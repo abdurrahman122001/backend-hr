@@ -1,0 +1,48 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "migrate": "node migrate.js",
+    "seed:employees": "node seedEmployees.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.9.0",
+    "bcrypt": "^5.1.1",
+    "bcryptjs": "^3.0.2",
+    "cors": "^2.8.5",
+    "crypto": "^1.0.1",
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "handlebars": "^4.7.8",
+    "imap": "^0.8.19",
+    "jimp": "^1.6.0",
+    "jsonwebtoken": "^9.0.2",
+    "mailparser": "^3.7.3",
+    "mjml": "^4.15.3",
+    "mongoose": "^8.14.1",
+    "multer": "^2.0.0",
+    "node-cron": "^4.0.6",
+    "nodemailer": "^7.0.3",
+    "number-to-words": "^1.2.4",
+    "openai": "^5.3.0",
+    "pdf-parse": "^1.1.1",
+    "pdfkit": "^0.17.1",
+    "sharp": "^0.34.2",
+    "socket.io": "^4.8.1",
+    "tesseract.js": "^6.0.1",
+    "uuid": "^11.1.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
