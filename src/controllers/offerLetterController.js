@@ -4,6 +4,7 @@ const CompanyProfile = require("../models/CompanyProfile");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
+const { encrypt } = require("../utils/encryption"); // <-- Import the encryption
 
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
@@ -61,7 +62,6 @@ function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
 
-// --- Signature Block (Comic Sans, but contact details neatly in a table) ---
 const EMAIL_SIGNATURE = `
   <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 15px; margin-top:32px; margin-bottom:0; line-height:1.6;">
     <div style="margin-bottom:10px;">
@@ -103,7 +103,6 @@ The information contained in this email (including any attachments) is intended 
   </div>
 `;
 
-// --- Helper: Convert HTML to plain text for email fallback (minimal) ---
 function htmlToText(html) {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
@@ -112,13 +111,12 @@ function htmlToText(html) {
     .replace(/<\/li>/gi, "\n")
     .replace(/<ul[^>]*>/gi, "")
     .replace(/<\/ul>/gi, "")
-    .replace(/<[^>]+>/g, "") // remove all other tags
-    .replace(/\n{3,}/g, "\n\n") // reduce 3+ newlines to 2
+    .replace(/<[^>]+>/g, "")
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
 module.exports = {
-  // Only generates letter (NO DB WRITE)
   async generateOfferLetter(req, res) {
     try {
       const {
@@ -129,7 +127,7 @@ module.exports = {
         startDate,
         reportingTime,
         confirmationDeadlineDate,
-        department, // DEPARTMENT NAME should be sent from frontend
+        department,
       } = req.body;
 
       if (
@@ -173,22 +171,21 @@ module.exports = {
       );
       const grossSalary = formatNumberWithCommas(grossSalaryRaw);
 
-      // --- HTML VERSION for Quill/editor ---
+      // HTML for ReactQuill (no outer font-family wrapper)
       const letter = `
-      
 <p>Dear ${candidateName},</p>
 
 <p>We’re thrilled to have you on board!</p>
 
 <p>After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.</p>
 
-<p>We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job it’s a journey, and we’re looking forward to seeing you thrive with us.</p>
+<p>We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job – it’s a journey, and we’re looking forward to seeing you thrive with us.</p>
 
 <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
 
 <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
 
-<p>In this role, you’ll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
+<p>In this role, you’ll be working 45 hours per week, from Monday to Friday – a full week of opportunities to grow, collaborate, and contribute.</p>
 
 <p>To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:</p>
 <ul>
@@ -202,7 +199,6 @@ module.exports = {
 <p>We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!</p>
 `.trim();
 
-      // Send as {letter} so frontend puts directly into ReactQuill!
       return res.json({
         letter,
         grossSalary: grossSalaryRaw,
@@ -223,19 +219,19 @@ module.exports = {
     }
   },
 
-  // Actually sends the letter and CREATES Employee & SalarySlip
+  // SEND & SAVE salary slip with encrypted data
   async sendOfferLetter(req, res) {
     try {
       const {
         candidateEmail,
-        letter, // This is HTML from Quill!
+        letter,
         salaryBreakup,
         position,
         candidateName,
         startDate,
         reportingTime,
         confirmationDeadlineDate,
-        department, // <-- department name (string)
+        department,
       } = req.body;
       const candidate = candidateName || "Candidate";
 
@@ -274,31 +270,34 @@ module.exports = {
         await employee.save();
       }
 
-      // Create SalarySlip
+      // ---- ENCRYPT ALL SalarySlip fields (except _id/refs)
       const grossSalaryRaw = SALARY_COMPONENTS.reduce(
         (sum, k) => sum + (Number(salaryBreakup[k]) || 0),
         0
       );
+
+      // Encrypt each value in the salary slip, as string!
       const slipData = {
         employee: employee._id,
-        candidateName: candidate,
-        candidateEmail,
-        position,
-        startDate,
-        reportingTime,
-        confirmationDeadlineDate,
-        grossSalary: grossSalaryRaw,
+        candidateName: encrypt(candidate),
+        candidateEmail: encrypt(candidateEmail),
+        position: encrypt(position),
+        startDate: encrypt(startDate),
+        reportingTime: encrypt(reportingTime),
+        confirmationDeadlineDate: encrypt(confirmationDeadlineDate),
+        grossSalary: encrypt(grossSalaryRaw.toString()),
         owner: req.user?._id,
         createdBy: req.user?._id,
       };
-      SALARY_COMPONENTS.forEach(
-        (k) => (slipData[k] = Number(salaryBreakup[k]) || 0)
-      );
+      SALARY_COMPONENTS.forEach((k) => {
+        slipData[k] = encrypt((salaryBreakup[k] || 0).toString());
+      });
+
       await SalarySlip.create(slipData);
 
-      // --- Email: Use HTML directly as received ---
+      // Email: outer font is Comic Sans!
       const html = `
-  <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 16px;">
+      <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 16px;">
         ${letter}
         ${EMAIL_SIGNATURE}
         ${EMAIL_DISCLAIMER}
