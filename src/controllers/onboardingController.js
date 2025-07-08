@@ -3,6 +3,7 @@
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/SalarySlip");
 const { sendEmail } = require("../services/mailService");
+const { encrypt } = require("../utils/encryption");
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
@@ -52,7 +53,7 @@ module.exports = {
         return res.status(400).json({ error: "Missing required fields." });
       }
 
-      // Build SalarySlip data object
+      // Build SalarySlip data object (RAW)
       let slipData = {
         employee: null, // to be set below
         candidateName,
@@ -69,8 +70,8 @@ module.exports = {
         if (field === "overtimeCompensation") {
           slipData[field] = Number(
             salaryBreakup.overtimeCompensation ||
-            salaryBreakup.overtimeComp ||
-            0
+              salaryBreakup.overtimeComp ||
+              0
           );
         } else {
           slipData[field] = Number(salaryBreakup[field] || 0);
@@ -82,6 +83,12 @@ module.exports = {
         0
       );
 
+      // --- ENCRYPT all salary fields before saving SalarySlip ---
+      SALARY_COMPONENTS.forEach((field) => {
+        slipData[field] = encrypt(String(slipData[field] || 0));
+      });
+      slipData.grossSalary = encrypt(String(slipData.grossSalary || 0));
+
       // Save/update employee
       const employee = await Employee.findOneAndUpdate(
         { email: candidateEmail },
@@ -92,7 +99,7 @@ module.exports = {
           department,
           joiningDate: startDate,
           reportingTime,
-          salaryBreakup: slipData,
+          salaryBreakup: slipData, // This now includes encrypted values
           shifts,
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -109,7 +116,7 @@ module.exports = {
           <p>Dear <strong>${candidateName}</strong>,</p>
           <p>Welcome to the beginning of something amazing! 🌟</p>
           <p>
-            I’m your new HR AI Agent — here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
+            I’m your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
             While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.
           </p>
           <p>
@@ -120,7 +127,7 @@ module.exports = {
             <li style="margin-bottom:4px;">✅ <strong>Your latest CV/Resume</strong> (PDF)</li>
           </ul>
           <p>
-            <em>🎯 Your data is safe with me — always encrypted, confidential, and used only to make your experience better.</em>
+            <em>🎯 Your data is safe with me always encrypted, confidential, and used only to make your experience better.</em>
           </p>
           <p>
             The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!

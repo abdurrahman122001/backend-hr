@@ -8,17 +8,19 @@ exports.getForLoggedInUser = async (req, res) => {
     const owner = req.user._id;
     const doc = await SalarySettings.findOne({ owner })
       .lean()
-      .select("enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields");
+      .select("enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledExtraFields");
     return res.json({
       enabledPersonalFields: doc?.enabledPersonalFields || [],
       enabledEmploymentFields: doc?.enabledEmploymentFields || [],
       enabledSalaryFields: doc?.enabledSalaryFields || [],
       enabledDeductionFields: doc?.enabledDeductionFields || [],
+      enabledExtraFields: doc?.enabledExtraFields || [], // <-- Add this!
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
   }
 };
+
 
 // POST /salary-settings
 exports.updateForLoggedInUser = async (req, res) => {
@@ -28,13 +30,15 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledPersonalFields,
       enabledEmploymentFields,
       enabledSalaryFields,
-      enabledDeductionFields
+      enabledDeductionFields,
+      enabledExtraFields // <-- Add this!
     } = req.body;
     if (
       !Array.isArray(enabledPersonalFields) ||
       !Array.isArray(enabledEmploymentFields) ||
       !Array.isArray(enabledSalaryFields) ||
-      !Array.isArray(enabledDeductionFields)
+      !Array.isArray(enabledDeductionFields) ||
+      !Array.isArray(enabledExtraFields) // <-- Add this!
     ) {
       return res.status(400).json({ error: "Invalid payload" });
     }
@@ -47,6 +51,7 @@ exports.updateForLoggedInUser = async (req, res) => {
           enabledEmploymentFields,
           enabledSalaryFields,
           enabledDeductionFields,
+          enabledExtraFields, // <-- Add this!
           updatedAt: new Date(),
         },
       },
@@ -54,7 +59,7 @@ exports.updateForLoggedInUser = async (req, res) => {
         upsert: true,
         new: true,
         lean: true,
-        select: "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields",
+        select: "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledExtraFields",
       }
     );
     return res.json({
@@ -62,8 +67,10 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledEmploymentFields: doc.enabledEmploymentFields,
       enabledSalaryFields: doc.enabledSalaryFields,
       enabledDeductionFields: doc.enabledDeductionFields,
+      enabledExtraFields: doc.enabledExtraFields, // <-- Add this!
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
   }
 };
+

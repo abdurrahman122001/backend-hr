@@ -6,7 +6,7 @@ const http         = require("http");
 const mongoose     = require("mongoose");
 const cors         = require("cors");
 const cron         = require("node-cron");
-
+const path = require('path');
 // Route imports
 const authRouter             = require("./routes/auth");
 const hrAuthRoutes           = require("./routes/hrAuth");
@@ -65,7 +65,7 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-
+app.use('/uploads', express.static(path.join(__dirname, './uploads'))); // Serve static files from uploads folder
 // === Public routes ===
 app.use("/api/auth", authRouter);
 // === Protected routes ===
@@ -94,7 +94,7 @@ app.use("/api/loans", loansRoutes);
 app.use('/api/loan', loansRoutes);
 app.use("/api/probation-periods", probationPeriodRouter);
 app.use('/api/leave-records', leaveRecordsRouter);
-app.use('/api', certificateRoutes);
+app.use('/api/certificates', certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
 app.use('/api/decryption-keys', descryptionKeys);
 app.use('/api/extra-fields', requireAuth, ExtraFields);

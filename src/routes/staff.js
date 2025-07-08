@@ -9,7 +9,8 @@ const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { encrypt, decrypt } = require("../utils/encryption");
 const DecryptionKey    = require("../models/DecryptionKey");
 const bcrypt = require('bcryptjs');
-
+const fs = require("fs");
+const Certificate = require("../models/Certificate");
 // Multer setup for photo uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -28,7 +29,13 @@ const upload = multer({
 router.post(
   "/create",
   requireAuth,
-  upload.single("photographFile"),
+  upload.fields([
+    { name: "photographFile", maxCount: 1 },
+    { name: "matricCertificate", maxCount: 1 },
+    { name: "interCertificate", maxCount: 1 },
+    { name: "graduateCertificate", maxCount: 1 },
+    { name: "mastersCertificate", maxCount: 1 },
+  ]),
   async (req, res) => {
     const {
       name, email, companyEmail, password, fatherOrHusbandName, cnic, dateOfBirth,
@@ -105,7 +112,9 @@ router.post(
         password: hrFlag ? password : undefined,
         fatherOrHusbandName,
         cnic,
-        photographUrl: req.file ? `/uploads/photos/${req.file.filename}` : undefined,
+        photographUrl: req.files && req.files["photographFile"] && req.files["photographFile"][0]
+          ? `/uploads/photos/${req.files["photographFile"][0].filename}`
+          : undefined,
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : undefined,
         gender,
         nationality,
@@ -144,6 +153,46 @@ router.post(
       });
 
       await emp.save();
+
+      // Certificate upload handling
+      const certTypes = [
+        { key: "matricCertificate", type: "matric" },
+        { key: "interCertificate", type: "inter" },
+        { key: "graduateCertificate", type: "graduate" },
+        { key: "mastersCertificate", type: "masters" },
+      ];
+
+      for (const { key, type } of certTypes) {
+        if (req.files && req.files[key] && req.files[key][0]) {
+          const fileObj = req.files[key][0];
+
+          // Move the file to a dedicated directory (uploads/certificates/:empId/:type/)
+          const destDir = path.join(
+            __dirname,
+            "..",
+            "uploads",
+            "certificates",
+            String(emp._id),
+            type
+          );
+          fs.mkdirSync(destDir, { recursive: true });
+
+          // Rename file (use originalname, replace spaces)
+          const newPath = path.join(destDir, fileObj.originalname.replace(/\s+/g, "_"));
+
+          fs.renameSync(fileObj.path, newPath);
+
+          // Store the fileUrl as a relative URL for static serving
+          const fileUrl = `/uploads/certificates/${emp._id}/${type}/${fileObj.originalname.replace(/\s+/g, "_")}`;
+
+          // Save Certificate document
+          await Certificate.create({
+            employee: emp._id,
+            type,
+            fileUrl,
+          });
+        }
+      }
 
       // Save SalarySlip as encrypted
       const slip = new SalarySlip({
@@ -211,7 +260,6 @@ router.post(
     }
   }
 );
-
 router.delete("/delete-all", requireAuth, async (req, res) => {
   try {
     // Delete all SalarySlips

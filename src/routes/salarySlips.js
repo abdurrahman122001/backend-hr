@@ -5,6 +5,7 @@ const router      = express.Router();
 const requireAuth = require('../middleware/auth');
 const SalarySlip  = require('../models/SalarySlip');
 const Employee    = require('../models/Employees');
+const { encrypt, decrypt } = require("../utils/encryption");
 
 // List of all allowance fields [Label, modelKey]
 const allowances = [
@@ -75,7 +76,7 @@ router.get('/', requireAuth, async (req, res) => {
   }
 });
 
-// ---------- PATCH: Update salary slip fields ----------
+
 router.patch('/:id', requireAuth, async (req, res) => {
   try {
     const allowedFields = [
@@ -83,10 +84,24 @@ router.patch('/:id', requireAuth, async (req, res) => {
       ...deductions.map(([_, key]) => key),
       // add more updatable fields if needed
     ];
+
+    // --- 1. Get encryption key (from frontend or user context) ---
+    const encryptionKey = req.body.encryptionKey || process.env.ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      return res.status(400).json({ status: 'error', message: 'No encryption key provided.' });
+    }
+
     const updates = {};
     for (let key of Object.keys(req.body)) {
       if (allowedFields.includes(key)) {
-        updates[key] = req.body[key];
+        let value = req.body[key];
+        // --- 2. Encrypt if not in 'iv:encrypted' format ---
+        if (typeof value === "string" && value.includes(":")) {
+          // Assume already encrypted
+          updates[key] = value;
+        } else {
+          updates[key] = encrypt(value, encryptionKey);
+        }
       }
     }
     if (Object.keys(updates).length === 0) {
@@ -103,7 +118,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Salary slip not found.' });
     }
 
-    // Add netSalary to response
+    // Add netSalary to response (optional: decrypt first, recalc net)
     const slipObj = slip.toObject();
     slipObj.netSalary = calcNet(slipObj);
 

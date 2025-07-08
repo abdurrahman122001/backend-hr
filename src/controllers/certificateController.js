@@ -1,51 +1,81 @@
-const Certificate = require('../models/Certificate');
 const path = require('path');
 const fs = require('fs');
+const Certificate = require('../models/Certificate');
+
+// Helper: resolve upload directory
+const getFolderPath = (employeeId, type) =>
+  path.join(__dirname, '..', 'uploads', 'certificates', employeeId, type);
 
 exports.uploadCertificate = async (req, res) => {
   try {
-    const { employeeId } = req.params;
-    const { type } = req.body;
+    const { employeeId, type } = req.params;
     const file = req.file;
 
-    if (!type || !['matric', 'inter', 'graduate', 'masters'].includes(type)) {
-      return res.status(400).json({ success: false, error: 'Invalid certificate type.' });
+    const allowed = ['matric', 'inter', 'graduate', 'masters'];
+    if (!allowed.includes(type)) return res.status(400).json({ error: 'Invalid certificate type.' });
+
+    // Ensure directory exists: /uploads/certificates/<employeeId>/<type>/
+    const folderPath = getFolderPath(employeeId, type);
+    fs.mkdirSync(folderPath, { recursive: true });
+
+    // OPTIONAL: Delete existing certificate for this type for this employee (only keep latest)
+    const existing = await Certificate.findOne({ employee: employeeId, type });
+    if (existing && existing.fileUrl) {
+      const oldPath = path.join(__dirname, '..', existing.fileUrl);
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      await existing.deleteOne();
     }
-    if (!file) {
-      return res.status(400).json({ success: false, error: 'No file uploaded.' });
-    }
 
-    // Save file to disk (or use S3)
-    const fileName = `${employeeId}_${type}_${Date.now()}${path.extname(file.originalname)}`;
-    const uploadDir = path.join(__dirname, '../uploads/certificates');
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-    const filePath = path.join(uploadDir, fileName);
-    fs.writeFileSync(filePath, file.buffer);
+    const fileName = `${Date.now()}_${file.originalname.replace(/\s+/g, '_')}`;
+    const uploadPath = path.join(folderPath, fileName);
 
-    // Remove previous certificate if exists
-    await Certificate.deleteOne({ employee: employeeId, type });
+    fs.writeFileSync(uploadPath, file.buffer);
 
-    // Save to DB
+    // Store URL as relative path for static serving
+    const fileUrl = `/uploads/certificates/${employeeId}/${type}/${fileName}`;
+
+    // Save record
     const cert = await Certificate.create({
       employee: employeeId,
       type,
-      fileUrl: `/uploads/certificates/${fileName}`
+      fileUrl,
     });
 
-    res.json({ success: true, certificate: cert });
+    res.json({ success: true, cert });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ error: err.message });
   }
 };
 
 exports.getCertificates = async (req, res) => {
-  const { employeeId } = req.params;
-  const certs = await Certificate.find({ employee: employeeId });
-  res.json({ success: true, certificates: certs });
-};
+  try {
+    const { employeeId } = req.params;
+    const certs = await Certificate.find({ employee: employeeId });
 
+    // Attach absolute URL
+    const baseUrl = req.protocol + '://' + req.get('host');
+    const certsWithUrl = certs.map(cert => ({
+      ...cert.toObject(),
+      url: baseUrl + cert.fileUrl
+    }));
+
+    res.json({ success: true, certs: certsWithUrl });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
 exports.deleteCertificate = async (req, res) => {
-  const { employeeId, type } = req.params;
-  await Certificate.deleteOne({ employee: employeeId, type });
-  res.json({ success: true });
+  try {
+    const { employeeId, type } = req.params;
+    const cert = await Certificate.findOneAndDelete({ employee: employeeId, type });
+    if (!cert) return res.status(404).json({ error: 'Not found' });
+
+    // Delete file from disk
+    const filePath = path.join(__dirname, '..', cert.fileUrl);
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 };

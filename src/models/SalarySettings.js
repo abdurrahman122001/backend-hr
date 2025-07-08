@@ -18,6 +18,7 @@ const SalarySettingsSchema = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    enabledExtraFields: { type: [String], default: [] }, 
   },
   { timestamps: true }
 );
