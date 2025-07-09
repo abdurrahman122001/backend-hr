@@ -16,11 +16,11 @@ const EmployeeSchema = new Schema(
     cnic: { type: String, trim: true, default: "" }, // CNIC Number
     cnicIssueDate: { type: String },
     cnicExpiryDate: { type: String },
-    photographUrl: { type: String },      // Upload Photograph
-    cvUrl: { type: String },              // Upload CV
+    photographUrl: { type: String }, // Upload Photograph
+    cvUrl: { type: String }, // Upload CV
     latestQualification: { type: String },
     fieldOfQualification: { type: String },
-    phone: { type: String },              // Mobile Number
+    phone: { type: String }, // Mobile Number
     email: {
       type: String,
       required: [true, "Email is required"],
@@ -29,7 +29,7 @@ const EmployeeSchema = new Schema(
         validator: (v) => typeof v === "string" && v.trim() !== "",
         message: "Email cannot be empty",
       },
-    },                                   // Personal Email Address
+    }, // Personal Email Address
     companyEmail: { type: String, default: "" }, // Office Email Address
     permanentAddress: { type: String },
     presentAddress: { type: String },
@@ -41,8 +41,8 @@ const EmployeeSchema = new Schema(
     // NOMINEE DETAILS
     nomineeName: { type: String },
     nomineeCnic: { type: String },
-    nomineeRelation: { type: String },      // Relationship with Nominee
-    nomineeNo: { type: String },            // Nominee Number
+    nomineeRelation: { type: String }, // Relationship with Nominee
+    nomineeNo: { type: String }, // Nominee Number
 
     // EMERGENCY CONTACT DETAILS
     emergencyContactName: { type: String },
@@ -112,6 +112,11 @@ const EmployeeSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: "User",
       required: false,
+    },
+    providentFund: {
+      pfRate: { type: Number }, // If null, use global
+      years: { type: Number },
+      override: { type: Boolean, default: false },
     },
 
     // NDA/Contract

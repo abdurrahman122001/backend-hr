@@ -5,10 +5,16 @@ const { Types } = require('mongoose');
 const Employee = require('../models/Employees');
 const LoanDetail = require('../models/LoanDetail');
 
+// Helper for months (for older data without dueDate)
+const monthsList = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
+];
+
 // 1. Get all employees (utility)
 router.get('/employees', async (req, res) => {
   try {
-    const employees = await Employee.find();
+    const employees = await Employee.find().select('_id name');
     res.json({ employees });
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch employees" });
@@ -26,68 +32,13 @@ router.get('/', async (req, res) => {
 
     const loans = await LoanDetail.find({ employee }).lean();
 
-    // Current date details
-    const today = new Date();
-    const currentMonth = today.getMonth() + 1;
-    const currentYear = today.getFullYear();
-
-    // Format loans for frontend
-    const formattedLoans = loans.map((loan) => {
-      let paidPrev = 0, paidCurr = 0;
-      const schedule = Array.isArray(loan.paymentSchedule) ? loan.paymentSchedule : [];
-      for (let payment of schedule) {
-        const date = payment.dueDate || (
-          payment.month && payment.year
-            ? new Date(`${payment.year}-${("0"+(monthsList.indexOf(payment.month)+1)).slice(-2)}-01`)
-            : null
-        );
-        if (!date) continue;
-        const payDate = new Date(date);
-        const payMonth = payDate.getMonth() + 1;
-        const payYear = payDate.getFullYear();
-        const amount = payment.totalPayment || payment.installmentAmount || payment.amount || 0;
-        if (payYear < currentYear || (payYear === currentYear && payMonth < currentMonth)) {
-          paidPrev += amount;
-        } else if (payYear === currentYear && payMonth === currentMonth) {
-          paidCurr += amount;
-        }
-      }
-      return {
-        _id: loan._id,
-        type: loan.type,
-        loanAmount: loan.loanAmount,
-        monthlyInstallment: loan.monthlyInstallment,
-        totalMarkup: loan.totalMarkup,
-        totalToBePaid: loan.totalToBePaid,
-        paidPrev,
-        paidCurr,
-        createdAt: loan.createdAt,
-        updatedAt: loan.updatedAt,
-      };
-    });
-
-    res.json({ loans: formattedLoans });
+    res.json({ loans });
   } catch (err) {
-    console.error("Error in /api/loan:", err);
     res.status(500).json({ message: err.message });
   }
 });
 
-// 3. Get a single loan detail doc for an employee (if needed)
-router.get('/loan/:employeeId', async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    if (!Types.ObjectId.isValid(employeeId))
-      return res.status(400).json({ message: "Invalid employee ID" });
-
-    const loan = await LoanDetail.findOne({ employee: employeeId });
-    res.json(loan);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to fetch loan", details: err.message });
-  }
-});
-
-// 4. Save or update loan detail for one employee
+// 3. Save or update loan detail for one employee (add or replace by start month & year)
 router.post('/loan/:employeeId', async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -101,22 +52,28 @@ router.post('/loan/:employeeId', async (req, res) => {
       markupType,
       markupValue,
       scheduleStartMonth,
+      scheduleStartYear,
       monthlyInstallment,
       totalMarkup,
       totalToBePaid,
       paymentSchedule
     } = req.body;
 
-    let loan = await LoanDetail.findOne({ employee: employeeId });
+    // Only update loan for same employee, same start month and year
+    let loan = await LoanDetail.findOne({ 
+      employee: employeeId, 
+      scheduleStartMonth, 
+      scheduleStartYear 
+    });
 
     if (loan) {
-      // Update all fields
       loan.type = type;
       loan.loanAmount = loanAmount;
       loan.loanTerm = loanTerm;
       loan.markupType = markupType;
       loan.markupValue = markupValue;
       loan.scheduleStartMonth = scheduleStartMonth;
+      loan.scheduleStartYear = scheduleStartYear;
       loan.monthlyInstallment = monthlyInstallment;
       loan.totalMarkup = totalMarkup;
       loan.totalToBePaid = totalToBePaid;
@@ -131,6 +88,7 @@ router.post('/loan/:employeeId', async (req, res) => {
         markupType,
         markupValue,
         scheduleStartMonth,
+        scheduleStartYear,
         monthlyInstallment,
         totalMarkup,
         totalToBePaid,
@@ -143,10 +101,17 @@ router.post('/loan/:employeeId', async (req, res) => {
   }
 });
 
-module.exports = router;
+// 4. Get single loan detail (by loan id)
+router.get('/loan-detail/:loanId', async (req, res) => {
+  try {
+    const { loanId } = req.params;
+    if (!Types.ObjectId.isValid(loanId))
+      return res.status(400).json({ message: "Invalid loan ID" });
+    const loan = await LoanDetail.findById(loanId).populate('employee', 'name');
+    res.json(loan);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch loan", details: err.message });
+  }
+});
 
-// Helper for months (for older data without dueDate)
-const monthsList = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December"
-];
+module.exports = router;

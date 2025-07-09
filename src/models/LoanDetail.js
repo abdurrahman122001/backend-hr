@@ -1,16 +1,17 @@
+// models/LoanDetail.js
 const mongoose = require('mongoose');
 
 const paymentScheduleSchema = new mongoose.Schema({
   installmentNo: Number,
-  month: String,
-  year: Number,
-  dueDate: Date, // Optional; can be set by frontend if needed
-  principal: Number, // Amount of principal paid in this installment
-  markupPercentage: Number, // Interest/markup rate for this installment
-  markupAmount: Number, // Interest/markup amount for this installment
-  totalPayment: Number, // Total paid this installment (principal+markup, or just interest)
-  outstanding: Number, // For EMI: outstanding balance after this payment
-  note: String // For special notes (e.g., "Interest Only", "Principal + Last Interest")
+  month: String,      // e.g. "January"
+  year: Number,       // e.g. 2024
+  dueDate: Date,      // can be explicitly set
+  principal: Number,
+  markupPercentage: Number,
+  markupAmount: Number,
+  totalPayment: Number,
+  outstanding: Number,
+  note: String
 });
 
 const loanDetailSchema = new mongoose.Schema({
@@ -23,8 +24,9 @@ const loanDetailSchema = new mongoose.Schema({
     enum: ['fixed', 'reducing', 'interestOnly'],
     required: true
   },
-  markupValue: Number, // Interest/markup rate (%)
+  markupValue: Number,
   scheduleStartMonth: Number,
+  scheduleStartYear: Number,   // <----- NEW FIELD: Allow selecting any year for schedule start!
   monthlyInstallment: Number,
   totalMarkup: Number,
   totalToBePaid: Number,

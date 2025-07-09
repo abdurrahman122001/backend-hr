@@ -2,26 +2,30 @@
 
 const SalarySlipFields = require("../models/SalarySlipFields");
 
-// GET /salaryslip-settings
 exports.getForLoggedInUser = async (req, res) => {
   try {
     const owner = req.user._id;
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
-      .select("enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields");
+      .select(
+        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund"
+      );
     return res.json({
       enabledPersonalFields: doc?.enabledPersonalFields || [],
       enabledEmploymentFields: doc?.enabledEmploymentFields || [],
       enabledSalaryFields: doc?.enabledSalaryFields || [],
       enabledDeductionFields: doc?.enabledDeductionFields || [],
       enabledNetSalaryFields: doc?.enabledNetSalaryFields || [],
+      enabledLeaveRecords: doc?.enabledLeaveRecords || [],
+      showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
+      showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
   }
 };
 
-// POST /salaryslip-settings
+
 exports.updateForLoggedInUser = async (req, res) => {
   try {
     const owner = req.user._id;
@@ -30,17 +34,23 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledEmploymentFields,
       enabledSalaryFields,
       enabledDeductionFields,
-      enabledNetSalaryFields
+      enabledNetSalaryFields,
+      enabledLeaveRecords,
+      showProvidentFund, // add these two
+      showGratuityFund
     } = req.body;
+
     if (
       !Array.isArray(enabledPersonalFields) ||
       !Array.isArray(enabledEmploymentFields) ||
       !Array.isArray(enabledSalaryFields) ||
       !Array.isArray(enabledDeductionFields) ||
-      !Array.isArray(enabledNetSalaryFields)
+      !Array.isArray(enabledNetSalaryFields) ||
+      !Array.isArray(enabledLeaveRecords)
     ) {
       return res.status(400).json({ error: "Invalid payload" });
     }
+
     const doc = await SalarySlipFields.findOneAndUpdate(
       { owner },
       {
@@ -51,6 +61,9 @@ exports.updateForLoggedInUser = async (req, res) => {
           enabledSalaryFields,
           enabledDeductionFields,
           enabledNetSalaryFields,
+          enabledLeaveRecords,
+          showProvidentFund, // set in db
+          showGratuityFund,  // set in db
           updatedAt: new Date(),
         },
       },
@@ -58,17 +71,23 @@ exports.updateForLoggedInUser = async (req, res) => {
         upsert: true,
         new: true,
         lean: true,
-        select: "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields",
+        select:
+          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund",
       }
     );
+
     return res.json({
       enabledPersonalFields: doc.enabledPersonalFields,
       enabledEmploymentFields: doc.enabledEmploymentFields,
       enabledSalaryFields: doc.enabledSalaryFields,
       enabledDeductionFields: doc.enabledDeductionFields,
       enabledNetSalaryFields: doc.enabledNetSalaryFields,
+      enabledLeaveRecords: doc.enabledLeaveRecords,
+      showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
+      showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
   }
 };
+

@@ -22,6 +22,12 @@ const SalarySlipFields = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    showProvidentFund: { type: Boolean, default: true },
+    showGratuityFund: { type: Boolean, default: true },
+    enabledLeaveRecords: {
+      type: [String],
+      default: [],
+    },
   },
   { timestamps: true }
 );

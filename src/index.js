@@ -44,6 +44,9 @@ const ExtraFields = require('./routes/extraFields');
 const { startWatcher } = require("./watcher");
 const fontSettingRoute = require("./routes/fontSetting");
 const descryptionKeys = require("./routes/decryptionKeys");
+const pfRoute = require("./routes/pf");
+const GratuityRoute = require("./routes/gratuitySettings");
+
 const app    = express();
 // Wrap express in an HTTP server for Socket-IO
 const server = http.createServer(app);
@@ -98,6 +101,8 @@ app.use('/api/certificates', certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
 app.use('/api/decryption-keys', descryptionKeys);
 app.use('/api/extra-fields', requireAuth, ExtraFields);
+app.use('/api/pf', pfRoute);
+app.use('/api/gratuity',requireAuth, GratuityRoute);
 app.post(
   "/api/hierarchy/create",
   requireAuth,

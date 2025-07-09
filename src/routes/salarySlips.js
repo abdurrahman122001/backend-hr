@@ -1,4 +1,4 @@
-// backend/src/routes/salarySlips.js
+// routes/salarySlips.js
 const express     = require('express');
 const PDFDocument = require('pdfkit');
 const router      = express.Router();
@@ -6,6 +6,8 @@ const requireAuth = require('../middleware/auth');
 const SalarySlip  = require('../models/SalarySlip');
 const Employee    = require('../models/Employees');
 const { encrypt, decrypt } = require("../utils/encryption");
+
+const { createSalarySlip } = require('../controllers/salarySlipController');
 
 // List of all allowance fields [Label, modelKey]
 const allowances = [
@@ -54,9 +56,22 @@ function calcNet(slip) {
 // ---------- GET salary slips (all or filtered by employee) ----------
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { employee } = req.query; // ?employee=xxx
+    const { employee, month } = req.query; // now get month param too!
     let query = {};
     if (employee) query.employee = employee;
+
+    // Filter by month if provided (e.g. '2025-02')
+    if (month) {
+      const [year, mon] = month.split('-');
+      const yearNum = Number(year);
+      const monNum = Number(mon); // 1-based (2 for Feb)
+      // Salary slips where createdAt is >= 2025-02-01 and < 2025-03-01
+      query.createdAt = {
+        $gte: new Date(yearNum, monNum - 1, 1),
+        $lt: new Date(yearNum, monNum, 1),
+      };
+    }
+
     const slips = await SalarySlip
       .find(query)
       .populate('employee')
@@ -75,8 +90,18 @@ router.get('/', requireAuth, async (req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+// ---------- CREATE salary slip (calls controller logic) ----------
+router.post('/', requireAuth, async (req, res) => {
+  try {
+    const { employeeId, slipData } = req.body; // slipData contains basic, allowances etc
+    const slip = await createSalarySlip(employeeId, slipData);
+    res.json({ status: 'success', slip });
+  } catch (err) {
+    res.status(500).json({ status: 'error', message: "Failed to create salary slip", details: err.message });
+  }
+});
 
-
+// PATCH and Download endpoints remain unchanged (from your code above)
 router.patch('/:id', requireAuth, async (req, res) => {
   try {
     const allowedFields = [
@@ -201,7 +226,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       // Allowances column
       if (allowances[i]) {
         const [label, key] = allowances[i];
-        const val = slip[key] || 0;
+        const val = Number(slip[key] || 0);
         totalAllow += val;
         doc.text(label, col1X, y);
         doc.text(val.toFixed(2), col1X + 150, y, { width: 60, align: 'right' });
@@ -209,7 +234,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       // Deductions column
       if (deductions[i]) {
         const [label, key] = deductions[i];
-        const val = slip[key] || 0;
+        const val = Number(slip[key] || 0);
         totalDeduct += val;
         doc.text(label, col2X, y);
         doc.text(val.toFixed(2), col2X + 150, y, { width: 60, align: 'right' });

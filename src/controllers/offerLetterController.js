@@ -4,7 +4,7 @@ const CompanyProfile = require("../models/CompanyProfile");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
-const { encrypt } = require("../utils/encryption"); // <-- Import the encryption
+const { encrypt } = require("../utils/encryption");
 
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
@@ -62,38 +62,30 @@ function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
 
+// --- Beautified Signature and Disclaimer (Comic Sans, block style) ---
 const EMAIL_SIGNATURE = `
-  <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 15px; margin-top:32px; margin-bottom:0; line-height:1.6;">
+  <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 18px; margin-top:28px; margin-bottom:0; line-height:1.7; color:#1a1a1a;">
     <div style="margin-bottom:10px;">
-      Regards,<br>
+      <strong>Regards,</strong><br>
       <span style="font-weight:bold;">Human Resource Department</span><br>
       <span style="font-style: italic;">Mavens Advisor</span>
     </div>
-    <table style="font-family:inherit; font-size:15px; line-height:1.4; margin-bottom:8px;">
-      <tr>
-        <td style="padding-right:12px;"><b>T</b></td>
-        <td>+44 7451 285285</td>
-      </tr>
-      <tr>
-        <td style="padding-right:12px;"><b>E</b></td>
-        <td><a href="mailto:HR@mavensadvisor.com" style="color:#0057b7; text-decoration:underline;">HR@mavensadvisor.com</a></td>
-      </tr>
-      <tr>
-        <td style="padding-right:12px;"><b>W</b></td>
-        <td><a href="https://www.mavensadvisor.com" style="color:#0057b7; text-decoration:underline;">www.mavensadvisor.com</a></td>
-      </tr>
-    </table>
+    <div style="margin-bottom:10px;">
+      <div style="margin-bottom:2px;"><b>T</b> +44 7451 285285</div>
+      <div style="margin-bottom:2px;"><b>E</b> <a href="mailto:HR@mavensadvisor.com" style="color:#0057b7; text-decoration:underline;">HR@mavensadvisor.com</a></div>
+      <div style="margin-bottom:2px;"><b>W</b> <a href="https://www.mavensadvisor.com" style="color:#0057b7; text-decoration:underline;">www.mavensadvisor.com</a></div>
+    </div>
     <div>
-      Mavens Advisor LLC<br>
-      East Grand Boulevard, Detroit<br>
-      Michigan, United States
+      <span>Mavens Advisor LLC</span><br>
+      <span>East Grand Boulevard, Detroit</span><br>
+      <span>Michigan, United States</span>
     </div>
   </div>
 `;
 
 const EMAIL_DISCLAIMER = `
-  <div style="margin-top:28px;">
-    <div style="background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
+  <div style="margin-top:28px; margin-bottom:0;">
+    <div style="background:#f4f4f4; border-radius:7px; font-family:'Comic Sans MS', Comic Sans, cursive, monospace; font-size:13px; color:#333; white-space:pre-wrap; padding:18px 12px; overflow-x:auto; border:1.5px solid #dadada;">
 *********************************************************************************
 
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
@@ -103,6 +95,7 @@ The information contained in this email (including any attachments) is intended 
   </div>
 `;
 
+// --- For text-only fallback (strip all HTML) ---
 function htmlToText(html) {
   return html
     .replace(/<br\s*\/?>/gi, "\n")
@@ -116,7 +109,15 @@ function htmlToText(html) {
     .trim();
 }
 
+function stripSignatureAndDisclaimer(html) {
+  // Remove both EMAIL_SIGNATURE and EMAIL_DISCLAIMER if present
+  let out = html.replace(EMAIL_SIGNATURE.trim(), "");
+  out = out.replace(EMAIL_DISCLAIMER.trim(), "");
+  return out.replace(/\s*$/, ""); // Remove trailing whitespace
+}
+
 module.exports = {
+  // GENERATE OFFER LETTER: Always add signature/disclaimer for Quill preview
   async generateOfferLetter(req, res) {
     try {
       const {
@@ -129,6 +130,14 @@ module.exports = {
         confirmationDeadlineDate,
         department,
       } = req.body;
+
+      // Do not generate if employee already exists
+      const exists = await Employee.findOne({ email: candidateEmail });
+      if (exists) {
+        return res.status(400).json({
+          error: "An employee with this email already exists.",
+        });
+      }
 
       if (
         !candidateName ||
@@ -151,7 +160,6 @@ module.exports = {
         ownerId = new mongoose.Types.ObjectId(ownerId);
       }
       const company = await CompanyProfile.findOne({ owner: ownerId });
-
       if (!company) {
         return res.status(404).json({ error: "Company profile not found." });
       }
@@ -171,36 +179,31 @@ module.exports = {
       );
       const grossSalary = formatNumberWithCommas(grossSalaryRaw);
 
-      // HTML for ReactQuill (no outer font-family wrapper)
-      const letter = `
-<p>Dear ${candidateName},</p>
-
-<p>We’re thrilled to have you on board!</p>
-
-<p>After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.</p>
-
-<p>We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job it’s a journey, and we’re looking forward to seeing you thrive with us.</p>
-
-<p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
-
-<p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
-
-<p>In this role, you’ll be working 45 hours per week, from Monday to Friday – a full week of opportunities to grow, collaborate, and contribute.</p>
-
-<p>To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:</p>
-<ul>
-  <li>All original educational and professional certificates</li>
-  <li>Original CNIC with a photocopy</li>
-  <li>Two recent passport-sized photographs</li>
-</ul>
-
-<p>By accepting this offer, you also agree to the terms set forth in our Employment Contract and Non-Disclosure Agreement (NDA), which we will share with you separately.</p>
-
-<p>We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!</p>
-`.trim();
+      // Offer letter HTML, signature, disclaimer: all Comic Sans, always at the end
+      const bodyHtml = `
+        <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 18px;">
+          <p>Dear ${candidateName},</p>
+          <p>We’re thrilled to have you on board!</p>
+          <p>After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.</p>
+          <p>We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job it’s a journey, and we’re looking forward to seeing you thrive with us.</p>
+          <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
+          <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
+          <p>In this role, you’ll be working 45 hours per week, from Monday to Friday – a full week of opportunities to grow, collaborate, and contribute.</p>
+          <p>To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:</p>
+          <ul>
+            <li>All original educational and professional certificates</li>
+            <li>Original CNIC with a photocopy</li>
+            <li>Two recent passport-sized photographs</li>
+          </ul>
+          <p>By accepting this offer, you also agree to the terms set forth in our Employment Contract and Non-Disclosure Agreement (NDA), which we will share with you separately.</p>
+          <p>We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!</p>
+          ${EMAIL_SIGNATURE}
+          ${EMAIL_DISCLAIMER}
+        </div>
+      `.trim();
 
       return res.json({
-        letter,
+        letter: bodyHtml,
         grossSalary: grossSalaryRaw,
         salaryBreakup,
         position,
@@ -219,7 +222,7 @@ module.exports = {
     }
   },
 
-  // SEND & SAVE salary slip with encrypted data
+  // SEND OFFER LETTER: send exactly as in Quill, do not append, do not duplicate
   async sendOfferLetter(req, res) {
     try {
       const {
@@ -250,33 +253,30 @@ module.exports = {
           .json({ error: "Missing required fields for sending offer." });
       }
 
-      // Check for existing employee to enable threading (optional)
+      // Prevent duplicate employee
       let employee = await Employee.findOne({ email: candidateEmail });
-      if (!employee) {
-        employee = await Employee.create({
-          name: candidate,
-          email: candidateEmail,
-          designation: position,
-          startDate,
-          department: department || null,
-          owner: req.user?._id,
-          createdBy: req.user?._id,
+      if (employee) {
+        return res.status(400).json({
+          error: "An employee with this email already exists. Offer not sent.",
         });
-      } else {
-        employee.name = candidate;
-        employee.designation = position;
-        employee.startDate = startDate;
-        employee.department = department || employee.department;
-        await employee.save();
       }
 
-      // ---- ENCRYPT ALL SalarySlip fields (except _id/refs)
+      // Otherwise, create new employee
+      employee = await Employee.create({
+        name: candidate,
+        email: candidateEmail,
+        designation: position,
+        startDate,
+        department: department || null,
+        owner: req.user?._id,
+        createdBy: req.user?._id,
+      });
+
+      // ENCRYPT SalarySlip fields (except _id/refs)
       const grossSalaryRaw = SALARY_COMPONENTS.reduce(
         (sum, k) => sum + (Number(salaryBreakup[k]) || 0),
         0
       );
-
-      // Encrypt each value in the salary slip, as string!
       const slipData = {
         employee: employee._id,
         candidateName: encrypt(candidate),
@@ -292,41 +292,13 @@ module.exports = {
       SALARY_COMPONENTS.forEach((k) => {
         slipData[k] = encrypt((salaryBreakup[k] || 0).toString());
       });
-
       await SalarySlip.create(slipData);
 
-      // Email: outer font is Comic Sans!
-      const html = `
-      <div style="font-family: 'Comic Sans MS', Comic Sans, cursive; font-size: 16px;">
-        ${letter}
-        ${EMAIL_SIGNATURE}
-        ${EMAIL_DISCLAIMER}
-      </div>
-      `;
+      // Send *exact* HTML from Quill editor (already has signature/disclaimer)
+      const html = letter;
 
-      // Fallback: convert Quill HTML to plain text for .text email
-      const text =
-        htmlToText(letter) +
-        `
-
-Regards,
-Human Resource Department
-Mavens Advisor
-
-T          +44 7451 285285  
-E          HR@mavensadvisor.com  
-W         www.mavensadvisor.com
-
-Mavens Advisor LLC  
-East Grand Boulevard, Detroit  
-Michigan, United States
-
-*********************************************************************************
-
-The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-*********************************************************************************
-`;
+      // Fallback: plain text
+      const text = htmlToText(letter);
 
       await transporter.sendMail({
         from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
