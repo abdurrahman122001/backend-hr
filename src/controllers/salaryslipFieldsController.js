@@ -2,9 +2,17 @@
 
 const SalarySlipFields = require("../models/SalarySlipFields");
 
+// Utility to get correct owner for settings (super-admin for admins, else self)
+function getFieldsOwner(req) {
+  if (req.user.role === "admin" && req.user.createdBy) {
+    return req.user.createdBy;
+  }
+  return req.user._id;
+}
+
 exports.getForLoggedInUser = async (req, res) => {
   try {
-    const owner = req.user._id;
+    const owner = getFieldsOwner(req);
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
       .select(
@@ -28,7 +36,7 @@ exports.getForLoggedInUser = async (req, res) => {
 
 exports.updateForLoggedInUser = async (req, res) => {
   try {
-    const owner = req.user._id;
+    const owner = getFieldsOwner(req);
     const {
       enabledPersonalFields,
       enabledEmploymentFields,
@@ -36,7 +44,7 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledDeductionFields,
       enabledNetSalaryFields,
       enabledLeaveRecords,
-      showProvidentFund, // add these two
+      showProvidentFund,
       showGratuityFund
     } = req.body;
 
@@ -62,8 +70,8 @@ exports.updateForLoggedInUser = async (req, res) => {
           enabledDeductionFields,
           enabledNetSalaryFields,
           enabledLeaveRecords,
-          showProvidentFund, // set in db
-          showGratuityFund,  // set in db
+          showProvidentFund,
+          showGratuityFund,
           updatedAt: new Date(),
         },
       },
@@ -90,4 +98,3 @@ exports.updateForLoggedInUser = async (req, res) => {
     return res.status(500).json({ error: "Server error" });
   }
 };
-

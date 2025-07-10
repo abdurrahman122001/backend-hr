@@ -2,10 +2,11 @@
 const express = require('express');
 const jwt     = require('jsonwebtoken');
 const User    = require('../models/Users');
+const requireAuth = require('../middleware/auth'); // Make sure this is correct
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
-
+const authCtrl = require('../controllers/authController');
 // ————— Sign-up —————
 router.post('/signup', async (req, res) => {
   try {
@@ -48,5 +49,5 @@ router.post('/login', async (req, res) => {
     res.status(500).json({ error: 'Server error' });
   }
 });
-
+router.get('/me', requireAuth, authCtrl.getMe);
 module.exports = router;

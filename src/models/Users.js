@@ -1,29 +1,28 @@
-// backend/src/models/Users.js
 const mongoose = require('mongoose');
-const bcrypt   = require('bcrypt');
-
-const SALT_ROUNDS = 10;
+const bcrypt = require('bcrypt');
 
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   email:    { type: String, required: true, unique: true },
   password: { type: String, required: true },
-}, {
-  timestamps: true,
-});
+  role:     { type: String, enum: ['super-admin', 'admin', 'hr', 'employee'], default: 'employee' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+}, { timestamps: true });
 
-userSchema.pre('save', async function(next) {
+// Pre-save hook to hash password if changed
+userSchema.pre('save', async function (next) {
   if (!this.isModified('password')) return next();
   try {
-    this.password = await bcrypt.hash(this.password, SALT_ROUNDS);
+    this.password = await bcrypt.hash(this.password, 10);
     next();
   } catch (err) {
     next(err);
   }
 });
 
-userSchema.methods.comparePassword = function(candidate) {
-  return bcrypt.compare(candidate, this.password);
+// Add comparePassword method
+userSchema.methods.comparePassword = function (candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
 };
 
 module.exports = mongoose.model('User', userSchema);

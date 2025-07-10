@@ -3,7 +3,10 @@ const { Schema, model } = mongoose;
 
 const EmployeeSchema = new Schema(
   {
-    owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
+    owner: {
+      type: [{ type: Schema.Types.ObjectId, ref: "User" }],
+      required: true,
+    },
 
     // PERSONAL DETAILS
     name: { type: String, required: true }, // Full Name

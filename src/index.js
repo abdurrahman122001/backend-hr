@@ -46,6 +46,8 @@ const fontSettingRoute = require("./routes/fontSetting");
 const descryptionKeys = require("./routes/decryptionKeys");
 const pfRoute = require("./routes/pf");
 const GratuityRoute = require("./routes/gratuitySettings");
+const roleRoutes = require("./routes/role");
+const pageRoute = require("./routes/page");
 
 const app    = express();
 // Wrap express in an HTTP server for Socket-IO
@@ -103,6 +105,8 @@ app.use('/api/decryption-keys', descryptionKeys);
 app.use('/api/extra-fields', requireAuth, ExtraFields);
 app.use('/api/pf', pfRoute);
 app.use('/api/gratuity',requireAuth, GratuityRoute);
+app.use('/api/role', requireAuth, roleRoutes);
+app.use('/api/pages', requireAuth, pageRoute)
 app.post(
   "/api/hierarchy/create",
   requireAuth,
