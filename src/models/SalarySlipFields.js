@@ -24,6 +24,7 @@ const SalarySlipFields = new mongoose.Schema(
     },
     showProvidentFund: { type: Boolean, default: true },
     showGratuityFund: { type: Boolean, default: true },
+    showLoanDetails : { type: Boolean, default: true },
     enabledLeaveRecords: {
       type: [String],
       default: [],

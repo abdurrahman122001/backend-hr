@@ -16,7 +16,7 @@ exports.getForLoggedInUser = async (req, res) => {
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
       .select(
-        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund"
+        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails"
       );
     return res.json({
       enabledPersonalFields: doc?.enabledPersonalFields || [],
@@ -27,6 +27,7 @@ exports.getForLoggedInUser = async (req, res) => {
       enabledLeaveRecords: doc?.enabledLeaveRecords || [],
       showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
       showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
+      showLoanDetails : typeof doc?.showLoanDetails  === "boolean" ? doc.showLoanDetails  : true,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
@@ -44,8 +45,9 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledDeductionFields,
       enabledNetSalaryFields,
       enabledLeaveRecords,
-      showProvidentFund,
-      showGratuityFund
+      showProvidentFund, // add these two
+      showGratuityFund,
+      showLoanDetails 
     } = req.body;
 
     if (
@@ -70,8 +72,9 @@ exports.updateForLoggedInUser = async (req, res) => {
           enabledDeductionFields,
           enabledNetSalaryFields,
           enabledLeaveRecords,
-          showProvidentFund,
-          showGratuityFund,
+          showProvidentFund, 
+          showGratuityFund, 
+          showLoanDetails, 
           updatedAt: new Date(),
         },
       },
@@ -80,7 +83,7 @@ exports.updateForLoggedInUser = async (req, res) => {
         new: true,
         lean: true,
         select:
-          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund",
+          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails ",
       }
     );
 
@@ -93,6 +96,7 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledLeaveRecords: doc.enabledLeaveRecords,
       showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
       showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
+      showLoanDetails: typeof doc?.showLoanDetails === "boolean" ? doc.showLoanDetails : true,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
