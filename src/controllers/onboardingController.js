@@ -53,6 +53,13 @@ module.exports = {
         return res.status(400).json({ error: "Missing required fields." });
       }
 
+      let ownerId = null;
+      if (req.user && req.user._id) {
+        ownerId = req.user._id;
+      } else {
+        return res.status(401).json({ error: "Unauthorized: owner not found" });
+      }
+
       // Build SalarySlip data object (RAW)
       let slipData = {
         employee: null, // to be set below
@@ -101,6 +108,7 @@ module.exports = {
           reportingTime,
           salaryBreakup: slipData, // This now includes encrypted values
           shifts,
+          owner: [ownerId], // <<----- SET OWNER (array)
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
@@ -109,7 +117,8 @@ module.exports = {
       await SalarySlip.create(slipData);
 
       // --- EMAIL HTML (Comic Sans, left-aligned, signature + disclaimer) ---
-      const subject = "🚀 Hello from Your New HR AI Agent – Let’s Get You Officially Onboarded!";
+      const subject =
+        "🚀 Hello from Your New HR AI Agent – Let’s Get You Officially Onboarded!";
 
       const html = `
         <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
@@ -170,10 +179,13 @@ The information contained in this email (including any attachments) is intended 
         html,
       });
 
-      return res.json({ success: true, message: "Request sent for CNIC and CV." });
+      return res.json({
+        success: true,
+        message: "Request sent for CNIC and CV.",
+      });
     } catch (err) {
       console.error("Error requesting CNIC & CV:", err);
       return res.status(500).json({ error: "Failed to send CNIC/CV request." });
     }
-  }
+  },
 };

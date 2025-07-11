@@ -3,7 +3,7 @@ const express  = require('express');
 const router   = express.Router();
 
 const Employee = require('../models/Employees');
-const { getAllEmployees, createEmployee, updateEmployee, list } = require('../controllers/employeeController');
+const { getAllEmployees, createEmployee, updateEmployee, list , getUpcomingBirthdays } = require('../controllers/employeeController');
 
 // --- Helper for correct owner matching (move to utils if needed) ---
 function getEffectiveOwnerId(user) {
@@ -29,6 +29,8 @@ router.get('/', async (req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
+router.get('/birthdays', getUpcomingBirthdays);
 
 // GET /api/employees/names
 router.get('/names', async (req, res) => {
@@ -117,5 +119,5 @@ router.patch('/:id', async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
-
+// GET /api/employees/birthdays
 module.exports = router;

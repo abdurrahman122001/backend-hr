@@ -3,10 +3,7 @@ const { Schema, model } = mongoose;
 
 const EmployeeSchema = new Schema(
   {
-    owner: {
-      type: [{ type: Schema.Types.ObjectId, ref: "User" }],
-      required: true,
-    },
+  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
 
     // PERSONAL DETAILS
     name: { type: String, required: true }, // Full Name
@@ -51,7 +48,9 @@ const EmployeeSchema = new Schema(
     emergencyContactName: { type: String },
     emergencyContactRelation: { type: String },
     emergencyContactNumber: { type: String },
-
+    setPasswordToken: { type: String },
+    setPasswordTokenExpires: { type: Date },
+    password: { type: String }, // Hash, can be null until set
     // (OPTIONAL) If you want to keep emergencyNo separately
     emergencyNo: { type: String }, // If used
 

@@ -39,6 +39,7 @@ const probationPeriodRouter = require("./routes/probationPeriods");
 const leaveRecordsRouter = require('./routes/leaveRecords');
 const certificateRoutes = require('./routes/certificate');
 const ExtraFields = require('./routes/extraFields');
+const usersRoute = require('./routes/users');  // <-- Correc
 
 // IMAP watcher
 const { startWatcher } = require("./watcher");
@@ -48,7 +49,6 @@ const pfRoute = require("./routes/pf");
 const GratuityRoute = require("./routes/gratuitySettings");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
-
 const app    = express();
 // Wrap express in an HTTP server for Socket-IO
 const server = http.createServer(app);
@@ -94,7 +94,7 @@ app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
-app.use("/api/onboarding", onboardingRouter);
+app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/loans", loansRoutes);
 app.use('/api/loan', loansRoutes);
 app.use("/api/probation-periods", probationPeriodRouter);
@@ -106,7 +106,8 @@ app.use('/api/extra-fields', requireAuth, ExtraFields);
 app.use('/api/pf', pfRoute);
 app.use('/api/gratuity',requireAuth, GratuityRoute);
 app.use('/api/role', requireAuth, roleRoutes);
-app.use('/api/pages', requireAuth, pageRoute)
+app.use('/api/pages', requireAuth, pageRoute);
+app.use('/api/users', requireAuth, usersRoute);
 app.post(
   "/api/hierarchy/create",
   requireAuth,
