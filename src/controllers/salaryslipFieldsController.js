@@ -54,9 +54,7 @@ exports.updateForLoggedInUser = async (req, res) => {
       !Array.isArray(enabledPersonalFields) ||
       !Array.isArray(enabledEmploymentFields) ||
       !Array.isArray(enabledSalaryFields) ||
-      !Array.isArray(enabledDeductionFields) ||
-      !Array.isArray(enabledNetSalaryFields) ||
-      !Array.isArray(enabledLeaveRecords)
+      !Array.isArray(enabledDeductionFields)
     ) {
       return res.status(400).json({ error: "Invalid payload" });
     }
