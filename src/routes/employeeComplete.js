@@ -153,7 +153,7 @@ router.put(
         emp.setPasswordTokenExpires = expires;
         await emp.save();
 
-        const setPasswordUrl = `${FRONTEND_BASE_URL}/set-password?token=${token}&id=${emp._id}`;
+        const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
         const html = `
           <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;max-width:600px;margin:0 auto;color:#222;font-size:17px;line-height:1.75;">
             <p>Dear <strong>${emp.name || "Employee"}</strong>,</p>

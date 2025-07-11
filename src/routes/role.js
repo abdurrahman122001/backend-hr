@@ -1,20 +1,20 @@
 const express = require('express');
 const router = express.Router();
-const userCtrl = require('../controllers/userController');
-const rolePermCtrl = require('../controllers/rolePermissionController');
+const ctrl = require('../controllers/rolePermissionController');
 
-// User management (super-admin only)
-router.post('/admin/create-user', userCtrl.createUser);
+// Get all pages with all role permissions
+router.get('/', ctrl.getAllPages);
 
-// Role permissions
-router.get('/admin/role-permissions', rolePermCtrl.getAllRolePermissions);
-router.post('/admin/role-permissions/:role', rolePermCtrl.setRolePages);
-router.get(
-  '/admin/role-permissions/:role',
-  rolePermCtrl.getRolePages
-);
+// Get all pages with just one role's permissions
+router.get('/role/:role', ctrl.getPagesByRole);
 
-// Pages list
-router.get('/admin/pages', rolePermCtrl.getAllPages);
+// Get a single page's permissions
+router.get('/:pageId', ctrl.getPageById);
+
+// Update one permission for a page+role
+router.patch('/:pageId/permissions/:role', ctrl.updatePagePermission);
+
+// Create a new page
+router.post('/', ctrl.createPage);
 
 module.exports = router;
