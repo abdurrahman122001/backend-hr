@@ -181,7 +181,7 @@ async function generateOfferLetter(req, res) {
         </p>
         <br/>
         <div style="margin-bottom:16px;">
-          Regards,<br/><br/>
+          Regards,<br/>
           <span style="font-weight:bold;">Human Resource Department</span><br/>
           <span style="font-style: italic;">${COMPANY_NAME}</span>
           <br/><br/>
