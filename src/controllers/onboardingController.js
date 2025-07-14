@@ -60,41 +60,32 @@ module.exports = {
         return res.status(401).json({ error: "Unauthorized: owner not found" });
       }
 
-      // Build SalarySlip data object (RAW)
-      let slipData = {
-        employee: null, // to be set below
-        candidateName,
-        candidateEmail,
-        position,
-        department,
-        startDate,
-        reportingTime,
-        shifts,
-        grossSalary: 0,
-      };
-
-      SALARY_COMPONENTS.forEach((field) => {
+      // --- Encrypt salary fields with await ---
+      const encryptedSalary = {};
+      for (let field of SALARY_COMPONENTS) {
+        let value;
         if (field === "overtimeCompensation") {
-          slipData[field] = Number(
+          value =
             salaryBreakup.overtimeCompensation ||
-              salaryBreakup.overtimeComp ||
-              0
-          );
+            salaryBreakup.overtimeComp ||
+            0;
         } else {
-          slipData[field] = Number(salaryBreakup[field] || 0);
+          value = salaryBreakup[field] || 0;
         }
-      });
+        encryptedSalary[field] = await encrypt(String(value));
+      }
 
-      slipData.grossSalary = SALARY_COMPONENTS.reduce(
-        (sum, field) => sum + (Number(slipData[field]) || 0),
-        0
-      );
-
-      // --- ENCRYPT all salary fields before saving SalarySlip ---
-      SALARY_COMPONENTS.forEach((field) => {
-        slipData[field] = encrypt(String(slipData[field] || 0));
-      });
-      slipData.grossSalary = encrypt(String(slipData.grossSalary || 0));
+      // Calculate gross salary and encrypt
+      let grossSalaryRaw = 0;
+      for (let field of SALARY_COMPONENTS) {
+        let val =
+          salaryBreakup[field] ||
+          (field === "overtimeCompensation"
+            ? salaryBreakup.overtimeComp || 0
+            : 0);
+        grossSalaryRaw += Number(val || 0);
+      }
+      const encryptedGrossSalary = await encrypt(String(grossSalaryRaw));
 
       // Save/update employee
       const employee = await Employee.findOneAndUpdate(
@@ -106,17 +97,30 @@ module.exports = {
           department,
           joiningDate: startDate,
           reportingTime,
-          salaryBreakup: slipData, // This now includes encrypted values
+          salaryBreakup: salaryBreakup, // not encrypted, for quick ref on employee
           shifts,
           owner: [ownerId], // <<----- SET OWNER (array)
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
-      slipData.employee = employee._id;
+
+      // Save SalarySlip with encrypted fields
+      const slipData = {
+        employee: employee._id,
+        candidateName: await encrypt(candidateName),
+        candidateEmail: await encrypt(candidateEmail),
+        position: await encrypt(position),
+        department: await encrypt(department),
+        startDate: await encrypt(startDate),
+        reportingTime: await encrypt(reportingTime),
+        shifts,
+        ...encryptedSalary,
+        grossSalary: encryptedGrossSalary,
+      };
 
       await SalarySlip.create(slipData);
 
-      // --- EMAIL HTML (Comic Sans, left-aligned, signature + disclaimer) ---
+      // --- EMAIL HTML (Comic Sans, image CSS, disclaimer) ---
       const subject =
         "🚀 Hello from Your New HR AI Agent – Let’s Get You Officially Onboarded!";
 
@@ -153,10 +157,14 @@ module.exports = {
             Your HR AI Agent 🤖<br/>
             Powered by People. Driven by Purpose.
             <br/><br/>
-            T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; +44 7451 285285<br/>
-            E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HR@mavensadvisor.com<br/>
-            W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; www.mavensadvisor.com<br/>
+            T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
+            E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
+            W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
             <br/>
+            <div>
+            <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
+          </div>
+          <br/>
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States

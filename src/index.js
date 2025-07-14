@@ -98,7 +98,7 @@ app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/loans", loansRoutes);
 app.use('/api/loan', loansRoutes);
 app.use("/api/probation-periods", probationPeriodRouter);
-app.use('/api/leave-records', leaveRecordsRouter);
+app.use('/api/leave-records', requireAuth, leaveRecordsRouter);
 app.use('/api/certificates', certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
 app.use('/api/decryption-keys', descryptionKeys);

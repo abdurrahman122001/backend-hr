@@ -19,14 +19,25 @@ const transporter = nodemailer.createTransport({
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
-const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+44 7451 285285";
+const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 
 const SALARY_COMPONENTS = [
-  "basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance",
-  "medicalAllowance", "utilityAllowance", "overtimeComp", "dislocationAllowance",
-  "leaveEncashment", "bonus", "arrears", "autoAllowance", "incentive",
-  "fuelAllowance", "othersAllowances"
+  "basic",
+  "dearnessAllowance",
+  "houseRentAllowance",
+  "conveyanceAllowance",
+  "medicalAllowance",
+  "utilityAllowance",
+  "overtimeComp",
+  "dislocationAllowance",
+  "leaveEncashment",
+  "bonus",
+  "arrears",
+  "autoAllowance",
+  "incentive",
+  "fuelAllowance",
+  "othersAllowances",
 ];
 
 // --- DISCLAIMER: Only inside the box, nowhere else ---
@@ -45,6 +56,11 @@ const EMAIL_DISCLAIMER = `
     text-align:left;
     white-space:pre;
     overflow-x:auto;
+    width:50% !important;
+    max-width:50% !important;
+    min-width:200px;
+    box-sizing:border-box;
+    display:block;
   ">
 ************************************************************************************************
 
@@ -56,13 +72,26 @@ The information contained in this email (including any attachments) is intended 
 
 // --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
 function enforceComicSans(html) {
-  const fontStyle = "font-family: 'Comic Sans MS', Comic Sans, cursive, sans-serif;";
+  const fontStyle =
+    "font-family: 'Comic Sans MS', Comic Sans, cursive, sans-serif;";
   return html
     .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
     .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
     .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
     .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
     .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
+}
+
+// --- Helper: Enforce <img> CSS everywhere ---
+function enforceImgCss(html) {
+  // Remove any existing style attr on <img>
+  html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
+  // Add our enforced style
+  html = html.replace(
+    /<img([^>]*?)\/?>/g,
+    `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
+  );
+  return html;
 }
 
 // --- Helpers for formatting ---
@@ -115,7 +144,9 @@ async function generateOfferLetter(req, res) {
       !reportingTime ||
       !confirmationDeadlineDate
     ) {
-      return res.status(400).json({ error: "Missing required candidate or date fields." });
+      return res
+        .status(400)
+        .json({ error: "Missing required candidate or date fields." });
     }
     if (!req.user || !req.user._id) {
       return res.status(400).json({ error: "No user context found." });
@@ -164,7 +195,7 @@ async function generateOfferLetter(req, res) {
         </p>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
         <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
-        <p>In this role, you’ll be working 45 hours per week, from Monday to Friday – a full week of opportunities to grow, collaborate, and contribute.</p>
+        <p>In this role, you’ll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
         <p>
           To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:
         </p>
@@ -187,8 +218,10 @@ async function generateOfferLetter(req, res) {
           <br/><br/>
           T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
           E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-          <br/>
+          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}
+            <div>
+<img src="http://admin.innand.com/logo.png" />
+            </div>
           Mavens Advisor LLC<br/>
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
@@ -198,6 +231,8 @@ async function generateOfferLetter(req, res) {
 
     // --- Enforce Comic Sans everywhere except disclaimer ---
     bodyHtml = enforceComicSans(bodyHtml);
+    // --- Enforce <img> CSS everywhere ---
+    bodyHtml = enforceImgCss(bodyHtml);
 
     // --- Append disclaimer (NEVER Quill/user editable) ---
     bodyHtml += EMAIL_DISCLAIMER;
@@ -216,9 +251,7 @@ async function generateOfferLetter(req, res) {
     });
   } catch (err) {
     console.error("Offer gen error:", err?.response?.data || err);
-    return res
-      .status(500)
-      .json({ error: "Failed to generate offer letter." });
+    return res.status(500).json({ error: "Failed to generate offer letter." });
   }
 }
 
@@ -302,8 +335,11 @@ async function sendOfferLetter(req, res) {
 
     // --- Build final email (remove old disclaimers, append new) ---
     let html = enforceComicSans(letter);
+    html = enforceImgCss(html);
     // Remove any previous disclaimer
-    const disclaimerIndex = html.indexOf("The information contained in this email");
+    const disclaimerIndex = html.indexOf(
+      "The information contained in this email"
+    );
     if (disclaimerIndex !== -1) {
       html = html.slice(0, disclaimerIndex);
     }
@@ -325,7 +361,7 @@ async function sendOfferLetter(req, res) {
     console.error("Email send error:", err);
     return res.status(500).json({ error: "Failed to send offer letter." });
   }
-};
+}
 
 module.exports = {
   generateOfferLetter,

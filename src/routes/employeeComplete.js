@@ -11,7 +11,7 @@ const router = express.Router();
 
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "http://localhost:5173"; // or your deployed URL
-
+  process.env.APP_URL;
 // --- Ensure upload folders exist ---
 const ensureDir = (dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

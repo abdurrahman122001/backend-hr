@@ -2,11 +2,24 @@ const LeaveRecord = require("../models/LeaveRecord");
 
 // GET
 exports.getMyLeaveRecord = async (req, res) => {
+  console.log('\n=== [DEBUG] /leave-records/me called ===');
   try {
-    const owner = req.user._id;
+    // Log what user is attached to the request
+    console.log('[DEBUG] req.user:', req.user);
+    const owner = req.user?._id;
+    if (!owner) {
+      console.log('[DEBUG] No user found on req.user');
+      return res.status(401).json({ success: false, error: 'Unauthorized: user not found' });
+    }
+
+    // Log before querying the database
+    console.log('[DEBUG] Looking for LeaveRecord for owner:', owner);
     let record = await LeaveRecord.findOne({ owner });
+    console.log('[DEBUG] DB record:', record);
+
     return res.json({ success: true, data: record });
   } catch (err) {
+    console.error('[ERROR] getMyLeaveRecord failed:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 };
