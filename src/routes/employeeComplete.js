@@ -9,6 +9,11 @@ const fs = require("fs");
 
 const router = express.Router();
 
+const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
+const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
+const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
+const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
+
 const FRONTEND_BASE_URL =
   process.env.FRONTEND_BASE_URL || "http://localhost:5173";
   const APP_URL = process.env.APP_URL || "http://localhost:3000"; // fallback for dev
@@ -156,8 +161,7 @@ router.put(
 
         const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
         const html = `
-          <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;max-width:600px;margin:0 auto;color:#222;font-size:17px;line-height:1.75;">
-            <p>Dear <strong>${emp.name || "Employee"}</strong>,</p>
+<div style="font-family:'Comic Sans MS',Comic Sans, cursive, Arial, sans-serif; max-width:600px; color:#222; font-size:17px; line-height:1.75; text-align:left;">            <p>Dear <strong>${emp.name || "Employee"}</strong>,</p>
             <p>
               Thank you for completing your employee profile.<br>
               To secure your account and access the HR portal, please set your password by clicking the link below.
@@ -176,6 +180,19 @@ router.put(
               Kind regards,<br>
               <span style="font-weight:bold;">Your HR AI Agent 🤖</span><br>
               <span style="font-style:italic;font-size:15px;">Mavens Advisors</span>
+                <br/><br/>
+            T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
+            E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
+            W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
+            <br/>
+            <div>
+            <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
+          </div>
+          <br/>
+            Mavens Advisor LLC<br/>
+            East Grand Boulevard, Detroit<br/>
+            Michigan, United States
+          </div>
             </div>
             <div style="background:#f4f4f4;border-radius:7px;font-family:monospace;font-size:13px;color:#333;white-space:pre;padding:18px 12px;margin-top:28px;overflow-x:auto;">
 *********************************************************************************

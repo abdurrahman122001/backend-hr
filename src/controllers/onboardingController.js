@@ -7,7 +7,7 @@ const { encrypt } = require("../utils/encryption");
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
-const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+44 7451 285285";
+const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 
 const SALARY_COMPONENTS = [
