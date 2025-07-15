@@ -86,7 +86,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
   const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const html = `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;max-width:600px;">
+    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
       <p>Dear <strong>${employeeName || "Employee"}</strong>,</p>
       <p>Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
       <p>As your HR AI Agent, I’ve been busy building a smarter, more connected system to support you better. 
@@ -124,7 +124,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
         Michigan, United States
       </div>
       <div style="margin:32px 0 0 0;">
-        <div style="background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
+        <div style="background:#f4f4f4; max-width:600px; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
 *********************************************************************************
 
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
@@ -213,7 +213,8 @@ async function processMessage(stream) {
               nationality: cnic.nationality || data.nationality,
               cnicIssueDate: cnic.dateOfIssue || data.cnicIssueDate,
               cnicExpiryDate: cnic.dateOfExpiry || data.cnicExpiryDate,
-              fatherOrHusbandName: cnic.fatherOrHusbandName || data.fatherOrHusbandName,
+              fatherOrHusbandName:
+                cnic.fatherOrHusbandName || data.fatherOrHusbandName,
             });
             extractedName = cnic.name || "";
           } catch (error) {
@@ -243,9 +244,14 @@ async function processMessage(stream) {
         }
 
         emp = await Employee.findOne({ email: fromAddr });
-        await sendCompleteProfileLink(emp._id, fromAddr, emp.name, COMPANY_NAME);
+        await sendCompleteProfileLink(
+          emp._id,
+          fromAddr,
+          emp.name,
+          COMPANY_NAME
+        );
         // DO NOT classify or send any other reply!
-        return;  // <---- Early return if doc sent!
+        return; // <---- Early return if doc sent!
       }
     }
 
@@ -262,7 +268,7 @@ async function processMessage(stream) {
         to: fromAddr,
         subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
         html: `
-      <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;max-width:600px;">
+      <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121; width:100%;">
         <p>Dear <strong>${bestName}</strong>,</p>
         <p>
           We are absolutely delighted to receive your acceptance! 🎉<br>
@@ -304,7 +310,7 @@ async function processMessage(stream) {
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
         </div>
-        <div style="background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto; margin-top:32px;">
+        <div style="max-width:600px;background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto; margin-top:32px;">
 *********************************************************************************
 
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
@@ -319,7 +325,7 @@ The information contained in this email (including any attachments) is intended 
         to: fromAddr,
         subject: "Thank You for Your Response – Offer Not Accepted",
         html: `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#222;max-width:600px;">
+    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#222;width:100%">
       <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
       <p>
         Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
@@ -343,7 +349,7 @@ The information contained in this email (including any attachments) is intended 
         Michigan, United States
       </div>
       <div style="margin:32px 0 0 0;">
-        <div style="background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
+        <div style="background:#f4f4f4; max-width:600px; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
 *********************************************************************************
 
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.

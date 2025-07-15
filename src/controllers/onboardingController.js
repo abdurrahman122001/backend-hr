@@ -39,7 +39,8 @@ module.exports = {
         startDate,
         reportingTime,
         salaryBreakup = {},
-        shifts = [],
+        shift,       // might be a string (single shift id)
+        shifts = [], // might be array (for future)
       } = req.body;
 
       if (
@@ -58,6 +59,14 @@ module.exports = {
         ownerId = req.user._id;
       } else {
         return res.status(401).json({ error: "Unauthorized: owner not found" });
+      }
+
+      // ---- SHIFT HANDLING: always use an array ----
+      let shiftArr = [];
+      if (shift && typeof shift === "string" && shift.trim() !== "") {
+        shiftArr = [shift];
+      } else if (Array.isArray(shifts) && shifts.length > 0) {
+        shiftArr = shifts;
       }
 
       // --- Encrypt salary fields with await ---
@@ -98,8 +107,8 @@ module.exports = {
           joiningDate: startDate,
           reportingTime,
           salaryBreakup: salaryBreakup, // not encrypted, for quick ref on employee
-          shifts,
-          owner: [ownerId], // <<----- SET OWNER (array)
+          shifts: shiftArr, // << always array!
+          owner: [ownerId],
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
@@ -113,7 +122,7 @@ module.exports = {
         department: await encrypt(department),
         startDate: await encrypt(startDate),
         reportingTime: await encrypt(reportingTime),
-        shifts,
+        shifts: shiftArr, // << always array!
         ...encryptedSalary,
         grossSalary: encryptedGrossSalary,
       };

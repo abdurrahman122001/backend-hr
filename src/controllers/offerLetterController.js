@@ -134,6 +134,7 @@ async function generateOfferLetter(req, res) {
       reportingTime,
       confirmationDeadlineDate,
       department,
+      shift, // <-- add this line
     } = req.body;
 
     if (
@@ -268,6 +269,7 @@ async function sendOfferLetter(req, res) {
       reportingTime,
       confirmationDeadlineDate,
       department,
+      shift
     } = req.body;
     const candidate = candidateName || "Candidate";
 
@@ -303,6 +305,7 @@ async function sendOfferLetter(req, res) {
       department: department || null,
       owner: req.user?._id,
       createdBy: req.user?._id,
+      shifts: shift ? [shift] : undefined, // <-- updated: assign the selected shift
     });
 
     // Encrypt salary fields

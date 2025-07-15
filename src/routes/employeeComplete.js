@@ -14,10 +14,9 @@ const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 
-const FRONTEND_BASE_URL =
-  process.env.FRONTEND_BASE_URL || "http://localhost:5173";
-  const APP_URL = process.env.APP_URL || "http://localhost:3000"; // fallback for dev
- // or your deployed URL
+const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "http://localhost:5173";
+const APP_URL = process.env.APP_URL || "http://localhost:3000"; // fallback for dev
+// or your deployed URL
 // --- Ensure upload folders exist ---
 const ensureDir = (dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -137,9 +136,11 @@ router.put(
         "joiningDate",
       ];
       allFields.forEach((field) => {
+        // Prevent photographUrl from ever being set from the body!
+        if (field === "photographUrl") return;
         if (req.body[field] !== undefined && req.body[field] !== null) {
           if (dateFields.includes(field) && req.body[field]) {
-            emp[field] = req.body[field]; // Save as string to match your schema
+            emp[field] = req.body[field];
           } else {
             emp[field] = req.body[field];
           }
@@ -161,7 +162,9 @@ router.put(
 
         const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
         const html = `
-<div style="font-family:'Comic Sans MS',Comic Sans, cursive, Arial, sans-serif; max-width:600px; color:#222; font-size:17px; line-height:1.75; text-align:left;">            <p>Dear <strong>${emp.name || "Employee"}</strong>,</p>
+<div style="font-family:'Comic Sans MS',Comic Sans, cursive, Arial, sans-serif; max-width:600px; color:#222; font-size:17px; line-height:1.75; text-align:left;">            <p>Dear <strong>${
+          emp.name || "Employee"
+        }</strong>,</p>
             <p>
               Thank you for completing your employee profile.<br>
               To secure your account and access the HR portal, please set your password by clicking the link below.

@@ -16,8 +16,12 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       shifts = await Shift.find({ owner: employee.owner });
     }
 
+    // ---- Updated Part: Ensure photographUrl is present (even if empty) ----
+    let employeeObj = employee.toObject ? employee.toObject() : employee;
+    if (!employeeObj.photographUrl) employeeObj.photographUrl = "";
+
     res.json({
-      employee,
+      employee: employeeObj,
       salarySlip: salarySlip || null,
       shifts, // Add to response
     });
@@ -25,7 +29,6 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-
 // PUT: Update both employee and latest salary slip (no change needed here)
 exports.updateEmployeeAndSalarySlip = async (req, res) => {
   try {

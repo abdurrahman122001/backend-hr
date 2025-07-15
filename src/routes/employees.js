@@ -49,7 +49,8 @@ router.get('/names', async (req, res) => {
 
 // POST /api/employees
 router.post('/', async (req, res) => {
-  const { name, position, department, email, rt, salaryOffered, leaveEntitlement } = req.body;
+  // Add photographUrl to destructure from req.body
+  const { name, position, department, email, rt, salaryOffered, leaveEntitlement, photographUrl } = req.body;
   if (!name || !position || !department || !email) {
     return res.status(400).json({ status: 'error', message: 'Missing required fields' });
   }
@@ -63,7 +64,8 @@ router.post('/', async (req, res) => {
       email,
       rt,
       salaryOffered,
-      leaveEntitlement
+      leaveEntitlement,
+      photographUrl, // <-- Save photographUrl as well
     });
     res.json({ status: 'success', data: emp });
   } catch (err) {
