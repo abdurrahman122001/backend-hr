@@ -175,7 +175,7 @@ router.put(
               </a>
             </p>
             <p>
-              This link will expire in <strong>2 hours</strong> for your security.<br>
+              This link will expire in <strong>24 hours</strong> for your security.<br>
               If you did not request this, you can safely ignore this message.
             </p>
             <br>
