@@ -40,7 +40,7 @@ const leaveRecordsRouter = require('./routes/leaveRecords');
 const certificateRoutes = require('./routes/certificate');
 const ExtraFields = require('./routes/extraFields');
 const usersRoute = require('./routes/users');  // <-- Correc
-
+const setDateRoute = require('./routes//setDate');
 // IMAP watcher
 const { startWatcher } = require("./watcher");
 const fontSettingRoute = require("./routes/fontSetting");
@@ -108,6 +108,7 @@ app.use('/api/gratuity',requireAuth, GratuityRoute);
 app.use('/api/role', requireAuth, roleRoutes);
 app.use('/api/pages', requireAuth, pageRoute);
 app.use('/api/users', requireAuth, usersRoute);
+app.use('/api/setDate', requireAuth, setDateRoute)
 app.post(
   "/api/hierarchy/create",
   requireAuth,

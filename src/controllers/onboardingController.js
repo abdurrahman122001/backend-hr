@@ -1,10 +1,12 @@
 // backend/controllers/onboardingController.js
 
+require("dotenv").config();
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/SalarySlip");
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 
+// Company info from ENV with fallbacks
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
@@ -17,7 +19,7 @@ const SALARY_COMPONENTS = [
   "conveyanceAllowance",
   "medicalAllowance",
   "utilityAllowance",
-  "overtimeCompensation",
+  "overtimeCompensation", // Accept both overtimeCompensation and overtimeComp (for compatibility)
   "dislocationAllowance",
   "leaveEncashment",
   "bonus",
@@ -27,6 +29,61 @@ const SALARY_COMPONENTS = [
   "fuelAllowance",
   "othersAllowances",
 ];
+
+// --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
+function enforceComicSans(html) {
+  const fontStyle =
+    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
+  return html
+    .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
+    .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
+    .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
+    .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
+    .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
+}
+
+// --- Helper: Enforce <img> CSS everywhere ---
+function enforceImgCss(html) {
+  // Remove any existing style attr on <img>
+  html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
+  // Add our enforced style
+  html = html.replace(
+    /<img([^>]*?)\/?>/g,
+    `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
+  );
+  return html;
+}
+
+// --- Disclaimer Box: Same as offer letter (for 1:1 consistency) ---
+const EMAIL_DISCLAIMER = `
+  <div style="
+    background:#f4f4f4;
+    border-radius:12px;
+    border:1.8px solid #dadada;
+    margin-top:44px;
+    margin-bottom:0;
+    padding:18px 18px 24px 18px;
+    font-family: monospace;
+    font-size:16px;
+    color:#7a5366;
+    line-height:2.15;
+    text-align:left;
+    white-space:pre;
+    overflow-x:auto;
+    width:50% !important;
+    max-width:50% !important;
+    min-width:200px;
+    box-sizing:border-box;
+    display:block;
+  ">
+************************************************************************************************
+
+The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
+
+************************************************************************************************
+  </div>
+`;
+
 
 module.exports = {
   async requestCnicAndCv(req, res) {
@@ -129,11 +186,11 @@ module.exports = {
 
       await SalarySlip.create(slipData);
 
-      // --- EMAIL HTML (Comic Sans, image CSS, disclaimer) ---
+      // --- EMAIL HTML (Comic Sans, layout, logo, disclaimer, enforced CSS everywhere) ---
       const subject =
         "🚀 Hello from Your New HR AI Agent – Let’s Get You Officially Onboarded!";
 
-      const html = `
+      let html = `
         <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
           <p>Dear <strong>${candidateName}</strong>,</p>
           <p>Welcome to the beginning of something amazing! 🌟</p>
@@ -149,7 +206,7 @@ module.exports = {
             <li style="margin-bottom:4px;">✅ <strong>Your latest CV/Resume</strong> (PDF)</li>
           </ul>
           <p>
-            <em>🎯 Your data is safe with me always encrypted, confidential, and used only to make your experience better.</em>
+            <em>🎯 Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em>
           </p>
           <p>
             The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!
@@ -171,24 +228,23 @@ module.exports = {
             W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
             <br/>
             <div>
-            <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
-          </div>
-          <br/>
+              <img src="http://admin.innand.com/logo.png" />
+            </div>
+            <br/>
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States
           </div>
-          <div style="margin: 32px 0 0 0;">
-            <div style="background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
-*********************************************************************************
-
-The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-*********************************************************************************
-            </div>
-          </div>
         </div>
       `;
+
+      // Enforce Comic Sans everywhere except disclaimer block
+      html = enforceComicSans(html);
+      // Enforce <img> CSS everywhere
+      html = enforceImgCss(html);
+
+      // --- Append disclaimer (NEVER user editable) ---
+      html += EMAIL_DISCLAIMER;
 
       await sendEmail({
         to: candidateEmail,

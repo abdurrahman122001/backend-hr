@@ -46,7 +46,7 @@ const EMAIL_DISCLAIMER = `
     background:#f4f4f4;
     border-radius:12px;
     border:1.8px solid #dadada;
-    margin-top:44px;
+    margin-top:16px;
     margin-bottom:0;
     padding:18px 18px 24px 18px;
     font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
@@ -54,7 +54,7 @@ const EMAIL_DISCLAIMER = `
     color:#7a5366;
     line-height:2.15;
     text-align:left;
-    white-space:pre;
+    white-space:pre-line;
     overflow-x:auto;
     width:50% !important;
     max-width:50% !important;
@@ -63,9 +63,7 @@ const EMAIL_DISCLAIMER = `
     display:block;
   ">
 ************************************************************************************************
-
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
 ************************************************************************************************
   </div>
 `;
@@ -211,9 +209,10 @@ async function generateOfferLetter(req, res) {
         <p>
           We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!
         </p>
-        <br/>
-        <div style="margin-bottom:16px;">
-          Regards,<br/>
+        <p style="margin-bottom: 1em;">
+          Regards,
+        </p>
+        <div>
           <span style="font-weight:bold;">Human Resource Department</span><br/>
           <span style="font-style: italic;">${COMPANY_NAME}</span>
           <br/><br/>

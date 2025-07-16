@@ -1,14 +1,12 @@
-// sendSlipEmail.js
 const CompanyProfile = require('../models/CompanyProfile');
+const SalarySlipFields = require('../models/SalarySlipFields');
+const LoanDetail = require('../models/LoanDetail');
 const nodemailer = require("nodemailer");
 const numberToWords = require("number-to-words");
+const SalarySlip = require('../models/SalarySlip');
+const LeaveRecord = require('../models/LeaveRecord');
 
 // Helper to format numbers as currency
-const formatCurrency = (val) =>
-  val !== undefined && val !== null && !isNaN(val)
-    ? `Rs. ${Number(val).toLocaleString()}`
-    : "-";
-
 function formatDate(dt) {
   if (!dt) return "-";
   try {
@@ -24,11 +22,8 @@ function formatDate(dt) {
 
 function formatPhoneNumber(phone) {
   if (!phone) return "-";
-  // Remove all non-digits
   let num = phone.replace(/[^\d]/g, "");
-  if (!num) return "-"; // <--- Fix: If nothing left, return "-"
-
-  // Should start with '92' and have 11 or 12 digits
+  if (!num) return "-";
   if (num.startsWith("92") && num.length === 12) {
     num = num.slice(0, 12);
   }
@@ -38,44 +33,42 @@ function formatPhoneNumber(phone) {
   if (num.startsWith("92") && num.length === 11) {
     return `+${num.slice(0, 2)} ${num.slice(2, 5)} ${num.slice(5)}`;
   }
-  // fallback: just return as +<number>
   return `+${num}`;
 }
 
-  // Field Label Maps
 const ALLOWANCES_LABELS = {
   basic: "Basic Pay",
   dearnessAllowance: "Dearness Allowance",
-  conveyanceAllowance: "Conveyance Allowance",
   houseRentAllowance: "House Rent Allowance",
+  conveyanceAllowance: "Conveyance Allowance",
   medicalAllowance: "Medical Allowance",
   utilityAllowance: "Utility Allowance",
-  overtimeCompensation: "Overtime Compensation",
+  autoAllowance: "Auto Allowance",
+  fuelAllowance: "Fuel Allowance",
   dislocationAllowance: "Dislocation Allowance",
+  overtimeCompensation: "Overtime Compensation",
   leaveEncashment: "Leave Encashment",
   bonus: "Bonus",
   arrears: "Arrears",
-  autoAllowance: "Auto Allowance",
   incentive: "Incentive",
-  fuelAllowance: "Fuel Allowance",
   othersAllowances: "Other Allowances",
 };
 
 const DEDUCTIONS_LABELS = {
-  leaveDeductions: "Leave Deduction",
-  lateDeductions: "Late Deduction",
   eobiDeduction: "EOBI Deduction",
   sessiDeduction: "SESSI Deduction",
   providentFundDeduction: "Provident Fund Deduction",
   gratuityFundDeduction: "Gratuity Fund Deduction",
+  taxDeduction: "Tax Deduction",
+  leaveDeductions: "Leave Deduction",
+  lateDeductions: "Late Deduction",
+  advanceSalaryDeductions: "Advance Salary Deduction",
   vehicleLoanDeduction: "Vehicle Loan Deduction",
   otherLoanDeductions: "Loan Deduction",
-  advanceSalaryDeductions: "Advance Salary Deduction",
   medicalInsurance: "Medical Insurance",
   lifeInsurance: "Life Insurance",
   penalties: "Penalties",
   otherDeductions: "Other Deduction",
-  taxDeduction: "Tax Deduction",
 };
 
 const PROFILE_LABELS = {
@@ -104,10 +97,11 @@ const PROFILE_LABELS = {
   nomineeCnic: "Nominee CNIC",
   nomineeRelation: "Relation with Nominee",
   nomineeEmergencyNo: "Nominee Number",
+  emergencyContactNumber: "Emergency Contact Number",
+  shifts: "Shift(s)",
 };
 
-
-// Backend: use this for Provident Fund
+// Table columns for funds
 const PROVIDENT_FUND_FIELDS = [
   { label: "Balance Brought Forward", key: "providentFundBalanceBF" },
   { label: "Employee Contribution", key: "employeeProvidentFundContribution" },
@@ -116,8 +110,6 @@ const PROVIDENT_FUND_FIELDS = [
   { label: "Profit", key: "providentFundProfit" },
   { label: "Balance", key: "providentFundBalance" }
 ];
-
-// Backend: use this for Gratuity Fund
 const GRATUITY_FUND_FIELDS = [
   { label: "Balance Brought Forward", key: "gratuityFundBalanceBF" },
   { label: "Employee Contribution", key: "employeeGratuityFundContribution" },
@@ -127,43 +119,9 @@ const GRATUITY_FUND_FIELDS = [
   { label: "Balance", key: "gratuityFundBalance" }
 ];
 
-
-
-function padRows(htmlRows, count) {
-  const emptyRow = `
-    <div style="display:flex; justify-content:space-between; padding:4px 0;">
-      <span style="color: transparent;">-</span>
-      <span style="font-weight:500; margin-left:auto; color:transparent;">-</span>
-    </div>
-  `;
-  while (htmlRows.length < count) {
-    htmlRows.push(emptyRow);
-  }
-  return htmlRows;
-}
-
-function renderLoanTable(loanRows = []) {
-  if (!Array.isArray(loanRows) || !loanRows.length) return "";
-
-  // Get all unique column keys (in order of first appearance)
-  const columns = Array.from(
-    loanRows.reduce((set, row) => {
-      Object.keys(row).forEach((k) => set.add(k));
-      return set;
-    }, new Set())
-  );
-
-  // Human-readable column labels
-  const labelMap = {
-    type: "Type",
-    amountPaidCurrent: "Amount Paid in Current Month",
-    amountPaidPrevious: "Amount Paid in Previous Month(s)",
-    balancePrincipal: "Balance (Principal)",
-    balanceMarkup: "Balance (Markup)",
-    netBalance: "Net Balance",
-    // fallback: use field name itself
-  };
-
+// Render the Loan Table
+function renderLoanTable(loans = []) {
+  const arr = Array.isArray(loans) && loans.length ? loans : [{}];
   return `
     <div style="margin-bottom: 24px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
@@ -172,93 +130,32 @@ function renderLoanTable(loanRows = []) {
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
         <thead>
           <tr style="background:#f1f5f9;">
-            ${columns
-              .map(
-                (col) =>
-                  `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${
-                    labelMap[col] || col
-                  }</th>`
-              )
-              .join("")}
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Type</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Current Month</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Previous Month(s)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Markup)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Net Balance</th>
           </tr>
         </thead>
         <tbody>
-          ${loanRows
-            .map(
-              (row) =>
-                `<tr>
-                  ${columns
-                    .map(
-                      (col) =>
-                        `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                          row[col] !== undefined && row[col] !== null && row[col] !== ""
-                            ? row[col]
-                            : "-"
-                        }</td>`
-                    )
-                    .join("")}
-                </tr>`
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
-}
-
-function renderLeaveTable(leaves = {}) {
-  // Extract actual present fields (e.g., casualEntitled, sickEntitled, etc.)
-  const types = ["casual", "sick", "annual", "wop", "other"];
-  const cols = ["Entitled", "AvailedYTD", "AvailedMTH", "Balance"];
-  // Only types/fields present in leaves
-  const present = types.map(type => {
-    const row = {};
-    cols.forEach(col => {
-      const key = `${type}${col}`;
-      if (leaves.hasOwnProperty(key)) row[col] = leaves[key];
-    });
-    return { type, row };
-  }).filter(r => Object.keys(r.row).length > 0);
-
-  // If no leave data, return nothing
-  if (present.length === 0) return "";
-
-  // Find which columns to show (union of present)
-  const presentCols = Array.from(new Set(present.flatMap(r => Object.keys(r.row))));
-
-  const colLabel = {
-    Entitled: "Entitled",
-    AvailedYTD: "Availed (YTD)",
-    AvailedMTH: "Availed (MTH)",
-    Balance: "Balance"
-  };
-  const typeLabel = {
-    casual: "Casual",
-    sick: "Sick",
-    annual: "Annual",
-    wop: "WOP",
-    other: "Other"
-  };
-
-  return `
-    <div style="margin: 24px 0;">
-      <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">Leave Records</div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
-        <thead>
-          <tr style="background:#f1f5f9;">
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Leave Type</th>
-            ${presentCols.map(c => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${colLabel[c]}</th>`).join("")}
-          </tr>
-        </thead>
-        <tbody>
-          ${present.map(({ type, row }) =>
-            `<tr>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
-              ${presentCols.map(col =>
-                `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${row[col] ?? "-"}</td>`
-              ).join("")}
-            </tr>`
-          ).join("")}
+          ${arr.map(loan => {
+    let paidPrev = '-';
+    if (Array.isArray(loan.paymentSchedule) && loan.paymentSchedule.length > 0) {
+      const paid = loan.paymentSchedule.slice(0, -1).reduce((sum, payment) => sum + (payment.amount || 0), 0);
+      paidPrev = paid ? paid.toLocaleString() : '-';
+    }
+    return `
+              <tr>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.monthlyInstallment != null ? loan.monthlyInstallment.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${paidPrev}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.loanAmount != null ? loan.loanAmount.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalMarkup != null ? loan.totalMarkup.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalToBePaid != null ? loan.totalToBePaid.toLocaleString() : '-'}</td>
+              </tr>
+            `;
+  }).join('')}
         </tbody>
       </table>
     </div>
@@ -266,8 +163,6 @@ function renderLeaveTable(leaves = {}) {
 }
 
 function renderProvidentFundTable(data = {}) {
-  const visibleFields = PROVIDENT_FUND_FIELDS.filter(f => data.hasOwnProperty(f.key));
-  if (visibleFields.length === 0) return "";
   return `
     <div style="margin-bottom: 24px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
@@ -276,14 +171,12 @@ function renderProvidentFundTable(data = {}) {
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
         <thead>
           <tr style="background:#f1f5f9;">
-            ${visibleFields.map(f => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`).join("")}
+            ${PROVIDENT_FUND_FIELDS.map(f => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`).join("")}
           </tr>
         </thead>
         <tbody>
           <tr>
-            ${visibleFields.map(f =>
-              `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data[f.key] ?? "-"}</td>`
-            ).join("")}
+            ${PROVIDENT_FUND_FIELDS.map(f => `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-"}</td>`).join("")}
           </tr>
         </tbody>
       </table>
@@ -291,9 +184,8 @@ function renderProvidentFundTable(data = {}) {
   `;
 }
 
+// Render Gratuity Fund Table
 function renderGratuityFundTable(data = {}) {
-  const visibleFields = GRATUITY_FUND_FIELDS.filter(f => data.hasOwnProperty(f.key));
-  if (visibleFields.length === 0) return "";
   return `
     <div style="margin-bottom: 24px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
@@ -302,14 +194,12 @@ function renderGratuityFundTable(data = {}) {
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
         <thead>
           <tr style="background:#f1f5f9;">
-            ${visibleFields.map(f => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`).join("")}
+            ${GRATUITY_FUND_FIELDS.map(f => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`).join("")}
           </tr>
         </thead>
         <tbody>
           <tr>
-            ${visibleFields.map(f =>
-              `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data[f.key] ?? "-"}</td>`
-            ).join("")}
+            ${GRATUITY_FUND_FIELDS.map(f => `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-"}</td>`).join("")}
           </tr>
         </tbody>
       </table>
@@ -317,7 +207,66 @@ function renderGratuityFundTable(data = {}) {
   `;
 }
 
+// Render Leave Table
+function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
+  if (!Array.isArray(enabledLeaveRecords) || !enabledLeaveRecords.length) return "";
+  const cols = ["Entitled", "AvailedYTD", "AvailedMTH", "Balance"];
+  const colLabel = { Entitled: "Entitled", AvailedYTD: "Availed (YTD)", AvailedMTH: "Availed (MTH)", Balance: "Balance" };
+  const typeLabel = { casual: "Casual", sick: "Sick", annual: "Annual", wop: "WOP", other: "Other" };
+  return `
+    <div style="margin: 24px 0;">
+      <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">Leave Records</div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
+        <thead>
+          <tr style="background:#f1f5f9;">
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Leave Type</th>
+            ${cols.map(c => `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${colLabel[c]}</th>`).join("")}
+          </tr>
+        </thead>
+        <tbody>
+          ${enabledLeaveRecords.map(type => `
+            <tr>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
+              ${cols.map(col => {
+    const key = `${type.toLowerCase()}${col}`;
+    const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
+    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
+  }).join("")}
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
 
+// Net Salary Table Builder
+function buildNetSalaryTable({ netSalary, amountInWords, enabledNetSalaryFields }) {
+  const NET_FIELD_LABELS = { netSalary: "Net Salary", amountInWords: "Amount in Words", modeOfPayment: "Mode of Payment" };
+  const netValues = { netSalary: netSalary, amountInWords: amountInWords, modeOfPayment: "Bank Transfer" };
+  const enabledFields = Array.isArray(enabledNetSalaryFields) && enabledNetSalaryFields.length ? enabledNetSalaryFields : ["netSalary", "amountInWords", "modeOfPayment"];
+  const netRows = enabledFields.map(key => {
+    let val = netValues[key];
+    if (key === "netSalary") val = val !== undefined && val !== null && val !== 0 ? "Rs. " + Number(val).toLocaleString() : "-";
+    if (key === "amountInWords") val = val || "-";
+    if (key === "modeOfPayment") val = val || "-";
+    if (val === undefined || val === null || val === 0) val = "-";
+    return `
+      <tr>
+        <td style="font-weight:700; color:#334155; padding:10px 10px 10px 14px;">${NET_FIELD_LABELS[key] || key}</td>
+        <td style="font-weight:700; text-align:right; color:#334155; padding:10px 14px 10px 10px;">${val}</td>
+      </tr>
+    `;
+  }).join("\n");
+  return `
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9; border:1px solid #dbeafe; border-radius:10px; font-size:15px;">
+      <tr>
+        <td colspan="2" style="font-weight:700; color:#1d4ed8; font-size:16.5px; background:#dbeafe; border-top-left-radius:10px; border-top-right-radius:10px; padding:10px 14px; border-bottom:1px solid #e5e7eb;">Net Salary</td>
+      </tr>
+      ${netRows}
+    </table>
+  `;
+}
 
 function buildSalarySlipHtml({
   employee,
@@ -331,47 +280,60 @@ function buildSalarySlipHtml({
   netSalary,
   monthYear,
   company,
+  profileFields,
+  enabledNetSalaryFields,
+  showLoanDetails,
+  showProvidentFund,
+  showGratuityFund,
+  enabledLeaveRecords,
+  enabledCompFields,
+  enabledDedFields,
 }) {
-  // Amount in words
-  const amountInWords = netSalary > 0
-    ? `${numberToWords.toWords(netSalary).replace(/,/g, "")} Rupees Only`
-        .replace(/(^\w|\s\w)/g, (m) => m.toUpperCase())
-    : "-";
+  const amountInWords = netSalary > 0 ? `${numberToWords.toWords(netSalary).replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, m => m.toUpperCase()) : "-";
 
-  function renderEmployeeTable(empObj, labelObj) {
-    const fields = Object.keys(empObj);
+  function renderEmployeeTable(empObj, labelObj, profileFieldsOrder = null) {
+    const fields =
+      Array.isArray(profileFieldsOrder) && profileFieldsOrder.length
+        ? profileFieldsOrder
+        : Object.keys(empObj);
     const colCount = 3;
     const rows = Math.ceil(fields.length / colCount);
-    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed; box-shadow: 0 1px 3px rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1); background-color: #fff; padding: 2rem; border: 1px solid #dbeafe; border-radius: 1rem;">`;
+    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 20px auto;">`;
     for (let i = 0; i < rows; i++) {
       html += "<tr>";
       for (let j = 0; j < colCount; j++) {
         const idx = i * colCount + j;
         const key = fields[idx];
-        // Only set border if not last row
-        const borderStyle =
-          i === rows - 1 ? "" : "border-bottom:1px solid #e5e7eb;";
         if (key) {
+          let valueToShow =
+            empObj[key] !== null && empObj[key] !== undefined && empObj[key] !== ""
+              ? key === "shifts"
+                ? Array.isArray(empObj.shifts) && empObj.shifts.length > 0
+                  ? empObj.shifts
+                      .map((s) => (typeof s === "object" && s && s.name ? s.name : "-"))
+                      .join(", ")
+                  : "-"
+                : key === "phone" || key === "nomineeEmergencyNo" || key === "emergencyContactNumber"
+                ? formatPhoneNumber(empObj[key])
+                : key === "dateOfBirth" ||
+                  key === "joiningDate" ||
+                  key === "cnicIssueDate" ||
+                  key === "cnicExpiryDate"
+                ? formatDate(empObj[key])
+                : empObj[key]
+              : "-";
           html += `
-            <td style="vertical-align:top; min-width:200px; word-break:break-word; overflow-wrap:break-word; ${borderStyle} padding-top: 15px; padding-bottom:15px; padding-right:12px;">
-              <label style="font-size:0.95rem; font-weight:500; color:#6b7280;">${labelObj?.[key] || PROFILE_LABELS[key] || key}</label>
-                <p style="color:#111827; margin:2px 0 0 0;">
-                  ${
-                    (empObj[key] !== null && empObj[key] !== undefined && empObj[key] !== "")
-                      ? (
-                          (key === "phone" || key === "nomineeEmergencyNo")
-                            ? formatPhoneNumber(empObj[key])
-                            : (key === "dateOfBirth" || key === "joiningDate" || key === "cnicIssueDate" || key === "cnicExpiryDate")
-                              ? formatDate(empObj[key])
-                              : empObj[key]
-                        )
-                      : "-"
-                  }
-                </p>
+            <td style="padding:10px 14px; font-size:14px; vertical-align:top;">
+              <span style="display:block; color:#64748b; font-weight:600;">${
+                labelObj?.[key] || PROFILE_LABELS[key] || key
+              }</span>
+              <span style="color:#111827; font-weight:500; display:block; margin-top:2px;">
+                ${valueToShow}
+              </span>
             </td>
           `;
         } else {
-          html += "<td></td>";
+          html += `<td></td>`;
         }
       }
       html += "</tr>";
@@ -380,254 +342,323 @@ function buildSalarySlipHtml({
     return html;
   }
 
-  function renderSalaryTable(compObj, labelObj = {}) {
-    let total = 0;
-    const rows = Object.keys(compObj).map((key) => {
-      const value = Number(compObj[key]) || 0;
-      total += value;
-      return `
-        <div style="display: flex; justify-content: space-between; padding: 4px 0;">
-          <span style="color: #334155;">${labelObj[key] || ALLOWANCES_LABELS[key] || key}</span>
-          <span style="font-weight: 500; margin-left: auto;">${value !== 0 ? value.toLocaleString() : "-"}</span>
-        </div>
-      `;
+
+  function renderSalaryDeductionTables(compObj, dedObj, compLabels = {}, dedLabels = {}, enabledCompFields = [], enabledDedFields = []) {
+    const defaultCompKeys = Object.keys(ALLOWANCES_LABELS);
+    const defaultDedKeys = Object.keys(DEDUCTIONS_LABELS);
+    const compKeys = enabledCompFields.length ? enabledCompFields : defaultCompKeys;
+    const dedKeys = enabledDedFields.length ? enabledDedFields : defaultDedKeys;
+
+    let compRows = "";
+    let dedRows = "";
+    let totalEarnings = 0;
+    let totalDeductions = 0;
+
+    // Generate rows for allowances in the specified order
+    compKeys.forEach((compKey) => {
+      const compVal = Number(compObj[compKey]) || 0;
+      totalEarnings += compVal;
+      compRows += `
+      <tr>
+        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+          ${compLabels[compKey] || ALLOWANCES_LABELS[compKey] || compKey}
+        </td>
+        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+          ${compVal ? compVal.toLocaleString() : "-"}
+        </td>
+      </tr>
+    `;
     });
-    return { rows, total };
+
+    // Generate rows for deductions in the specified order
+    dedKeys.forEach((dedKey) => {
+      const dedVal = Number(dedObj[dedKey]) || 0;
+      totalDeductions += dedVal;
+      dedRows += `
+      <tr>
+        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+          ${dedLabels[dedKey] || DEDUCTIONS_LABELS[dedKey] || dedKey}
+        </td>
+        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#b91c1c; font-weight:500; font-size:14px; text-align:center;">
+          ${dedVal ? dedVal.toLocaleString() : "-"}
+        </td>
+      </tr>
+    `;
+    });
+
+    // Add padding rows if one table has more rows than the other
+    const maxRows = Math.max(compKeys.length, dedKeys.length);
+    for (let i = compKeys.length; i < maxRows; i++) {
+      compRows += `
+      <tr>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
+      </tr>
+    `;
+    }
+    for (let i = dedKeys.length; i < maxRows; i++) {
+      dedRows += `
+      <tr>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
+      </tr>
+    `;
+    }
+
+    if (maxRows === 0) {
+      compRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td></tr>`;
+      dedRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td></tr>`;
+    }
+
+    return {
+      table: `
+      <table width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr>
+          <td valign="top" width="50%" style="padding-right:10px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
+              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Salary & Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
+              <tbody>${compRows}</tbody>
+              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalEarnings.toLocaleString()}</td></tr></tfoot>
+            </table>
+          </td>
+          <td valign="top" width="50%" style="padding-left:10px;">
+            <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
+              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
+              <tbody>${dedRows}</tbody>
+              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalDeductions.toLocaleString()}</td></tr></tfoot>
+            </table>
+          </td>
+        </tr>
+      </table>
+    `,
+      totalEarnings,
+      totalDeductions,
+    };
   }
 
-  function renderDeductionsTable(dedObj, labelObj = {}) {
-    let total = 0;
-    const rows = Object.keys(dedObj).map((key) => {
-      const value = Number(dedObj[key]) || 0;
-      total += value;
-      return `
-        <div style="display: flex; justify-content: space-between; padding: 4px 0;">
-          <span style="color: #334155;">${labelObj[key] || DEDUCTIONS_LABELS[key] || key}</span>
-          <span style="font-weight: 500; margin-left: auto;">${value !== 0 ? value.toLocaleString() : "-"}</span>
-        </div>
-      `;
-    });
-    return { rows, total };
-  }
-
-  const loansHtml = loans && Object.keys(loans).length ? renderLoanTable(loans) : "";
-  const leavesHtml = leaves && Object.keys(leaves).length ? renderLeaveTable(leaves) : "";
-  const providentFundHtml = providentFund && Object.keys(providentFund).length ? renderProvidentFundTable(providentFund) : "";
-  const gratuityFundHtml = gratuityFund && Object.keys(gratuityFund).length ? renderGratuityFundTable(gratuityFund) : "";
-
-
-  const { rows: earningsRows, total: totalEarnings } = renderSalaryTable(
+  const { table: salaryDeductionTable } = renderSalaryDeductionTables(
     compensation || {},
-    labels?.compensation || {}
-  );
-  const { rows: deductionsRows, total: totalDeductions } = renderDeductionsTable(
     deductions || {},
-    labels?.deductions || {}
+    labels?.compensation || {},
+    labels?.deductions || {},
+    normalizeFields(enabledCompFields),
+    normalizeFields(enabledDedFields)
   );
 
-  const maxRows = Math.max(earningsRows.length, deductionsRows.length);
-  const paddedEarningsRows = padRows(earningsRows, maxRows);
-  const paddedDeductionsRows = padRows(deductionsRows, maxRows);
+  const employeeTable = renderEmployeeTable(employee || {}, labels?.employee || {}, profileFields);
+  const loansHtml = showLoanDetails ? renderLoanTable(loans) : "";
+  const providentFundHtml = showProvidentFund ? renderProvidentFundTable(providentFund) : "";
+  const gratuityFundHtml = showGratuityFund ? renderGratuityFundTable(gratuityFund) : "";
+  const leavesHtml = renderLeaveTable(leaves, enabledLeaveRecords);
+  const netSalaryTable = buildNetSalaryTable({ netSalary, amountInWords, enabledNetSalaryFields });
 
-  const earningsHtml = paddedEarningsRows.join("");
-  const deductionsHtml = paddedDeductionsRows.join("");
-
-  const employeeTable = renderEmployeeTable(
-    employee || {},
-    labels?.employee || {}
-  );
-
-
-  // The rest is **your existing HTML**...
   return `<!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8">
-    <title>Pay Slip - ${company.name}</title>
-    <meta name="viewport" content="width=900", initial-scale=1.0">
-  </head>
-  <style>
-  .im{
-  color: unset !important;
-  }
-  </style>
-  <body style="min-height:100vh; background-color:#eff6ff; margin:0; padding:16px; font-family:'Segoe UI',Arial,sans-serif; box-sizing: border-box;">
-    <div style="max-width:900px; min-width: 900px; margin:0 auto;background:#fff;border-radius:16px;overflow:hidden; box-shadow:0 4px 24px rgba(0,0,0,0.08);  width:100%;">
-      <!-- Header -->
-      <div style="background:#dbeafe; padding:24px 32px; border-bottom:1px solid #e5e7eb;">
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed; word-break:break-word; ">
-          <tr>
-            <td style="word-break:break-word; overflow-wrap:break-word; vertical-align:top;">
-              <h1 style="font-size:25px; font-weight:700; color:#1d4ed8; margin:0; letter-spacing:0.5px; line-height:1.1;">
-                ${company.name}
-              </h1>
-              <p style="color:#334155; font-weight:600; margin:8px 0 0 0;">${company.address}</p>
-            </td>
-            <td align="right" style="vertical-align:top;">
-              <div style="display:inline-block; text-align:right;">
-                <h2 style="font-size:1.25rem; font-weight:bold; color:#0f172a; margin:0 0 4px 0;">Pay Slip</h2>
-                <p style="color:#334155; margin:0 0 2px 0; font-size:1rem;">${monthYear}</p>
-                <p style="font-size:0.85rem; color:#64748b; margin:4px 0 0 0;">Generated:<br/>${new Date().toLocaleString()}</p>
-              </div>
-            </td>
-          </tr>
-        </table>
-      </div>
-      <!-- Employee Information -->
-      <div style="padding:32px;">
-        <h3 style="font-size:22px; font-weight:700; color:#1d4ed8; margin-bottom:16px; border-bottom:1px solid #bfdbfe; padding-bottom:8px;">Employee Information</h3>
-        ${employeeTable}
-      </div>
-      <!-- Salary Details -->
-      <div style="padding:0 32px 32px 32px;">
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="table-layout:fixed; word-break:break-word;">
-          <tr>
-            <!-- Earnings -->
-            <td valign="top" width="50%" style="padding-right:16px; min-width:220px; word-break:break-word; overflow-wrap:break-word;">
-              <h3 style="font-size:22px; font-weight:700; color:#1d4ed8; margin-bottom:16px; border-bottom:1px solid #bfdbfe; padding-bottom:8px;">
-                Salary &amp; Allowances
-              </h3>
-              <div style="background:#eff6ff; border-radius:12px; padding:16px;">
-                <div>${earningsHtml}</div>
-                <div style="border-top:1px solid #bfdbfe; padding-top:8px; margin-top:12px;">
-                  <div style="display:flex; justify-content:space-between; font-weight:700; color:#1d4ed8;">
-                    <span>Total Additions</span>
-                    <span style="margin-left: auto;">${formatCurrency(totalEarnings)}</span>
-                  </div>
-                </div>
-              </div>
-            </td>
-            <!-- Deductions -->
-            <td valign="top" width="50%" style="padding-left:16px; min-width:220px; word-break:break-word; overflow-wrap:break-word;">
-              <h3 style="font-size:22px; font-weight:700; color:#1d4ed8; margin-bottom:16px; border-bottom:1px solid #bfdbfe; padding-bottom:8px;">
-                Deductions
-              </h3>
-              <div style="background:#eff6ff; border-radius:12px; padding:16px;">
-                <div>${deductionsHtml}</div>
-                <div style="border-top:1px solid #bfdbfe; padding-top:8px; margin-top:12px;">
-                  <div style="display:flex; justify-content:space-between; font-weight:700; color:#991b1b;">
-                    <span>Total Deductions</span>
-                    <span style="margin-left: auto;">${formatCurrency(totalDeductions)}</span>
-                  </div>
-                </div>
-              </div>
-            </td>
-          </tr>
-        </table>
-      </div>
-      <!-- Net Salary -->
-      <div style="background:#f1f5f9; padding:24px 32px;">
-        <table style="width:100%; color:#0f172a; font-size:1.05rem; border-collapse:collapse;">
-          <tbody>
-            <tr style="border-bottom:1px solid #e5e7eb;">
-              <td style="padding:8px 8px; font-weight:600; word-break:break-word; overflow-wrap:break-word;">
-                <h3 style="font-size:1.125rem; font-weight:bold; color:#1d4ed8; margin:0;">Net Salary</h3>
-              </td>
-              <td style="padding:8px 8px; text-align:right; font-weight:600; word-break:break-word; overflow-wrap:break-word;">
-                <p style="font-size:1.125rem; color:#334155; margin:0;">${formatCurrency(netSalary)}</p>
-              </td>
-            </tr>
-            <tr style="border-bottom:1px solid #e5e7eb;">
-              <td style="padding:8px 8px; font-weight:600; word-break:break-word; overflow-wrap:break-word;">
-                <h3 style="font-size:1.125rem; font-weight:bold; color:#1d4ed8; margin:0;">Amount in Words</h3>
-              </td>
-              <td style="padding:8px 8px; text-align:right; font-weight:600;">
-                <p style="font-size:1.125rem; color:#334155; margin:0;">${amountInWords}</p>
-              </td>
-            </tr>
-            <tr style="border-bottom:1px solid #e5e7eb;">
-              <td style="padding:8px 8px; font-weight:600; word-break:break-word; overflow-wrap:break-word;">
-                <h3 style="font-size:1.125rem; font-weight:bold; color:#1d4ed8; margin:0;">Mode of Payment</h3>
-              </td>
-              <td style="padding:8px 8px; text-align:right; font-weight:600; word-break:break-word; overflow-wrap:break-word;">
-                <p style="font-size:1.125rem; color:#334155; margin:0;">Bank Transfer</p>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div style="padding: 40px 32px 0 32px;">
-        ${loansHtml}
-        ${providentFundHtml}
-        ${gratuityFundHtml}
-        ${leavesHtml}
-      </div>
-      <div style="padding:24px 24px 24px 24px; margin-bottom:12px; border-bottom-left-radius:16px; border-bottom-right-radius:16px; border-top:1px solid #f1f5f9; background:#f8fafc;">
-        <!-- Empty bottom block (matches original) -->
-      </div>
-      <!-- Footer -->
-      <div style="text-align:center; color:#6b7280; font-size:0.95rem; padding:16px 0; border-top:1px solid #e5e7eb;">
-        <p style="margin:0;">This is a system generated pay slip and does not require signature.</p>
-      </div>
-    </div>
-  </body>
+  <html>
+    <head>
+      <meta charset="UTF-8">
+      <title>Pay Slip - ${company.name}</title>
+    </head>
+    <body style="background:#f1f5f9; margin:0; padding:0; font-family:Segoe UI,Arial,sans-serif; color:#1e293b;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
+        <tr>
+          <td align="center">
+            <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe;">
+              <tr>
+                <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb;">
+                  <table width="100%">
+                    <tr>
+                      <td valign="middle" style="padding:0;">
+                        <span style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</span><br>
+                        <span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>
+                      </td>
+                      <td valign="top" align="right" style="padding:0;">
+                        <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip – ${monthYear}</span><br>
+                        <span style="color:#64748b; font-size:13px;">Generated: ${new Date().toLocaleString()}</span>
+                      </td>
+                    </tr>
+                  </table>
+                </td>
+              </tr>
+              <tr>
+                <td style="padding:32px 32px 8px 32px;">${employeeTable}</td>
+              </tr>
+              <tr>
+                <td style="padding:8px 32px 8px 32px;">${salaryDeductionTable}</td>
+              </tr>
+              <tr>
+                <td style="padding:24px 32px;">${netSalaryTable}</td>
+              </tr>
+              <tr>
+                <td style="padding:10px 32px 24px 32px;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
+              </tr>
+              <tr>
+                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb;">
+                  This is a system generated pay slip and does not require signature.
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      </table>
+    </body>
   </html>`;
+}
+function normalizeFields(fieldArr) {
+  return Array.isArray(fieldArr)
+    ? fieldArr.map(f =>
+      Array.isArray(f) ? f[1] : (typeof f === "object" && f.key ? f.key : f)
+    )
+    : [];
 }
 
 module.exports = async function sendSlipEmail(req, res) {
   try {
     const companyProfile = await CompanyProfile.findOne({ owner: req.user._id }).lean();
-
     const company = {
       name: companyProfile?.name || 'Company Name',
       address: companyProfile?.address || '',
       email: companyProfile?.email || '',
     };
-    const {
-      employee,
-      compensation,
-      deductions,
-      loans,     // <--- NEW
-      leaves,    // <--- NEW
-      providentFund,  // <-- Add this if you use a nested structure
-      gratuityFund,
-      labels,
-      monthYear: monthYearFromBody,
-      email,
-    } = req.body;
 
-        let monthYear = monthYearFromBody;
-    if (!monthYear) {
-      monthYear = new Date().toLocaleDateString("en-GB", {
-        month: "long",
-        year: "numeric",
-      });
+    const salaryFieldsDoc = await SalarySlipFields.findOne({ owner: req.user._id }).lean();
+    const enabledNetSalaryFields = salaryFieldsDoc?.enabledNetSalaryFields || [];
+    const showLoanDetails = salaryFieldsDoc?.showLoanDetails !== false;
+    const showProvidentFund = salaryFieldsDoc?.showProvidentFund !== false;
+    const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
+    const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
+    const enabledCompFields = normalizeFields(salaryFieldsDoc?.enabledSalaryFields || [
+      "basic",
+      "dearnessAllowance",
+      "houseRentAllowance",
+      "conveyanceAllowance",
+      "medicalAllowance",
+      "utilityAllowance",
+      "autoAllowance",
+      "fuelAllowance",
+      "dislocationAllowance",
+      "overtimeCompensation",
+      "leaveEncashment",
+      "bonus",
+      "arrears",
+      "incentive",
+      "othersAllowances",
+    ]);
+    const enabledDedFields = normalizeFields(salaryFieldsDoc?.enabledDeductionFields || [
+      "eobiDeduction",
+      "sessiDeduction",
+      "providentFundDeduction",
+      "gratuityFundDeduction",
+      "taxDeduction",
+      "leaveDeductions",
+      "lateDeductions",
+      "advanceSalaryDeductions",
+      "vehicleLoanDeduction",
+      "otherLoanDeductions",
+      "medicalInsurance",
+      "lifeInsurance",
+      "penalties",
+      "otherDeductions",
+    ]);
+
+
+    const { employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields } = req.body;
+
+    const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
+    const leaves = {
+      annualEntitled: leaveRecord?.totalEntitled ?? "-",
+      annualAvailedYTD: leaveRecord?.totalAvailedYTD ?? "-",
+      annualAvailedMTH: leaveRecord?.totalAvailedFTM ?? "-",
+      annualBalance: leaveRecord?.totalBalance ?? "-",
+      casualEntitled: "-",
+      casualAvailedYTD: "-",
+      casualAvailedMTH: "-",
+      casualBalance: "-",
+      sickEntitled: "-",
+      sickAvailedYTD: "-",
+      sickAvailedMTH: "-",
+      sickBalance: "-",
+      wopEntitled: "-",
+      wopAvailedYTD: "-",
+      wopAvailedMTH: "-",
+      wopBalance: "-",
+      otherEntitled: "-",
+      otherAvailedYTD: "-",
+      otherAvailedMTH: "-",
+      otherBalance: "-",
+    };
+
+        const slip = await SalarySlip.findById(req.body.slipId)
+      .populate({
+        path: "employee",
+        populate: { path: "shifts" },
+      })
+      .lean();
+    if (!slip) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Salary slip not found" });
     }
+    const getEmployee = slip.employee;
+    const employeeId = getEmployee?._id;
 
-    // Backend net salary calculation
-    const totalEarnings = Object.values(compensation || {}).reduce(
-      (sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0),
-      0
-    );
-    const totalDeductions = Object.values(deductions || {}).reduce(
-      (sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0),
-      0
-    );
+    let loans = [];
+    if (employee && employeeId) loans = await LoanDetail.find({ employee: employeeId }).lean();
+
+    const compensation = {};
+    for (const key of enabledCompFields) compensation[key] = slip[key] || 0;
+
+    const deductions = {};
+    for (const key of enabledDedFields) deductions[key] = slip[key] || 0;
+
+    let monthYear = monthYearFromBody;
+    if (!monthYear) monthYear = new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+
+    const totalEarnings = Object.values(compensation || {}).reduce((sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0), 0);
+    const totalDeductions = Object.values(deductions || {}).reduce((sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0), 0);
     const netSalary = totalEarnings - totalDeductions;
 
+    const basicSalary = Number(slip.basic) || 0;
+    const pfRate = Number(slip.employee?.providentFund?.pfRate) || 0; // Fetch PF rate from employee.pf.pfRate
+    const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0; // Employee and Employer contribution
+    const pfBalanceBroughtForward = slip.pf_balanceBF !== undefined ? Number(slip.pf_balanceBF) : pfContribution;
+
+
+    const providentFundData = {
+      providentFundBalanceBF: pfBalanceBroughtForward.toLocaleString(),
+      employeeProvidentFundContribution: pfRate.toString()+"%", 
+      employerProvidentFundContribution: pfRate.toString()+"%", 
+      providentFundWithdrawal: "-",
+      providentFundProfit: "-",
+      providentFundBalance: pfBalanceBroughtForward.toLocaleString(),
+    };
+
     const html = buildSalarySlipHtml({
-      employee,
+      employee: getEmployee,
       compensation,
       deductions,
-      loans,     // <--- NEW
-      leaves,    // <--- NEW
-      providentFund,  // <-- Add this if you use a nested structure
+      loans,
+      leaves,
+      providentFund: providentFundData,
       gratuityFund,
       labels,
       netSalary,
       monthYear,
       company,
+      profileFields,
+      enabledNetSalaryFields,
+      showLoanDetails,
+      showProvidentFund,
+      showGratuityFund,
+      enabledLeaveRecords,
+      enabledCompFields,
+      enabledDedFields,
     });
 
     const transporter = nodemailer.createTransport({
       host: process.env.MAIL_HOST,
       port: Number(process.env.MAIL_PORT),
       secure: process.env.MAIL_ENCRYPTION === "ssl",
-      auth: {
-        user: process.env.MAIL_USERNAME,
-        pass: process.env.MAIL_PASSWORD,
-      },
+      auth: { user: process.env.MAIL_USERNAME, pass: process.env.MAIL_PASSWORD },
     });
 
     await transporter.sendMail({
@@ -642,4 +673,3 @@ module.exports = async function sendSlipEmail(req, res) {
     res.status(500).json({ success: false, message: "Failed to send email", error: err.message });
   }
 };
-

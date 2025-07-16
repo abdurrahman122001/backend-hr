@@ -86,7 +86,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
   const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const html = `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;width:100%">
       <p>Dear <strong>${employeeName || "Employee"}</strong>,</p>
       <p>Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
       <p>As your HR AI Agent, I’ve been busy building a smarter, more connected system to support you better. 
@@ -108,7 +108,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
       <p>It’ll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
       <p>Let’s make our workplace even more organized, connected, and ready for what’s next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I’m here to make things smoother for you now and always.</p>
       <br/>
-      <div style="margin-bottom:16px;">
+      <div style="margin-bottom:13Wpx;">
         With excitement,<br/>
         Your HR AI Agent 🤖<br/>
         <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
@@ -123,14 +123,29 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
         East Grand Boulevard, Detroit<br/>
         Michigan, United States
       </div>
-      <div style="margin:32px 0 0 0;">
-        <div style="background:#f4f4f4; max-width:600px; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
-*********************************************************************************
-
+      <div style="
+        background:#f4f4f4;
+        border-radius:12px;
+        border:1.8px solid #dadada;
+        margin-top:44px;
+        margin-bottom:0;
+        padding:18px 18px 24px 18px;
+        font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
+        font-size:16px;
+        color:#7a5366;
+        line-height:2.15;
+        text-align:left;
+        white-space:pre-line;
+        overflow-x:auto;
+        width:50% !important;
+        max-width:50% !important;
+        min-width:200px;
+        box-sizing:border-box;
+        display:block;
+      ">
+************************************************************************************************
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-*********************************************************************************
-        </div>
+************************************************************************************************
       </div>
     </div>
   `;
@@ -268,7 +283,7 @@ async function processMessage(stream) {
         to: fromAddr,
         subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
         html: `
-      <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121; width:100%;">
+      <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121; width:100%;">
         <p>Dear <strong>${bestName}</strong>,</p>
         <p>
           We are absolutely delighted to receive your acceptance! 🎉<br>
@@ -293,7 +308,7 @@ async function processMessage(stream) {
         <p>
           <strong>We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</strong>
         </p>
-        <div style="margin-bottom:16px;">
+        <div style="margin-bottom:13px;">
           With excitement,<br/>
           Your HR AI Agent 🤖<br/>
           <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
@@ -310,12 +325,29 @@ async function processMessage(stream) {
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
         </div>
-        <div style="max-width:600px;background:#f4f4f4; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto; margin-top:32px;">
-*********************************************************************************
-
+        <div style="
+          background:#f4f4f4;
+          border-radius:12px;
+          border:1.8px solid #dadada;
+          margin-top:44px;
+          margin-bottom:0;
+          padding:18px 18px 24px 18px;
+          font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
+          font-size:16px;
+          color:#7a5366;
+          line-height:2.15;
+          text-align:left;
+          white-space:pre-line;
+          overflow-x:auto;
+          width:50% !important;
+          max-width:50% !important;
+          min-width:200px;
+          box-sizing:border-box;
+          display:block;
+        ">
+************************************************************************************************
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-*********************************************************************************
+************************************************************************************************
         </div>
       </div>
     `,
@@ -325,7 +357,7 @@ The information contained in this email (including any attachments) is intended 
         to: fromAddr,
         subject: "Thank You for Your Response – Offer Not Accepted",
         html: `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#222;width:100%">
+    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;width:100%">
       <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
       <p>
         Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
@@ -333,7 +365,7 @@ The information contained in this email (including any attachments) is intended 
       <p>
         If you have any feedback on your experience or would like to share why you chose not to accept, we would be grateful for your thoughts&mdash;it helps us improve! Should circumstances change in the future, please feel free to reach out. We wish you the very best in your career ahead.
       </p>
-      <div style="margin-bottom:16px;">
+      <div style="margin-bottom:13px;">
         With excitement,<br/>
         Your HR AI Agent 🤖<br/>
         <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
@@ -342,21 +374,36 @@ The information contained in this email (including any attachments) is intended 
         E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
         W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
         <br/>
+
         <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
         <br/>
         Mavens Advisor LLC<br/>
         East Grand Boulevard, Detroit<br/>
         Michigan, United States
-      </div>
-      <div style="margin:32px 0 0 0;">
-        <div style="background:#f4f4f4; max-width:600px; border-radius:7px; font-family:monospace; font-size:13px; color:#333; white-space:pre; padding:18px 12px; overflow-x:auto;">
-*********************************************************************************
-
+<div style="
+  background:#f4f4f4;
+  border-radius:12px;
+  border:1.8px solid #dadada;
+  margin-top:44px;
+  margin-bottom:0;
+  padding:18px 18px 24px 18px;
+  font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
+  font-size:16px;
+  color:#7a5366;
+  line-height:2.15;
+  text-align:left;
+  white-space:pre-line;
+  overflow-x:auto;
+  width:50% !important;
+  max-width:50% !important;
+  min-width:200px;
+  box-sizing:border-box;
+  display:block;
+">
+************************************************************************************************
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-*********************************************************************************
-        </div>
-      </div>
+************************************************************************************************
+</div>
     </div>
   `,
       });
@@ -364,13 +411,13 @@ The information contained in this email (including any attachments) is intended 
       await sendEmail({
         to: fromAddr,
         subject: "Approval/Decision Recorded",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;max-width:600px;">Thank you for your response. Your approval/rejection has been recorded.</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Thank you for your response. Your approval/rejection has been recorded.</div>`,
       });
     } else if (label === "leave_request") {
       await sendEmail({
         to: fromAddr,
         subject: "Leave Request Received",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#212121;max-width:600px;">Your leave request has been received and will be reviewed.</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Your leave request has been received and will be reviewed.</div>`,
       });
     } else {
       // AI-powered fallback
@@ -378,7 +425,7 @@ The information contained in this email (including any attachments) is intended 
       await sendEmail({
         to: fromAddr,
         subject: "Regarding Your Message",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:16px;line-height:1.7;color:#222;max-width:600px;">${aiReply}</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;">${aiReply}</div>`,
       });
     }
   } catch (error) {
