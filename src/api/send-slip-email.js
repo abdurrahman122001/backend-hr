@@ -5,6 +5,7 @@ const nodemailer = require("nodemailer");
 const numberToWords = require("number-to-words");
 const SalarySlip = require('../models/SalarySlip');
 const LeaveRecord = require('../models/LeaveRecord');
+const { decrypt } = require("../utils/encryption");
 
 // Helper to format numbers as currency
 function formatDate(dt) {
@@ -34,6 +35,20 @@ function formatPhoneNumber(phone) {
     return `+${num.slice(0, 2)} ${num.slice(2, 5)} ${num.slice(5)}`;
   }
   return `+${num}`;
+}
+
+function calculateYearsOfService(joiningDate, currentDate) {
+  if (!joiningDate) return 0;
+  try {
+    const joinDate = new Date(joiningDate);
+    if (isNaN(joinDate.getTime())) return 0;
+    const diffMs = currentDate.getTime() - joinDate.getTime();
+    const years = diffMs / (1000 * 60 * 60 * 24 * 365); // Account for leap years
+    if (years < 0) return 0; // Future joining dates
+    return Number(years.toFixed(1)); // Round to 1 decimal place
+  } catch {
+    return 0;
+  }
 }
 
 const ALLOWANCES_LABELS = {
@@ -110,10 +125,11 @@ const PROVIDENT_FUND_FIELDS = [
   { label: "Profit", key: "providentFundProfit" },
   { label: "Balance", key: "providentFundBalance" }
 ];
+
 const GRATUITY_FUND_FIELDS = [
   { label: "Balance Brought Forward", key: "gratuityFundBalanceBF" },
-  { label: "Employee Contribution", key: "employeeGratuityFundContribution" },
-  { label: "Employer Contribution", key: "employerGratuityFundContribution" },
+  { label: "Years of Service", key: "yearsOfService" },
+  { label: "Monthly Contribution", key: "monthlyContribution" },
   { label: "Withdrawal", key: "gratuityFundWithdrawal" },
   { label: "Profit", key: "gratuityFundProfit" },
   { label: "Balance", key: "gratuityFundBalance" }
@@ -148,11 +164,11 @@ function renderLoanTable(loans = []) {
     return `
               <tr>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.monthlyInstallment != null ? loan.monthlyInstallment.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.monthlyInstallment != null && loan.monthlyInstallment !== 0 ? loan.monthlyInstallment.toLocaleString() : '-'}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${paidPrev}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.loanAmount != null ? loan.loanAmount.toLocaleString() : '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalMarkup != null ? loan.totalMarkup.toLocaleString() : '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalToBePaid != null ? loan.totalToBePaid.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.loanAmount != null && loan.loanAmount !== 0 ? loan.loanAmount.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalMarkup != null && loan.totalMarkup !== 0 ? loan.totalMarkup.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalToBePaid != null && loan.totalToBePaid !== 0 ? loan.totalToBePaid.toLocaleString() : '-'}</td>
               </tr>
             `;
   }).join('')}
@@ -162,6 +178,7 @@ function renderLoanTable(loans = []) {
   `;
 }
 
+// Render Provident Fund Table
 function renderProvidentFundTable(data = {}) {
   return `
     <div style="margin-bottom: 24px;">
@@ -199,7 +216,15 @@ function renderGratuityFundTable(data = {}) {
         </thead>
         <tbody>
           <tr>
-            ${GRATUITY_FUND_FIELDS.map(f => `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-"}</td>`).join("")}
+            ${GRATUITY_FUND_FIELDS.map(f => {
+              let value = data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-";
+              if (f.key === "gratuityFundBalanceBF" || f.key === "monthlyContribution" || f.key === "gratuityFundWithdrawal" || f.key === "gratuityFundProfit" || f.key === "gratuityFundBalance") {
+                value = value !== "-" ? `Rs. ${Number(value).toLocaleString()}` : "-";
+              } else if (f.key === "yearsOfService") {
+                value = value !== "-" ? `${value} years` : "-";
+              }
+              return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${value}</td>`;
+            }).join("")}
           </tr>
         </tbody>
       </table>
@@ -228,10 +253,10 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
             <tr>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
               ${cols.map(col => {
-    const key = `${type.toLowerCase()}${col}`;
-    const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
-    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
-  }).join("")}
+                const key = `${type.toLowerCase()}${col}`;
+                const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
+                return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
+              }).join("")}
             </tr>
           `).join("")}
         </tbody>
@@ -247,10 +272,10 @@ function buildNetSalaryTable({ netSalary, amountInWords, enabledNetSalaryFields 
   const enabledFields = Array.isArray(enabledNetSalaryFields) && enabledNetSalaryFields.length ? enabledNetSalaryFields : ["netSalary", "amountInWords", "modeOfPayment"];
   const netRows = enabledFields.map(key => {
     let val = netValues[key];
-    if (key === "netSalary") val = val !== undefined && val !== null && val !== 0 ? "Rs. " + Number(val).toLocaleString() : "-";
-    if (key === "amountInWords") val = val || "-";
+    if (key === "netSalary") val = val != null && val !== 0 ? "Rs. " + Number(val).toLocaleString() : "-";
+    if (key === "amountInWords") val = val && val !== "-" ? val : "-";
     if (key === "modeOfPayment") val = val || "-";
-    if (val === undefined || val === null || val === 0) val = "-";
+    if (val == null || val === 0) val = "-";
     return `
       <tr>
         <td style="font-weight:700; color:#334155; padding:10px 10px 10px 14px;">${NET_FIELD_LABELS[key] || key}</td>
@@ -289,7 +314,7 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
 }) {
-  const amountInWords = netSalary > 0 ? `${numberToWords.toWords(netSalary).replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, m => m.toUpperCase()) : "-";
+  const amountInWords = netSalary != null && netSalary !== 0 ? `${numberToWords.toWords(netSalary).replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, m => m.toUpperCase()) : "-";
 
   function renderEmployeeTable(empObj, labelObj, profileFieldsOrder = null) {
     const fields =
@@ -306,7 +331,7 @@ function buildSalarySlipHtml({
         const key = fields[idx];
         if (key) {
           let valueToShow =
-            empObj[key] !== null && empObj[key] !== undefined && empObj[key] !== ""
+            empObj[key] != null && empObj[key] !== "" && empObj[key] !== 0
               ? key === "shifts"
                 ? Array.isArray(empObj.shifts) && empObj.shifts.length > 0
                   ? empObj.shifts
@@ -342,7 +367,6 @@ function buildSalarySlipHtml({
     return html;
   }
 
-
   function renderSalaryDeductionTables(compObj, dedObj, compLabels = {}, dedLabels = {}, enabledCompFields = [], enabledDedFields = []) {
     const defaultCompKeys = Object.keys(ALLOWANCES_LABELS);
     const defaultDedKeys = Object.keys(DEDUCTIONS_LABELS);
@@ -356,15 +380,15 @@ function buildSalarySlipHtml({
 
     // Generate rows for allowances in the specified order
     compKeys.forEach((compKey) => {
-      const compVal = Number(compObj[compKey]) || 0;
-      totalEarnings += compVal;
+      const compVal = Number(compObj[compKey]);
+      totalEarnings += compVal || 0;
       compRows += `
       <tr>
         <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
           ${compLabels[compKey] || ALLOWANCES_LABELS[compKey] || compKey}
         </td>
         <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
-          ${compVal ? compVal.toLocaleString() : "-"}
+          ${compVal != null && compVal !== 0 ? compVal.toLocaleString() : "-"}
         </td>
       </tr>
     `;
@@ -372,15 +396,15 @@ function buildSalarySlipHtml({
 
     // Generate rows for deductions in the specified order
     dedKeys.forEach((dedKey) => {
-      const dedVal = Number(dedObj[dedKey]) || 0;
-      totalDeductions += dedVal;
+      const dedVal = Number(dedObj[dedKey]);
+      totalDeductions += dedVal || 0;
       dedRows += `
       <tr>
         <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
           ${dedLabels[dedKey] || DEDUCTIONS_LABELS[dedKey] || dedKey}
         </td>
-        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#b91c1c; font-weight:500; font-size:14px; text-align:center;">
-          ${dedVal ? dedVal.toLocaleString() : "-"}
+        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+          ${dedVal != null && dedVal !== 0 ? dedVal.toLocaleString() : "-"}
         </td>
       </tr>
     `;
@@ -418,14 +442,14 @@ function buildSalarySlipHtml({
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Salary & Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${compRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalEarnings.toLocaleString()}</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalEarnings != null && totalEarnings !== 0 ? totalEarnings.toLocaleString() : "-"}</td></tr></tfoot>
             </table>
           </td>
           <td valign="top" width="50%" style="padding-left:10px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${dedRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalDeductions.toLocaleString()}</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalDeductions != null && totalDeductions !== 0 ? totalDeductions.toLocaleString() : "-"}</td></tr></tfoot>
             </table>
           </td>
         </tr>
@@ -436,14 +460,15 @@ function buildSalarySlipHtml({
     };
   }
 
-  const { table: salaryDeductionTable } = renderSalaryDeductionTables(
-    compensation || {},
-    deductions || {},
-    labels?.compensation || {},
-    labels?.deductions || {},
-    normalizeFields(enabledCompFields),
-    normalizeFields(enabledDedFields)
-  );
+const { table: salaryDeductionTable, totalEarnings, totalDeductions } = renderSalaryDeductionTables(
+  compensation || {},
+  deductions || {},
+  labels?.compensation || {},
+  labels?.deductions || {},
+  normalizeFields(enabledCompFields, ALLOWANCE_ORDER),
+  normalizeFields(enabledDedFields, DEDUCTION_ORDER)
+);
+
 
   const employeeTable = renderEmployeeTable(employee || {}, labels?.employee || {}, profileFields);
   const loansHtml = showLoanDetails ? renderLoanTable(loans) : "";
@@ -503,21 +528,61 @@ function buildSalarySlipHtml({
     </body>
   </html>`;
 }
-function normalizeFields(fieldArr) {
-  return Array.isArray(fieldArr)
+
+const ALLOWANCE_ORDER = [
+  "basic",
+  "dearnessAllowance",
+  "houseRentAllowance",
+  "conveyanceAllowance",
+  "medicalAllowance",
+  "utilityAllowance",
+  "autoAllowance",
+  "fuelAllowance",
+  "dislocationAllowance",
+  "overtimeCompensation",
+  "leaveEncashment",
+  "bonus",
+  "arrears",
+  "incentive",
+  "othersAllowances",
+];
+
+const DEDUCTION_ORDER = [
+  "eobiDeduction",
+  "sessiDeduction",
+  "providentFundDeduction",
+  "gratuityFundDeduction",
+  "taxDeduction",
+  "leaveDeductions",
+  "lateDeductions",
+  "advanceSalaryDeductions",
+  "vehicleLoanDeduction",
+  "otherLoanDeductions",
+  "medicalInsurance",
+  "lifeInsurance",
+  "penalties",
+  "otherDeductions",
+];
+
+
+function normalizeFields(fieldArr, orderArr) {
+  // extract keys as before
+  const keys = Array.isArray(fieldArr)
     ? fieldArr.map(f =>
       Array.isArray(f) ? f[1] : (typeof f === "object" && f.key ? f.key : f)
     )
     : [];
+  // always keep master order
+  return orderArr.filter(key => keys.includes(key));
 }
 
 module.exports = async function sendSlipEmail(req, res) {
   try {
     const companyProfile = await CompanyProfile.findOne({ owner: req.user._id }).lean();
     const company = {
-      name: companyProfile?.name || 'Company Name',
-      address: companyProfile?.address || '',
-      email: companyProfile?.email || '',
+      name: companyProfile?.name || "Company Name",
+      address: companyProfile?.address || "",
+      email: companyProfile?.email || "",
     };
 
     const salaryFieldsDoc = await SalarySlipFields.findOne({ owner: req.user._id }).lean();
@@ -526,110 +591,124 @@ module.exports = async function sendSlipEmail(req, res) {
     const showProvidentFund = salaryFieldsDoc?.showProvidentFund !== false;
     const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
-    const enabledCompFields = normalizeFields(salaryFieldsDoc?.enabledSalaryFields || [
-      "basic",
-      "dearnessAllowance",
-      "houseRentAllowance",
-      "conveyanceAllowance",
-      "medicalAllowance",
-      "utilityAllowance",
-      "autoAllowance",
-      "fuelAllowance",
-      "dislocationAllowance",
-      "overtimeCompensation",
-      "leaveEncashment",
-      "bonus",
-      "arrears",
-      "incentive",
-      "othersAllowances",
-    ]);
-    const enabledDedFields = normalizeFields(salaryFieldsDoc?.enabledDeductionFields || [
-      "eobiDeduction",
-      "sessiDeduction",
-      "providentFundDeduction",
-      "gratuityFundDeduction",
-      "taxDeduction",
-      "leaveDeductions",
-      "lateDeductions",
-      "advanceSalaryDeductions",
-      "vehicleLoanDeduction",
-      "otherLoanDeductions",
-      "medicalInsurance",
-      "lifeInsurance",
-      "penalties",
-      "otherDeductions",
-    ]);
+    const enabledCompFields = normalizeFields(
+      salaryFieldsDoc?.enabledSalaryFields || ALLOWANCE_ORDER,
+      ALLOWANCE_ORDER
+    );
+    const enabledDedFields = normalizeFields(
+      salaryFieldsDoc?.enabledDeductionFields || DEDUCTION_ORDER,
+      DEDUCTION_ORDER
+    );
 
 
-    const { employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields } = req.body;
+    const { slipId, employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields, decryptionKey } = req.body;
 
-    const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
-    const leaves = {
-      annualEntitled: leaveRecord?.totalEntitled ?? "-",
-      annualAvailedYTD: leaveRecord?.totalAvailedYTD ?? "-",
-      annualAvailedMTH: leaveRecord?.totalAvailedFTM ?? "-",
-      annualBalance: leaveRecord?.totalBalance ?? "-",
-      casualEntitled: "-",
-      casualAvailedYTD: "-",
-      casualAvailedMTH: "-",
-      casualBalance: "-",
-      sickEntitled: "-",
-      sickAvailedYTD: "-",
-      sickAvailedMTH: "-",
-      sickBalance: "-",
-      wopEntitled: "-",
-      wopAvailedYTD: "-",
-      wopAvailedMTH: "-",
-      wopBalance: "-",
-      otherEntitled: "-",
-      otherAvailedYTD: "-",
-      otherAvailedMTH: "-",
-      otherBalance: "-",
-    };
-
-        const slip = await SalarySlip.findById(req.body.slipId)
+        // Fetch the slip from the database
+    const slip = await SalarySlip.findById(slipId)
       .populate({
         path: "employee",
         populate: { path: "shifts" },
       })
       .lean();
     if (!slip) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Salary slip not found" });
+      return res.status(404).json({ success: false, message: "Salary slip not found" });
     }
+
+ const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
+const employeeLeaves = slip.employee?.leaveEntitlement || {};
+const leaves = {
+  annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
+  annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
+  annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
+  annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null 
+    ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0 
+      ? (employeeLeaves.total - employeeLeaves.usedPaid) 
+      : "-" 
+    : "-",
+  casualEntitled: "-",
+  casualAvailedYTD: "-",
+  casualAvailedMTH: "-",
+  casualBalance: "-",
+  sickEntitled: "-",
+  sickAvailedYTD: "-",
+  sickAvailedMTH: "-",
+  sickBalance: "-",
+  wopEntitled: "-",
+  wopAvailedYTD: "-",
+  wopAvailedMTH: "-",
+  wopBalance: "-",
+  otherEntitled: "-",
+  otherAvailedYTD: "-",
+  otherAvailedMTH: "-",
+  otherBalance: "-",
+};
+
+
+    // Decrypt only if decryptionKey is provided
+    const decryptField = async (encryptedValue) => {
+      if (!encryptedValue || !decryptionKey) return "[Decryption Error]";
+      try {
+        return await decrypt(encryptedValue, decryptionKey);
+      } catch (err) {
+        return "[Decryption Error]";
+      }
+    };
+
     const getEmployee = slip.employee;
     const employeeId = getEmployee?._id;
 
     let loans = [];
     if (employee && employeeId) loans = await LoanDetail.find({ employee: employeeId }).lean();
 
-    const compensation = {};
-    for (const key of enabledCompFields) compensation[key] = slip[key] || 0;
+    // Decrypt compensation and deductions using Promise.all
+    const compensationPromises = enabledCompFields.map(async (key) => [key, await decryptField(slip[key])]);
+    const deductionsPromises = enabledDedFields.map(async (key) => [key, await decryptField(slip[key])]);
+    const compensation = Object.fromEntries(await Promise.all(compensationPromises));
+    const deductions = Object.fromEntries(await Promise.all(deductionsPromises));
 
-    const deductions = {};
-    for (const key of enabledDedFields) deductions[key] = slip[key] || 0;
+    // Convert decrypted values to numbers, default to 0 if decryption fails
+    const totalEarnings = enabledCompFields.reduce((sum, key) => sum + (Number(compensation[key]) || 0), 0);
+    const totalDeductions = enabledDedFields.reduce((sum, key) => sum + (Number(deductions[key]) || 0), 0);
+    const netSalary = totalEarnings - totalDeductions;
 
     let monthYear = monthYearFromBody;
     if (!monthYear) monthYear = new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" });
 
-    const totalEarnings = Object.values(compensation || {}).reduce((sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0), 0);
-    const totalDeductions = Object.values(deductions || {}).reduce((sum, v) => sum + (typeof v === "number" ? v : Number(v) || 0), 0);
-    const netSalary = totalEarnings - totalDeductions;
-
-    const basicSalary = Number(slip.basic) || 0;
-    const pfRate = Number(slip.employee?.providentFund?.pfRate) || 0; // Fetch PF rate from employee.pf.pfRate
-    const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0; // Employee and Employer contribution
-    const pfBalanceBroughtForward = slip.pf_balanceBF !== undefined ? Number(slip.pf_balanceBF) : pfContribution;
-
+    // Provident Fund Calculations
+    const basicSalary = Number(await decryptField(slip.basic)) || 0;
+    const pfRate = Number(await decryptField(slip.employee?.providentFund?.pfRate)) || 0;
+    const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0;
+    const pfBalanceBroughtForward = Number(await decryptField(slip.pf_balanceBF)) || pfContribution;
 
     const providentFundData = {
-      providentFundBalanceBF: pfBalanceBroughtForward.toLocaleString(),
-      employeeProvidentFundContribution: pfRate.toString()+"%", 
-      employerProvidentFundContribution: pfRate.toString()+"%", 
+      providentFundBalanceBF: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+      employeeProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
+      employerProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
       providentFundWithdrawal: "-",
       providentFundProfit: "-",
-      providentFundBalance: pfBalanceBroughtForward.toLocaleString(),
+      providentFundBalance: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+    };
+
+    // Gratuity Fund Calculations
+    const currentDate = new Date("2025-07-17T19:10:00+05:00"); // 07:10 PM PKT, July 17, 2025
+    const yearsOfService = calculateYearsOfService(slip.employee?.joiningDate, currentDate);
+    const monthlyContribution = netSalary > 0 && yearsOfService > 0
+      ? Number(((netSalary * yearsOfService) / (yearsOfService * 12)).toFixed(2))
+      : 0;
+    const gfBalanceBroughtForward = netSalary > 0 && yearsOfService > 0
+      ? Number((monthlyContribution * (yearsOfService * 12)).toFixed(2))
+      : 0;
+    const gfWithdrawal = Number(await decryptField(slip.gf_withdrawal)) || 0;
+    const gfProfit = Number(await decryptField(slip.gf_profit)) || 0;
+    const gfBalance = gfBalanceBroughtForward - gfWithdrawal + gfProfit;
+
+    const gratuityFundData = {
+      gratuityFundBalanceBF: gfBalanceBroughtForward != null && gfBalanceBroughtForward !== 0 ? gfBalanceBroughtForward : "-",
+      yearsOfService: yearsOfService != null && yearsOfService !== 0 ? yearsOfService : "-",
+      monthlyContribution: monthlyContribution != null && monthlyContribution !== 0 ? monthlyContribution : "-",
+      gratuityFundWithdrawal: gfWithdrawal != null && gfWithdrawal !== 0 ? gfWithdrawal : "-",
+      gratuityFundProfit: gfProfit != null && gfProfit !== 0 ? gfProfit : "-",
+      gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
     };
 
     const html = buildSalarySlipHtml({
@@ -639,7 +718,7 @@ module.exports = async function sendSlipEmail(req, res) {
       loans,
       leaves,
       providentFund: providentFundData,
-      gratuityFund,
+      gratuityFund: gratuityFundData,
       labels,
       netSalary,
       monthYear,
@@ -664,12 +743,13 @@ module.exports = async function sendSlipEmail(req, res) {
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: email,
-      subject: `Salary Slip${employee?.name ? " - " + employee.name : ""}`,
+      subject: `Salary Slip${getEmployee?.name ? " - " + getEmployee.name : ""}`, // No [Decryption Error] here
       html,
     });
 
     res.json({ success: true, message: "Email sent!" });
   } catch (err) {
+    console.error("Email sending error:", err);
     res.status(500).json({ success: false, message: "Failed to send email", error: err.message });
   }
 };
