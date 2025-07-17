@@ -300,7 +300,7 @@ async function sendOfferLetter(req, res) {
       name: candidate,
       email: candidateEmail,
       designation: position,
-      startDate,
+      joiningDate: startDate,
       department: department || null,
       owner: req.user?._id,
       createdBy: req.user?._id,
