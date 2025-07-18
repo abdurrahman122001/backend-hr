@@ -392,21 +392,21 @@ function buildSalarySlipHtml({
     let totalEarnings = 0;
     let totalDeductions = 0;
 
-      function safeAmountCell(val) {
-    // If undefined, null, empty, dash, or not a number, return '-'
-    if (
-      val === undefined ||
-      val === null ||
-      val === "" ||
-      val === "-" ||
-      isNaN(Number(val))
-    ) {
-      return "-";
+    function safeAmountCell(val) {
+      // If undefined, null, empty, dash, or not a number, return '-'
+      if (
+        val === undefined ||
+        val === null ||
+        val === "" ||
+        val === "-" ||
+        isNaN(Number(val))
+      ) {
+        return "-";
+      }
+      const num = Number(val);
+      // If zero, show '-' (or change logic if you want to show 0)
+      return num !== 0 ? num.toLocaleString() : "-";
     }
-    const num = Number(val);
-    // If zero, show '-' (or change logic if you want to show 0)
-    return num !== 0 ? num.toLocaleString() : "-";
-  }
 
     // Generate rows for allowances in the specified order
     compKeys.forEach((compKey) => {
@@ -701,13 +701,21 @@ module.exports = async function sendSlipEmail(req, res) {
     const deductionsRaw = {};
     for (const key of enabledDedFields) {
       // Patch: fetch loan deduction from slip.loanDeductions.otherLoans or .vehicleLoan, otherwise decrypt as usual
-      if (key === "otherLoanDeductions" && slip.loanDeductions && typeof slip.loanDeductions === "object") {
-        deductionsRaw[key] = safeAmountCell(slip.loanDeductions.otherLoans);
-      } else if (key === "vehicleLoanDeduction" && slip.loanDeductions && typeof slip.loanDeductions === "object") {
-        deductionsRaw[key] = safeAmountCell(slip.loanDeductions.vehicleLoan);
+      if (
+        (key === "otherLoanDeductions" || key === "vehicleLoanDeduction") &&
+        slip.loanDeductions &&
+        typeof slip.loanDeductions === "object"
+      ) {
+        // Get the encrypted value
+        let encrypted;
+        if (key === "otherLoanDeductions") encrypted = slip.loanDeductions.otherLoans;
+        if (key === "vehicleLoanDeduction") encrypted = slip.loanDeductions.vehicleLoan;
+        // Decrypt just like other fields
+        deductionsRaw[key] = await decryptField(encrypted);
       } else {
         deductionsRaw[key] = await decryptField(slip[key]);
       }
+
     }
 
     // Patch: For calculations, always use numbers (treat "-" or blank as 0)

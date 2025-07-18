@@ -227,10 +227,6 @@ module.exports = {
             E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
             W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
             <br/>
-            <div>
-              <img src="http://admin.innand.com/logo.png" />
-            </div>
-            <br/>
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States

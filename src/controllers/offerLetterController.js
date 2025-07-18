@@ -119,6 +119,14 @@ function formatTime12hr(timeStr) {
 function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
+function probationDaysToMonths(probationDays) {
+  const days = Number(probationDays) || 0;
+  if (!days) return "";
+  const months = Math.round(days / 30);
+  return months > 0
+    ? `${months} month${months > 1 ? "s" : ""}`
+    : `${days} days`;
+}
 
 // --- OFFER LETTER GENERATOR ---
 async function generateOfferLetter(req, res) {
@@ -133,6 +141,7 @@ async function generateOfferLetter(req, res) {
       confirmationDeadlineDate,
       department,
       shift, // <-- add this line
+      probationDays,
     } = req.body;
 
     if (
@@ -187,7 +196,11 @@ async function generateOfferLetter(req, res) {
         <p>Dear <strong>${candidateName}</strong>,</p>
         <p>We’re thrilled to have you on board!</p>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${
+      company.name}</b>.
+        </p>
+        <p>
+          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)} probationary period</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
         <p>
           We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job it’s a journey, and we’re looking forward to seeing you thrive with us.
@@ -209,7 +222,7 @@ async function generateOfferLetter(req, res) {
         <p>
           We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!
         </p>
-        <p style="margin-bottom: 1em;">
+        <p style=margin-top: 12px">
           Regards,
         </p>
         <div>
@@ -218,10 +231,7 @@ async function generateOfferLetter(req, res) {
           <br/><br/>
           T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
           E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}
-            <div>
-<img src="http://admin.innand.com/logo.png" />
-            </div>
+          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/><br/>
           Mavens Advisor LLC<br/>
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
@@ -268,7 +278,7 @@ async function sendOfferLetter(req, res) {
       reportingTime,
       confirmationDeadlineDate,
       department,
-      shift
+      shift,
     } = req.body;
     const candidate = candidateName || "Candidate";
 

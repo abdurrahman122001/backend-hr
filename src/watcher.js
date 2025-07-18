@@ -117,8 +117,6 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
         E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
         W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
         <br/>
-        <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
-        <br/>
         Mavens Advisor LLC<br/>
         East Grand Boulevard, Detroit<br/>
         Michigan, United States
@@ -317,10 +315,6 @@ async function processMessage(stream) {
           E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
           W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
           <br/>
-            <div>
-            <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
-          </div>
-          <br/>
           Mavens Advisor LLC<br/>
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
@@ -373,9 +367,6 @@ The information contained in this email (including any attachments) is intended 
         T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
         E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
         W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-        <br/>
-
-        <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
         <br/>
         Mavens Advisor LLC<br/>
         East Grand Boulevard, Detroit<br/>
