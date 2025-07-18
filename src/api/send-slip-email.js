@@ -43,9 +43,9 @@ function calculateYearsOfService(joiningDate, currentDate) {
     const joinDate = new Date(joiningDate);
     if (isNaN(joinDate.getTime())) return 0;
     const diffMs = currentDate.getTime() - joinDate.getTime();
-    const years = diffMs / (1000 * 60 * 60 * 24 * 365); // Account for leap years
-    if (years < 0) return 0; // Future joining dates
-    return Number(years.toFixed(1)); // Round to 1 decimal place
+    const years = diffMs / (1000 * 60 * 60 * 24 * 365);
+    if (years < 0) return 0;
+    return Number(years.toFixed(1));
   } catch {
     return 0;
   }
@@ -116,7 +116,6 @@ const PROFILE_LABELS = {
   shifts: "Shift(s)",
 };
 
-// Table columns for funds
 const PROVIDENT_FUND_FIELDS = [
   { label: "Balance Brought Forward", key: "providentFundBalanceBF" },
   { label: "Employee Contribution", key: "employeeProvidentFundContribution" },
@@ -135,6 +134,20 @@ const GRATUITY_FUND_FIELDS = [
   { label: "Balance", key: "gratuityFundBalance" }
 ];
 
+// Main cell formatter for all numbers (avoids NaN)
+function safeAmountCell(val) {
+  if (
+    val === undefined ||
+    val === null ||
+    val === "" ||
+    val === "-" ||
+    isNaN(Number(val))
+  ) {
+    return "-";
+  }
+  const num = Number(val);
+  return num !== 0 && !isNaN(num) ? num.toLocaleString() : "-";
+}
 // Render the Loan Table
 function renderLoanTable(loans = []) {
   const arr = Array.isArray(loans) && loans.length ? loans : [{}];
@@ -217,14 +230,14 @@ function renderGratuityFundTable(data = {}) {
         <tbody>
           <tr>
             ${GRATUITY_FUND_FIELDS.map(f => {
-              let value = data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-";
-              if (f.key === "gratuityFundBalanceBF" || f.key === "monthlyContribution" || f.key === "gratuityFundWithdrawal" || f.key === "gratuityFundProfit" || f.key === "gratuityFundBalance") {
-                value = value !== "-" ? `Rs. ${Number(value).toLocaleString()}` : "-";
-              } else if (f.key === "yearsOfService") {
-                value = value !== "-" ? `${value} years` : "-";
-              }
-              return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${value}</td>`;
-            }).join("")}
+    let value = data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-";
+    if (f.key === "gratuityFundBalanceBF" || f.key === "monthlyContribution" || f.key === "gratuityFundWithdrawal" || f.key === "gratuityFundProfit" || f.key === "gratuityFundBalance") {
+      value = value !== "-" ? `Rs. ${Number(value).toLocaleString()}` : "-";
+    } else if (f.key === "yearsOfService") {
+      value = value !== "-" ? `${value} years` : "-";
+    }
+    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${value}</td>`;
+  }).join("")}
           </tr>
         </tbody>
       </table>
@@ -253,10 +266,10 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
             <tr>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
               ${cols.map(col => {
-                const key = `${type.toLowerCase()}${col}`;
-                const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
-                return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
-              }).join("")}
+    const key = `${type.toLowerCase()}${col}`;
+    const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
+    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
+  }).join("")}
             </tr>
           `).join("")}
         </tbody>
@@ -335,23 +348,22 @@ function buildSalarySlipHtml({
               ? key === "shifts"
                 ? Array.isArray(empObj.shifts) && empObj.shifts.length > 0
                   ? empObj.shifts
-                      .map((s) => (typeof s === "object" && s && s.name ? s.name : "-"))
-                      .join(", ")
+                    .map((s) => (typeof s === "object" && s && s.name ? s.name : "-"))
+                    .join(", ")
                   : "-"
                 : key === "phone" || key === "nomineeEmergencyNo" || key === "emergencyContactNumber"
-                ? formatPhoneNumber(empObj[key])
-                : key === "dateOfBirth" ||
-                  key === "joiningDate" ||
-                  key === "cnicIssueDate" ||
-                  key === "cnicExpiryDate"
-                ? formatDate(empObj[key])
-                : empObj[key]
+                  ? formatPhoneNumber(empObj[key])
+                  : key === "dateOfBirth" ||
+                    key === "joiningDate" ||
+                    key === "cnicIssueDate" ||
+                    key === "cnicExpiryDate"
+                    ? formatDate(empObj[key])
+                    : empObj[key]
               : "-";
           html += `
             <td style="padding:10px 14px; font-size:14px; vertical-align:top;">
-              <span style="display:block; color:#64748b; font-weight:600;">${
-                labelObj?.[key] || PROFILE_LABELS[key] || key
-              }</span>
+              <span style="display:block; color:#64748b; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
+            }</span>
               <span style="color:#111827; font-weight:500; display:block; margin-top:2px;">
                 ${valueToShow}
               </span>
@@ -367,6 +379,8 @@ function buildSalarySlipHtml({
     return html;
   }
 
+
+
   function renderSalaryDeductionTables(compObj, dedObj, compLabels = {}, dedLabels = {}, enabledCompFields = [], enabledDedFields = []) {
     const defaultCompKeys = Object.keys(ALLOWANCES_LABELS);
     const defaultDedKeys = Object.keys(DEDUCTIONS_LABELS);
@@ -378,37 +392,57 @@ function buildSalarySlipHtml({
     let totalEarnings = 0;
     let totalDeductions = 0;
 
+      function safeAmountCell(val) {
+    // If undefined, null, empty, dash, or not a number, return '-'
+    if (
+      val === undefined ||
+      val === null ||
+      val === "" ||
+      val === "-" ||
+      isNaN(Number(val))
+    ) {
+      return "-";
+    }
+    const num = Number(val);
+    // If zero, show '-' (or change logic if you want to show 0)
+    return num !== 0 ? num.toLocaleString() : "-";
+  }
+
     // Generate rows for allowances in the specified order
     compKeys.forEach((compKey) => {
-      const compVal = Number(compObj[compKey]);
-      totalEarnings += compVal || 0;
+      const rawVal = compObj[compKey];
+      const numVal = Number(rawVal);
+      // Only add to totalEarnings if it is a valid number
+      if (!isNaN(numVal)) totalEarnings += numVal;
       compRows += `
-      <tr>
-        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
-          ${compLabels[compKey] || ALLOWANCES_LABELS[compKey] || compKey}
-        </td>
-        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
-          ${compVal != null && compVal !== 0 ? compVal.toLocaleString() : "-"}
-        </td>
-      </tr>
-    `;
+    <tr>
+      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+        ${compLabels[compKey] || ALLOWANCES_LABELS[compKey] || compKey}
+      </td>
+      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+        ${safeAmountCell(rawVal)}
+      </td>
+    </tr>
+  `;
     });
 
-    // Generate rows for deductions in the specified order
     dedKeys.forEach((dedKey) => {
-      const dedVal = Number(dedObj[dedKey]);
-      totalDeductions += dedVal || 0;
+      const rawVal = dedObj[dedKey];
+      const numVal = Number(rawVal);
+      // Only add to totalDeductions if it is a valid number
+      if (!isNaN(numVal)) totalDeductions += numVal;
       dedRows += `
-      <tr>
-        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
-          ${dedLabels[dedKey] || DEDUCTIONS_LABELS[dedKey] || dedKey}
-        </td>
-        <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
-          ${dedVal != null && dedVal !== 0 ? dedVal.toLocaleString() : "-"}
-        </td>
-      </tr>
-    `;
+    <tr>
+      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+        ${dedLabels[dedKey] || DEDUCTIONS_LABELS[dedKey] || dedKey}
+      </td>
+      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+        ${safeAmountCell(rawVal)}
+      </td>
+    </tr>
+  `;
     });
+
 
     // Add padding rows if one table has more rows than the other
     const maxRows = Math.max(compKeys.length, dedKeys.length);
@@ -460,14 +494,14 @@ function buildSalarySlipHtml({
     };
   }
 
-const { table: salaryDeductionTable, totalEarnings, totalDeductions } = renderSalaryDeductionTables(
-  compensation || {},
-  deductions || {},
-  labels?.compensation || {},
-  labels?.deductions || {},
-  normalizeFields(enabledCompFields, ALLOWANCE_ORDER),
-  normalizeFields(enabledDedFields, DEDUCTION_ORDER)
-);
+  const { table: salaryDeductionTable, totalEarnings, totalDeductions } = renderSalaryDeductionTables(
+    compensation || {},
+    deductions || {},
+    labels?.compensation || {},
+    labels?.deductions || {},
+    normalizeFields(enabledCompFields, ALLOWANCE_ORDER),
+    normalizeFields(enabledDedFields, DEDUCTION_ORDER)
+  );
 
 
   const employeeTable = renderEmployeeTable(employee || {}, labels?.employee || {}, profileFields);
@@ -600,10 +634,9 @@ module.exports = async function sendSlipEmail(req, res) {
       DEDUCTION_ORDER
     );
 
-
     const { slipId, employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields, decryptionKey } = req.body;
 
-        // Fetch the slip from the database
+    // Fetch the slip from the database
     const slip = await SalarySlip.findById(slipId)
       .populate({
         path: "employee",
@@ -614,39 +647,39 @@ module.exports = async function sendSlipEmail(req, res) {
       return res.status(404).json({ success: false, message: "Salary slip not found" });
     }
 
- const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
-const employeeLeaves = slip.employee?.leaveEntitlement || {};
-const leaves = {
-  annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
-  annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
-  annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
-  annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null 
-    ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0 
-      ? (employeeLeaves.total - employeeLeaves.usedPaid) 
-      : "-" 
-    : "-",
-  casualEntitled: "-",
-  casualAvailedYTD: "-",
-  casualAvailedMTH: "-",
-  casualBalance: "-",
-  sickEntitled: "-",
-  sickAvailedYTD: "-",
-  sickAvailedMTH: "-",
-  sickBalance: "-",
-  wopEntitled: "-",
-  wopAvailedYTD: "-",
-  wopAvailedMTH: "-",
-  wopBalance: "-",
-  otherEntitled: "-",
-  otherAvailedYTD: "-",
-  otherAvailedMTH: "-",
-  otherBalance: "-",
-};
-
+    const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
+    const employeeLeaves = slip.employee?.leaveEntitlement || {};
+    const leaves = {
+      annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
+      annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
+      annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
+      annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null
+        ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0
+          ? (employeeLeaves.total - employeeLeaves.usedPaid)
+          : "-"
+        : "-",
+      casualEntitled: "-",
+      casualAvailedYTD: "-",
+      casualAvailedMTH: "-",
+      casualBalance: "-",
+      sickEntitled: "-",
+      sickAvailedYTD: "-",
+      sickAvailedMTH: "-",
+      sickBalance: "-",
+      wopEntitled: "-",
+      wopAvailedYTD: "-",
+      wopAvailedMTH: "-",
+      wopBalance: "-",
+      otherEntitled: "-",
+      otherAvailedYTD: "-",
+      otherAvailedMTH: "-",
+      otherBalance: "-",
+    };
 
     // Decrypt only if decryptionKey is provided
     const decryptField = async (encryptedValue) => {
-      if (!encryptedValue || !decryptionKey) return "[Decryption Error]";
+      if (!encryptedValue || encryptedValue === "" || encryptedValue === 0) return "-";
+      if (!decryptionKey) return "[Decryption Error]";
       try {
         return await decrypt(encryptedValue, decryptionKey);
       } catch (err) {
@@ -660,15 +693,36 @@ const leaves = {
     let loans = [];
     if (employee && employeeId) loans = await LoanDetail.find({ employee: employeeId }).lean();
 
-    // Decrypt compensation and deductions using Promise.all
+    // Compensation (as before)
     const compensationPromises = enabledCompFields.map(async (key) => [key, await decryptField(slip[key])]);
-    const deductionsPromises = enabledDedFields.map(async (key) => [key, await decryptField(slip[key])]);
-    const compensation = Object.fromEntries(await Promise.all(compensationPromises));
-    const deductions = Object.fromEntries(await Promise.all(deductionsPromises));
+    const compensationRaw = Object.fromEntries(await Promise.all(compensationPromises));
 
-    // Convert decrypted values to numbers, default to 0 if decryption fails
-    const totalEarnings = enabledCompFields.reduce((sum, key) => sum + (Number(compensation[key]) || 0), 0);
-    const totalDeductions = enabledDedFields.reduce((sum, key) => sum + (Number(deductions[key]) || 0), 0);
+    // Deductions (patched for loan fields)
+    const deductionsRaw = {};
+    for (const key of enabledDedFields) {
+      // Patch: fetch loan deduction from slip.loanDeductions.otherLoans or .vehicleLoan, otherwise decrypt as usual
+      if (key === "otherLoanDeductions" && slip.loanDeductions && typeof slip.loanDeductions === "object") {
+        deductionsRaw[key] = safeAmountCell(slip.loanDeductions.otherLoans);
+      } else if (key === "vehicleLoanDeduction" && slip.loanDeductions && typeof slip.loanDeductions === "object") {
+        deductionsRaw[key] = safeAmountCell(slip.loanDeductions.vehicleLoan);
+      } else {
+        deductionsRaw[key] = await decryptField(slip[key]);
+      }
+    }
+
+    // Patch: For calculations, always use numbers (treat "-" or blank as 0)
+    const toSafeNumber = v => (v === "-" || v === undefined || v === null || v === "" || isNaN(Number(v))) ? 0 : Number(v);
+
+    const compensation = Object.fromEntries(
+      Object.entries(compensationRaw).map(([k, v]) => [k, toSafeNumber(v)])
+    );
+    const deductions = Object.fromEntries(
+      Object.entries(deductionsRaw).map(([k, v]) => [k, toSafeNumber(v)])
+    );
+
+    const totalEarnings = enabledCompFields.reduce((sum, key) => sum + (compensation[key] || 0), 0);
+    const totalDeductions = enabledDedFields.reduce((sum, key) => sum + (deductions[key] || 0), 0);
+
     const netSalary = totalEarnings - totalDeductions;
 
     let monthYear = monthYearFromBody;
@@ -690,7 +744,7 @@ const leaves = {
     };
 
     // Gratuity Fund Calculations
-    const currentDate = new Date("2025-07-17T19:10:00+05:00"); // 07:10 PM PKT, July 17, 2025
+    const currentDate = new Date("2025-07-17T19:10:00+05:00");
     const yearsOfService = calculateYearsOfService(slip.employee?.joiningDate, currentDate);
     const monthlyContribution = netSalary > 0 && yearsOfService > 0
       ? Number(((netSalary * yearsOfService) / (yearsOfService * 12)).toFixed(2))
@@ -711,10 +765,11 @@ const leaves = {
       gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
     };
 
+    // Use compensationRaw/deductionsRaw for display so blanks remain "-"
     const html = buildSalarySlipHtml({
       employee: getEmployee,
-      compensation,
-      deductions,
+      compensation: compensationRaw,
+      deductions: deductionsRaw,
       loans,
       leaves,
       providentFund: providentFundData,
@@ -743,7 +798,7 @@ const leaves = {
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: email,
-      subject: `Salary Slip${getEmployee?.name ? " - " + getEmployee.name : ""}`, // No [Decryption Error] here
+      subject: `Salary Slip${getEmployee?.name ? " - " + getEmployee.name : ""}`,
       html,
     });
 

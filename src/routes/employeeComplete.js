@@ -7,16 +7,15 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-const router = express.Router();
-
+// --- Company Info ---
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "http://localhost:5173";
-const APP_URL = process.env.APP_URL || "http://localhost:3000"; // fallback for dev
-// or your deployed URL
+const APP_URL = process.env.APP_URL || "http://localhost:3000";
+
 // --- Ensure upload folders exist ---
 const ensureDir = (dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -44,6 +43,7 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
+// --- All Employee fields ---
 const allFields = [
   "name",
   "email",
@@ -80,6 +80,61 @@ const allFields = [
   "rt",
 ];
 
+// --- Comic Sans everywhere except disclaimer block ---
+function enforceComicSans(html) {
+  const fontStyle =
+    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
+  return html
+    .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
+    .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
+    .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
+    .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
+    .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
+}
+
+// --- Enforce <img> CSS everywhere ---
+function enforceImgCss(html) {
+  html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
+  html = html.replace(
+    /<img([^>]*?)\/?>/g,
+    `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
+  );
+  return html;
+}
+
+// --- Disclaimer (same as offer letter) ---
+const EMAIL_DISCLAIMER = `
+  <div style="
+    background:#f4f4f4;
+    border-radius:12px;
+    border:1.8px solid #dadada;
+    margin-top:44px;
+    margin-bottom:0;
+    padding:18px 18px 24px 18px;
+    font-family: monospace;
+    font-size:16px;
+    color:#7a5366;
+    line-height:2.15;
+    text-align:left;
+    white-space:pre;
+    overflow-x:auto;
+    width:50% !important;
+    max-width:50% !important;
+    min-width:200px;
+    box-sizing:border-box;
+    display:block;
+  ">
+************************************************************************************************
+
+The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
+
+************************************************************************************************
+  </div>
+`;
+
+// --- ROUTER SETUP ---
+const router = express.Router();
+
 // --- GET: Fetch all fields ---
 router.get("/:id/complete", async (req, res) => {
   try {
@@ -104,7 +159,7 @@ router.get("/:id/complete", async (req, res) => {
   }
 });
 
-// --- PUT: Update all fields, send "Set Password" email if needed ---
+// --- PUT: Update all fields, send Set Password email with offer letter layout ---
 router.put(
   "/:id/complete",
   upload.fields([
@@ -128,7 +183,7 @@ router.put(
         emp.cvUrl = `/uploads/cv/${req.files.cv[0].filename}`;
       }
 
-      // Parse date fields and update fields
+      // Parse and update all fields
       const dateFields = [
         "dateOfBirth",
         "cnicIssueDate",
@@ -136,7 +191,6 @@ router.put(
         "joiningDate",
       ];
       allFields.forEach((field) => {
-        // Prevent photographUrl from ever being set from the body!
         if (field === "photographUrl") return;
         if (req.body[field] !== undefined && req.body[field] !== null) {
           if (dateFields.includes(field) && req.body[field]) {
@@ -161,49 +215,55 @@ router.put(
         await emp.save();
 
         const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
-        const html = `
-<div style="font-family:'Comic Sans MS',Comic Sans, cursive, Arial, sans-serif; max-width:600px; color:#222; font-size:17px; line-height:1.75; text-align:left;">            <p>Dear <strong>${
-          emp.name || "Employee"
-        }</strong>,</p>
-            <p>
-              Thank you for completing your employee profile.<br>
-              To secure your account and access the HR portal, please set your password by clicking the link below.
-            </p>
-            <p style="margin:28px 0;">
-              <a href="${setPasswordUrl}" style="background:#0057b7;color:#fff;text-decoration:none;font-weight:bold;padding:14px 30px;border-radius:6px;display:inline-block;font-size:18px;letter-spacing:.3px;">
-                Set My Password
-              </a>
-            </p>
-            <p>
-              This link will expire in <strong>24 hours</strong> for your security.<br>
-              If you did not request this, you can safely ignore this message.
-            </p>
-            <br>
-            <div style="margin-top:18px;font-size:15px;">
-              Kind regards,<br>
-              <span style="font-weight:bold;">Your HR AI Agent 🤖</span><br>
-              <span style="font-style:italic;font-size:15px;">Mavens Advisors</span>
-                <br/><br/>
+
+        // --- PIXEL-PERFECT OFFER LETTER LAYOUT ---
+        let html = `
+        <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;font-size:16px;color:#22223B;background:#f9fafb;line-height:2.1;text-align:left;margin:0;padding:40px 30px 38px 30px;max-width:100%;border-radius:15px;border:1.5px solid #e0e0e0;">
+          <p style="margin-bottom:20px;font-size:19px;">
+            Dear <strong>${emp.name || "Employee"}</strong>,
+          </p>
+          <p style="margin-bottom:18px;">
+            Thank you for completing your employee profile.<br/>
+            To secure your account and access the HR portal, please set your password by clicking the link below.
+          </p>
+          <div style="margin:30px 0 24px 0;">
+            <a href="${setPasswordUrl}"
+               style="background:#0057b7;color:#fff;text-decoration:none;font-weight:bold;padding:12px 30px 12px 30px;border-radius:7px;display:inline-block;font-size:14px;letter-spacing:.4px;box-shadow:0 2px 12px #0057b730;">
+              Set My Password
+            </a>
+          </div>
+          <p style="margin-bottom:22px;">
+            This link will expire in <strong>7 days</strong> for your security.<br/>
+            If you did not request this, you can safely ignore this message.
+          </p>
+          <br/>
+          <div style="margin-bottom:24px;font-size:16px;color:#565676;">
+            Kind regards,<br/>
+            <span style="font-weight:bold;">Your HR AI Agent 🤖</span><br/>
+            <span style="font-style:italic;">${COMPANY_NAME}</span>
+            <br/><br/>
             T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
             E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
             W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
             <br/>
             <div>
-            <img src="http://admin.innand.com/logo.png" style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />
-          </div>
-          <br/>
+              <img src="http://admin.innand.com/logo.png" />
+            </div>
+            <br/>
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States
           </div>
-            </div>
-            <div style="background:#f4f4f4;border-radius:7px;font-family:monospace;font-size:13px;color:#333;white-space:pre;padding:18px 12px;margin-top:28px;overflow-x:auto;">
-*********************************************************************************
-The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient, please notify the sender by replying and then delete this message from your system. Any use, dissemination, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-*********************************************************************************
-            </div>
-          </div>
+        </div>
         `;
+
+        // Enforce Comic Sans everywhere except disclaimer
+        html = enforceComicSans(html);
+        // Enforce <img> CSS everywhere
+        html = enforceImgCss(html);
+
+        // --- Append disclaimer ---
+        html += EMAIL_DISCLAIMER;
 
         await sendEmail({
           to: emp.email,
@@ -226,7 +286,7 @@ The information contained in this email (including any attachments) is intended 
   }
 );
 
-// --- PUBLIC POST: Set Password ---
+// --- PUBLIC PUT: Set Password ---
 router.put("/set-password", async (req, res) => {
   try {
     const { id, token, password } = req.body;
@@ -264,4 +324,5 @@ router.put("/set-password", async (req, res) => {
     res.status(500).json({ error: "Server error. Try again." });
   }
 });
+
 module.exports = router;

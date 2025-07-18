@@ -1,11 +1,10 @@
-const express     = require('express');
+const express = require('express');
 const PDFDocument = require('pdfkit');
-const router      = express.Router();
+const router = express.Router();
 const requireAuth = require('../middleware/auth');
-const SalarySlip  = require('../models/SalarySlip');
-const Employee    = require('../models/Employees');
-const { encrypt, decrypt } = require("../utils/encryption");
-
+const SalarySlip = require('../models/SalarySlip');
+const Employee = require('../models/Employees');
+const { encrypt, decrypt } = require('../utils/encryption');
 const { createSalarySlip } = require('../controllers/salarySlipController');
 
 const allowances = [
@@ -45,7 +44,7 @@ const deductions = [
 
 function calcNet(slip) {
   const totalAllow = allowances.reduce((sum, [, key]) => sum + (Number(slip[key]) || 0), 0);
-  const totalDed  = deductions.reduce((sum, [, key]) => sum + (Number(slip[key]) || 0), 0);
+  const totalDed = deductions.reduce((sum, [, key]) => sum + (Number(slip[key]) || 0), 0);
   return totalAllow - totalDed;
 }
 
@@ -56,43 +55,39 @@ router.get('/', requireAuth, async (req, res) => {
     let query = {};
     if (employee) query.employee = employee;
 
-    // Filter by month if provided (e.g. '2025-02')
+    // Filter by month if provided (e.g., '2025-02')
     if (month) {
       const [year, mon] = month.split('-');
       const yearNum = Number(year);
       const monNum = Number(mon);
+      if (isNaN(yearNum) || isNaN(monNum)) {
+        return res.status(400).json({ status: 'error', message: 'Invalid month format. Use YYYY-MM.' });
+      }
       query.createdAt = {
         $gte: new Date(yearNum, monNum - 1, 1),
         $lt: new Date(yearNum, monNum, 1),
       };
     }
 
-    // --- Role-based filtering: get allowed employee ids ---
+    // Role-based filtering: get allowed employee IDs
     let allowedEmployeeIds = [];
     let userFilter = {};
     if (req.user.role === 'super-admin') {
-      // See all
       allowedEmployeeIds = null;
     } else if (req.user.role === 'admin' && req.user.createdBy) {
-      // Only employees where owner = createdBy (the super-admin/owner who created this admin)
       userFilter = { owner: req.user.createdBy };
     } else {
-      // Only employees where owner = _id (for HR or employee)
       userFilter = { owner: req.user._id };
     }
 
     if (allowedEmployeeIds !== null) {
-      // Fetch allowed employee ids based on filter
       const emps = await Employee.find(userFilter).select('_id').lean();
       allowedEmployeeIds = emps.map(e => e._id);
-      // If there is already an employee param, filter by intersection
       if (query.employee) {
-        // If request already wants a specific employee, only allow if in allowedEmployeeIds
         if (!allowedEmployeeIds.some(id => String(id) === String(query.employee))) {
-          return res.json({ slips: [] }); // Not allowed, no data
+          return res.json({ slips: [] });
         }
       } else {
-        // Otherwise, set query to filter salary slips by allowed employees
         query.employee = { $in: allowedEmployeeIds };
       }
     }
@@ -110,20 +105,24 @@ router.get('/', requireAuth, async (req, res) => {
 
     res.json({ slips: slipsWithNet });
   } catch (err) {
-    console.error(err);
+    console.error('Error fetching salary slips:', err);
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
 
-// ---------- CREATE salary slip (calls controller logic) ----------
+// ---------- CREATE salary slip ----------
 router.post('/', requireAuth, async (req, res) => {
   try {
     const { employeeId, slipData } = req.body;
 
-    // --- Role-based: Only allow if user is allowed to create for this employee ---
+    if (!employeeId || !slipData) {
+      return res.status(400).json({ status: 'error', message: 'employeeId and slipData are required.' });
+    }
+
+    // Role-based: Only allow if user is allowed to create for this employee
     let userFilter = {};
     if (req.user.role === 'super-admin') {
-      // can create for anyone
+      // Can create for anyone
     } else if (req.user.role === 'admin' && req.user.createdBy) {
       userFilter = { _id: employeeId, owner: req.user.createdBy };
     } else {
@@ -137,11 +136,12 @@ router.post('/', requireAuth, async (req, res) => {
     const slip = await createSalarySlip(employeeId, slipData);
     res.json({ status: 'success', slip });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: "Failed to create salary slip", details: err.message });
+    console.error('Error creating salary slip:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to create salary slip', details: err.message });
   }
 });
 
-// PATCH (update) endpoint
+// ---------- PATCH (update) endpoint ----------
 router.patch('/:id', requireAuth, async (req, res) => {
   try {
     const allowedFields = [
@@ -149,15 +149,17 @@ router.patch('/:id', requireAuth, async (req, res) => {
       ...deductions.map(([_, key]) => key),
     ];
 
-    // --- 1. Get encryption key (from frontend or user context) ---
+    // Get encryption key
     const encryptionKey = req.body.encryptionKey || process.env.ENCRYPTION_KEY;
     if (!encryptionKey) {
       return res.status(400).json({ status: 'error', message: 'No encryption key provided.' });
     }
 
-    // --- Role-based: Only allow if user is allowed to update this slip ---
+    // Role-based: Only allow if user is allowed to update this slip
     const slip = await SalarySlip.findById(req.params.id).populate('employee');
-    if (!slip) return res.status(404).json({ status: 'error', message: 'Salary slip not found.' });
+    if (!slip) {
+      return res.status(404).json({ status: 'error', message: 'Salary slip not found.' });
+    }
 
     let ownerAllowed = false;
     if (req.user.role === 'super-admin') {
@@ -171,20 +173,38 @@ router.patch('/:id', requireAuth, async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Not allowed to update this slip.' });
     }
 
+    // Process updates
     const updates = {};
     for (let key of Object.keys(req.body)) {
       if (allowedFields.includes(key)) {
         let value = req.body[key];
-        if (typeof value === "string" && value.includes(":")) {
-          updates[key] = value;
+        if (typeof value === 'string' && value.includes(':')) {
+          updates[key] = value; // Already encrypted
         } else {
-          updates[key] = encrypt(value, encryptionKey);
+          // Ensure value is a number or string before encryption
+          if (typeof value !== 'number' && typeof value !== 'string') {
+            return res.status(400).json({
+              status: 'error',
+              message: `Invalid value type for ${key}: ${typeof value}. Expected number or string.`,
+            });
+          }
+          // Await encryption to resolve the Promise
+          try {
+            updates[key] = await encrypt(value, encryptionKey);
+          } catch (encryptErr) {
+            console.error(`Encryption error for ${key}:`, encryptErr);
+            return res.status(500).json({ status: 'error', message: `Encryption failed for ${key}: ${encryptErr.message}` });
+          }
         }
       }
     }
+
     if (Object.keys(updates).length === 0) {
       return res.status(400).json({ status: 'error', message: 'No valid fields to update.' });
     }
+
+    // Log updates for debugging
+    console.log('Updating salary slip with:', updates);
 
     const updatedSlip = await SalarySlip.findByIdAndUpdate(
       req.params.id,
@@ -201,7 +221,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
 
     res.json({ status: 'success', slip: slipObj });
   } catch (err) {
-    console.error(err);
+    console.error('Error updating salary slip:', err);
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
@@ -214,10 +234,10 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       .populate('employee');
 
     if (!slip) {
-      return res.status(404).json({ status: 'error', message: 'Not found' });
+      return res.status(404).json({ status: 'error', message: 'Salary slip not found.' });
     }
 
-    // --- Role-based: Only allow if user is allowed to download this slip ---
+    // Role-based: Only allow if user is allowed to download this slip
     let ownerAllowed = false;
     if (req.user.role === 'super-admin') {
       ownerAllowed = true;
@@ -238,7 +258,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     doc.pipe(res);
 
-    // — HEADER —
+    // HEADER
     doc
       .font('Helvetica-Bold')
       .fontSize(18)
@@ -249,7 +269,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       .text('Head Office • Karachi, Pakistan', { align: 'center' })
       .moveDown(1.5);
 
-    // — EMPLOYEE DETAILS —
+    // EMPLOYEE DETAILS
     doc
       .font('Helvetica-Bold')
       .fontSize(12)
@@ -257,14 +277,16 @@ router.get('/:id/download', requireAuth, async (req, res) => {
       .moveDown(0.5);
 
     const y0 = doc.y;
-    doc.font('Helvetica').fontSize(10)
+    doc
+      .font('Helvetica')
+      .fontSize(10)
       .text(`Name: ${slip.employee.name}`, 40, y0)
-      .text(`Department: ${slip.employee.department}`, 320, y0)
-      .text(`Designation: ${slip.employee.designation}`, 40, y0 + 15)
-      .text(`Joining Date: ${slip.employee.joiningDate ? slip.employee.joiningDate.toISOString().slice(0, 10) : ''}`, 320, y0 + 15)
+      .text(`Department: ${slip.employee.department || 'N/A'}`, 320, y0)
+      .text(`Designation: ${slip.employee.designation || 'N/A'}`, 40, y0 + 15)
+      .text(`Joining Date: ${slip.employee.joiningDate ? slip.employee.joiningDate.toISOString().slice(0, 10) : 'N/A'}`, 320, y0 + 15)
       .moveDown(2);
 
-    // — SALARY & ALLOWANCES vs DEDUCTIONS —
+    // SALARY & ALLOWANCES vs DEDUCTIONS
     const col1X = 40;
     const col2X = 320;
     const startY = doc.y;
@@ -310,7 +332,7 @@ router.get('/:id/download', requireAuth, async (req, res) => {
 
     doc.end();
   } catch (err) {
-    console.error(err);
+    console.error('Error generating PDF:', err);
     res.status(500).json({ status: 'error', message: err.message });
   }
 });

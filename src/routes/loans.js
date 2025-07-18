@@ -4,14 +4,23 @@ const { Types } = require('mongoose');
 
 const Employee = require('../models/Employees');
 const LoanDetail = require('../models/LoanDetail');
+const SalarySlip = require('../models/SalarySlip');
+const { encrypt } = require('../utils/encryption'); // <-- Import your real async encrypt!
 
-// Helper for months (for older data without dueDate)
 const monthsList = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December"
 ];
 
-// 1. Get all employees (utility)
+// Helper: Get month start/end as Date objects (works with monthIndex: 0-11)
+function getMonthDateRange(year, monthIndex) {
+  if (typeof monthIndex !== 'number' || monthIndex < 0 || monthIndex > 11) throw new Error("Invalid month index");
+  const start = new Date(year, monthIndex, 1, 0, 0, 0, 0);
+  const end = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
+  return { start, end };
+}
+
+// 1. Get all employees
 router.get('/employees', async (req, res) => {
   try {
     const employees = await Employee.find().select('_id name');
@@ -21,7 +30,7 @@ router.get('/employees', async (req, res) => {
   }
 });
 
-// 2. Get ALL loan details for ONE employee (array)
+// 2. Get all loan details for one employee
 router.get('/', async (req, res) => {
   try {
     const { employee } = req.query;
@@ -51,7 +60,7 @@ router.post('/loan/:employeeId', async (req, res) => {
       loanTerm,
       markupType,
       markupValue,
-      scheduleStartMonth,
+      scheduleStartMonth, // index 0-11
       scheduleStartYear,
       monthlyInstallment,
       totalMarkup,
@@ -59,11 +68,11 @@ router.post('/loan/:employeeId', async (req, res) => {
       paymentSchedule
     } = req.body;
 
-    // Only update loan for same employee, same start month and year
-    let loan = await LoanDetail.findOne({ 
-      employee: employeeId, 
-      scheduleStartMonth, 
-      scheduleStartYear 
+    // Save or update loan for the same employee, month, year
+    let loan = await LoanDetail.findOne({
+      employee: employeeId,
+      scheduleStartMonth,
+      scheduleStartYear
     });
 
     if (loan) {
@@ -95,8 +104,33 @@ router.post('/loan/:employeeId', async (req, res) => {
         paymentSchedule
       });
     }
+
+    // --- Update SalarySlip for this employee/month ---
+    const { start, end } = getMonthDateRange(scheduleStartYear, scheduleStartMonth);
+    const salarySlip = await SalarySlip.findOne({
+      employee: employeeId,
+      updatedAt: { $gte: start, $lte: end }
+    });
+
+    // Calculate total of all monthlyInstallments for this employee/month
+    const allLoans = await LoanDetail.find({
+      employee: employeeId,
+      scheduleStartMonth,
+      scheduleStartYear
+    });
+    const totalOtherLoans = allLoans.reduce((sum, l) => sum + (l.monthlyInstallment || 0), 0);
+
+    if (salarySlip) {
+      if (!salarySlip.loanDeductions) salarySlip.loanDeductions = {};
+      salarySlip.loanDeductions.otherLoans = await encrypt(totalOtherLoans.toString());
+      salarySlip.loanDeductions.vehicleLoan = "0";
+      salarySlip.gratuityFundDeduction = ""; // Top-level field in SalarySlip schema
+      await salarySlip.save();
+    }
+
     res.json(loan);
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: "Failed to save loan", details: err.message });
   }
 });

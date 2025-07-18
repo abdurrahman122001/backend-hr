@@ -21,12 +21,6 @@ async function getPFRateAndYears(employeeId) {
   return { pfRate, years };
 }
 
-/**
- * Create a salary slip with correct PF deduction.
- * - Calculates employee's PF monthly contribution (deduction)
- * - Stores this in providentFundDeduction
- * - Other deductions/allowances can be added as per your logic
- */
 async function createSalarySlip(employeeId, slipData) {
   const { pfRate } = await getPFRateAndYears(employeeId);
   // Use slipData.basic as string or number
