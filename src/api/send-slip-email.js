@@ -148,6 +148,7 @@ function safeAmountCell(val) {
   const num = Number(val);
   return num !== 0 && !isNaN(num) ? num.toLocaleString() : "-";
 }
+
 // Render the Loan Table
 function renderLoanTable(loans = []) {
   const arr = Array.isArray(loans) && loans.length ? loans : [{}];
@@ -171,17 +172,17 @@ function renderLoanTable(loans = []) {
           ${arr.map(loan => {
     let paidPrev = '-';
     if (Array.isArray(loan.paymentSchedule) && loan.paymentSchedule.length > 0) {
-      const paid = loan.paymentSchedule.slice(0, -1).reduce((sum, payment) => sum + (payment.amount || 0), 0);
-      paidPrev = paid ? paid.toLocaleString() : '-';
+      const paid = loan.paymentSchedule.slice(0, -1).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+      paidPrev = paid && !isNaN(paid) ? paid.toLocaleString() : '-';
     }
     return `
               <tr>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.monthlyInstallment != null && loan.monthlyInstallment !== 0 ? loan.monthlyInstallment.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.monthlyInstallment)}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${paidPrev}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.loanAmount != null && loan.loanAmount !== 0 ? loan.loanAmount.toLocaleString() : '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalMarkup != null && loan.totalMarkup !== 0 ? loan.totalMarkup.toLocaleString() : '-'}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.totalToBePaid != null && loan.totalToBePaid !== 0 ? loan.totalToBePaid.toLocaleString() : '-'}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.loanAmount)}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalMarkup)}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalToBePaid)}</td>
               </tr>
             `;
   }).join('')}
@@ -379,8 +380,6 @@ function buildSalarySlipHtml({
     return html;
   }
 
-
-
   function renderSalaryDeductionTables(compObj, dedObj, compLabels = {}, dedLabels = {}, enabledCompFields = [], enabledDedFields = []) {
     const defaultCompKeys = Object.keys(ALLOWANCES_LABELS);
     const defaultDedKeys = Object.keys(DEDUCTIONS_LABELS);
@@ -391,22 +390,6 @@ function buildSalarySlipHtml({
     let dedRows = "";
     let totalEarnings = 0;
     let totalDeductions = 0;
-
-    function safeAmountCell(val) {
-      // If undefined, null, empty, dash, or not a number, return '-'
-      if (
-        val === undefined ||
-        val === null ||
-        val === "" ||
-        val === "-" ||
-        isNaN(Number(val))
-      ) {
-        return "-";
-      }
-      const num = Number(val);
-      // If zero, show '-' (or change logic if you want to show 0)
-      return num !== 0 ? num.toLocaleString() : "-";
-    }
 
     // Generate rows for allowances in the specified order
     compKeys.forEach((compKey) => {
@@ -442,7 +425,6 @@ function buildSalarySlipHtml({
     </tr>
   `;
     });
-
 
     // Add padding rows if one table has more rows than the other
     const maxRows = Math.max(compKeys.length, dedKeys.length);
@@ -502,7 +484,6 @@ function buildSalarySlipHtml({
     normalizeFields(enabledCompFields, ALLOWANCE_ORDER),
     normalizeFields(enabledDedFields, DEDUCTION_ORDER)
   );
-
 
   const employeeTable = renderEmployeeTable(employee || {}, labels?.employee || {}, profileFields);
   const loansHtml = showLoanDetails ? renderLoanTable(loans) : "";
@@ -598,15 +579,12 @@ const DEDUCTION_ORDER = [
   "otherDeductions",
 ];
 
-
 function normalizeFields(fieldArr, orderArr) {
-  // extract keys as before
   const keys = Array.isArray(fieldArr)
     ? fieldArr.map(f =>
       Array.isArray(f) ? f[1] : (typeof f === "object" && f.key ? f.key : f)
     )
     : [];
-  // always keep master order
   return orderArr.filter(key => keys.includes(key));
 }
 
@@ -690,37 +668,48 @@ module.exports = async function sendSlipEmail(req, res) {
     const getEmployee = slip.employee;
     const employeeId = getEmployee?._id;
 
+    // Fetch and decrypt loan details
     let loans = [];
-    if (employee && employeeId) loans = await LoanDetail.find({ employee: employeeId }).lean();
+    if (employee && employeeId && showLoanDetails) {
+      const rawLoans = await LoanDetail.find({ employee: employeeId }).lean();
+      loans = await Promise.all(rawLoans.map(async (loan) => ({
+        ...loan,
+        monthlyInstallment: await decryptField(loan.monthlyInstallment),
+        loanAmount: await decryptField(loan.loanAmount),
+        totalMarkup: await decryptField(loan.totalMarkup),
+        totalToBePaid: await decryptField(loan.totalToBePaid),
+        paymentSchedule: Array.isArray(loan.paymentSchedule)
+          ? await Promise.all(loan.paymentSchedule.map(async (payment) => ({
+              ...payment,
+              amount: await decryptField(payment.amount),
+            })))
+          : [],
+      })));
+    }
 
-    // Compensation (as before)
+    // Compensation
     const compensationPromises = enabledCompFields.map(async (key) => [key, await decryptField(slip[key])]);
     const compensationRaw = Object.fromEntries(await Promise.all(compensationPromises));
 
-    // Deductions (patched for loan fields)
+    // Deductions
     const deductionsRaw = {};
     for (const key of enabledDedFields) {
-      // Patch: fetch loan deduction from slip.loanDeductions.otherLoans or .vehicleLoan, otherwise decrypt as usual
       if (
         (key === "otherLoanDeductions" || key === "vehicleLoanDeduction") &&
         slip.loanDeductions &&
         typeof slip.loanDeductions === "object"
       ) {
-        // Get the encrypted value
         let encrypted;
         if (key === "otherLoanDeductions") encrypted = slip.loanDeductions.otherLoans;
         if (key === "vehicleLoanDeduction") encrypted = slip.loanDeductions.vehicleLoan;
-        // Decrypt just like other fields
         deductionsRaw[key] = await decryptField(encrypted);
       } else {
         deductionsRaw[key] = await decryptField(slip[key]);
       }
-
     }
 
-    // Patch: For calculations, always use numbers (treat "-" or blank as 0)
+    // Convert to numbers for calculations
     const toSafeNumber = v => (v === "-" || v === undefined || v === null || v === "" || isNaN(Number(v))) ? 0 : Number(v);
-
     const compensation = Object.fromEntries(
       Object.entries(compensationRaw).map(([k, v]) => [k, toSafeNumber(v)])
     );

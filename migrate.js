@@ -1,4 +1,4 @@
-// migrate.js
+// migrateLoanDetailSchema.js
 require("dotenv").config();
 const mongoose = require("mongoose");
 
@@ -10,22 +10,22 @@ async function migrate() {
     });
     console.log("✅ Connected to MongoDB");
 
-    // delete any in‐memory models so require() can re-register them
+    // Remove cached models
     Object.keys(mongoose.models).forEach((modelName) => {
       mongoose.deleteModel(modelName);
     });
 
-    require("./src/models/SalarySlip");
+    require("./src/models/LoanDetail");
     // require("./src/models/Leaves");
 
-    // sync indexes
+    // Sync indexes
     for (let modelName of Object.keys(mongoose.models)) {
       const model = mongoose.models[modelName];
       await model.syncIndexes();
       console.log(`– synced indexes for ${modelName}`);
     }
 
-    console.log("🎉 Migration complete!");
+    console.log("🎉 Schema migration complete!");
     process.exit(0);
   } catch (err) {
     console.error("❌ Migration failed:", err);

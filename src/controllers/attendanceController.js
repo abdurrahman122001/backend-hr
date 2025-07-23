@@ -1,9 +1,10 @@
 // backend/src/controllers/attendanceController.js
 const Attendance = require('../models/Attendance');
-const mongoose  = require('mongoose');
+const mongoose = require('mongoose');
 const { backfillForDate } = require('../backfillAttendance');
+const { updateLeaveEntitlementForEmployee } = require('../utils/leaveEntitlement');
+const { decrypt, encrypt } = require("../utils/encryption");
 
-// POST /api/attendance
 exports.markAttendance = async (req, res) => {
   try {
     const ownerId = req.user._id;
@@ -17,10 +18,16 @@ exports.markAttendance = async (req, res) => {
       leaveType
     } = req.body;
 
+    // UNIVERSAL: Load all required models/helpers ONCE
+    const Employee = require('../models/Employees');
+    const PayrollPeriod = require('../models/PayrollPeriod');
+    const SalarySlip = require('../models/SalarySlip');
+    const { decrypt, encrypt } = require("../utils/encryption");
+
     const updateDoc = {
       $set: {
-        owner:      ownerId,
-        employee:   employeeId,
+        owner: ownerId,
+        employee: employeeId,
         date,
         status,
         checkIn,
@@ -42,12 +49,103 @@ exports.markAttendance = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
+    // --- Deduction Logic (Both Leave & Late) ---
+    // 1. Get employee info
+    const employee = await Employee.findById(employeeId).lean();
+
+    // 2. Find payroll period (always for the current date)
+    let periodStart, periodEnd, start, end;
+    if (employee) {
+      const allPayrolls = await PayrollPeriod.find({ owner: employee.owner }).lean();
+      const shiftId = employee.shifts?.[0];
+      const payroll = allPayrolls.find(
+        p => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+      );
+      if (payroll) {
+        const now = new Date();
+        const anchor = new Date(payroll.payrollPeriodStartDay);
+        if (payroll.payrollPeriodType === "monthly") {
+          const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), anchor.getDate());
+          if (now >= thisMonthStart) {
+            periodStart = thisMonthStart;
+          } else {
+            periodStart = new Date(now.getFullYear(), now.getMonth() - 1, anchor.getDate());
+          }
+          periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, periodStart.getDate());
+          periodEnd.setDate(periodEnd.getDate() - 1);
+        } else {
+          let length = payroll.payrollPeriodLength;
+          if (payroll.payrollPeriodType === "weekly") length = 7;
+          if (payroll.payrollPeriodType === "bimonthly") length = 15;
+          if (payroll.payrollPeriodType === "10-days") length = 10;
+          let diff = Math.floor((now - anchor) / (1000 * 60 * 60 * 24));
+          let cycles = Math.floor(diff / length);
+          periodStart = new Date(anchor);
+          periodStart.setDate(anchor.getDate() + cycles * length);
+          periodEnd = new Date(periodStart);
+          periodEnd.setDate(periodStart.getDate() + length - 1);
+        }
+        start = periodStart.toISOString().slice(0, 10);
+        end = periodEnd.toISOString().slice(0, 10);
+
+        // 3. Fetch or create salary slip for this period
+        let slip = await SalarySlip.findOne({
+          employee: employeeId,
+          createdAt: { $gte: new Date(start), $lte: new Date(end) }
+        });
+        if (!slip) {
+          slip = await SalarySlip.create({
+            employee: employeeId,
+            grossSalary: "" // blank for now if doesn't exist
+          });
+        }
+
+        // 4. Get gross salary (decrypt if available), perDay
+        let grossSalary = 0;
+        if (slip.grossSalary) {
+          grossSalary = Number(await decrypt(slip.grossSalary));
+        }
+        const totalWorkingDays = 22; // Can be adjusted
+        const perDay = grossSalary / totalWorkingDays;
+
+        // --- LEAVE DEDUCTION ---
+        if (status === "Absent") {
+          await updateLeaveEntitlementForEmployee(employeeId);
+          if (employee.leaveEntitlement) {
+            const { total = 0, usedPaid = 0, usedUnpaid = 0 } = employee.leaveEntitlement;
+            // Only run if latest absent is unpaid
+            if ((total - usedPaid) < 1 && usedUnpaid > 0) {
+              const leaveDeduction = Math.round(perDay * usedUnpaid);
+              slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+              await slip.save();
+            }
+          }
+        }
+
+        // --- LATE DEDUCTION ---
+        const lateRecords = await Attendance.find({
+          employee: employeeId,
+          date: { $gte: start, $lte: end },
+          status: "Late"
+        });
+        const lateCount = lateRecords.length;
+        const lateDeductionDays = Math.floor(lateCount / 3); // Every 3 lates = 1 day deduction
+        const lateDeduction = Math.round(perDay * lateDeductionDays);
+        slip.lateDeductions = await encrypt(lateDeduction.toString());
+        await slip.save();
+
+      }
+    }
+
     res.json(rec);
   } catch (err) {
     console.error("Error in markAttendance:", err);
     res.status(400).json({ error: err.message });
   }
 };
+
+
+
 
 // GET /api/attendance?date=YYYY-MM-DD
 exports.getRecordsByDate = async (req, res) => {
@@ -129,7 +227,7 @@ exports.getRecordsByEmployee = async (req, res) => {
   }
   try {
     const records = await Attendance.find({
-      owner:    new mongoose.Types.ObjectId(req.user._id),
+      owner: new mongoose.Types.ObjectId(req.user._id),
       employee: new mongoose.Types.ObjectId(id)
     })
       .sort('date')
@@ -152,7 +250,7 @@ exports.getStatsByEmployee = async (req, res) => {
   }
   try {
     const match = {
-      owner:    new mongoose.Types.ObjectId(req.user._id),
+      owner: new mongoose.Types.ObjectId(req.user._id),
       employee: new mongoose.Types.ObjectId(id)
     };
     if (from && to) {

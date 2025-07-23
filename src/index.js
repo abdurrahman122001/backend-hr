@@ -1,5 +1,6 @@
 // backend/src/index.js
 require("dotenv").config();
+require('./utils/payrolls');
 
 const express      = require("express");
 const http         = require("http");
@@ -218,36 +219,91 @@ cron.schedule(
       const done = await Attendance.find({ date }).select("employee").lean();
       const doneIds = new Set(done.map((r) => r.employee.toString()));
 
-      // Get all employees
-      const allEmps = await Employee.find({}).select("_id owner").lean();
+      // Get all employees, including their shifts
+      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
 
-      // Build upsert operations for those missing
-      const ops = allEmps
-        .filter((e) => !doneIds.has(e._id.toString()))
-        .map((e) => ({
+      // Get all payroll periods
+      const allPayrolls = await PayrollPeriod.find({}).lean();
+
+      // Get day name (e.g., 'sunday') for yesterday
+      const dayName = yesterday
+        .toLocaleDateString("en-US", { weekday: "long" })
+        .toLowerCase();
+        console.log(`[cron] Yesterday was: ${dayName}`);
+      const ops = [];
+
+      for (const e of allEmps) {
+        // Skip employees who already have attendance for the day
+        if (doneIds.has(e._id.toString())) continue;
+
+        // Find payroll period for any of employee's shifts (first match)
+        const payroll = allPayrolls.find(
+          (p) =>
+            Array.isArray(p.shifts) &&
+            e.shifts &&
+            e.shifts.some((s) =>
+              p.shifts.map(String).includes(String(s))
+            )
+        );
+
+        // If no payroll period or nonWorkingDays, mark absent as before
+        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
+          ops.push({
+            updateOne: {
+              filter: { employee: e._id, date },
+              update: {
+                $setOnInsert: {
+                  employee: e._id,
+                  date,
+                  owner: e.owner,
+                  status: "Absent",
+                  checkIn: null,
+                  checkOut: null,
+                  notes: null,
+                  markedByHR: false,
+                },
+              },
+              upsert: true,
+            },
+          });
+          continue;
+        }
+
+        // Check if yesterday is a non-working day for this payroll period
+        const nonWorking = payroll.nonWorkingDays.map((n) =>
+          String(n).toLowerCase().trim()
+        );
+        if (nonWorking.includes(dayName)) {
+          // It's a non-working day, skip marking absent
+          continue;
+        }
+
+        // Otherwise, mark absent as usual
+        ops.push({
           updateOne: {
             filter: { employee: e._id, date },
             update: {
               $setOnInsert: {
-                employee:     e._id,
+                employee: e._id,
                 date,
-                owner:        e.owner,
-                status:       "Absent",
-                checkIn:      null,
-                checkOut:     null,
-                notes:        null,
-                markedByHR:   false,
+                owner: e.owner,
+                status: "Absent",
+                checkIn: null,
+                checkOut: null,
+                notes: null,
+                markedByHR: false,
               },
             },
             upsert: true,
           },
-        }));
+        });
+      }
 
       if (ops.length) {
         const res = await Attendance.bulkWrite(ops);
         console.log(`[cron] Upserted ${res.upsertedCount} records for ${date}`);
       } else {
-        console.log(`[cron] All employees have attendance for ${date}`);
+        console.log(`[cron] All employees have attendance for ${date} or it's a non-working day.`);
       }
     } catch (err) {
       console.error("[cron] Error auto-filling attendance:", err);

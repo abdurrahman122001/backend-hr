@@ -2,34 +2,34 @@
 const mongoose = require('mongoose');
 
 const paymentScheduleSchema = new mongoose.Schema({
-  installmentNo: Number,
-  month: String,      // e.g. "January"
-  year: Number,       // e.g. 2024
-  dueDate: Date,      // can be explicitly set
-  principal: Number,
-  markupPercentage: Number,
-  markupAmount: Number,
-  totalPayment: Number,
-  outstanding: Number,
+  installmentNo: String,      // encrypted
+  month: String,
+  year: String,               // encrypted
+  dueDate: Date,
+  principal: String,          // encrypted
+  markupPercentage: String,   // encrypted
+  markupAmount: String,       // encrypted
+  totalPayment: String,       // encrypted
+  outstanding: String,        // encrypted
   note: String
 });
 
 const loanDetailSchema = new mongoose.Schema({
   employee: { type: mongoose.Schema.Types.ObjectId, ref: 'Employee', required: true },
   type: { type: String, default: "Personal Loan" },
-  loanAmount: Number,
-  loanTerm: Number,
+  loanAmount: String,            // encrypted
+  loanTerm: String,              // encrypted
   markupType: { 
     type: String, 
     enum: ['fixed', 'reducing', 'interestOnly'],
     required: true
   },
-  markupValue: Number,
-  scheduleStartMonth: Number,
-  scheduleStartYear: Number,   // <----- NEW FIELD: Allow selecting any year for schedule start!
-  monthlyInstallment: Number,
-  totalMarkup: Number,
-  totalToBePaid: Number,
+  markupValue: String,           // encrypted
+  scheduleStartMonth: String,    // encrypted
+  scheduleStartYear: String,     // encrypted
+  monthlyInstallment: String,    // encrypted
+  totalMarkup: String,           // encrypted
+  totalToBePaid: String,         // encrypted
   paymentSchedule: [paymentScheduleSchema],
 }, { timestamps: true });
 
