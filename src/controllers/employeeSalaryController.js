@@ -1,5 +1,5 @@
 const Employee = require('../models/Employees');
-const SalarySlip = require('../models/SalarySlip');
+const SalarySlip = require('../models/Salaries');
 const Shift = require('../models/Shift');
 
 // GET: Fetch employee, latest salary slip, and available shifts (by owner)
