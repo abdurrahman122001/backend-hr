@@ -167,16 +167,14 @@ function renderLoanTable(loans = []) {
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Markup)</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Net Balance</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Markup Amount</th>
           </tr>
         </thead>
         <tbody>
           ${arr.map(loan => {
     let paidPrev = '-';
-    if (Array.isArray(loan.paymentSchedule) && loan.paymentSchedule.length > 0) {
-      const paid = loan.paymentSchedule.slice(0, -1).reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
-      paidPrev = paid && !isNaN(paid) ? paid.toLocaleString() : '-';
-    }
+if (loan.loanPaidPreviousMonths !== undefined && loan.loanPaidPreviousMonths !== null) {
+  paidPrev = Number(loan.loanPaidPreviousMonths).toLocaleString();
+}
     return `
               <tr>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || '-'}</td>
@@ -185,7 +183,6 @@ function renderLoanTable(loans = []) {
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.loanAmount)}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalMarkup)}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalToBePaid)}</td>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.markupAmount)}</td>
               </tr>
             `;
   }).join('')}
