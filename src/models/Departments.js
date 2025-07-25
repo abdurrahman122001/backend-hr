@@ -13,6 +13,10 @@ const DepartmentSchema = new Schema({
     required: true,
     trim: true,
   },
+    designations: {
+    type: [String],
+    default: [],
+  },
 }, {
   timestamps: true,
 });

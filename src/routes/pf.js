@@ -1,5 +1,3 @@
-// routes/pf.js
-
 const express = require('express');
 const router = express.Router();
 const crypto = require("crypto");
@@ -13,16 +11,24 @@ const SalarySlip = require('../models/SalarySlip');
 // =====================
 router.get('/employees', async (req, res) => {
   try {
-    const employees = await Employee.find({}, {
-      name: 1,
-      providentFund: 1,
-      _id: 1,
-    }).lean();
+    // Fetch global PF setting
+    const globalPF = await PFSetting.findOne().sort({ updatedAt: -1 }).lean();
+
+    // Fetch employees
+    const employees = await Employee.find(
+      {},
+      {
+        name: 1,
+        providentFund: 1,
+        _id: 1,
+      }
+    ).lean();
 
     // Get latest salary slips for all employees
     const slips = await SalarySlip.aggregate([
       { $sort: { createdAt: -1 } },
-      { $group: {
+      {
+        $group: {
           _id: "$employee",
           grossSalary: { $first: "$grossSalary" },
           createdAt: { $first: "$createdAt" }
@@ -47,8 +53,13 @@ router.get('/employees', async (req, res) => {
       salarySlipDate: slipMap[emp._id.toString()]?.createdAt ?? null,
     }));
 
-    res.json({ status: 'success', data: list });
+    res.json({
+      status: 'success',
+      data: list,
+      globalPF: globalPF ? { pfRate: globalPF.pfRate, years: globalPF.years } : null
+    });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ error: 'Failed to fetch employees PF data' });
   }
 });
@@ -64,11 +75,11 @@ router.post('/gross-salary/:empId', async (req, res) => {
     const empId = req.params.empId;
     const slip = await SalarySlip.findOne({ employee: empId }).sort({ createdAt: -1 });
     if (!slip || !slip.grossSalary)
-      return res.status(404).json({ error: "No salary slip found" });
+      return res.status(404).json({ error: "No salary slip found for this employee." });
 
     // Decrypt using key provided by user (must be 32 bytes for AES-256-CBC)
     const parts = slip.grossSalary.split(":");
-    if (parts.length < 2) return res.status(400).json({ error: "Invalid encrypted format" });
+    if (parts.length < 2) return res.status(400).json({ error: "Invalid encrypted format." });
     const iv = Buffer.from(parts.shift(), "base64");
     const encryptedText = parts.join(":");
 
@@ -83,7 +94,8 @@ router.post('/gross-salary/:empId', async (req, res) => {
       return res.status(401).json({ error: "Invalid decryption key." });
     }
   } catch (err) {
-    res.status(500).json({ error: 'Failed to decrypt gross salary' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to decrypt gross salary.' });
   }
 });
 
@@ -93,9 +105,13 @@ router.post('/gross-salary/:empId', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const latest = await PFSetting.findOne().sort({ updatedAt: -1 });
+    if (!latest) {
+      return res.json(null);
+    }
     res.json(latest);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch PF settings' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch PF settings.' });
   }
 });
 
@@ -105,10 +121,27 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { pfRate, years } = req.body;
+    if (pfRate === undefined || years === undefined) {
+      return res.status(400).json({ error: "PF rate and years are required." });
+    }
     const pf = await PFSetting.create({ pfRate, years, updatedBy: req.user?._id });
     res.json(pf);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to set PF setting' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to set PF setting.' });
+  }
+});
+
+// =====================
+// DELETE: Delete global PF setting
+// =====================
+router.delete('/', async (req, res) => {
+  try {
+    await PFSetting.deleteMany({});
+    res.json({ message: 'Global PF settings deleted successfully.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete global PF settings.' });
   }
 });
 
@@ -118,7 +151,9 @@ router.post('/', async (req, res) => {
 router.post('/apply-to-all', async (req, res) => {
   try {
     const latest = await PFSetting.findOne().sort({ updatedAt: -1 });
-    if (!latest) return res.status(400).json({ message: 'No PF setting found' });
+    if (!latest) {
+      return res.status(400).json({ message: 'No global PF setting found. Please create a global PF setting first.' });
+    }
     const result = await Employee.updateMany(
       { "providentFund.override": { $ne: true } },
       {
@@ -129,9 +164,10 @@ router.post('/apply-to-all', async (req, res) => {
         }
       }
     );
-    res.json({ updated: result.nModified || result.modifiedCount || 0 });
+    res.json({ message: 'Global PF applied successfully.', updated: result.modifiedCount || 0 });
   } catch (err) {
-    res.status(500).json({ error: 'Failed to apply PF to all employees' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to apply PF to all employees.' });
   }
 });
 
@@ -141,14 +177,21 @@ router.post('/apply-to-all', async (req, res) => {
 router.patch('/employee/:id', async (req, res) => {
   try {
     const { pfRate, years } = req.body;
+    if (pfRate === undefined || years === undefined) {
+      return res.status(400).json({ error: "PF rate and years are required." });
+    }
     const emp = await Employee.findByIdAndUpdate(req.params.id, {
       "providentFund.pfRate": pfRate,
       "providentFund.years": years,
       "providentFund.override": true
     }, { new: true });
+    if (!emp) {
+      return res.status(404).json({ error: "Employee not found." });
+    }
     res.json(emp);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to update employee PF' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update employee PF.' });
   }
 });
 
@@ -161,9 +204,35 @@ router.patch('/employee/:id/remove-override', async (req, res) => {
       $unset: { "providentFund.pfRate": "", "providentFund.years": "" },
       "providentFund.override": false
     }, { new: true });
+    if (!emp) {
+      return res.status(404).json({ error: "Employee not found." });
+    }
     res.json(emp);
   } catch (err) {
-    res.status(500).json({ error: 'Failed to remove PF override' });
+    console.error(err);
+    res.status(500).json({ error: 'Failed to remove PF override.' });
+  }
+});
+
+// =====================
+// DELETE: Delete PF data for single employee
+// =====================
+router.delete('/employee/:id', async (req, res) => {
+  try {
+    const emp = await Employee.findByIdAndUpdate(req.params.id, {
+      $unset: { 
+        "providentFund.pfRate": "", 
+        "providentFund.years": "",
+        "providentFund.override": ""
+      }
+    }, { new: true });
+    if (!emp) {
+      return res.status(404).json({ error: "Employee not found." });
+    }
+    res.json({ message: 'Employee PF data deleted successfully.', employee: emp });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete employee PF data.' });
   }
 });
 

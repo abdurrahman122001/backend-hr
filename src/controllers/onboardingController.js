@@ -1,8 +1,6 @@
-// backend/controllers/onboardingController.js
-
 require("dotenv").config();
 const Employee = require("../models/Employees");
-const SalarySlip = require("../models/SalarySlip");
+const Salaries = require("../models/Salaries");
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 
@@ -19,7 +17,7 @@ const SALARY_COMPONENTS = [
   "conveyanceAllowance",
   "medicalAllowance",
   "utilityAllowance",
-  "overtimeCompensation", // Accept both overtimeCompensation and overtimeComp (for compatibility)
+  "overtimeCompensation",
   "dislocationAllowance",
   "leaveEncashment",
   "bonus",
@@ -83,7 +81,6 @@ The information contained in this email (including any attachments) is intended 
 ************************************************************************************************
   </div>
 `;
-
 
 module.exports = {
   async requestCnicAndCv(req, res) {
@@ -164,13 +161,18 @@ module.exports = {
           joiningDate: startDate,
           reportingTime,
           salaryBreakup: salaryBreakup, // not encrypted, for quick ref on employee
-          shifts: shiftArr, // << always array!
+          shifts: shiftArr, // always array
           owner: [ownerId],
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      // Save SalarySlip with encrypted fields
+      // Use startDate (employee joining date) or today if not available
+      const baseDate = startDate ? new Date(startDate) : new Date();
+      const monthName = baseDate.toLocaleString('en-US', { month: 'long' }); // "July"
+      const year = baseDate.getFullYear().toString();
+
+      // Save Salaries with encrypted fields
       const slipData = {
         employee: employee._id,
         candidateName: await encrypt(candidateName),
@@ -179,12 +181,16 @@ module.exports = {
         department: await encrypt(department),
         startDate: await encrypt(startDate),
         reportingTime: await encrypt(reportingTime),
-        shifts: shiftArr, // << always array!
+        shifts: shiftArr, // always array
         ...encryptedSalary,
         grossSalary: encryptedGrossSalary,
+        month: monthName,
+        year: year,
+        owner: ownerId, // Fix: Include owner field
+        createdBy: ownerId, // Add createdBy for consistency with offerLetter.js
       };
 
-      await SalarySlip.create(slipData);
+      await Salaries.create(slipData);
 
       // --- EMAIL HTML (Comic Sans, layout, logo, disclaimer, enforced CSS everywhere) ---
       const subject =
@@ -223,9 +229,9 @@ module.exports = {
             Your HR AI Agent 🤖<br/>
             Powered by People. Driven by Purpose.
             <br/><br/>
-            T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-            E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-            W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
+            T         ${COMPANY_CONTACT}<br/>
+            E         ${COMPANY_EMAIL}<br/>
+            W       ${COMPANY_WEBSITE}<br/>
             <br/>
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>

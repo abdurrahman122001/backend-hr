@@ -51,23 +51,29 @@ function calcNet(slip) {
 // ---------- GET salary slips (all or filtered by employee) ----------
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const { employee, month } = req.query;
+    const { employee, month, year } = req.query;
     let query = {};
     if (employee) query.employee = employee;
 
-    // Filter by month if provided (e.g., '2025-02')
-    if (month) {
-      const [year, mon] = month.split('-');
-      const yearNum = Number(year);
-      const monNum = Number(mon);
+    // --- Filtering by month name + year (preferred for your schema) ---
+    // Accepts ?month=July&year=2024
+    if (month && year) {
+      query.month = month; // e.g. "July"
+      query.year = year;   // e.g. "2024" (string or number, match your schema)
+    }
+    // --- (Optional) Backward compatibility: also accept ?month=2024-07 ---
+    else if (month && month.includes('-')) {
+      const [yearNum, monNum] = month.split('-').map(Number);
       if (isNaN(yearNum) || isNaN(monNum)) {
         return res.status(400).json({ status: 'error', message: 'Invalid month format. Use YYYY-MM.' });
       }
+      // Fallback: filter using createdAt (for legacy data)
       query.createdAt = {
         $gte: new Date(yearNum, monNum - 1, 1),
         $lt: new Date(yearNum, monNum, 1),
       };
     }
+    // else: No month filter, return all slips for employee (or all, if allowed)
 
     // Role-based filtering: get allowed employee IDs
     let allowedEmployeeIds = [];

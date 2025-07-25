@@ -2,11 +2,7 @@ const PFSetting = require("../models/PFSetting");
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/SalarySlip");
 
-/**
- * Returns correct PF rate and years for an employee:
- * - Uses per-employee override if present and enabled
- * - Falls back to global PFSetting if not overridden
- */
+
 async function getPFRateAndYears(employeeId) {
   const employee = await Employee.findById(employeeId);
   let pfRate, years;

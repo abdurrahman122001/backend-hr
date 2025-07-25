@@ -10,6 +10,7 @@ const requireAuth       = require("../middleware/auth");
 
 const Employee          = require("../models/Employees");
 const SalarySlip        = require("../models/SalarySlip");
+const Salaries = require("../models/Salaries");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const Certificate       = require("../models/Certificate");
 const DecryptionKey     = require("../models/DecryptionKey");
@@ -210,6 +211,25 @@ router.post(
         taxDeduction:           deductions.taxDeduction,
       });
       await slip.save();
+
+      const ALLOWANCE_FIELDS = [
+  "basic", "dearnessAllowance", "houseRentAllowance",
+  "conveyanceAllowance", "medicalAllowance", "utilityAllowance",
+  "overtimeComp", "dislocationAllowance", "leaveEncashment",
+  "bonus", "arrears", "autoAllowance", "incentive",
+  "fuelAllowance", "othersAllowances", "grossSalary"
+];
+const salaryFields = {};
+for (const key of ALLOWANCE_FIELDS) {
+  salaryFields[key] = req.body[key] || 0;
+}
+salaryFields.employee = emp._id;
+salaryFields.owner = req.user._id;
+await Salaries.findOneAndUpdate(
+  { employee: emp._id, owner: req.user._id },
+  salaryFields,
+  { upsert: true, new: true, setDefaultsOnInsert: true }
+);
 
       // — Create hierarchy links if provided —
       if (seniorId) {

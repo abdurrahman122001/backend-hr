@@ -67,6 +67,7 @@ const ALLOWANCES_LABELS = {
   arrears: "Arrears",
   incentive: "Incentive",
   othersAllowances: "Other Allowances",
+  loanBenefits: "Loan Benefits"
 };
 
 const DEDUCTIONS_LABELS = {
@@ -166,6 +167,7 @@ function renderLoanTable(loans = []) {
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Markup)</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Net Balance</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Markup Amount</th>
           </tr>
         </thead>
         <tbody>
@@ -183,6 +185,7 @@ function renderLoanTable(loans = []) {
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.loanAmount)}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalMarkup)}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.totalToBePaid)}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(loan.markupAmount)}</td>
               </tr>
             `;
   }).join('')}
@@ -560,6 +563,7 @@ const ALLOWANCE_ORDER = [
   "arrears",
   "incentive",
   "othersAllowances",
+  "loanBenefits"
 ];
 
 const DEDUCTION_ORDER = [
@@ -585,11 +589,101 @@ function normalizeFields(fieldArr, orderArr) {
       Array.isArray(f) ? f[1] : (typeof f === "object" && f.key ? f.key : f)
     )
     : [];
+  // Ensure loanBenefits is included if not explicitly disabled
+  if (!keys.includes("loanBenefits")) {
+    keys.push("loanBenefits");
+  }
   return orderArr.filter(key => keys.includes(key));
+}
+
+async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
+  if (!monthYear) {
+    throw new Error("monthYear is required");
+  }
+
+  // Extract month and year from monthYear (e.g. "July 2025")
+  const [monthName, yearStr] = monthYear.split(' ');
+  const year = parseInt(yearStr);
+
+  if (!monthName || !yearStr || isNaN(year)) {
+    throw new Error("Invalid monthYear format. Expected format like 'July 2025'");
+  }
+
+  // Find all loans for this employee
+  const loans = await LoanDetail.find({ employee: employeeId }).lean();
+
+  // Process each loan's payment schedule
+  const loanDetails = [];
+  let totalLoanBenefits = 0;
+  let totalLoanInstallments = 0;
+
+  for (const loan of loans) {
+    if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) continue;
+
+    // Find the matching schedule entry
+    const entry = loan.paymentSchedule.find(
+      ps => ps.month === monthName && ps.year === year
+    );
+
+    if (!entry) continue;
+
+    try {
+      // Decrypt the relevant amounts
+      const markupAmount = entry.markupAmount 
+        ? parseFloat(await decrypt(entry.markupAmount, decryptionKey)) || 0
+        : 0;
+
+      const monthlyInstallment = loan.monthlyInstallment
+        ? parseFloat(await decrypt(loan.monthlyInstallment, decryptionKey)) || 0
+        : 0;
+
+      const loanAmount = loan.loanAmount
+        ? parseFloat(await decrypt(loan.loanAmount, decryptionKey)) || 0
+        : 0;
+
+      const totalMarkup = loan.totalMarkup
+        ? parseFloat(await decrypt(loan.totalMarkup, decryptionKey)) || 0
+        : 0;
+
+      const totalToBePaid = loan.totalToBePaid
+        ? parseFloat(await decrypt(loan.totalToBePaid, decryptionKey)) || 0
+        : 0;
+
+      const paidPrev = loan.paymentSchedule
+        .slice(0, -1)
+        .reduce((sum, payment) => sum + (Number(payment.amount) || 0), 0);
+
+      loanDetails.push({
+        type: loan.type || "Loan",
+        monthlyInstallment,
+        paidPrev: paidPrev && !isNaN(paidPrev) ? paidPrev : 0,
+        loanAmount,
+        totalMarkup,
+        totalToBePaid,
+        markupAmount,
+        markupValue: loan.markupValue || 0
+      });
+
+      totalLoanBenefits += markupAmount;
+      totalLoanInstallments += monthlyInstallment;
+
+    } catch (e) {
+      console.error(`Decryption failed for loan ${loan._id}:`, e);
+      continue;
+    }
+  }
+
+  return {
+    loanDetails,
+    markupValue: loanDetails[0]?.markupValue || 0,
+    totalLoanBenefits,
+    totalLoanInstallments
+  };
 }
 
 module.exports = async function sendSlipEmail(req, res) {
   try {
+    // Fetch company profile
     const companyProfile = await CompanyProfile.findOne({ owner: req.user._id }).lean();
     const company = {
       name: companyProfile?.name || "Company Name",
@@ -597,185 +691,274 @@ module.exports = async function sendSlipEmail(req, res) {
       email: companyProfile?.email || "",
     };
 
+    // Fetch salary fields configuration
     const salaryFieldsDoc = await SalarySlipFields.findOne({ owner: req.user._id }).lean();
     const enabledNetSalaryFields = salaryFieldsDoc?.enabledNetSalaryFields || [];
     const showLoanDetails = salaryFieldsDoc?.showLoanDetails !== false;
     const showProvidentFund = salaryFieldsDoc?.showProvidentFund !== false;
     const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
-    const enabledCompFields = normalizeFields(
-      salaryFieldsDoc?.enabledSalaryFields || ALLOWANCE_ORDER,
+    // Ensure loanBenefits is included in enabledCompFields
+    let enabledCompFields = normalizeFields(
+      salaryFieldsDoc?.enabledSalaryFields || [...ALLOWANCE_ORDER],
       ALLOWANCE_ORDER
     );
+    if (!enabledCompFields.includes("loanBenefits")) {
+      enabledCompFields.push("loanBenefits");
+    }
     const enabledDedFields = normalizeFields(
       salaryFieldsDoc?.enabledDeductionFields || DEDUCTION_ORDER,
       DEDUCTION_ORDER
     );
 
-    const { slipId, employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields, decryptionKey } = req.body;
+    const { slipId, employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields, decryptionKey, compensation, deductions, netSalary } = req.body;
 
-    // Fetch the slip from the database
-    const slip = await SalarySlip.findById(slipId)
-      .populate({
-        path: "employee",
-        populate: { path: "shifts" },
-      })
-      .lean();
-    if (!slip) {
-      return res.status(404).json({ success: false, message: "Salary slip not found" });
-    }
+    let slip, employeeData, compensationData, deductionsData, netSalaryData, leaves = {}, loans = [], providentFundData = {}, gratuityFundData = {};
 
-    const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
-    const employeeLeaves = slip.employee?.leaveEntitlement || {};
-    const leaves = {
-      annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
-      annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
-      annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
-      annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null
-        ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0
-          ? (employeeLeaves.total - employeeLeaves.usedPaid)
-          : "-"
-        : "-",
-      casualEntitled: "-",
-      casualAvailedYTD: "-",
-      casualAvailedMTH: "-",
-      casualBalance: "-",
-      sickEntitled: "-",
-      sickAvailedYTD: "-",
-      sickAvailedMTH: "-",
-      sickBalance: "-",
-      wopEntitled: "-",
-      wopAvailedYTD: "-",
-      wopAvailedMTH: "-",
-      wopBalance: "-",
-      otherEntitled: "-",
-      otherAvailedYTD: "-",
-      otherAvailedMTH: "-",
-      otherBalance: "-",
-    };
-
-    // Decrypt only if decryptionKey is provided
-    const decryptField = async (encryptedValue) => {
-      if (!encryptedValue || encryptedValue === "" || encryptedValue === 0) return "-";
-      if (!decryptionKey) return "[Decryption Error]";
-      try {
-        return await decrypt(encryptedValue, decryptionKey);
-      } catch (err) {
-        return "[Decryption Error]";
+    if (slipId) {
+      // Database-driven slip
+      slip = await SalarySlip.findById(slipId)
+        .populate({
+          path: "employee",
+          populate: { path: "shifts" },
+        })
+        .lean();
+      if (!slip) {
+        return res.status(404).json({ success: false, message: "Salary slip not found" });
       }
-    };
 
-    const getEmployee = slip.employee;
-    const employeeId = getEmployee?._id;
+      // Fetch leave records
+      const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
+      const employeeLeaves = slip.employee?.leaveEntitlement || {};
+      leaves = {
+        annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
+        annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
+        annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
+        annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null
+          ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0
+            ? (employeeLeaves.total - employeeLeaves.usedPaid)
+            : "-"
+          : "-",
+        casualEntitled: "-",
+        casualAvailedYTD: "-",
+        casualAvailedMTH: "-",
+        casualBalance: "-",
+        sickEntitled: "-",
+        sickAvailedYTD: "-",
+        sickAvailedMTH: "-",
+        sickBalance: "-",
+        wopEntitled: "-",
+        wopAvailedYTD: "-",
+        wopAvailedMTH: "-",
+        wopBalance: "-",
+        otherEntitled: "-",
+        otherAvailedYTD: "-",
+        otherAvailedMTH: "-",
+        otherBalance: "-",
+      };
 
-    // Fetch and decrypt loan details
-    let loans = [];
-    if (employee && employeeId && showLoanDetails) {
-      const rawLoans = await LoanDetail.find({ employee: employeeId }).lean();
-      loans = await Promise.all(rawLoans.map(async (loan) => ({
-        ...loan,
-        monthlyInstallment: await decryptField(loan.monthlyInstallment),
-        loanAmount: await decryptField(loan.loanAmount),
-        totalMarkup: await decryptField(loan.totalMarkup),
-        totalToBePaid: await decryptField(loan.totalToBePaid),
-        paymentSchedule: Array.isArray(loan.paymentSchedule)
-          ? await Promise.all(loan.paymentSchedule.map(async (payment) => ({
-              ...payment,
-              amount: await decryptField(payment.amount),
-            })))
-          : [],
-      })));
-    }
+      // Decrypt fields
+      const decryptField = async (encryptedValue) => {
+        if (!encryptedValue || encryptedValue === "" || encryptedValue === 0) return "-";
+        if (!decryptionKey) return "[Decryption Error]";
+        try {
+          return await decrypt(encryptedValue, decryptionKey);
+        } catch (err) {
+          return "[Decryption Error]";
+        }
+      };
 
-    // Compensation
-    const compensationPromises = enabledCompFields.map(async (key) => [key, await decryptField(slip[key])]);
-    const compensationRaw = Object.fromEntries(await Promise.all(compensationPromises));
+      const employeeId = slip.employee?._id;
 
-    // Deductions
-    const deductionsRaw = {};
-    for (const key of enabledDedFields) {
-      if (
-        (key === "otherLoanDeductions" || key === "vehicleLoanDeduction") &&
-        slip.loanDeductions &&
-        typeof slip.loanDeductions === "object"
-      ) {
-        let encrypted;
-        if (key === "otherLoanDeductions") encrypted = slip.loanDeductions.otherLoans;
-        if (key === "vehicleLoanDeduction") encrypted = slip.loanDeductions.vehicleLoan;
-        deductionsRaw[key] = await decryptField(encrypted);
-      } else {
-        deductionsRaw[key] = await decryptField(slip[key]);
+      // Calculate loan benefits and details
+      let totalLoanBenefits = 0;
+      if (employeeId && showLoanDetails) {
+        const loanData = await calculateLoanBenefits(employeeId, monthYearFromBody || new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" }), decryptionKey);
+        loans = loanData.loanDetails;
+        totalLoanBenefits = loanData.totalLoanBenefits;
       }
-    }
 
-    // Convert to numbers for calculations
-    const toSafeNumber = v => (v === "-" || v === undefined || v === null || v === "" || isNaN(Number(v))) ? 0 : Number(v);
-    const compensation = Object.fromEntries(
-      Object.entries(compensationRaw).map(([k, v]) => [k, toSafeNumber(v)])
-    );
-    const deductions = Object.fromEntries(
-      Object.entries(deductionsRaw).map(([k, v]) => [k, toSafeNumber(v)])
-    );
+      // Compensation
+      const compensationPromises = enabledCompFields
+        .filter(key => key !== "loanBenefits") // Handle loanBenefits separately
+        .map(async (key) => [key, await decryptField(slip[key])]);
+      compensationData = Object.fromEntries(await Promise.all(compensationPromises));
+      // Add loan benefits to compensation
+      compensationData.loanBenefits = totalLoanBenefits;
 
-    const totalEarnings = enabledCompFields.reduce((sum, key) => sum + (compensation[key] || 0), 0);
-    const totalDeductions = enabledDedFields.reduce((sum, key) => sum + (deductions[key] || 0), 0);
+      // Deductions
+      deductionsData = {};
+      for (const key of enabledDedFields) {
+        if (
+          (key === "otherLoanDeductions" || key === "vehicleLoanDeduction") &&
+          slip.loanDeductions &&
+          typeof slip.loanDeductions === "object"
+        ) {
+          let encrypted;
+          if (key === "otherLoanDeductions") encrypted = slip.loanDeductions.otherLoans;
+          if (key === "vehicleLoanDeduction") encrypted = slip.loanDeductions.vehicleLoan;
+          deductionsData[key] = await decryptField(encrypted);
+        } else {
+          deductionsData[key] = await decryptField(slip[key]);
+        }
+      }
 
-    const netSalary = totalEarnings - totalDeductions;
+      // Convert to numbers for calculations
+      const toSafeNumber = v => (v === "-" || v === undefined || v === null || v === "" || isNaN(Number(v))) ? 0 : Number(v);
+      compensationData = Object.fromEntries(
+        Object.entries(compensationData).map(([k, v]) => [k, toSafeNumber(v)])
+      );
+      deductionsData = Object.fromEntries(
+        Object.entries(deductionsData).map(([k, v]) => [k, toSafeNumber(v)])
+      );
 
+      // Net salary
+      const totalEarnings = enabledCompFields.reduce((sum, key) => sum + (compensationData[key] || 0), 0);
+      const totalDeductions = enabledDedFields.reduce((sum, key) => sum + (deductionsData[key] || 0), 0);
+      netSalaryData = totalEarnings - totalDeductions;
+
+      // Employee data
+      employeeData = slip.employee;
+
+      // Provident Fund Calculations
+      const basicSalary = Number(await decryptField(slip.basic)) || 0;
+      const pfRate = Number(await decryptField(slip.employee?.providentFund?.pfRate)) || 0;
+      const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0;
+      const pfBalanceBroughtForward = Number(await decryptField(slip.pf_balanceBF)) || pfContribution;
+      providentFundData = {
+        providentFundBalanceBF: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+        employeeProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
+        employerProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
+        providentFundWithdrawal: "-",
+        providentFundProfit: "-",
+        providentFundBalance: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+      };
+
+      // Gratuity Fund Calculations
+      const currentDate = new Date();
+      const yearsOfService = calculateYearsOfService(slip.employee?.joiningDate, currentDate);
+      const monthlyContribution = netSalaryData > 0 && yearsOfService > 0
+        ? Number(((netSalaryData * yearsOfService) / (yearsOfService * 12)).toFixed(2))
+        : 0;
+      const gfBalanceBroughtForward = netSalaryData > 0 && yearsOfService > 0
+        ? Number((monthlyContribution * (yearsOfService * 12)).toFixed(2))
+        : 0;
+      const gfWithdrawal = Number(await decryptField(slip.gf_withdrawal)) || 0;
+      const gfProfit = Number(await decryptField(slip.gf_profit)) || 0;
+      const gfBalance = gfBalanceBroughtForward - gfWithdrawal + gfProfit;
+      gratuityFundData = {
+        gratuityFundBalanceBF: gfBalanceBroughtForward != null && gfBalanceBroughtForward !== 0 ? gfBalanceBroughtForward : "-",
+        yearsOfService: yearsOfService != null && yearsOfService !== 0 ? yearsOfService : "-",
+        monthlyContribution: monthlyContribution != null && monthlyContribution !== 0 ? monthlyContribution : "-",
+        gratuityFundWithdrawal: gfWithdrawal != null && gfWithdrawal !== 0 ? gfWithdrawal : "-",
+        gratuityFundProfit: gfProfit != null && gfProfit !== 0 ? gfProfit : "-",
+        gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
+      };
+    } else {
+  // Manual slip mode
+  if (!employee || !email || !compensation || !deductions || netSalary == null) {
+    return res.status(400).json({
+      success: false,
+      message: "Missing required fields: employee, email, compensation, deductions, or netSalary",
+    });
+  }
+
+  // Validate email format
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ success: false, message: "Invalid email address" });
+  }
+
+  // Use provided data directly
+  employeeData = employee;
+  compensationData = compensation;
+  deductionsData = deductions;
+  netSalaryData = netSalary;
+
+  // LOAN DATA: use loan field if provided, else empty array (needed by renderLoanTable)
+ loans = Array.isArray(req.body.loans) ? req.body.loans : (req.body.loan ? [req.body.loan] : []);
+
+  // LEAVE DATA: use leaves field if provided, else default object (needed by renderLeaveTable)
+  leaves = req.body.leaves || {
+    annualEntitled: "-",
+    annualAvailedYTD: "-",
+    annualAvailedMTH: "-",
+    annualBalance: "-",
+    casualEntitled: "-",
+    casualAvailedYTD: "-",
+    casualAvailedMTH: "-",
+    casualBalance: "-",
+    sickEntitled: "-",
+    sickAvailedYTD: "-",
+    sickAvailedMTH: "-",
+    sickBalance: "-",
+    wopEntitled: "-",
+    wopAvailedYTD: "-",
+    wopAvailedMTH: "-",
+    wopBalance: "-",
+    otherEntitled: "-",
+    otherAvailedYTD: "-",
+    otherAvailedMTH: "-",
+    otherBalance: "-",
+  };
+
+  // Provident Fund & Gratuity Fund
+  providentFundData = {
+    providentFundBalanceBF: "-",
+    employeeProvidentFundContribution: "-",
+    employerProvidentFundContribution: "-",
+    providentFundWithdrawal: "-",
+    providentFundProfit: "-",
+    providentFundBalance: "-",
+  };
+  gratuityFundData = {
+    gratuityFundBalanceBF: "-",
+    yearsOfService: "-",
+    monthlyContribution: "-",
+    gratuityFundWithdrawal: "-",
+    gratuityFundProfit: "-",
+    gratuityFundBalance: "-",
+  };
+
+  if (providentFund) {
+    providentFundData = { ...providentFundData, ...providentFund };
+  }
+  if (gratuityFund) {
+    gratuityFundData = { ...gratuityFundData, ...gratuityFund };
+  }
+}
+
+    // Month/Year handling
     let monthYear = monthYearFromBody;
-    if (!monthYear) monthYear = new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+    if (!monthYear) {
+      monthYear = new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+    }
 
-    // Provident Fund Calculations
-    const basicSalary = Number(await decryptField(slip.basic)) || 0;
-    const pfRate = Number(await decryptField(slip.employee?.providentFund?.pfRate)) || 0;
-    const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0;
-    const pfBalanceBroughtForward = Number(await decryptField(slip.pf_balanceBF)) || pfContribution;
-
-    const providentFundData = {
-      providentFundBalanceBF: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
-      employeeProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
-      employerProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
-      providentFundWithdrawal: "-",
-      providentFundProfit: "-",
-      providentFundBalance: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+    // Labels (use provided labels or defaults)
+    const labelsData = labels || {
+      compensation: Object.fromEntries(
+        enabledCompFields.map((key) => [key, ALLOWANCES_LABELS[key] || key])
+      ),
+      deductions: Object.fromEntries(
+        enabledDedFields.map((key) => [key, DEDUCTIONS_LABELS[key] || key])
+      ),
+      employee: PROFILE_LABELS,
     };
 
-    // Gratuity Fund Calculations
-    const currentDate = new Date("2025-07-17T19:10:00+05:00");
-    const yearsOfService = calculateYearsOfService(slip.employee?.joiningDate, currentDate);
-    const monthlyContribution = netSalary > 0 && yearsOfService > 0
-      ? Number(((netSalary * yearsOfService) / (yearsOfService * 12)).toFixed(2))
-      : 0;
-    const gfBalanceBroughtForward = netSalary > 0 && yearsOfService > 0
-      ? Number((monthlyContribution * (yearsOfService * 12)).toFixed(2))
-      : 0;
-    const gfWithdrawal = Number(await decryptField(slip.gf_withdrawal)) || 0;
-    const gfProfit = Number(await decryptField(slip.gf_profit)) || 0;
-    const gfBalance = gfBalanceBroughtForward - gfWithdrawal + gfProfit;
-
-    const gratuityFundData = {
-      gratuityFundBalanceBF: gfBalanceBroughtForward != null && gfBalanceBroughtForward !== 0 ? gfBalanceBroughtForward : "-",
-      yearsOfService: yearsOfService != null && yearsOfService !== 0 ? yearsOfService : "-",
-      monthlyContribution: monthlyContribution != null && monthlyContribution !== 0 ? monthlyContribution : "-",
-      gratuityFundWithdrawal: gfWithdrawal != null && gfWithdrawal !== 0 ? gfWithdrawal : "-",
-      gratuityFundProfit: gfProfit != null && gfProfit !== 0 ? gfProfit : "-",
-      gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
-    };
-
-    // Use compensationRaw/deductionsRaw for display so blanks remain "-"
+    // Generate HTML
     const html = buildSalarySlipHtml({
-      employee: getEmployee,
-      compensation: compensationRaw,
-      deductions: deductionsRaw,
+      employee: employeeData,
+      compensation: compensationData,
+      deductions: deductionsData,
       loans,
       leaves,
       providentFund: providentFundData,
       gratuityFund: gratuityFundData,
-      labels,
-      netSalary,
+      labels: labelsData,
+      netSalary: netSalaryData,
       monthYear,
       company,
-      profileFields,
+      profileFields: profileFields || [...enabledCompFields, ...enabledDedFields],
       enabledNetSalaryFields,
       showLoanDetails,
       showProvidentFund,
@@ -785,17 +968,18 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledDedFields,
     });
 
+    // Send email
     const transporter = nodemailer.createTransport({
       host: process.env.MAIL_HOST,
       port: Number(process.env.MAIL_PORT),
       secure: process.env.MAIL_ENCRYPTION === "ssl",
       auth: { user: process.env.MAIL_USERNAME, pass: process.env.MAIL_PASSWORD },
     });
-
+    console.log("Manual slip: req.body", req.body);
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: email,
-      subject: `Salary Slip${getEmployee?.name ? " - " + getEmployee.name : ""}`,
+      subject: `Salary Slip${employeeData?.name ? " - " + employeeData.name : ""}`,
       html,
     });
 

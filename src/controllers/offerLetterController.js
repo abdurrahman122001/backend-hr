@@ -1,7 +1,7 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
 const CompanyProfile = require("../models/CompanyProfile");
-const SalarySlip = require("../models/SalarySlip");
+const Salaries = require("../models/Salaries");
 const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
 const { encrypt } = require("../utils/encryption");
@@ -343,7 +343,7 @@ async function sendOfferLetter(req, res) {
       ...encryptedSalaryBreakup,
     };
 
-    await SalarySlip.create(slipData);
+    await Salaries.create(slipData);
 
     // --- Build final email (remove old disclaimers, append new) ---
     let html = enforceComicSans(letter);

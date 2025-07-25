@@ -1,6 +1,6 @@
 const Employee = require('../models/Employees');
 const SalarySlip = require('../models/SalarySlip');
-const Shift = require('../models/Shift'); // <-- Add your Shift model import
+const Shift = require('../models/Shift');
 
 // GET: Fetch employee, latest salary slip, and available shifts (by owner)
 exports.getEmployeeAndSalarySlip = async (req, res) => {
@@ -16,24 +16,41 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       shifts = await Shift.find({ owner: employee.owner });
     }
 
-    // ---- Updated Part: Ensure photographUrl is present (even if empty) ----
+    // Ensure photographUrl is present (even if empty)
     let employeeObj = employee.toObject ? employee.toObject() : employee;
     if (!employeeObj.photographUrl) employeeObj.photographUrl = "";
+
+    // Ensure leaveEntitlement is properly structured
+    employeeObj.leaveEntitlement = {
+      total: employeeObj.leaveEntitlement?.total ?? 0,
+      usedPaid: employeeObj.leaveEntitlement?.usedPaid ?? 0,
+      usedUnpaid: employeeObj.leaveEntitlement?.usedUnpaid ?? 0,
+      manuallySet: !!employeeObj.leaveEntitlement?.manuallySet,
+    };
 
     res.json({
       employee: employeeObj,
       salarySlip: salarySlip || null,
-      shifts, // Add to response
+      shifts,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 };
-// PUT: Update both employee and latest salary slip (no change needed here)
+
+// PUT: Update both employee and latest salary slip
 exports.updateEmployeeAndSalarySlip = async (req, res) => {
   try {
     const employeeId = req.params.id;
     const { employee: employeeData, salarySlip: slipData } = req.body;
+
+    // Validate leaveEntitlement.total
+    if (
+      employeeData.leaveEntitlement &&
+      (isNaN(employeeData.leaveEntitlement.total) || employeeData.leaveEntitlement.total < 0)
+    ) {
+      return res.status(400).json({ error: "Leave entitlement total must be a non-negative number" });
+    }
 
     // Update Employee (all fields)
     const updatedEmployee = await Employee.findByIdAndUpdate(

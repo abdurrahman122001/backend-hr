@@ -1,11 +1,8 @@
-// src/controllers/departmentsController.js
-
 const Department = require('../models/Departments');
 
 // GET all departments for an owner
 exports.getDepartments = async (req, res) => {
   try {
-    // use req.user._id if you have authentication middleware
     const ownerId = req.user?._id || req.query.owner; // fallback for testing
     if (!ownerId) return res.status(400).json({ error: "Owner required" });
     const departments = await Department.find({ owner: ownerId }).sort({ createdAt: -1 });
@@ -18,14 +15,16 @@ exports.getDepartments = async (req, res) => {
 // CREATE a new department
 exports.createDepartment = async (req, res) => {
   try {
-    // use req.user._id if available
     const owner = req.user?._id || req.body.owner;
-    const { name } = req.body;
+    const { name, designations } = req.body;
     if (!name || !owner) {
       return res.status(400).json({ error: 'Name and owner are required.' });
     }
-    // Will throw on duplicate due to unique index
-    const department = new Department({ name, owner });
+    // Validate designations (optional, must be array of strings if provided)
+    if (designations && (!Array.isArray(designations) || designations.some(d => typeof d !== 'string'))) {
+      return res.status(400).json({ error: 'Designations must be an array of strings.' });
+    }
+    const department = new Department({ name, owner, designations: designations || [] });
     await department.save();
     res.status(201).json(department);
   } catch (err) {
@@ -40,11 +39,17 @@ exports.createDepartment = async (req, res) => {
 exports.updateDepartment = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name } = req.body;
-    // Get department and owner
+    const { name, designations } = req.body;
     const department = await Department.findById(id);
     if (!department) return res.status(404).json({ error: 'Department not found.' });
-    department.name = name;
+    // Update fields if provided
+    if (name) department.name = name;
+    if (designations) {
+      if (!Array.isArray(designations) || designations.some(d => typeof d !== 'string')) {
+        return res.status(400).json({ error: 'Designations must be an array of strings.' });
+      }
+      department.designations = designations;
+    }
     try {
       await department.save();
       res.json(department);

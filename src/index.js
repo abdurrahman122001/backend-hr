@@ -1,6 +1,5 @@
 // backend/src/index.js
 require("dotenv").config();
-require('./utils/payrolls');
 
 const express      = require("express");
 const http         = require("http");
@@ -102,10 +101,10 @@ app.use("/api/probation-periods", probationPeriodRouter);
 app.use('/api/leave-records', requireAuth, leaveRecordsRouter);
 app.use('/api/certificates', certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
-app.use('/api/decryption-keys', descryptionKeys);
+app.use('/api/decryption-keys', requireAuth, descryptionKeys);
 app.use('/api/extra-fields', requireAuth, ExtraFields);
 app.use('/api/pf', pfRoute);
-app.use('/api/gratuity',requireAuth, GratuityRoute);
+app.use('/api/gratuity', requireAuth, GratuityRoute);
 app.use('/api/role', requireAuth, roleRoutes);
 app.use('/api/pages', requireAuth, pageRoute);
 app.use('/api/users', requireAuth, usersRoute);
