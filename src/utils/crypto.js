@@ -1,4 +1,4 @@
-import CryptoJS from "crypto-js";
+const CryptoJS = require("crypto-js");
 
 // Helper: base64 decode (nodejs Buffer atob)
 function b64decode(str) {
@@ -11,7 +11,7 @@ function b64decode(str) {
   return Uint8Array.from(Buffer.from(str, "base64"));
 }
 
-export function decryptSalary(encrypted, key) {
+function decryptSalary(encrypted, key) {
   if (!encrypted || !key) return "";
 
   try {
@@ -31,3 +31,5 @@ export function decryptSalary(encrypted, key) {
     return "[Decryption Error]";
   }
 }
+
+module.exports = { decryptSalary };

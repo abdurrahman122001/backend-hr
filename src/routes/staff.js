@@ -63,7 +63,7 @@ router.post(
         bankName, bankAccountNumber,
         nomineeName, nomineeRelation, nomineeCnic, nomineeNo,
         emergencyContactName, emergencyContactRelation, emergencyContactNumber,
-        rt, department, designation, joiningDate, leaveEntitlement,
+        rt, department, designation, shifts, joiningDate, leaveEntitlement,
         seniorId, juniorId, relation,
         isHR, isAdmin,
         // compensation defaults
@@ -140,7 +140,7 @@ router.post(
         bankName, bankAccountNumber,
         nomineeName, nomineeRelation, nomineeCnic, nomineeNo,
         emergencyContactName, emergencyContactRelation, emergencyContactNumber,
-        rt, department, designation,
+        rt, department, designation, shifts,
         joiningDate:         joiningDate   ? new Date(joiningDate)   : undefined,
         leaveEntitlement: {
           total: Number(leaveEntitlement) || 0,
@@ -176,8 +176,9 @@ router.post(
         await Certificate.create({ employee: emp._id, type, fileUrl });
       }
 
-      // — Create initial SalarySlip using the same encrypted values —
-      const slip = new SalarySlip({
+      // — Create initial Salaries using the same encrypted values —
+      const slip = new Salaries({
+        owner: req.user._id,
         employee: emp._id,
         generatedOn: new Date(),
         basic:                  compensation.basic,
@@ -212,19 +213,27 @@ router.post(
       });
       await slip.save();
 
-      const ALLOWANCE_FIELDS = [
+  const ALLOWANCE_FIELDS = [
   "basic", "dearnessAllowance", "houseRentAllowance",
   "conveyanceAllowance", "medicalAllowance", "utilityAllowance",
   "overtimeComp", "dislocationAllowance", "leaveEncashment",
   "bonus", "arrears", "autoAllowance", "incentive",
   "fuelAllowance", "othersAllowances", "grossSalary"
 ];
-const salaryFields = {};
+
+const salaryFields = {
+  employee: emp._id,
+  owner: req.user._id,
+};
+
+// Encrypt each salary field before assigning
 for (const key of ALLOWANCE_FIELDS) {
-  salaryFields[key] = req.body[key] || 0;
+  // Use the original value (from req.body), default to 0 if missing
+  const val = req.body[key] || 0;
+  salaryFields[key] = await encrypt(String(val));
 }
-salaryFields.employee = emp._id;
-salaryFields.owner = req.user._id;
+
+// Now save (findOneAndUpdate)
 await Salaries.findOneAndUpdate(
   { employee: emp._id, owner: req.user._id },
   salaryFields,

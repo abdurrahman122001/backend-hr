@@ -121,29 +121,26 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
         East Grand Boulevard, Detroit<br/>
         Michigan, United States
       </div>
-      <div style="
-        background:#f4f4f4;
-        border-radius:12px;
-        border:1.8px solid #dadada;
-        margin-top:44px;
-        margin-bottom:0;
-        padding:18px 18px 24px 18px;
-        font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
-        font-size:16px;
-        color:#7a5366;
-        line-height:2.15;
-        text-align:left;
-        white-space:pre-line;
-        overflow-x:auto;
-        width:50% !important;
-        max-width:50% !important;
-        min-width:200px;
-        box-sizing:border-box;
-        display:block;
-      ">
-************************************************************************************************
+        <div style="
+          border-radius:12px;
+          margin-top:44px;
+          margin-bottom:0;
+          padding:18px 18px 24px 18px;
+          font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
+          font-size:13px;
+          color:#7a5366;
+          line-height:2.15;
+          text-align:left;
+          white-space:pre-line;
+          overflow-x:auto;
+          box-sizing:border-box;
+          display:block;
+        ">
+****************************************************************************************************************************************************************************
+
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-************************************************************************************************
+
+****************************************************************************************************************************************************************************
       </div>
     </div>
   `;
@@ -320,28 +317,25 @@ async function processMessage(stream) {
           Michigan, United States
         </div>
         <div style="
-          background:#f4f4f4;
           border-radius:12px;
-          border:1.8px solid #dadada;
           margin-top:44px;
           margin-bottom:0;
           padding:18px 18px 24px 18px;
           font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
-          font-size:16px;
+          font-size:13px;
           color:#7a5366;
           line-height:2.15;
           text-align:left;
           white-space:pre-line;
           overflow-x:auto;
-          width:50% !important;
-          max-width:50% !important;
-          min-width:200px;
           box-sizing:border-box;
           display:block;
         ">
-************************************************************************************************
+****************************************************************************************************************************************************************************
+
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-************************************************************************************************
+
+****************************************************************************************************************************************************************************
         </div>
       </div>
     `,
@@ -371,29 +365,26 @@ The information contained in this email (including any attachments) is intended 
         Mavens Advisor LLC<br/>
         East Grand Boulevard, Detroit<br/>
         Michigan, United States
-<div style="
-  background:#f4f4f4;
-  border-radius:12px;
-  border:1.8px solid #dadada;
-  margin-top:44px;
-  margin-bottom:0;
-  padding:18px 18px 24px 18px;
-  font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
-  font-size:16px;
-  color:#7a5366;
-  line-height:2.15;
-  text-align:left;
-  white-space:pre-line;
-  overflow-x:auto;
-  width:50% !important;
-  max-width:50% !important;
-  min-width:200px;
-  box-sizing:border-box;
-  display:block;
-">
-************************************************************************************************
+        <div style="
+          border-radius:12px;
+          margin-top:44px;
+          margin-bottom:0;
+          padding:18px 18px 24px 18px;
+          font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
+          font-size:13px;
+          color:#7a5366;
+          line-height:2.15;
+          text-align:left;
+          white-space:pre-line;
+          overflow-x:auto;
+          box-sizing:border-box;
+          display:block;
+        "><br/>
+****************************************************************************************************************************************************************************
+
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-************************************************************************************************
+
+****************************************************************************************************************************************************************************
 </div>
     </div>
   `,

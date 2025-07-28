@@ -15,7 +15,9 @@ async function migrate() {
       mongoose.deleteModel(modelName);
     });
 
-    require("./src/models/LoanDetail");
+    require("./src/models/Salaries");
+    require("./src/models/SalarySlip")
+    require("./src/models/DecryptionKey");
     // require("./src/models/Leaves");
 
     // Sync indexes

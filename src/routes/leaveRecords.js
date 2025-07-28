@@ -7,6 +7,7 @@ router.use(requireAuth);
 
 // GET leave record
 router.get("/me", ctrl.getMyLeaveRecord);
+router.get("/me/db", ctrl.getMyLeaveRecordFromDb);
 // Insert (create) leave record
 router.post("/me", ctrl.createMyLeaveRecord);
 // Update existing leave record

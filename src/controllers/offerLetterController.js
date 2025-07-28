@@ -43,28 +43,25 @@ const SALARY_COMPONENTS = [
 // --- DISCLAIMER: Only inside the box, nowhere else ---
 const EMAIL_DISCLAIMER = `
   <div style="
-    background:#f4f4f4;
     border-radius:12px;
-    border:1.8px solid #dadada;
-    margin-top:16px;
     margin-bottom:0;
-    padding:18px 18px 24px 18px;
-    font-family: 'Comic Sans MS', Comic Sans, cursive, monospace;
-    font-size:16px;
+    padding:8px 14px 10px 18px;  /* Reduced padding from top and bottom */
+    font-family: monospace;
+    font-size:13px;
     color:#7a5366;
-    line-height:2.15;
+    line-height:1.8;  /* Reduced line height */
     text-align:left;
-    white-space:pre-line;
+    white-space:pre;
     overflow-x:auto;
-    width:50% !important;
-    max-width:50% !important;
     min-width:200px;
     box-sizing:border-box;
     display:block;
   ">
-************************************************************************************************
+************************************************************************************************************************************************************************************
+
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-************************************************************************************************
+
+************************************************************************************************************************************************************************************
   </div>
 `;
 
@@ -140,7 +137,7 @@ async function generateOfferLetter(req, res) {
       reportingTime,
       confirmationDeadlineDate,
       department,
-      shift, // <-- add this line
+      shift,
       probationDays,
     } = req.body;
 
@@ -194,20 +191,19 @@ async function generateOfferLetter(req, res) {
     let bodyHtml = `
       <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
         <p>Dear <strong>${candidateName}</strong>,</p>
-        <p>We’re thrilled to have you on board!</p>
+        <p>We're thrilled to have you on board!</p>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${
-      company.name}</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
         </p>
         <p>
           Your appointment is subject to a <b>${probationDaysToMonths(probationDays)} probationary period</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
         <p>
-          We believe you will be a valuable addition to our growing team, and we’re excited about what we can build together. This isn’t just a job it’s a journey, and we’re looking forward to seeing you thrive with us.
+          We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job it's a journey, and we're looking forward to seeing you thrive with us.
         </p>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
         <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
-        <p>In this role, you’ll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
+        <p>In this role, you'll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
         <p>
           To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:
         </p>
@@ -220,18 +216,18 @@ async function generateOfferLetter(req, res) {
           By accepting this offer, you also agree to the terms set forth in our Employment Contract and Non-Disclosure Agreement (NDA), which we will share with you separately.
         </p>
         <p>
-          We’re truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let’s make great things happen together!
+          We're truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let's make great things happen together!
         </p>
-        <p style=margin-top: 12px">
+        <p style="margin-top:12px">
           Regards,
         </p>
         <div>
           <span style="font-weight:bold;">Human Resource Department</span><br/>
           <span style="font-style: italic;">${COMPANY_NAME}</span>
-          <br/><br/>
+          <br/>
           T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
           E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/><br/>
+          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
           Mavens Advisor LLC<br/>
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
@@ -314,7 +310,7 @@ async function sendOfferLetter(req, res) {
       department: department || null,
       owner: req.user?._id,
       createdBy: req.user?._id,
-      shifts: shift ? [shift] : undefined, // <-- updated: assign the selected shift
+      shifts: shift ? [shift] : undefined,
     });
 
     // Encrypt salary fields

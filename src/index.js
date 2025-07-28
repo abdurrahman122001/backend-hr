@@ -88,7 +88,7 @@ app.use("/api/hr",              hrAuthRoutes);
 app.use("/api/employee",        employeeCompleteRouter);
 app.use("/api/company-profile", require("./routes/companyProfile"));
 app.use("/api/docs", docsRouter);
-app.use("/api/employee-salary", requireAuth, employeeSalaryRouter);  // <--- THIS LINE
+app.use("/api/employee-salary", employeeSalaryRouter);  // <--- THIS LINE
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);

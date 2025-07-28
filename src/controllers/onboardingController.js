@@ -52,33 +52,29 @@ function enforceImgCss(html) {
   return html;
 }
 
-// --- Disclaimer Box: Same as offer letter (for 1:1 consistency) ---
+// --- Disclaimer Box: Same as offer letter (for 1:1 consistency), width removed ---
 const EMAIL_DISCLAIMER = `
   <div style="
-    background:#f4f4f4;
     border-radius:12px;
-    border:1.8px solid #dadada;
     margin-top:44px;
     margin-bottom:0;
-    padding:18px 18px 24px 18px;
+    padding:14px 14px 18px 18px;
     font-family: monospace;
-    font-size:16px;
+    font-size:13px;
     color:#7a5366;
     line-height:2.15;
     text-align:left;
     white-space:pre;
     overflow-x:auto;
-    width:50% !important;
-    max-width:50% !important;
     min-width:200px;
     box-sizing:border-box;
     display:block;
   ">
-************************************************************************************************
+************************************************************************************************************************************************************************************
 
 The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
 
-************************************************************************************************
+************************************************************************************************************************************************************************************
   </div>
 `;
 
@@ -223,7 +219,6 @@ module.exports = {
           <p>
             Can’t wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
           </p>
-          <br/>
           <div style="margin-bottom:16px;">
             With excitement,<br/><br/>
             Your HR AI Agent 🤖<br/>
