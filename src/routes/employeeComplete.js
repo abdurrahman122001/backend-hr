@@ -235,8 +235,7 @@ router.put(
             East Grand Boulevard, Detroit<br/>
             Michigan, United States
             <br>
-                        <br>
-
+            <br>
           </div>
           ${buildDisclaimer()}
 

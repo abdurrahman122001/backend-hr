@@ -108,7 +108,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
       <p>It’ll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
       <p>Let’s make our workplace even more organized, connected, and ready for what’s next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I’m here to make things smoother for you now and always.</p>
       <br/>
-      <div style="margin-bottom:13Wpx;">
+      <div>
         With excitement,<br/>
         Your HR AI Agent 🤖<br/>
         <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
@@ -292,7 +292,7 @@ async function processMessage(stream) {
         <p>
           <strong>We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</strong>
         </p>
-        <div style="margin-bottom:13px;">
+        <div>
           With excitement,<br/>
           Your HR AI Agent 🤖<br/>
           <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
@@ -331,7 +331,7 @@ async function processMessage(stream) {
       <p>
         If you have any feedback on your experience or would like to share why you chose not to accept, we would be grateful for your thoughts&mdash;it helps us improve! Should circumstances change in the future, please feel free to reach out. We wish you the very best in your career ahead.
       </p>
-      <div style="margin-bottom:13px;">
+      <div>
         With excitement,<br/>
         Your HR AI Agent 🤖<br/>
         <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
