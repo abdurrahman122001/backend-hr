@@ -52,31 +52,19 @@ function enforceImgCss(html) {
   return html;
 }
 
-// --- Disclaimer Box: Same as offer letter (for 1:1 consistency), width removed ---
-const EMAIL_DISCLAIMER = `
-  <div style="
-    border-radius:12px;
-    margin-top:44px;
-    margin-bottom:0;
-    padding:14px 14px 18px 18px;
-    font-family: monospace;
-    font-size:13px;
-    color:#7a5366;
-    line-height:2.15;
-    text-align:left;
-    white-space:pre;
-    overflow-x:auto;
-    min-width:200px;
-    box-sizing:border-box;
-    display:block;
-  ">
-************************************************************************************************************************************************************************************
-
-The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-************************************************************************************************************************************************************************************
-  </div>
-`;
+function buildDisclaimer() {
+  return `
+    <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
+      ************************************************************************************************************************************************************************************
+      <br/>
+      <br/>
+      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
+      <br/>
+      <br/>
+      ************************************************************************************************************************************************************************************
+    </div>
+  `;
+}
 
 module.exports = {
   async requestCnicAndCv(req, res) {
@@ -190,14 +178,14 @@ module.exports = {
 
       // --- EMAIL HTML (Comic Sans, layout, logo, disclaimer, enforced CSS everywhere) ---
       const subject =
-        "🚀 Hello from Your New HR AI Agent – Let’s Get You Officially Onboarded!";
+        "🚀 Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
 
       let html = `
         <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
           <p>Dear <strong>${candidateName}</strong>,</p>
           <p>Welcome to the beginning of something amazing! 🌟</p>
           <p>
-            I’m your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
+            I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
             While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.
           </p>
           <p>
@@ -214,10 +202,10 @@ module.exports = {
             The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!
           </p>
           <p>
-            If you have any questions or feel stuck, I’m just a message away.
+            If you have any questions or feel stuck, I'm just a message away.
           </p>
           <p>
-            Can’t wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
+            Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
           </p>
           <div style="margin-bottom:16px;">
             With excitement,<br/><br/>
@@ -231,7 +219,10 @@ module.exports = {
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States
+            <br>
           </div>
+
+          ${buildDisclaimer()}
         </div>
       `;
 
@@ -239,9 +230,6 @@ module.exports = {
       html = enforceComicSans(html);
       // Enforce <img> CSS everywhere
       html = enforceImgCss(html);
-
-      // --- Append disclaimer (NEVER user editable) ---
-      html += EMAIL_DISCLAIMER;
 
       await sendEmail({
         to: candidateEmail,

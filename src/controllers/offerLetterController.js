@@ -41,30 +41,19 @@ const SALARY_COMPONENTS = [
 ];
 
 // --- DISCLAIMER: Only inside the box, nowhere else ---
-const EMAIL_DISCLAIMER = `
-  <div style="
-    border-radius:12px;
-    margin-bottom:0;
-    padding:8px 14px 10px 18px;  /* Reduced padding from top and bottom */
-    font-family: monospace;
-    font-size:13px;
-    color:#7a5366;
-    line-height:1.8;  /* Reduced line height */
-    text-align:left;
-    white-space:pre;
-    overflow-x:auto;
-    min-width:200px;
-    box-sizing:border-box;
-    display:block;
-  ">
-************************************************************************************************************************************************************************************
-
-The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-
-************************************************************************************************************************************************************************************
-  </div>
-`;
-
+function buildDisclaimer() {
+  return `
+    <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666;">
+      ************************************************************************************************************************************************************************************
+      <br/>
+      <br/>
+      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
+      <br/>
+      <br/>
+      ************************************************************************************************************************************************************************************
+    </div>
+  `;
+}
 // --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
 function enforceComicSans(html) {
   const fontStyle =
@@ -232,6 +221,7 @@ async function generateOfferLetter(req, res) {
           East Grand Boulevard, Detroit<br/>
           Michigan, United States
         </div>
+        ${buildDisclaimer()}
       </div>
     `.trim();
 
@@ -239,9 +229,6 @@ async function generateOfferLetter(req, res) {
     bodyHtml = enforceComicSans(bodyHtml);
     // --- Enforce <img> CSS everywhere ---
     bodyHtml = enforceImgCss(bodyHtml);
-
-    // --- Append disclaimer (NEVER Quill/user editable) ---
-    bodyHtml += EMAIL_DISCLAIMER;
 
     return res.json({
       letter: bodyHtml,
@@ -351,7 +338,7 @@ async function sendOfferLetter(req, res) {
     if (disclaimerIndex !== -1) {
       html = html.slice(0, disclaimerIndex);
     }
-    html += EMAIL_DISCLAIMER;
+    html += buildDisclaimer();
 
     // Fallback plain text for email clients
     const text = html.replace(/<[^>]+>/g, " ");
