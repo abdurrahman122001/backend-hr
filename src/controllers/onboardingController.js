@@ -219,7 +219,8 @@ module.exports = {
             Mavens Advisor LLC<br/>
             East Grand Boulevard, Detroit<br/>
             Michigan, United States
-            <br>
+            <br/>
+            <br/>
           </div>
 
           ${buildDisclaimer()}
