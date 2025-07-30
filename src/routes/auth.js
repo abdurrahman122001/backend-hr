@@ -50,4 +50,8 @@ router.post('/login', async (req, res) => {
   }
 });
 router.get('/me', requireAuth, authCtrl.getMe);
+
+router.post('/forgot-password', authCtrl.forgotPassword);
+router.post('/reset-password/:token', authCtrl.resetPassword);
+
 module.exports = router;
