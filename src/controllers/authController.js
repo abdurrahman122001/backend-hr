@@ -39,7 +39,7 @@ exports.forgotPassword = async (req, res) => {
     await user.save();
 
     // Compose reset link
-    const resetURL = `${process.env.FRONTEND_URL}/reset-password/${token}`;
+    const resetURL = `${process.env.APP_URL}/reset-password/${token}`;
     const html = `
       <p>You requested a password reset.</p>
       <p><a href="${resetURL}">Click here to reset your password</a></p>
