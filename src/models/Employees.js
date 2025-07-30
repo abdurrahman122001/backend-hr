@@ -1,9 +1,16 @@
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
+const DEFAULT_SHIFT_ID = new mongoose.Types.ObjectId(
+  "6849ac46fa83715da425e2b5"
+);
 
 const EmployeeSchema = new Schema(
   {
-  owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    owner: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
 
     // PERSONAL DETAILS
     name: { type: String, required: true }, // Full Name
@@ -60,8 +67,10 @@ const EmployeeSchema = new Schema(
     department: { type: String },
     designation: { type: String },
     joiningDate: { type: String },
-    shifts: [{ type: Schema.Types.ObjectId, ref: "Shift" }],
-
+    shifts: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Shift" }],
+      default: [DEFAULT_SHIFT_ID], // <-- Always select this shift by default!
+    },
     // LEAVE ENTITLEMENT
     leaveEntitlement: {
       total: { type: Number, default: 22 },

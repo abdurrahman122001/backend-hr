@@ -18,7 +18,7 @@ const SALARY_COMPONENTS = [
   "conveyanceAllowance",
   "medicalAllowance",
   "utilityAllowance",
-  "overtimeCompensation",
+  "overtimeComp", // <-- make sure this matches the other controller
   "dislocationAllowance",
   "leaveEncashment",
   "bonus",
@@ -87,38 +87,30 @@ module.exports = {
       }
 
       // ---- SHIFT HANDLING: always use an array ----
-      let shiftArr = [];
-      if (shift && typeof shift === "string" && shift.trim() !== "") {
-        shiftArr = [shift];
-      } else if (Array.isArray(shifts) && shifts.length > 0) {
-        shiftArr = shifts;
-      }
+let shiftArr = [];
+if (shift && typeof shift === "string" && shift.trim() !== "") {
+  shiftArr = [shift];
+} else if (Array.isArray(shifts) && shifts.length > 0) {
+  shiftArr = shifts;
+} else {
+  shiftArr = ["6849ac46fa83715da425e2b5"];
+}
+
 
       // --- Encrypt salary fields with await ---
       const encryptedSalary = {};
       for (let field of SALARY_COMPONENTS) {
-        let value;
-        if (field === "overtimeCompensation") {
-          value =
-            salaryBreakup.overtimeCompensation ||
-            salaryBreakup.overtimeComp ||
-            0;
-        } else {
-          value = salaryBreakup[field] || 0;
-        }
+        let value = salaryBreakup[field] || 0;
         encryptedSalary[field] = await encrypt(String(value));
       }
 
       // Calculate gross salary and encrypt
       let grossSalaryRaw = 0;
       for (let field of SALARY_COMPONENTS) {
-        let val =
-          salaryBreakup[field] ||
-          (field === "overtimeCompensation"
-            ? salaryBreakup.overtimeComp || 0
-            : 0);
+        let val = salaryBreakup[field] || 0;
         grossSalaryRaw += Number(val || 0);
       }
+
       const encryptedGrossSalary = await encrypt(String(grossSalaryRaw));
 
       // Save/update employee
