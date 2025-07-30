@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const Employee = require("../models/Employees");
+const signature = require("../models/Signature");
 const sendEmail = require("../services/mailService").sendEmail;
 const multer = require("multer");
 const path = require("path");
@@ -13,7 +14,8 @@ const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 
-const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "http://localhost:5173";
+const FRONTEND_BASE_URL =
+  process.env.FRONTEND_BASE_URL || "http://localhost:5173";
 const APP_URL = process.env.APP_URL || "http://localhost:3000";
 
 // --- Ensure upload folders exist ---
@@ -102,21 +104,6 @@ function enforceImgCss(html) {
   return html;
 }
 
-function buildDisclaimer() {
-  return `
-    <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
-  `;
-}
-
-
 // --- ROUTER SETUP ---
 const router = express.Router();
 
@@ -200,7 +187,25 @@ router.put(
         await emp.save();
 
         const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
+        const signature = await Signature.findOne({ owner: ownerId });
 
+        let signatureBlock = "";
+        if (signature) {
+          signatureBlock = `
+        <div style="margin-top:32px;margin-bottom:12px;">
+          ${
+            signature.signatureImage
+              ? `<img src="${process.env.SERVER_URL || ""}${
+                  signature.signatureImage
+                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              : ""
+          }
+          <div style="text-align:left;">
+            ${signature.signatureText}
+          </div>
+        </div>
+      `;
+        }
         // --- PIXEL-PERFECT OFFER LETTER LAYOUT ---
         let html = `
         <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;font-size:16px;color:#22223B;background:#f9fafb;line-height:2.1;text-align:left;margin:0;padding:40px 30px 38px 30px;max-width:100%;border-radius:15px;border:1.5px solid #e0e0e0;">
@@ -221,26 +226,9 @@ router.put(
             This link will expire in <strong>7 days</strong> for your security.<br/>
             If you did not request this, you can safely ignore this message.
           </p>
-          <br/>
-          <div style="margin-bottom:24px;font-size:16px;color:#565676;">
-            Kind regards,<br/>
-            <span style="font-weight:bold;">Your HR AI Agent 🤖</span><br/>
-            <span style="font-style:italic;">${COMPANY_NAME}</span>
-            <br/><br/>
-            T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-            E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-            W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-            <br/>
-            Mavens Advisor LLC<br/>
-            East Grand Boulevard, Detroit<br/>
-            Michigan, United States
-            <br>
-            <br>
-          </div>
-          ${buildDisclaimer()}
-
+          ${signatureBlock}
         </div>
-        `;
+      `;
 
         // Enforce Comic Sans everywhere except disclaimer
         html = enforceComicSans(html);

@@ -16,6 +16,7 @@ const {
   classifyOfferWithDeepSeek,
   analyzeWithDeepSeek,
 } = require("./services/deepseekService");
+const Signature = require("./models/Signature");
 
 // IMAP Config
 const imap = new Imap(require("./config/imapConfig"));
@@ -25,6 +26,7 @@ const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "hr@mavensadvisors.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
+const DEFAULT_OWNER_ID = process.env.DEFAULT_OWNER_ID || "6838b0b708e8629ffab534ee";
 
 // MongoDB Connection
 mongoose
@@ -82,14 +84,37 @@ function classifyEmail(text) {
   return "hr_related";
 }
 
-async function sendCompleteProfileLink(id, to, employeeName, companyName) {
+async function getSignatureBlock(ownerId) {
+  const signature = await Signature.findOne({ owner: ownerId });
+  if (!signature) return "";
+
+  let signatureBlock = `
+    <div style="margin-top:32px;margin-bottom:12px;">
+      ${
+        signature.signatureImage
+          ? `<img src="${process.env.SERVER_URL || ""}${
+              signature.signatureImage
+            }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+          : ""
+      }
+      <div style="text-align:left;">
+        ${signature.signatureText || ""}
+      </div>
+    </div>
+  `;
+  return signatureBlock;
+}
+
+async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerId) {
   const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
+  const signatureBlock = await getSignatureBlock(ownerId);
+
   const html = `
     <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;width:100%">
       <p>Dear <strong>${employeeName || "Employee"}</strong>,</p>
       <p>Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
-      <p>As your HR AI Agent, I’ve been busy building a smarter, more connected system to support you better. 
+      <p>As your HR AI Agent, I've been busy building a smarter, more connected system to support you better. 
       From payroll to perks, records to recognition it all starts with having the right information in the right place.</p>
       <p>To complete your employee profile and keep our records up to date, I kindly request you to take a moment to fill out a short form:</p>
       <p>
@@ -103,34 +128,11 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName) {
       <ul style="margin:0 0 1em 2em;padding:0;">
         <li style="margin-bottom:4px;">✅ Your salary info is processed correctly</li>
         <li style="margin-bottom:4px;">✅ Your benefits and contact details are accurate</li>
-        <li style="margin-bottom:4px;">✅ You’re ready for future updates, promotions, and recognitions 🎉</li>
+        <li style="margin-bottom:4px;">✅ You're ready for future updates, promotions, and recognitions 🎉</li>
       </ul>
-      <p>It’ll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
-      <p>Let’s make our workplace even more organized, connected, and ready for what’s next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I’m here to make things smoother for you now and always.</p>
-      <br/>
-      <div>
-        With excitement,<br/>
-        Your HR AI Agent 🤖<br/>
-        <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
-        <br/><br/>
-        T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-        E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-        W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-        <br/>
-        Mavens Advisor LLC<br/>
-        East Grand Boulevard, Detroit<br/>
-        Michigan, United States
-      </div>
-      <br/>
-          <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
+      <p>It'll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
+      <p>Let's make our workplace even more organized, connected, and ready for what's next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I'm here to make things smoother for you now and always.</p>
+      ${signatureBlock}
     </div>
   `;
   await sendEmail({ to, subject, html });
@@ -180,8 +182,9 @@ async function processMessage(stream) {
 
     let emp = await Employee.findOne({ email: fromAddr });
     let extractedName = "";
+    let ownerId = emp?.owner || DEFAULT_OWNER_ID;
 
-    let docSent = false; // <---- Add this flag
+    let docSent = false;
     let data = {
       cnic: "",
       dateOfBirth: "",
@@ -230,14 +233,14 @@ async function processMessage(stream) {
             {
               ...data,
               email: fromAddr,
-              owner: emp.owner || "6838b0b708e8629ffab534ee",
+              owner: ownerId,
             }
           );
         } else {
           emp = await Employee.create({
             ...data,
             email: fromAddr,
-            owner: "6838b0b708e8629ffab534ee",
+            owner: ownerId,
             name: extractedName,
           });
         }
@@ -247,19 +250,23 @@ async function processMessage(stream) {
           emp._id,
           fromAddr,
           emp.name,
-          COMPANY_NAME
+          COMPANY_NAME,
+          ownerId
         );
-        // DO NOT classify or send any other reply!
-        return; // <---- Early return if doc sent!
+        return;
       }
     }
 
     // --- If NOT a CNIC/CV document email ---
     emp = await Employee.findOne({ email: fromAddr });
-    if (emp) await ensureDocsGenerated(emp);
+    if (emp) {
+      ownerId = emp.owner || DEFAULT_OWNER_ID;
+      await ensureDocsGenerated(emp);
+    }
 
-    // --- Email classification/replies (your original logic) ---
+    // --- Email classification/replies ---
     const label = classifyEmail(bodyText);
+    const signatureBlock = await getSignatureBlock(ownerId);
 
     if (label === "offer_acceptance") {
       let bestName = emp?.name || extractedName || "Candidate";
@@ -267,106 +274,63 @@ async function processMessage(stream) {
         to: fromAddr,
         subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
         html: `
-      <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121; width:100%;">
-        <p>Dear <strong>${bestName}</strong>,</p>
-        <p>
-          We are absolutely delighted to receive your acceptance! 🎉<br>
-          <br>
-          <strong>Welcome to the ${COMPANY_NAME} family!</strong>
-        </p>
-        <p>
-          Our team is looking forward to working with you and helping you grow in your new role.<br>
-          We know that joining a new company can be both exciting and a little overwhelming but don’t worry, we’re here to guide you every step of the way.
-        </p>
-        <p>
-          <strong>What’s next?</strong>
-          <ul style="margin:0 0 1em 2em;padding:0;">
-            <li style="margin-bottom:4px;">Please reply to this email with clear images of your <strong>CNIC</strong> (front & back, JPG or PNG format).</li>
-            <li style="margin-bottom:4px;">Attach your <strong>latest CV/Resume</strong> (PDF).</li>
-            <li style="margin-bottom:4px;">Once we have your documents, you’ll receive a special link to complete your digital employee profile online.</li>
-          </ul>
-        </p>
-        <p>
-          If you have any questions about your offer, role, or onboarding process, feel free to reach out. Your HR AI Agent (that’s me!) is always ready to assist you.
-        </p>
-        <p>
-          <strong>We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</strong>
-        </p>
-        <div>
-          With excitement,<br/>
-          Your HR AI Agent 🤖<br/>
-          <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
-          <br/><br/>
-          T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-          E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-          <br/>
-          Mavens Advisor LLC<br/>
-          East Grand Boulevard, Detroit<br/>
-          Michigan, United States
-        </div>
-        <br/>
-          <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
-      </div>
-    `,
+          <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121; width:100%;">
+            <p>Dear <strong>${bestName}</strong>,</p>
+            <p>
+              We are absolutely delighted to receive your acceptance! 🎉<br>
+              <br>
+              <strong>Welcome to the ${COMPANY_NAME} family!</strong>
+            </p>
+            <p>
+              Our team is looking forward to working with you and helping you grow in your new role.<br>
+              We know that joining a new company can be both exciting and a little overwhelming but don't worry, we're here to guide you every step of the way.
+            </p>
+            <p>
+              <strong>What's next?</strong>
+              <ul style="margin:0 0 1em 2em;padding:0;">
+                <li style="margin-bottom:4px;">Please reply to this email with clear images of your <strong>CNIC</strong> (front & back, JPG or PNG format).</li>
+                <li style="margin-bottom:4px;">Attach your <strong>latest CV/Resume</strong> (PDF).</li>
+                <li style="margin-bottom:4px;">Once we have your documents, you'll receive a special link to complete your digital employee profile online.</li>
+              </ul>
+            </p>
+            <p>
+              If you have any questions about your offer, role, or onboarding process, feel free to reach out. Your HR AI Agent (that's me!) is always ready to assist you.
+            </p>
+            <p>
+              <strong>We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</strong>
+            </p>
+            ${signatureBlock}
+          </div>
+        `,
       });
     } else if (label === "offer_rejection") {
       await sendEmail({
         to: fromAddr,
         subject: "Thank You for Your Response – Offer Not Accepted",
         html: `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;width:100%">
-      <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
-      <p>
-        Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
-      </p>
-      <p>
-        If you have any feedback on your experience or would like to share why you chose not to accept, we would be grateful for your thoughts&mdash;it helps us improve! Should circumstances change in the future, please feel free to reach out. We wish you the very best in your career ahead.
-      </p>
-      <div>
-        With excitement,<br/>
-        Your HR AI Agent 🤖<br/>
-        <span style="font-style: italic; font-size: 15px;">${COMPANY_NAME}</span>
-        <br/><br/>
-        T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-        E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-        W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-        <br/>
-        Mavens Advisor LLC<br/>
-        East Grand Boulevard, Detroit<br/>
-        Michigan, United States
-        <br/>
-          <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
-    </div>
-  `,
+          <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;width:100%">
+            <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
+            <p>
+              Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
+            </p>
+            <p>
+              If you have any feedback on your experience or would like to share why you chose not to accept, we would be grateful for your thoughts&mdash;it helps us improve! Should circumstances change in the future, please feel free to reach out. We wish you the very best in your career ahead.
+            </p>
+            ${signatureBlock}
+          </div>
+        `,
       });
     } else if (label === "approval_response") {
       await sendEmail({
         to: fromAddr,
         subject: "Approval/Decision Recorded",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Thank you for your response. Your approval/rejection has been recorded.</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Thank you for your response. Your approval/rejection has been recorded. ${signatureBlock}</div>`,
       });
     } else if (label === "leave_request") {
       await sendEmail({
         to: fromAddr,
         subject: "Leave Request Received",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Your leave request has been received and will be reviewed.</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Your leave request has been received and will be reviewed. ${signatureBlock}</div>`,
       });
     } else {
       // AI-powered fallback
@@ -374,7 +338,7 @@ async function processMessage(stream) {
       await sendEmail({
         to: fromAddr,
         subject: "Regarding Your Message",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;">${aiReply}</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;">${aiReply} ${signatureBlock}</div>`,
       });
     }
   } catch (error) {

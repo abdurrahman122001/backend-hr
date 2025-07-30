@@ -3,6 +3,7 @@ const Employee = require("../models/Employees");
 const Salaries = require("../models/Salaries");
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
+const Signature = require("../models/Signature"); // add this to your requires
 
 // Company info from ENV with fallbacks
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -52,20 +53,6 @@ function enforceImgCss(html) {
   return html;
 }
 
-function buildDisclaimer() {
-  return `
-    <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666; margin-top: 20px;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
-  `;
-}
-
 module.exports = {
   async requestCnicAndCv(req, res) {
     try {
@@ -77,7 +64,7 @@ module.exports = {
         startDate,
         reportingTime,
         salaryBreakup = {},
-        shift,       // might be a string (single shift id)
+        shift, // might be a string (single shift id)
         shifts = [], // might be array (for future)
       } = req.body;
 
@@ -153,7 +140,7 @@ module.exports = {
 
       // Use startDate (employee joining date) or today if not available
       const baseDate = startDate ? new Date(startDate) : new Date();
-      const monthName = baseDate.toLocaleString('en-US', { month: 'long' }); // "July"
+      const monthName = baseDate.toLocaleString("en-US", { month: "long" }); // "July"
       const year = baseDate.getFullYear().toString();
 
       // Save Salaries with encrypted fields
@@ -175,7 +162,25 @@ module.exports = {
       };
 
       await Salaries.create(slipData);
+      const signature = await Signature.findOne({ owner: ownerId });
 
+      let signatureBlock = "";
+      if (signature) {
+        signatureBlock = `
+        <div style="margin-top:32px;margin-bottom:12px;">
+          ${
+            signature.signatureImage
+              ? `<img src="${process.env.SERVER_URL || ""}${
+                  signature.signatureImage
+                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              : ""
+          }
+          <div style="text-align:left;">
+            ${signature.signatureText}
+          </div>
+        </div>
+      `;
+      }
       // --- EMAIL HTML (Comic Sans, layout, logo, disclaimer, enforced CSS everywhere) ---
       const subject =
         "🚀 Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
@@ -207,23 +212,7 @@ module.exports = {
           <p>
             Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
           </p>
-          <div style="margin-bottom:16px;">
-            With excitement,<br/><br/>
-            Your HR AI Agent 🤖<br/>
-            Powered by People. Driven by Purpose.
-            <br/><br/>
-            T         ${COMPANY_CONTACT}<br/>
-            E         ${COMPANY_EMAIL}<br/>
-            W       ${COMPANY_WEBSITE}<br/>
-            <br/>
-            Mavens Advisor LLC<br/>
-            East Grand Boulevard, Detroit<br/>
-            Michigan, United States
-            <br/>
-            <br/>
-          </div>
-
-          ${buildDisclaimer()}
+                ${signatureBlock}
         </div>
       `;
 

@@ -47,6 +47,7 @@ const fontSettingRoute = require("./routes/fontSetting");
 const descryptionKeys = require("./routes/decryptionKeys");
 const pfRoute = require("./routes/pf");
 const GratuityRoute = require("./routes/gratuitySettings");
+const SignaturRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
 const app    = express();
@@ -109,6 +110,7 @@ app.use('/api/role', requireAuth, roleRoutes);
 app.use('/api/pages', requireAuth, pageRoute);
 app.use('/api/users', requireAuth, usersRoute);
 app.use('/api/setDate', requireAuth, setDateRoute)
+app.use('/api/signature', requireAuth, SignaturRoute);
 app.post(
   "/api/hierarchy/create",
   requireAuth,

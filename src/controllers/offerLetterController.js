@@ -5,6 +5,7 @@ const Salaries = require("../models/Salaries");
 const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
 const { encrypt } = require("../utils/encryption");
+const Signature = require("../models/Signature"); // add this to your requires
 
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
@@ -39,21 +40,6 @@ const SALARY_COMPONENTS = [
   "fuelAllowance",
   "othersAllowances",
 ];
-
-// --- DISCLAIMER: Only inside the box, nowhere else ---
-function buildDisclaimer() {
-  return `
-    <div style="font-family: Arial, sans-serif; font-size: 13px; color: #666;">
-      ************************************************************************************************************************************************************************************
-      <br/>
-      <br/>
-      The information contained in this email (including any attachments) is intended only for the personal and confidential use of the recipient(s) named above. If you are not an intended recipient of this message, please notify the sender by replying to this message and then delete the message and any copies from your system. Any use, dissemination, distribution, or reproduction of this message by unintended recipients is not authorized and may be unlawful.
-      <br/>
-      <br/>
-      ************************************************************************************************************************************************************************************
-    </div>
-  `;
-}
 // --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
 function enforceComicSans(html) {
   const fontStyle =
@@ -175,6 +161,25 @@ async function generateOfferLetter(req, res) {
       0
     );
     const grossSalary = formatNumberWithCommas(grossSalaryRaw);
+    const signature = await Signature.findOne({ owner: ownerId });
+
+      let signatureBlock = "";
+      if (signature) {
+        signatureBlock = `
+        <div style="margin-top:32px;margin-bottom:12px;">
+          ${
+            signature.signatureImage
+              ? `<img src="${process.env.SERVER_URL || ""}${
+                  signature.signatureImage
+                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              : ""
+          }
+          <div style="text-align:left;">
+            ${signature.signatureText}
+          </div>
+        </div>
+      `;
+      }
 
     // --- Main email body, left-aligned, signature block, NO asterisks ---
     let bodyHtml = `
@@ -210,18 +215,7 @@ async function generateOfferLetter(req, res) {
         <p style="margin-top:12px">
           Regards,
         </p>
-        <div>
-          <span style="font-weight:bold;">Human Resource Department</span><br/>
-          <span style="font-style: italic;">${COMPANY_NAME}</span>
-          <br/>
-          T &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_CONTACT}<br/>
-          E &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_EMAIL}<br/>
-          W &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ${COMPANY_WEBSITE}<br/>
-          Mavens Advisor LLC<br/>
-          East Grand Boulevard, Detroit<br/>
-          Michigan, United States
-        </div>
-        ${buildDisclaimer()}
+        ${signatureBlock}
       </div>
     `.trim();
 
@@ -335,10 +329,7 @@ async function sendOfferLetter(req, res) {
     const disclaimerIndex = html.indexOf(
       "The information contained in this email"
     );
-    if (disclaimerIndex !== -1) {
-      html = html.slice(0, disclaimerIndex);
-    }
-    html += buildDisclaimer();
+  
 
     // Fallback plain text for email clients
     const text = html.replace(/<[^>]+>/g, " ");
