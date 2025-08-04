@@ -12,9 +12,8 @@ const {
   generateAndSaveSalaryCertificate,
 } = require("./services/ndaService");
 const {
-  extractCNICUsingOCR,
-  classifyOfferWithDeepSeek,
-  analyzeWithDeepSeek,
+  extractCNICUsingOpenAI,
+  // Optionally, if you want: classifyOfferWithOpenAI, analyzeWithOpenAI
 } = require("./services/deepseekService");
 const Signature = require("./models/Signature");
 
@@ -207,7 +206,7 @@ async function processMessage(stream) {
           docSent = true;
           const buf = att.content;
           try {
-            const cnic = await extractCNICUsingOCR(buf);
+            const cnic = await extractCNICUsingOpenAI(buf);
             Object.assign(data, {
               cnic: cnic.cnic || data.cnic,
               dateOfBirth: cnic.dateOfBirth || data.dateOfBirth,
@@ -334,11 +333,11 @@ async function processMessage(stream) {
       });
     } else {
       // AI-powered fallback
-      const aiReply = await analyzeWithDeepSeek(bodyText);
+      // const aiReply = await analyzeWithOpenAI(bodyText);
       await sendEmail({
         to: fromAddr,
         subject: "Regarding Your Message",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;">${aiReply} ${signatureBlock}</div>`,
+        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;"> ${signatureBlock}</div>`,
       });
     }
   } catch (error) {
