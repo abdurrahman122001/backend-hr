@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const Employee = require("../models/Employees");
-const signature = require("../models/Signature");
+const Signature = require("../models/Signature");
 const sendEmail = require("../services/mailService").sendEmail;
 const multer = require("multer");
 const path = require("path");
@@ -155,7 +155,7 @@ router.put(
         emp.cvUrl = `/uploads/cv/${req.files.cv[0].filename}`;
       }
 
-      // Parse and update all fields
+      // Parse and update all non-file fields (do NOT touch owner)
       const dateFields = [
         "dateOfBirth",
         "cnicIssueDate",
@@ -163,7 +163,8 @@ router.put(
         "joiningDate",
       ];
       allFields.forEach((field) => {
-        if (field === "photographUrl") return;
+        if (field === "photographUrl" || field === "cvUrl") return; // handled above
+        if (field === "owner") return; // ❌ don't update owner here
         if (req.body[field] !== undefined && req.body[field] !== null) {
           if (dateFields.includes(field) && req.body[field]) {
             emp[field] = req.body[field];
@@ -172,9 +173,6 @@ router.put(
           }
         }
       });
-
-      // Ensure owner is an array (match your schema)
-      if (!emp.owner) emp.owner = ["6838b0b708e8629ffab534ee"];
 
       await emp.save();
 
@@ -187,52 +185,55 @@ router.put(
         await emp.save();
 
         const setPasswordUrl = `${APP_URL}/set-password?token=${token}&id=${emp._id}`;
-        const signature = await Signature.findOne({ owner: ownerId });
+
+        // Use existing owner only; do NOT set or modify it
+        const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
 
         let signatureBlock = "";
-        if (signature) {
-          signatureBlock = `
-        <div style="margin-top:32px;margin-bottom:12px;">
-          ${
-            signature.signatureImage
-              ? `<img src="${process.env.SERVER_URL || ""}${
-                  signature.signatureImage
-                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-              : ""
+        if (ownerId) {
+          const signatureDoc = await Signature.findOne({ owner: ownerId });
+          if (signatureDoc) {
+            const server = process.env.SERVER_URL || "";
+            const imgHtml = signatureDoc.signatureImage
+              ? `<img src="${server}${signatureDoc.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              : "";
+            signatureBlock = `
+              <div style="margin-top:32px;margin-bottom:12px;">
+                ${imgHtml}
+                <div style="text-align:left;">
+                  ${signatureDoc.signatureText || ""}
+                </div>
+              </div>
+            `;
           }
-          <div style="text-align:left;">
-            ${signature.signatureText}
-          </div>
-        </div>
-      `;
         }
+
         // --- PIXEL-PERFECT OFFER LETTER LAYOUT ---
         let html = `
-        <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;font-size:16px;color:#22223B;background:#f9fafb;line-height:2.1;text-align:left;margin:0;padding:40px 30px 38px 30px;max-width:100%;border-radius:15px;border:1.5px solid #e0e0e0;">
-          <p style="margin-bottom:20px;font-size:19px;">
-            Dear <strong>${emp.name || "Employee"}</strong>,
-          </p>
-          <p style="margin-bottom:18px;">
-            Thank you for completing your employee profile.<br/>
-            To secure your account and access the HR portal, please set your password by clicking the link below.
-          </p>
-          <div style="margin:30px 0 24px 0;">
-            <a href="${setPasswordUrl}"
-               style="background:#0057b7;color:#fff;text-decoration:none;font-weight:bold;padding:12px 30px 12px 30px;border-radius:7px;display:inline-block;font-size:14px;letter-spacing:.4px;box-shadow:0 2px 12px #0057b730;">
-              Set My Password
-            </a>
+          <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;font-size:16px;color:#22223B;background:#f9fafb;line-height:2.1;text-align:left;margin:0;padding:40px 30px 38px 30px;max-width:100%;border-radius:15px;border:1.5px solid #e0e0e0;">
+            <p style="margin-bottom:20px;font-size:19px;">
+              Dear <strong>${emp.name || "Employee"}</strong>,
+            </p>
+            <p style="margin-bottom:18px;">
+              Thank you for completing your employee profile.<br/>
+              To secure your account and access the HR portal, please set your password by clicking the link below.
+            </p>
+            <div style="margin:30px 0 24px 0;">
+              <a href="${setPasswordUrl}"
+                 style="background:#0057b7;color:#fff;text-decoration:none;font-weight:bold;padding:12px 30px;border-radius:7px;display:inline-block;font-size:14px;letter-spacing:.4px;box-shadow:0 2px 12px #0057b730;">
+                Set My Password
+              </a>
+            </div>
+            <p style="margin-bottom:22px;">
+              This link will expire in <strong>7 days</strong> for your security.<br/>
+              If you did not request this, you can safely ignore this message.
+            </p>
+            ${signatureBlock}
           </div>
-          <p style="margin-bottom:22px;">
-            This link will expire in <strong>7 days</strong> for your security.<br/>
-            If you did not request this, you can safely ignore this message.
-          </p>
-          ${signatureBlock}
-        </div>
-      `;
+        `;
 
-        // Enforce Comic Sans everywhere except disclaimer
+        // Enforce Comic Sans and <img> styling
         html = enforceComicSans(html);
-        // Enforce <img> CSS everywhere
         html = enforceImgCss(html);
 
         await sendEmail({
@@ -244,18 +245,13 @@ router.put(
 
       return res.json({ success: true, data: { _id: emp._id.toString() } });
     } catch (err) {
-      console.error(
-        "❌ PUT /api/employee/:id/complete error:",
-        err,
-        err?.stack
-      );
+      console.error("❌ PUT /api/employee/:id/complete error:", err, err?.stack);
       return res
         .status(500)
         .json({ success: false, error: err?.message || "Server error" });
     }
   }
 );
-
 // --- PUBLIC PUT: Set Password ---
 router.put("/set-password", async (req, res) => {
   try {
