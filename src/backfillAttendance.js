@@ -14,7 +14,11 @@ async function backfillForDate(dateStr) {
 
   // 2) Find which ones already have a record
   const existing = await Attendance.find({ date: dateStr }, 'employee').lean();
-  const doneSet  = new Set(existing.map(r => r.employee.toString()));
+  const doneSet  = new Set(
+  existing
+    .filter(r => !!r.employee)   // Only those with employee
+    .map(r => r.employee.toString())
+);
 
   // 3) Filter out the done ones
   const missing = allIds.filter(id => !doneSet.has(id));

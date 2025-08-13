@@ -1,4 +1,3 @@
-require("dotenv").config();
 const mongoose = require("mongoose");
 const CompanyProfile = require("../models/CompanyProfile");
 const Salaries = require("../models/Salaries");
@@ -6,6 +5,7 @@ const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature"); // add this to your requires
+require("dotenv").config();
 
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
@@ -40,7 +40,8 @@ const SALARY_COMPONENTS = [
   "fuelAllowance",
   "othersAllowances",
 ];
-// --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
+
+// --- Helper: Enforce Comic Sans ---
 function enforceComicSans(html) {
   const fontStyle =
     "font-family: 'Comic Sans MS', Comic Sans, cursive, sans-serif;";
@@ -52,11 +53,9 @@ function enforceComicSans(html) {
     .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
 }
 
-// --- Helper: Enforce <img> CSS everywhere ---
+// --- Helper: Enforce <img> CSS ---
 function enforceImgCss(html) {
-  // Remove any existing style attr on <img>
   html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
-  // Add our enforced style
   html = html.replace(
     /<img([^>]*?)\/?>/g,
     `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
@@ -64,7 +63,7 @@ function enforceImgCss(html) {
   return html;
 }
 
-// --- Helpers for formatting ---
+// --- Formatting Helpers ---
 function formatDateDMY(dateInput) {
   if (!dateInput) return "";
   const dateObj = new Date(dateInput);
@@ -74,6 +73,7 @@ function formatDateDMY(dateInput) {
   const year = dateObj.getFullYear();
   return `${day} ${month} ${year}`;
 }
+
 function formatTime12hr(timeStr) {
   if (!timeStr) return "";
   let [hour, min] =
@@ -88,9 +88,11 @@ function formatTime12hr(timeStr) {
   if (hour === 0) hour = 12;
   return `${hour}:${min.padStart(2, "0")} ${suffix}`;
 }
+
 function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
+
 function probationDaysToMonths(probationDays) {
   const days = Number(probationDays) || 0;
   if (!days) return "";
@@ -100,7 +102,7 @@ function probationDaysToMonths(probationDays) {
     : `${days} days`;
 }
 
-// --- OFFER LETTER GENERATOR ---
+// --- Generate Offer Letter ---
 async function generateOfferLetter(req, res) {
   try {
     const {
@@ -122,17 +124,17 @@ async function generateOfferLetter(req, res) {
       !position ||
       !startDate ||
       !reportingTime ||
-      !confirmationDeadlineDate
+      !confirmationDeadlineDate ||
+      !probationDays
     ) {
       return res
         .status(400)
         .json({ error: "Missing required candidate or date fields." });
     }
     if (!req.user || !req.user._id) {
-      return res.status(400).json({ error: "No user context found." });
+      return res.status(401).json({ error: "No user context found." });
     }
 
-    // Prevent duplicate employee
     const exists = await Employee.findOne({ email: candidateEmail });
     if (exists) {
       return res.status(400).json({
@@ -163,9 +165,9 @@ async function generateOfferLetter(req, res) {
     const grossSalary = formatNumberWithCommas(grossSalaryRaw);
     const signature = await Signature.findOne({ owner: ownerId });
 
-      let signatureBlock = "";
-      if (signature) {
-        signatureBlock = `
+    let signatureBlock = "";
+    if (signature) {
+      signatureBlock = `
         <div style="margin-top:32px;margin-bottom:12px;">
           ${
             signature.signatureImage
@@ -179,9 +181,8 @@ async function generateOfferLetter(req, res) {
           </div>
         </div>
       `;
-      }
+    }
 
-    // --- Main email body, left-aligned, signature block, NO asterisks ---
     let bodyHtml = `
       <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
         <p>Dear <strong>${candidateName}</strong>,</p>
@@ -190,7 +191,7 @@ async function generateOfferLetter(req, res) {
           After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
         </p>
         <p>
-          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)} probationary period</b>, after successful completion of which your position will be confirmed as permanent.
+          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)}</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
         <p>
           We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job it's a journey, and we're looking forward to seeing you thrive with us.
@@ -219,9 +220,7 @@ async function generateOfferLetter(req, res) {
       </div>
     `.trim();
 
-    // --- Enforce Comic Sans everywhere except disclaimer ---
     bodyHtml = enforceComicSans(bodyHtml);
-    // --- Enforce <img> CSS everywhere ---
     bodyHtml = enforceImgCss(bodyHtml);
 
     return res.json({
@@ -237,12 +236,12 @@ async function generateOfferLetter(req, res) {
       department,
     });
   } catch (err) {
-    console.error("Offer gen error:", err?.response?.data || err);
+    console.error("Offer gen error:", err);
     return res.status(500).json({ error: "Failed to generate offer letter." });
   }
 }
 
-// --- SEND OFFER LETTER ---
+// --- Send Offer Letter ---
 async function sendOfferLetter(req, res) {
   try {
     const {
@@ -274,7 +273,6 @@ async function sendOfferLetter(req, res) {
         .json({ error: "Missing required fields for sending offer." });
     }
 
-    // Prevent duplicate employee
     let employee = await Employee.findOne({ email: candidateEmail });
     if (employee) {
       return res.status(400).json({
@@ -282,7 +280,6 @@ async function sendOfferLetter(req, res) {
       });
     }
 
-    // Create new employee
     employee = await Employee.create({
       name: candidate,
       email: candidateEmail,
@@ -294,7 +291,6 @@ async function sendOfferLetter(req, res) {
       shifts: shift ? [shift] : undefined,
     });
 
-    // Encrypt salary fields
     const grossSalaryRaw = SALARY_COMPONENTS.reduce(
       (sum, k) => sum + (Number(salaryBreakup[k]) || 0),
       0
@@ -322,16 +318,9 @@ async function sendOfferLetter(req, res) {
 
     await Salaries.create(slipData);
 
-    // --- Build final email (remove old disclaimers, append new) ---
     let html = enforceComicSans(letter);
     html = enforceImgCss(html);
-    // Remove any previous disclaimer
-    const disclaimerIndex = html.indexOf(
-      "The information contained in this email"
-    );
-  
 
-    // Fallback plain text for email clients
     const text = html.replace(/<[^>]+>/g, " ");
 
     await transporter.sendMail({

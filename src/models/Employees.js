@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
+const bcrypt = require("bcrypt");
 const DEFAULT_SHIFT_ID = new mongoose.Types.ObjectId(
   "6849ac46fa83715da425e2b5"
 );
@@ -149,4 +150,7 @@ EmployeeSchema.index(
   }
 );
 
+EmployeeSchema.methods.comparePassword = function (candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password);
+};
 module.exports = model("Employee", EmployeeSchema);

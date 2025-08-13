@@ -523,7 +523,7 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
     res.json({
       loanDetails,
       markupValue: loanDetails[0]?.markupValue || 0, // Assuming same markup for all
-      totalLoanBenefits,
+       totalLoanBenefits: Math.round(totalLoanBenefits),
       totalLoanInstallments
     });
 

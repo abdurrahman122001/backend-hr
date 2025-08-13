@@ -1,26 +1,28 @@
 // backend/src/index.js
 require("dotenv").config();
+const AttendanceConfig = require("./models/AttendanceConfig");
 
-const express      = require("express");
-const http         = require("http");
-const mongoose     = require("mongoose");
-const cors         = require("cors");
-const cron         = require("node-cron");
+const express = require("express");
+const http = require("http");
+const mongoose = require("mongoose");
+const cors = require("cors");
+const cron = require("node-cron");
 const path = require('path');
 // Route imports
-const authRouter             = require("./routes/auth");
-const hrAuthRoutes           = require("./routes/hrAuth");
+const authRouter = require("./routes/auth");
+const empAuthRouter = require('./routes/empAuth');
+const hrAuthRoutes = require("./routes/hrAuth");
 const employeeCompleteRouter = require("./routes/employeeComplete");
-const shiftsRouter           = require("./routes/shift");
-const employeesRouter        = require("./routes/employees");
-const attendanceRouter       = require("./routes/attendance");
-const leavesRouter           = require("./routes/leaves");
-const settingsRouter         = require("./routes/settings");
-const payrollPeriodsRouter   = require("./routes/payrollPeriod");
-const staffRouter            = require("./routes/staff");
-const salarySlipsRouter      = require("./routes/salarySlips");
+const shiftsRouter = require("./routes/shift");
+const employeesRouter = require("./routes/employees");
+const attendanceRouter = require("./routes/attendance");
+const leavesRouter = require("./routes/leaves");
+const settingsRouter = require("./routes/settings");
+const payrollPeriodsRouter = require("./routes/payrollPeriod");
+const staffRouter = require("./routes/staff");
+const salarySlipsRouter = require("./routes/salarySlips");
 const attendanceConfigRouter = require("./routes/attendanceConfig");
-const offerLetterRoutes      = require("./routes/offerLetterRoutes");
+const offerLetterRoutes = require("./routes/offerLetterRoutes");
 const departmentsRouter = require("./routes/departments");
 const designationsRouter = require("./routes/designations");
 const docsRouter = require("./routes/docs");
@@ -29,10 +31,17 @@ const hierarchyController = require("./controllers/hierarchyController");
 const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
 const loansRoutes = require('./routes/loans');
-const requireAuth = require("./middleware/auth");
 const onboardingRouter = require("./routes/onBoarding");
+const requireAuth = require("./middleware/auth");
+const requireEmployeeAuth = require('./middleware/empAuth');
+const empAttendanceRouter = require("./routes/empAttendance");
+const employeeBirthdays = require("./routes/empBirthdayRoutes");
+
+
+
+
 // Model imports
-const Employee   = require("./models/Employees");
+const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const sendSlipEmail = require("./routes/sendSlipEmail");
 const probationPeriodRouter = require("./routes/probationPeriods");
@@ -50,7 +59,7 @@ const GratuityRoute = require("./routes/gratuitySettings");
 const SignaturRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
-const app    = express();
+const app = express();
 // Wrap express in an HTTP server for Socket-IO
 const server = http.createServer(app);
 
@@ -74,19 +83,20 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(path.join(__dirname, './uploads'))); // Serve static files from uploads folder
 // === Public routes ===
 app.use("/api/auth", authRouter);
+app.use('/api/emp-auth', empAuthRouter);
 // === Protected routes ===
-app.use("/api/employees",       requireAuth, employeesRouter);
-app.use("/api/attendance",      requireAuth, attendanceRouter);
-app.use("/api/leaves",          requireAuth, leavesRouter);
-app.use("/api/settings",        requireAuth, settingsRouter);
+app.use("/api/employees", employeesRouter);
+app.use("/api/attendance", requireAuth, attendanceRouter);
+app.use("/api/leaves", requireAuth, leavesRouter);
+app.use("/api/settings", requireAuth, settingsRouter);
 app.use("/api/payroll-periods", requireAuth, payrollPeriodsRouter);
-app.use("/api/staff",           requireAuth, staffRouter);
-app.use("/api/salary-slips",    requireAuth, salarySlipsRouter);
-app.use("/api/shifts",          requireAuth, shiftsRouter);
-app.use("/api/offer-letter",    requireAuth, offerLetterRoutes);
+app.use("/api/staff", requireAuth, staffRouter);
+app.use("/api/salary-slips", requireAuth, salarySlipsRouter);
+app.use("/api/shifts", requireAuth, shiftsRouter);
+app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
-app.use("/api/hr",              hrAuthRoutes);
-app.use("/api/employee",        employeeCompleteRouter);
+app.use("/api/hr", hrAuthRoutes);
+app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", require("./routes/companyProfile"));
 app.use("/api/docs", docsRouter);
 app.use("/api/employee-salary", employeeSalaryRouter);  // <--- THIS LINE
@@ -111,6 +121,9 @@ app.use('/api/pages', requireAuth, pageRoute);
 app.use('/api/users', requireAuth, usersRoute);
 app.use('/api/setDate', requireAuth, setDateRoute)
 app.use('/api/signature', requireAuth, SignaturRoute);
+app.use('/api/emp-attendance', requireEmployeeAuth, empAttendanceRouter);
+app.use("/api/emp-birthdays", employeeBirthdays);
+
 app.post(
   "/api/hierarchy/create",
   requireAuth,
@@ -165,7 +178,7 @@ Employee.watch().on("change", (change) => {
   if (change.operationType === "insert") {
     const emp = change.fullDocument;
     io.emit("employee_added", {
-      message:   `New employee added: ${emp.name}`,
+      message: `New employee added: ${emp.name}`,
       createdAt: emp.createdAt,
     });
   }
@@ -193,7 +206,7 @@ Employee.watch().on("change", (change) => {
 // === MongoDB connection ===
 mongoose
   .connect(process.env.MONGODB_URI, {
-    useNewUrlParser:    true,
+    useNewUrlParser: true,
     useUnifiedTopology: true,
   })
   .then(() => {
@@ -208,6 +221,16 @@ cron.schedule(
   "0 0 * * *",
   async () => {
     try {
+      const config = await AttendanceConfig.findOne({}).lean();
+      if (config && config.markAbsentManually === true) {
+        console.log("[cron] markAbsentManually is true; skipping auto-absent marking for today.");
+        return;
+      }
+      const holiday = await Attendance.findOne({ date, isHoliday: true });
+      if (holiday) {
+        console.log(`[cron] ${date} is marked as a holiday; skipping auto-absent marking.`);
+        return;
+      }
       console.log("[cron] Auto-filling absent attendance for yesterday");
       const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
@@ -230,7 +253,7 @@ cron.schedule(
       const dayName = yesterday
         .toLocaleDateString("en-US", { weekday: "long" })
         .toLowerCase();
-        console.log(`[cron] Yesterday was: ${dayName}`);
+      console.log(`[cron] Yesterday was: ${dayName}`);
       const ops = [];
 
       for (const e of allEmps) {

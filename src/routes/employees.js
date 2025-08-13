@@ -1,7 +1,6 @@
 // backend/src/routes/employees.js
 const express  = require('express');
 const router   = express.Router();
-
 const Employee = require('../models/Employees');
 const { getAllEmployees, createEmployee, updateEmployee, list , getUpcomingBirthdays } = require('../controllers/employeeController');
 
@@ -16,11 +15,8 @@ function getEffectiveOwnerId(user) {
 // Middleware to check authentication and set req.user (should already be in app, if not add here)
 const requireAuth = require('../middleware/auth');
 
-// Use requireAuth for all routes
-router.use(requireAuth);
-
 // GET /api/employees
-router.get('/', async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
     const list = await Employee.find({ owner: { $in: [ownerId] } }).sort({ name: 1 }).lean();
@@ -30,10 +26,10 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.get('/birthdays', getUpcomingBirthdays);
+router.get('/birthdays', requireAuth, getUpcomingBirthdays);
 
 // GET /api/employees/names
-router.get('/names', async (req, res) => {
+router.get('/names', requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
     const docs = await Employee
@@ -48,7 +44,7 @@ router.get('/names', async (req, res) => {
 });
 
 // POST /api/employees
-router.post('/', async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   // Add photographUrl to destructure from req.body
   const { name, position, department, email, rt, salaryOffered, leaveEntitlement, photographUrl } = req.body;
   if (!name || !position || !department || !email) {
@@ -74,7 +70,7 @@ router.post('/', async (req, res) => {
 });
 
 // GET /api/employees/list
-router.get('/list', async (req, res) => {
+router.get('/list', requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
     const emps = await Employee
@@ -90,7 +86,7 @@ router.get('/list', async (req, res) => {
 });
 
 // GET /api/employees/:id
-router.get('/:id', async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
     const emp = await Employee.findOne({
@@ -105,7 +101,7 @@ router.get('/:id', async (req, res) => {
 });
 
 // PATCH /api/employees/:id
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
     const emp = await Employee.findOneAndUpdate(
@@ -121,5 +117,8 @@ router.patch('/:id', async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+
 // GET /api/employees/birthdays
 module.exports = router;
+

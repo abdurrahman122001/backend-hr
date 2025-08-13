@@ -12,8 +12,27 @@ const Salaries = require("../models/Salaries");
 exports.markAttendance = async (req, res) => {
   try {
     const ownerId = req.user._id;
-    const { employeeId, date, status, checkIn, checkOut, notes, leaveType } =
+    const { employeeId, date, status, checkIn, checkOut, notes, leaveType, isHoliday } =
       req.body;
+
+    if (isHoliday) {
+      // Only allow one holiday record per date+owner
+      const rec = await Attendance.findOneAndUpdate(
+        { owner: ownerId, date, isHoliday: true },
+        {
+          $set: {
+            owner: ownerId,
+            date,
+            isHoliday: true,
+            markedByHR: true,
+          },
+          $unset: { employee: "", status: "", checkIn: "", checkOut: "", notes: "", leaveType: "" }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      return res.json(rec);
+    }
+
 
     // 1. Mark attendance
     const updateDoc = {
@@ -228,20 +247,20 @@ exports.markAttendance = async (req, res) => {
     }
 
     // 6b. Half Day deduction logic (new addition)
-if (status === "Half Day") {
-  // Call the leave updater with 0.5
-  const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
-  if (result.unpaid > 0) {
-    let prevDeduction = 0;
-    if (slip.leaveDeductions) {
-      prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+    if (status === "Half Day") {
+      // Call the leave updater with 0.5
+      const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
+      if (result.unpaid > 0) {
+        let prevDeduction = 0;
+        if (slip.leaveDeductions) {
+          prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+        }
+        // Deduct half-day salary per 0.5 unpaid (if no paid leave left)
+        const leaveDeduction = Math.round((perDay / 2) * result.unpaid + prevDeduction);
+        slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+        await slip.save();
+      }
     }
-    // Deduct half-day salary per 0.5 unpaid (if no paid leave left)
-    const leaveDeduction = Math.round((perDay / 2) * result.unpaid + prevDeduction);
-    slip.leaveDeductions = await encrypt(leaveDeduction.toString());
-    await slip.save();
-  }
-}
 
 
     // 9. Respond
@@ -312,6 +331,7 @@ exports.getStats = async (req, res) => {
 
     const result = { present: 0, late: 0, halfDay: 0, absent: 0, total: 0 };
     stats.forEach(({ _id, count }) => {
+      if (typeof _id !== "string") return; // <-- Skip null etc.
       const key = _id === "Half Day" ? "halfDay" : _id.toLowerCase();
       result[key] = count;
       result.total += count;
@@ -369,6 +389,7 @@ exports.getStatsByEmployee = async (req, res) => {
 
     const result = { present: 0, late: 0, halfDay: 0, absent: 0, total: 0 };
     stats.forEach(({ _id, count }) => {
+      if (typeof _id !== "string") return; // <-- Skip null etc.
       const key = _id === "Half Day" ? "halfDay" : _id.toLowerCase();
       result[key] = count;
       result.total += count;
