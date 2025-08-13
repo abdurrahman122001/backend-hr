@@ -16,7 +16,7 @@ async function migrate() {
     });
 
     // require("./src/models/Employees");
-    require("./src/models/Leaves");
+    require("./src/models/Attendance");
 
     // Sync indexes
     for (let modelName of Object.keys(mongoose.models)) {
