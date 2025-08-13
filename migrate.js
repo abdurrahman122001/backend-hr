@@ -15,8 +15,8 @@ async function migrate() {
       mongoose.deleteModel(modelName);
     });
 
-    require("./src/models/Employees");
-    // require("./src/models/Leaves");
+    // require("./src/models/Employees");
+    require("./src/models/Leaves");
 
     // Sync indexes
     for (let modelName of Object.keys(mongoose.models)) {
