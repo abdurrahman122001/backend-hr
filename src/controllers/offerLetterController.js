@@ -4,7 +4,7 @@ const Salaries = require("../models/Salaries");
 const Employee = require("../models/Employees");
 const nodemailer = require("nodemailer");
 const { encrypt } = require("../utils/encryption");
-const Signature = require("../models/Signature"); // add this to your requires
+const Signature = require("../models/Signature");
 require("dotenv").config();
 
 const transporter = nodemailer.createTransport({
@@ -255,7 +255,9 @@ async function sendOfferLetter(req, res) {
       confirmationDeadlineDate,
       department,
       shift,
+      probationDays, // from frontend
     } = req.body;
+
     const candidate = candidateName || "Candidate";
 
     if (
@@ -273,14 +275,17 @@ async function sendOfferLetter(req, res) {
         .json({ error: "Missing required fields for sending offer." });
     }
 
-    let employee = await Employee.findOne({ email: candidateEmail });
-    if (employee) {
+    let existing = await Employee.findOne({ email: candidateEmail });
+    if (existing) {
       return res.status(400).json({
         error: "An employee with this email already exists. Offer not sent.",
       });
     }
 
-    employee = await Employee.create({
+    const probationDaysNum = Number(probationDays) || 0;
+
+    // Create employee; if on probation, initialize leaveEntitlement.total = 0
+    let employee = await Employee.create({
       name: candidate,
       email: candidateEmail,
       designation: position,
@@ -289,7 +294,26 @@ async function sendOfferLetter(req, res) {
       owner: req.user?._id,
       createdBy: req.user?._id,
       shifts: shift ? [shift] : undefined,
+      ...(probationDaysNum > 0
+        ? {
+            leaveEntitlement: {
+              total: 0,
+              usedPaid: 0,
+              usedUnpaid: 0,
+            },
+          }
+        : {}),
     });
+
+    // Extra safety: enforce total=0 after creation (handles schema defaults/middleware overwriting)
+    if (probationDaysNum > 0) {
+      await Employee.updateOne(
+        { _id: employee._id },
+        { $set: { "leaveEntitlement.total": 0 } },
+        { runValidators: false }
+      );
+      employee = await Employee.findById(employee._id);
+    }
 
     const grossSalaryRaw = SALARY_COMPONENTS.reduce(
       (sum, k) => sum + (Number(salaryBreakup[k]) || 0),
@@ -314,13 +338,13 @@ async function sendOfferLetter(req, res) {
       owner: req.user?._id,
       createdBy: req.user?._id,
       ...encryptedSalaryBreakup,
+      probationDays: await encrypt(probationDaysNum.toString()),
     };
 
     await Salaries.create(slipData);
 
     let html = enforceComicSans(letter);
     html = enforceImgCss(html);
-
     const text = html.replace(/<[^>]+>/g, " ");
 
     await transporter.sendMail({
