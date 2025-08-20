@@ -12,7 +12,7 @@ async function migrate() {
     console.log("✅ Connected to MongoDB");
 
     const owners = await Department.distinct('owner');
-    console.log(`Found ${owners.length} unique owners.`);
+    console.log(Found ${owners.length} unique owners.);
 
     for (const owner of owners) {
       const departments = await Department.find({ owner }).sort({ createdAt: 1 });
@@ -26,7 +26,7 @@ async function migrate() {
       }));
 
       await Department.bulkWrite(bulkOps);
-      console.log(`Updated ${departments.length} departments for owner ${owner}`);
+      console.log(Updated ${departments.length} departments for owner ${owner});
     }
 
     console.log('✅ Migration complete.');
