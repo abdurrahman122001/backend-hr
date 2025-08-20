@@ -5,7 +5,7 @@ exports.getDepartments = async (req, res) => {
   try {
     const ownerId = req.user?._id || req.query.owner; // fallback for testing
     if (!ownerId) return res.status(400).json({ error: "Owner required" });
-    const departments = await Department.find({ owner: ownerId }).sort({ createdAt: -1 });
+    const departments = await Department.find({ owner: ownerId }).sort({ order: 1 });
     res.json(departments);
   } catch (err) {
     res.status(500).json({ error: 'Failed to get departments.' });
@@ -75,5 +75,25 @@ exports.deleteDepartment = async (req, res) => {
     res.json({ message: 'Department deleted.' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete department.' });
+  }
+};
+
+// BULK UPDATE departments order
+exports.reorderDepartments = async (req, res) => {
+  try {
+    const { departments } = req.body; // [{ _id, order }]
+    if (!departments || !Array.isArray(departments)) {
+      return res.status(400).json({ error: 'Departments array required.' });
+    }
+    const bulkOps = departments.map(dep => ({
+      updateOne: {
+        filter: { _id: dep._id },
+        update: { $set: { order: dep.order } }
+      }
+    }));
+    await Department.bulkWrite(bulkOps);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reorder departments.' });
   }
 };

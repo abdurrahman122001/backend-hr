@@ -1,6 +1,7 @@
-// migrateLoanDetailSchema.js
+// migrateDepartmentOrder.js
 require("dotenv").config();
 const mongoose = require("mongoose");
+const Department = require('./src/models/Departments');
 
 async function migrate() {
   try {
@@ -10,26 +11,31 @@ async function migrate() {
     });
     console.log("✅ Connected to MongoDB");
 
-    // Remove cached models
-    Object.keys(mongoose.models).forEach((modelName) => {
-      mongoose.deleteModel(modelName);
-    });
+    const owners = await Department.distinct('owner');
+    console.log(`Found ${owners.length} unique owners.`);
 
-    // require("./src/models/Employees");
-    require("./src/models/Attendance");
+    for (const owner of owners) {
+      const departments = await Department.find({ owner }).sort({ createdAt: 1 });
+      if (departments.length === 0) continue;
 
-    // Sync indexes
-    for (let modelName of Object.keys(mongoose.models)) {
-      const model = mongoose.models[modelName];
-      await model.syncIndexes();
-      console.log(`– synced indexes for ${modelName}`);
+      const bulkOps = departments.map((dep, idx) => ({
+        updateOne: {
+          filter: { _id: dep._id },
+          update: { $set: { order: idx } },
+        }
+      }));
+
+      await Department.bulkWrite(bulkOps);
+      console.log(`Updated ${departments.length} departments for owner ${owner}`);
     }
 
-    console.log("🎉 Schema migration complete!");
-    process.exit(0);
+    console.log('✅ Migration complete.');
   } catch (err) {
     console.error("❌ Migration failed:", err);
-    process.exit(1);
+  } finally {
+    await mongoose.disconnect();
+    console.log("🔌 Disconnected from MongoDB");
+    process.exit();
   }
 }
 

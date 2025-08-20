@@ -5,11 +5,13 @@ const {
   createDepartment,
   updateDepartment,
   deleteDepartment,
+  reorderDepartments,
 } = require('../controllers/departmentsController');
 
 router.get('/', getDepartments);
 router.post('/', createDepartment);
 router.put('/:id', updateDepartment);
 router.delete('/:id', deleteDepartment);
+router.post('/reorder', reorderDepartments); 
 
 module.exports = router;
