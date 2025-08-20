@@ -8,26 +8,14 @@ const SalarySlip = require("../models/SalarySlip");
 const { encrypt, decrypt } = require("../utils/encryption");
 
 const monthsList = [
-  "January",
-  "February",
-  "March",
-  "April",
-  "May",
-  "June",
-  "July",
-  "August",
-  "September",
-  "October",
-  "November",
-  "December",
+  "January","February","March","April","May","June",
+  "July","August","September","October","November","December",
 ];
 
 // Helper: Get month start/end as Date objects (works with monthIndex: 0-11)
 function getMonthDateRange(year, monthIndex) {
   if (typeof monthIndex !== "number" || monthIndex < 0 || monthIndex > 11) {
-    console.warn(
-      `Invalid month index: ${monthIndex}. Defaulting to current month.`
-    );
+    console.warn(`Invalid month index: ${monthIndex}. Defaulting to current month.`);
     const currentDate = new Date();
     monthIndex = currentDate.getMonth();
     year = currentDate.getFullYear();
@@ -38,20 +26,10 @@ function getMonthDateRange(year, monthIndex) {
 }
 
 // Sensitive fields to encrypt/decrypt
-const sensitiveFields = [
-  "loanAmount",
-  "monthlyInstallment",
-  "totalMarkup",
-  "totalToBePaid",
-];
+const sensitiveFields = ["loanAmount","monthlyInstallment","totalMarkup","totalToBePaid"];
 
 const paymentScheduleSensitiveFields = [
-  "principal",
-  "markupPercentage",
-  "markupAmount",
-  "totalPayment",
-  "outstanding",
-  "customAmount",
+  "principal","markupPercentage","markupAmount","totalPayment","outstanding","customAmount",
 ];
 
 // Middleware to handle decryption key
@@ -60,6 +38,84 @@ const decryptWithKey = (req, res, next) => {
   next();
 };
 
+/**
+ * === CORE: recompute otherLoans for CURRENT month ===
+ * Sums (installment + benefit) for the current month across all loans
+ *   installment:
+ *     - custom => schedule.totalPayment for current month
+ *     - else   => monthlyInstallment
+ *   benefit:
+ *     - schedule.markupAmount for current month (if present)
+ *
+ * Updates SalarySlip.loanDeductions.otherLoans for current month if a slip exists.
+ * (We do not create new SalarySlip docs here to avoid schema conflicts.)
+ */
+// Replace your recompute helper with this version
+async function recomputeOtherLoansForCurrentMonth(employeeId) {
+  const now = new Date();
+  const targetMonthIndex = now.getMonth();
+  const targetYearNum = now.getFullYear();
+  const targetMonthName = monthsList[targetMonthIndex];
+
+  // Find the salary slip for the current month; no creation here
+  const { start, end } = getMonthDateRange(targetYearNum, targetMonthIndex);
+  const salarySlip = await SalarySlip.findOne({
+    employee: employeeId,
+    updatedAt: { $gte: start, $lte: end },
+  });
+
+  if (!salarySlip) return; // nothing to update if no slip for this month
+
+  const loans = await LoanDetail.find({ employee: employeeId }).lean();
+
+  let totalOtherLoans = 0;
+
+  for (const l of loans) {
+    // Find the schedule row for the current month/year (if any)
+    const entry = Array.isArray(l.paymentSchedule)
+      ? l.paymentSchedule.find(
+          (ps) => ps.month === targetMonthName && Number(ps.year) === targetYearNum
+        )
+      : null;
+
+    try {
+      let contribution = 0;
+
+      if (l.markupType === "custom") {
+        // For custom loans use that month's totalPayment (already includes benefit)
+        if (entry?.totalPayment) {
+          contribution = Number((await decrypt(entry.totalPayment)) || 0);
+        } else if (l.monthlyInstallment) {
+          // Fallback just in case
+          contribution = Number((await decrypt(l.monthlyInstallment)) || 0);
+        }
+      } else {
+        // For fixed/reducing/interest-only, monthlyInstallment already includes markup
+        if (l.monthlyInstallment) {
+          contribution = Number((await decrypt(l.monthlyInstallment)) || 0);
+        }
+      }
+
+      if (Number.isFinite(contribution)) {
+        totalOtherLoans += contribution;
+      }
+    } catch (e) {
+      console.error(`Error computing contribution for loan ${l._id}:`, e);
+    }
+  }
+
+  if (!salarySlip.loanDeductions) salarySlip.loanDeductions = {};
+  salarySlip.loanDeductions.otherLoans = await encrypt(String(totalOtherLoans));
+  // keep your defaults as before
+  if (!salarySlip.loanDeductions.vehicleLoan) {
+    salarySlip.loanDeductions.vehicleLoan = await encrypt("0");
+  }
+  if (!salarySlip.gratuityFundDeduction) {
+    salarySlip.gratuityFundDeduction = await encrypt("0");
+  }
+  await salarySlip.save();
+}
+
 // 1. Get all employees
 router.get("/employees", async (req, res) => {
   try {
@@ -67,9 +123,7 @@ router.get("/employees", async (req, res) => {
     res.json({ employees });
   } catch (err) {
     console.error("Error fetching employees:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch employees", details: err.message });
+    res.status(500).json({ error: "Failed to fetch employees", details: err.message });
   }
 });
 
@@ -77,12 +131,8 @@ router.get("/employees", async (req, res) => {
 router.get("/", decryptWithKey, async (req, res) => {
   try {
     const { employee } = req.query;
-    if (!employee) {
-      return res.status(400).json({ error: "Employee ID is required" });
-    }
-    if (!Types.ObjectId.isValid(employee)) {
-      return res.status(400).json({ error: "Invalid employee ID" });
-    }
+    if (!employee) return res.status(400).json({ error: "Employee ID is required" });
+    if (!Types.ObjectId.isValid(employee)) return res.status(400).json({ error: "Invalid employee ID" });
 
     const loans = await LoanDetail.find({ employee }).lean();
 
@@ -103,7 +153,7 @@ router.get("/", decryptWithKey, async (req, res) => {
                 decrypted !== undefined
                   ? decrypted
                   : loan[field];
-            } catch (e) {
+            } catch {
               decryptedLoan[field] = "[Decryption Error]";
             }
           }
@@ -117,10 +167,7 @@ router.get("/", decryptWithKey, async (req, res) => {
               for (const field of paymentScheduleSensitiveFields) {
                 if (isUnlocked && entry[field]) {
                   try {
-                    const decrypted = await decrypt(
-                      entry[field],
-                      req.decryptionKey
-                    );
+                    const decrypted = await decrypt(entry[field], req.decryptionKey);
                     decryptedEntry[field] =
                       decrypted !== "[Decryption Error]" &&
                       decrypted !== "[Wrong Key]" &&
@@ -128,7 +175,7 @@ router.get("/", decryptWithKey, async (req, res) => {
                       decrypted !== undefined
                         ? decrypted
                         : entry[field];
-                  } catch (e) {
+                  } catch {
                     decryptedEntry[field] = "[Decryption Error]";
                   }
                 }
@@ -144,13 +191,10 @@ router.get("/", decryptWithKey, async (req, res) => {
     res.json({ loans: decryptedLoans });
   } catch (err) {
     console.error("Error fetching loans:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch loans", details: err.message });
+    res.status(500).json({ error: "Failed to fetch loans", details: err.message });
   }
 });
 
-// 3. Save or update loan detail for one employee
 // 3. Save or update loan detail for one employee
 router.post("/loan/:employeeId", async (req, res) => {
   try {
@@ -172,8 +216,6 @@ router.post("/loan/:employeeId", async (req, res) => {
       totalToBePaid,
       paymentSchedule,
     } = req.body;
-
-    // ... (previous validation code remains the same)
 
     const encryptedData = {
       loanAmount: await encrypt(loanAmount.toString()),
@@ -232,55 +274,8 @@ router.post("/loan/:employeeId", async (req, res) => {
       });
     }
 
-    // Update Salary Slip loan deduction with actual loan + interest
-    const { start, end } = getMonthDateRange(
-      scheduleStartYear,
-      scheduleStartMonth
-    );
-    const salarySlip = await SalarySlip.findOne({
-      employee: employeeId,
-      updatedAt: { $gte: start, $lte: end },
-    });
-
-    if (salarySlip) {
-      const allLoans = await LoanDetail.find({
-        employee: employeeId,
-        scheduleStartMonth,
-        scheduleStartYear,
-      });
-
-      let totalOtherLoans = 0;
-
-      for (const l of allLoans) {
-        try {
-          // For custom loans, get the first payment's totalPayment
-          if (l.markupType === 'custom' && l.paymentSchedule && l.paymentSchedule.length > 0) {
-            const firstPayment = l.paymentSchedule[0];
-            if (firstPayment.totalPayment) {
-              const decrypted = await decrypt(firstPayment.totalPayment);
-              totalOtherLoans += Number(decrypted || 0);
-              continue;
-            }
-          }
-          
-          // For non-custom loans, use monthlyInstallment
-          const decrypted = await decrypt(l.monthlyInstallment);
-          totalOtherLoans += Number(decrypted || 0);
-        } catch (e) {
-          console.error(`Error decrypting loan ${l._id}:`, e);
-        }
-      }
-
-      if (!salarySlip.loanDeductions) {
-        salarySlip.loanDeductions = {};
-      }
-      salarySlip.loanDeductions.otherLoans = await encrypt(
-        totalOtherLoans.toString()
-      );
-      salarySlip.loanDeductions.vehicleLoan = await encrypt("0");
-      salarySlip.gratuityFundDeduction = await encrypt("0");
-      await salarySlip.save();
-    }
+    // 🔁 ALWAYS recompute for CURRENT month (not the loan start month)
+    await recomputeOtherLoansForCurrentMonth(employeeId);
 
     res.status(201).json(loan);
   } catch (err) {
@@ -288,16 +283,13 @@ router.post("/loan/:employeeId", async (req, res) => {
     if (err.name === "ValidationError") {
       return res.status(400).json({
         error: "Invalid loan data",
-        details: Object.values(err.errors)
-          .map((e) => e.message)
-          .join(", "),
+        details: Object.values(err.errors).map((e) => e.message).join(", "),
       });
     }
-    res
-      .status(500)
-      .json({ error: "Failed to save loan", details: err.message });
+    res.status(500).json({ error: "Failed to save loan", details: err.message });
   }
 });
+
 // 4. Get single loan detail
 router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
   try {
@@ -327,7 +319,7 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
             decrypted !== undefined
               ? decrypted
               : loan[field];
-        } catch (e) {
+        } catch {
           decryptedLoan[field] = "[Decryption Error]";
         }
       }
@@ -341,10 +333,7 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
           for (const field of paymentScheduleSensitiveFields) {
             if (isUnlocked && entry[field]) {
               try {
-                const decrypted = await decrypt(
-                  entry[field],
-                  req.decryptionKey
-                );
+                const decrypted = await decrypt(entry[field], req.decryptionKey);
                 decryptedEntry[field] =
                   decrypted !== "[Decryption Error]" &&
                   decrypted !== "[Wrong Key]" &&
@@ -352,7 +341,7 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
                   decrypted !== undefined
                     ? decrypted
                     : entry[field];
-              } catch (e) {
+              } catch {
                 decryptedEntry[field] = "[Decryption Error]";
               }
             }
@@ -365,9 +354,7 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
     res.json(decryptedLoan);
   } catch (err) {
     console.error("Error fetching loan:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch loan", details: err.message });
+    res.status(500).json({ error: "Failed to fetch loan", details: err.message });
   }
 });
 
@@ -384,79 +371,40 @@ router.delete("/loan/:loanId", async (req, res) => {
       return res.status(404).json({ error: "Loan not found" });
     }
 
-    const { employee, scheduleStartMonth, scheduleStartYear } = loan;
-
-    const { start, end } = getMonthDateRange(
-      scheduleStartYear,
-      scheduleStartMonth
-    );
-    const salarySlip = await SalarySlip.findOne({
-      employee,
-      updatedAt: { $gte: start, $lte: end },
-    });
-
-    if (salarySlip) {
-      const remainingLoans = await LoanDetail.find({
-        employee,
-        _id: { $ne: loanId },
-        scheduleStartMonth,
-        scheduleStartYear,
-      });
-
-      const totalOtherLoans = (
-        await Promise.all(
-          remainingLoans.map(async (l) => {
-            try {
-              return Number((await decrypt(l.monthlyInstallment)) || 0);
-            } catch (e) {
-              return 0;
-            }
-          })
-        )
-      ).reduce((sum, val) => sum + val, 0);
-
-      if (!salarySlip.loanDeductions) {
-        salarySlip.loanDeductions = {};
-      }
-      salarySlip.loanDeductions.otherLoans = await encrypt(
-        totalOtherLoans.toString()
-      );
-      salarySlip.loanDeductions.vehicleLoan = await encrypt("0");
-      salarySlip.gratuityFundDeduction = await encrypt("0");
-      await salarySlip.save();
-    }
+    const employeeId = loan.employee;
 
     await LoanDetail.deleteOne({ _id: loanId });
+
+    // 🔁 After deletion, recompute for CURRENT month
+    await recomputeOtherLoansForCurrentMonth(employeeId);
 
     res.json({ message: "Loan deleted successfully" });
   } catch (err) {
     console.error("Error deleting loan:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to delete loan", details: err.message });
+    res.status(500).json({ error: "Failed to delete loan", details: err.message });
   }
 });
+
+// 6. Loan benefits (unchanged)
 router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
   try {
     const { employeeId } = req.params;
     const { monthYear } = req.query;
-    
+
     if (!monthYear) {
       return res.status(400).json({ error: "monthYear query parameter is required" });
     }
 
     // Extract month and year from query (e.g. "July 2025")
-    const [monthName, yearStr] = monthYear.split(' ');
+    const [monthName, yearStr] = monthYear.split(" ");
     const year = parseInt(yearStr);
 
     if (!monthName || !yearStr || isNaN(year)) {
       return res.status(400).json({ error: "Invalid monthYear format. Expected format like 'July 2025'" });
     }
 
-    // Find all loans for this employee
     const loans = await LoanDetail.find({ employee: employeeId }).lean();
 
-    // Process each loan's payment schedule
     const loanDetails = [];
     let totalLoanBenefits = 0;
     let totalLoanInstallments = 0;
@@ -464,22 +412,24 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
     for (const loan of loans) {
       if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) continue;
 
-      // Find the matching schedule entry
       const entry = loan.paymentSchedule.find(
-        ps => ps.month === monthName && ps.year === year
+        (ps) => ps.month === monthName && Number(ps.year) === year
       );
-
       if (!entry) continue;
 
       try {
-        // Decrypt the relevant amounts
-        const markupAmount = entry.markupAmount 
+        const markupAmount = entry.markupAmount
           ? parseFloat(await decrypt(entry.markupAmount, req.decryptionKey)) || 0
           : 0;
 
         const monthlyInstallment = loan.monthlyInstallment
           ? parseFloat(await decrypt(loan.monthlyInstallment, req.decryptionKey)) || 0
           : 0;
+
+        let paymentAmount = monthlyInstallment;
+        if (loan.markupType === "custom" && entry.totalPayment) {
+          paymentAmount = parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) || 0;
+        }
 
         const loanAmount = loan.loanAmount
           ? parseFloat(await decrypt(loan.loanAmount, req.decryptionKey)) || 0
@@ -493,27 +443,20 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
           ? parseFloat(await decrypt(loan.totalToBePaid, req.decryptionKey)) || 0
           : 0;
 
-        // For custom loans, we should use the totalPayment from the schedule if available
-        let paymentAmount = monthlyInstallment;
-        if (loan.markupType === 'custom' && entry.totalPayment) {
-          paymentAmount = parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) || 0;
-        }
-
         loanDetails.push({
           type: loan.type || "Loan",
-          monthlyInstallment: paymentAmount, // Use the correct payment amount
-          paidPrev: 0, // You may need to calculate this based on previous payments
+          monthlyInstallment: paymentAmount,
+          paidPrev: 0,
           loanAmount,
           totalMarkup,
           totalToBePaid,
           markupAmount,
           markupValue: loan.markupValue || 0,
-          markupType: loan.markupType || 'fixed'
+          markupType: loan.markupType || "fixed",
         });
 
         totalLoanBenefits += markupAmount;
-        totalLoanInstallments += paymentAmount; // Use the correct payment amount
-
+        totalLoanInstallments += paymentAmount;
       } catch (e) {
         console.error(`Decryption failed for loan ${loan._id}:`, e);
         continue;
@@ -522,18 +465,18 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
 
     res.json({
       loanDetails,
-      markupValue: loanDetails[0]?.markupValue || 0, // Assuming same markup for all
-       totalLoanBenefits: Math.round(totalLoanBenefits),
-      totalLoanInstallments
+      markupValue: loanDetails[0]?.markupValue || 0,
+      totalLoanBenefits: Math.round(totalLoanBenefits),
+      totalLoanInstallments,
     });
-
   } catch (err) {
     console.error("Error in loan-benefits:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Failed to calculate benefits",
       details: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 });
+
 module.exports = router;
