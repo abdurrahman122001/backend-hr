@@ -73,7 +73,7 @@ app.set("io", io);
 // === Middleware ===
 app.use(
   cors({
-    origin: ["http://admin.virsme.com", "http://admin.innand.com", "http://apis.innand.com", "http://employee.virsme.com", "http://hr.virsme.com", "http://localhost:8080", "http://localhost:8081"],
+    origin: ["http://admin.virsme.com", "http://admin.innand.com", "http://apis.innand.com", "http://employee.virsme.com", "http://hr.virsme.com", "http://localhost:8080", "http://innand.com"],
     credentials: true, // if you need cookies/auth
   })
 );
