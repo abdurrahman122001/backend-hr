@@ -3,7 +3,8 @@
 const Settings = require('../models/Settings');
 
 exports.getSettings = async (req, res) => {
-  const s = await Settings.findOne({ owner: req.user._id }).lean();
+  const ownerId = req.user.owner || req.user.createdBy || req.user._id;
+  const s = await Settings.findOne({ owner: ownerId }).lean();
   res.json({
     timezone: s?.timezone || 'UTC',
     useSystemTimezone: s?.useSystemTimezone ?? true,

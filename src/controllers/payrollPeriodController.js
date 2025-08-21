@@ -1,15 +1,21 @@
-const PayrollPeriod = require('../models/PayrollPeriod');
-const Employee = require('../models/Employees');
-const SalarySlip = require('../models/SalarySlip');
-const dayjs = require('dayjs');
+const PayrollPeriod = require("../models/PayrollPeriod");
+const Employee = require("../models/Employees");
+const SalarySlip = require("../models/SalarySlip");
+const dayjs = require("dayjs");
 
 // Create a new payroll period
 exports.createPayrollPeriod = async (req, res) => {
-  const { name, payrollPeriodType, payrollPeriodStartDay, payrollPeriodLength, shifts } = req.body;
+  const {
+    name,
+    payrollPeriodType,
+    payrollPeriodStartDay,
+    payrollPeriodLength,
+    shifts,
+  } = req.body;
 
   // Duplicate check
   let exists = null;
-  if (payrollPeriodType === 'custom') {
+  if (payrollPeriodType === "custom") {
     exists = await PayrollPeriod.findOne({
       owner: req.user._id,
       payrollPeriodType,
@@ -24,7 +30,11 @@ exports.createPayrollPeriod = async (req, res) => {
     });
   }
   if (exists) {
-    return res.status(409).json({ error: 'Payroll period already exists for this type and start date.' });
+    return res
+      .status(409)
+      .json({
+        error: "Payroll period already exists for this type and start date.",
+      });
   }
 
   // Create if not duplicate
@@ -34,27 +44,55 @@ exports.createPayrollPeriod = async (req, res) => {
     payrollPeriodType,
     payrollPeriodStartDay,
     payrollPeriodLength,
-    shifts: shifts || []
+    shifts: shifts || [],
   });
 
   res.status(201).json(period);
 };
 
-exports.getPayrollPeriod = async (req, res, next) => {
-  const periods = await PayrollPeriod.find({ owner: req.user._id }).sort({ createdAt: -1 }).lean();
-  res.json(periods); // Always an array!
-};
+exports.getPayrollPeriod = async (req, res) => {
+  try {
+    // Effective tenant/owner id: prefer explicit owner → createdBy → self
+    const tenantId = req.user?.owner || req.user?.createdBy || req.user?._id;
+    const userId = req.user?._id;
 
+    // Backward-compatible scope:
+    // - matches docs where owner == tenant/user OR createdBy == tenant/user
+    // - works whether 'owner' is a scalar or an array (Mongo $in handles both)
+    const scope = {
+      $or: [
+        { owner: { $in: [tenantId, userId] } },
+        { createdBy: { $in: [tenantId, userId] } },
+      ],
+    };
+
+    const periods = await PayrollPeriod.find(scope)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    res.json(periods); // always an array
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
 exports.updatePayrollPeriod = async (req, res, next) => {
   const { id } = req.params;
-  const { name, shifts, payrollPeriodType, payrollPeriodStartDay, payrollPeriodLength } = req.body;
+  const {
+    name,
+    shifts,
+    payrollPeriodType,
+    payrollPeriodStartDay,
+    payrollPeriodLength,
+  } = req.body;
 
   const updateData = {};
   if (name) updateData.name = name;
   if (shifts) updateData.shifts = shifts;
   if (payrollPeriodType) updateData.payrollPeriodType = payrollPeriodType;
-  if (payrollPeriodStartDay) updateData.payrollPeriodStartDay = payrollPeriodStartDay;
-  if (payrollPeriodLength !== undefined) updateData.payrollPeriodLength = payrollPeriodLength;
+  if (payrollPeriodStartDay)
+    updateData.payrollPeriodStartDay = payrollPeriodStartDay;
+  if (payrollPeriodLength !== undefined)
+    updateData.payrollPeriodLength = payrollPeriodLength;
 
   const updated = await PayrollPeriod.findOneAndUpdate(
     { _id: id, owner: req.user._id },
@@ -62,24 +100,28 @@ exports.updatePayrollPeriod = async (req, res, next) => {
     { new: true }
   ).lean();
 
-  if (!updated) return res.status(404).json({ error: 'Payroll period not found' });
+  if (!updated)
+    return res.status(404).json({ error: "Payroll period not found" });
   res.json(updated);
 };
 
 exports.deletePayrollPeriod = async (req, res, next) => {
   const { id } = req.params;
-  const deleted = await PayrollPeriod.findOneAndDelete({ _id: id, owner: req.user._id });
+  const deleted = await PayrollPeriod.findOneAndDelete({
+    _id: id,
+    owner: req.user._id,
+  });
   if (!deleted) {
-    return res.status(404).json({ error: 'Payroll period not found' });
+    return res.status(404).json({ error: "Payroll period not found" });
   }
-  res.json({ message: 'Payroll period deleted successfully.' });
+  res.json({ message: "Payroll period deleted successfully." });
 };
 
 exports.updateNonWorkingDays = async (req, res) => {
   const ownerId = req.user._id;
   const { nonWorkingDays } = req.body;
   if (!Array.isArray(nonWorkingDays)) {
-    return res.status(400).json({ error: 'nonWorkingDays must be an array' });
+    return res.status(400).json({ error: "nonWorkingDays must be an array" });
   }
 
   const result = await PayrollPeriod.updateMany(
@@ -92,7 +134,9 @@ exports.updateNonWorkingDays = async (req, res) => {
 
 exports.getNonWorkingDays = async (req, res) => {
   const ownerId = req.user._id;
-  const period = await PayrollPeriod.findOne({ owner: ownerId }).sort({ createdAt: -1 }).lean();
+  const period = await PayrollPeriod.findOne({ owner: ownerId })
+    .sort({ createdAt: -1 })
+    .lean();
   res.json({ nonWorkingDays: period?.nonWorkingDays || [] });
 };
 
@@ -104,10 +148,15 @@ exports.getCurrentPayrollPeriodStatus = async (req, res) => {
     // Find the most recent period starting before or on today
     const period = await PayrollPeriod.findOne({
       owner: ownerId,
-      payrollPeriodStartDay: { $lte: today.format("YYYY-MM-DD") }
-    }).sort({ payrollPeriodStartDay: -1 }).lean();
+      payrollPeriodStartDay: { $lte: today.format("YYYY-MM-DD") },
+    })
+      .sort({ payrollPeriodStartDay: -1 })
+      .lean();
 
-    if (!period) return res.status(404).json({ error: "No payroll period found for this month." });
+    if (!period)
+      return res
+        .status(404)
+        .json({ error: "No payroll period found for this month." });
 
     // Get period start and length
     const start = dayjs(period.payrollPeriodStartDay);
@@ -122,11 +171,14 @@ exports.getCurrentPayrollPeriodStatus = async (req, res) => {
       else length = 30;
     }
     const end = start.add(length - 1, "day");
-    const daysLeft = end.diff(today, "day") >= 0 ? end.diff(today, "day") + 1 : 0;
+    const daysLeft =
+      end.diff(today, "day") >= 0 ? end.diff(today, "day") + 1 : 0;
     const periodEnded = today.isAfter(end, "day");
 
     // Get all employees for this owner
-    const employees = await Employee.find({ owner: ownerId }).select("_id name designation department").lean();
+    const employees = await Employee.find({ owner: ownerId })
+      .select("_id name designation department")
+      .lean();
 
     res.json({
       period,
@@ -156,7 +208,9 @@ exports.getCurrentPayrollPeriod = async (req, res) => {
       .lean();
 
     if (!period) {
-      return res.status(404).json({ error: "No payroll period found for this month." });
+      return res
+        .status(404)
+        .json({ error: "No payroll period found for this month." });
     }
 
     res.json({ period });

@@ -4,8 +4,8 @@ const Employee = require('../models/Employees');
 
 exports.getShifts = async (req, res) => {
   try {
-    const shifts = await Shift.find({ owner: req.user._id }).lean();
-
+    const ownerId = req.user.owner || req.user.createdBy || req.user._id;
+    const shifts = await Shift.find({ owner: ownerId }).lean();
     // Ensure graceTime always exists in response (for legacy data)
     const enrichedShifts = shifts.map(shift => ({
       ...shift,
@@ -114,8 +114,9 @@ exports.updateShift = async (req, res) => {
 
 exports.deleteShift = async (req, res) => {
   try {
+    const ownerId = req.user.owner || req.user.createdBy || req.user._id; 
     const { id } = req.params;
-    const result = await Shift.deleteOne({ _id: id, owner: req.user._id });
+    const result = await Shift.deleteOne({ _id: id, owner: ownerId });
     if (result.deletedCount === 0) return res.status(404).json({ error: 'Not found' });
     res.json({ success: true });
   } catch (err) {
@@ -125,10 +126,11 @@ exports.deleteShift = async (req, res) => {
 
 exports.setAllowMultipleShifts = async (req, res) => {
   try {
+    const ownerId = req.user.owner || req.user.createdBy || req.user._id;
     const { allowMultipleShifts } = req.body;
     // Save to company/user/org/global settings (adjust model as needed)
     await Shift.updateOne(
-      { owner: req.user._id }, // or company/org id
+      { owner: ownerId }, // or company/org id
       { $set: { allowMultipleShifts: !!allowMultipleShifts } },
       { upsert: true }
     );
@@ -140,7 +142,8 @@ exports.setAllowMultipleShifts = async (req, res) => {
 
 exports.getAllowMultipleShifts = async (req, res) => {
   try {
-    const settings = await Shift.findOne({ owner: req.user._id }); // or company/org id
+    const ownerId = req.user.owner || req.user.createdBy || req.user._id;
+    const settings = await Shift.findOne({ owner: ownerId }); // or company/org id
     res.json({ allowMultipleShifts: !!settings?.allowMultipleShifts });
   } catch (err) {
     res.status(500).json({ error: err.message });

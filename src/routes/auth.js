@@ -1,57 +1,94 @@
 // backend/src/routes/auth.js
-const express = require('express');
-const jwt     = require('jsonwebtoken');
-const User    = require('../models/Users');
-const requireAuth = require('../middleware/auth'); // Make sure this is correct
+const express = require("express");
+const jwt = require("jsonwebtoken");
+const User = require("../models/Users");
+const requireAuth = require("../middleware/auth"); // Make sure this is correct
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET;
-const authCtrl = require('../controllers/authController');
+const authCtrl = require("../controllers/authController");
 // ————— Sign-up —————
-router.post('/signup', async (req, res) => {
+router.post("/signup", async (req, res) => {
   try {
     const { username, email, password } = req.body;
     // basic validation
     if (!username || !email || !password) {
-      return res.status(400).json({ error: 'username, email and password are required' });
+      return res
+        .status(400)
+        .json({ error: "username, email and password are required" });
     }
     // create & hash via your pre('save') hook
     const newUser = new User({ username, email, password });
     await newUser.save();
 
     // generate token immediately so the user is logged-in on signup
-    const token = jwt.sign({ id: newUser._id }, JWT_SECRET, { expiresIn: '2h' });
+    const token = jwt.sign({ id: newUser._id }, JWT_SECRET, {
+      expiresIn: "2h",
+    });
     res.status(201).json({
       token,
-      user: { id: newUser._id, username: newUser.username }
+      user: { id: newUser._id, username: newUser.username },
     });
   } catch (err) {
     // handle duplicate‐key errors
     if (err.code === 11000) {
-      return res.status(409).json({ error: 'Username or email already taken' });
+      return res.status(409).json({ error: "Username or email already taken" });
     }
     console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: "Server error" });
   }
 });
-
-router.post('/login', async (req, res) => {
+router.post("/hr-login", async (req, res) => {
+  try {
     const { username, password } = req.body;
+
+    // HR can log in by username or email too
+    const query = username.includes("@") ? { email: username } : { username };
+    const user = await User.findOne(query);
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // must be role hr
+    if (user.role !== "hr") {
+      return res.status(403).json({ error: "Forbidden: not an HR account" });
+    }
+
+    const ok = await user.comparePassword(password);
+    if (!ok) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = jwt.sign({ id: user._id, role: user.role }, JWT_SECRET, {
+      expiresIn: "2h",
+    });
+    res.json({
+      token,
+      user: { id: user._id, username: user.username, role: user.role },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+router.post("/login", async (req, res) => {
+  const { username, password } = req.body;
   try {
     const user = await User.findOne({ username });
     if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ error: 'Invalid credentials' });
+      return res.status(401).json({ error: "Invalid credentials" });
     }
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: '2h' });
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "2h" });
     res.json({ token, user: { id: user._id, username: user.username } });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    res.status(500).json({ error: "Server error" });
   }
 });
-router.get('/me', requireAuth, authCtrl.getMe);
+router.get("/me", requireAuth, authCtrl.getMe);
 
-router.post('/forgot-password', authCtrl.forgotPassword);
-router.post('/reset-password/:token', authCtrl.resetPassword);
+router.post("/forgot-password", authCtrl.forgotPassword);
+router.post("/reset-password/:token", authCtrl.resetPassword);
 
 module.exports = router;
