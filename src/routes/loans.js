@@ -1,5 +1,4 @@
-// backend/src/routes/loansRouter.js
-
+// routes/loans.js
 const express = require("express");
 const router = express.Router();
 const { Types } = require("mongoose");
@@ -17,35 +16,112 @@ const monthsList = [
   "July","August","September","October","November","December",
 ];
 
-// Resolve effective tenant/owner id for scoping
 function resolveOwnerId(user) {
-  return user?.owner || user?.createdBy || user?._id;
+  return user?.owner || user?.createdBy || user?._id || null;
 }
 
-// Sensitive fields to encrypt/decrypt
+function normMonth(m) {
+  if (!m || typeof m !== "string") return "";
+  const t = m.trim();
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+}
+
+async function setOtherLoanFields(slip, encryptedValue) {
+  if (!slip.loanDeductions) slip.loanDeductions = {};
+  slip.loanDeductions.otherLoans = encryptedValue;
+  slip.markModified("loanDeductions");
+}
+
+// fields used for optional decryption output in GET endpoints
 const sensitiveFields = ["loanAmount","monthlyInstallment","totalMarkup","totalToBePaid"];
+const paymentScheduleSensitiveFields = ["principal","markupPercentage","markupAmount","totalPayment","outstanding","customAmount"];
 
-const paymentScheduleSensitiveFields = [
-  "principal","markupPercentage","markupAmount","totalPayment","outstanding","customAmount",
-];
-
-// Middleware to handle decryption key (query or header)
-const decryptWithKey = (req, res, next) => {
+const decryptWithKey = (req, _res, next) => {
   req.decryptionKey = req.query.key || req.headers["x-decryption-key"] || "";
   next();
 };
 
 // -----------------------------------------------------------------------------
-// CORE recompute: Update ONLY existing SalarySlips for this employee
-// We fetch all slips for the employee (optionally owner-filtered) and, for each
-// slip's (month, year), compute the month's total loan deductions and persist.
-// This avoids missing updates when ownerId isn't available or doesn't match.
+// Core recompute logic
 // -----------------------------------------------------------------------------
+
+/**
+ * Only deduct if a schedule row exists for that (month, year).
+ * If no row exists => 0 (this fixes “deducting before start month”).
+ * If row exists: prefer that row's totalPayment; if somehow missing, fall back to loan.monthlyInstallment.
+ */
+async function computeLoanMonthlyContribution(loan, month, yNum) {
+  const sched = Array.isArray(loan.paymentSchedule)
+    ? loan.paymentSchedule.find(
+        (ps) => normMonth(ps.month) === month && Number(ps.year) === yNum
+      )
+    : null;
+
+  // No schedule row for this month → do NOT deduct.
+  if (!sched) return 0;
+
+  if (sched.totalPayment) {
+    const v = Number(await decrypt(sched.totalPayment));
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  if (loan.monthlyInstallment) {
+    const v = Number(await decrypt(loan.monthlyInstallment));
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  return 0;
+}
+
+/**
+ * Update a single salary slip for given (employee, month, year).
+ */
+async function recomputeSingleMonthOtherLoans(employeeId, monthName, yearNum, ownerId) {
+  const month = normMonth(monthName);
+  const yNum = Number(yearNum);
+  if (!monthsList.includes(month) || !Number.isFinite(yNum)) return;
+
+  const loans = await LoanDetail.find({ employee: employeeId }).lean();
+  if (!loans.length) return;
+
+  const slip = await SalarySlip.findOne({
+    employee: employeeId,
+    month,
+    year: yNum.toString(),
+    ...(ownerId && { owner: ownerId }),
+  });
+  if (!slip) return;
+
+  let totalOtherLoans = 0;
+  for (const loan of loans) {
+    try {
+      totalOtherLoans += await computeLoanMonthlyContribution(loan, month, yNum);
+    } catch (e) {
+      console.error(`Loan ${loan._id} compute error @ ${month} ${yNum}:`, e);
+    }
+  }
+
+  const encrypted = await encrypt(String(totalOtherLoans || 0));
+  await setOtherLoanFields(slip, encrypted);
+
+  if (!slip.loanDeductions.vehicleLoan) {
+    slip.loanDeductions.vehicleLoan = await encrypt("0");
+  }
+  if (!slip.gratuityFundDeduction) {
+    slip.gratuityFundDeduction = await encrypt("0");
+  }
+
+  await slip.save();
+}
+
+/**
+ * Recompute for ALL existing salary slips of an employee.
+ * (Only months with schedule rows will add any deduction.)
+ */
 async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
   const loans = await LoanDetail.find({ employee: employeeId }).lean();
   if (!loans.length) return;
 
-  // Fetch existing slips for the employee (filter by owner if provided)
   const slipQuery = { employee: employeeId };
   if (ownerId) slipQuery.owner = ownerId;
 
@@ -53,58 +129,22 @@ async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
   if (!slips.length) return;
 
   for (const slip of slips) {
-    const monthName = slip.month;            // e.g., "July"
-    const yearStr   = String(slip.year);     // ensure string for Number()
-    const yearNum   = Number(yearStr);
+    const month = normMonth(slip.month);
+    const yearNum = Number(String(slip.year));
+    if (!monthsList.includes(month) || !Number.isFinite(yearNum)) continue;
 
-    if (!monthsList.includes(monthName) || !Number.isFinite(yearNum)) {
-      // Skip malformed slip (unexpected month/year)
-      continue;
-    }
-
-    // Compute this slip's total for (monthName, yearNum)
     let totalOtherLoans = 0;
-
-    for (const l of loans) {
-      const sched = Array.isArray(l.paymentSchedule)
-        ? l.paymentSchedule.find(ps => ps.month === monthName && Number(ps.year) === yearNum)
-        : null;
-
+    for (const loan of loans) {
       try {
-        let contribution = 0;
-
-        if (l.markupType === "custom") {
-          if (sched?.totalPayment) {
-            // custom schedule -> monthly totalPayment (includes benefit)
-            const dec = await decrypt(sched.totalPayment);
-            contribution = Number(dec) || 0;
-          } else if (l.monthlyInstallment) {
-            const dec = await decrypt(l.monthlyInstallment);
-            contribution = Number(dec) || 0;
-          }
-        } else {
-          // fixed/reducing/interest-only -> monthlyInstallment includes markup
-          if (l.monthlyInstallment) {
-            const dec = await decrypt(l.monthlyInstallment);
-            contribution = Number(dec) || 0;
-          }
-        }
-
-        if (Number.isFinite(contribution)) {
-          totalOtherLoans += contribution;
-        }
+        totalOtherLoans += await computeLoanMonthlyContribution(loan, month, yearNum);
       } catch (e) {
-        console.error(`Loan ${l._id} compute error @ ${monthName} ${yearNum}:`, e);
+        console.error(`Loan ${loan._id} compute error @ ${month} ${yearNum}:`, e);
       }
     }
 
-    // Persist to nested and legacy root fields for compatibility
-    if (!slip.loanDeductions) slip.loanDeductions = {};
-    slip.loanDeductions.otherLoans = await encrypt(String(totalOtherLoans));
-    // legacy flat field some UIs read:
-    slip.otherLoanDeductions = slip.loanDeductions.otherLoans;
+    const encrypted = await encrypt(String(totalOtherLoans || 0));
+    await setOtherLoanFields(slip, encrypted);
 
-    // default other related fields if missing (follow your prior pattern)
     if (!slip.loanDeductions.vehicleLoan) {
       slip.loanDeductions.vehicleLoan = await encrypt("0");
     }
@@ -112,27 +152,38 @@ async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
       slip.gratuityFundDeduction = await encrypt("0");
     }
 
-    // Ensure nested changes are tracked
-    slip.markModified("loanDeductions");
     await slip.save();
   }
 }
+
+// -----------------------------------------------------------------------------
+// Payment schedule recalculation when editing an installment
+// -----------------------------------------------------------------------------
 async function recalculatePaymentSchedule(loan, updatedInstallmentIndex, newTotalPayment) {
+  if (typeof newTotalPayment !== "number" || newTotalPayment < 0) {
+    throw new Error("Invalid newTotalPayment value");
+  }
+  if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) {
+    throw new Error("Invalid payment schedule");
+  }
+  if (updatedInstallmentIndex < 0 || updatedInstallmentIndex >= loan.paymentSchedule.length) {
+    throw new Error("Invalid installment index");
+  }
+
   const decryptedLoanAmount = Number(await decrypt(loan.loanAmount)) || 0;
   let remainingPrincipal = decryptedLoanAmount;
   let totalMarkup = 0;
   const newSchedule = [];
 
-  // For all installments before the updated one, keep them as is
   for (let i = 0; i < loan.paymentSchedule.length; i++) {
     const entry = loan.paymentSchedule[i];
+
     let principal = Number(await decrypt(entry.principal)) || 0;
     let markupAmount = Number(await decrypt(entry.markupAmount)) || 0;
     let totalPayment = Number(await decrypt(entry.totalPayment)) || 0;
     let outstanding = Number(await decrypt(entry.outstanding)) || 0;
 
     if (i < updatedInstallmentIndex) {
-      // Keep previous installments unchanged
       remainingPrincipal -= principal;
       totalMarkup += markupAmount;
       newSchedule.push({ ...entry });
@@ -140,15 +191,13 @@ async function recalculatePaymentSchedule(loan, updatedInstallmentIndex, newTota
     }
 
     if (i === updatedInstallmentIndex) {
-      // Use the new total payment
-      principal = newTotalPayment - markupAmount; // Line 144, where the error occurs
-      if (principal < 0) {
-        throw new Error("Total payment cannot be less than markup amount");
-      }
+      principal = newTotalPayment - markupAmount;
+      if (principal < 0) throw new Error("Total payment cannot be less than markup amount");
       remainingPrincipal -= principal;
       totalPayment = newTotalPayment;
       outstanding = Math.max(0, remainingPrincipal);
       totalMarkup += markupAmount;
+
       newSchedule.push({
         ...entry,
         principal: await encrypt(principal.toString()),
@@ -158,13 +207,12 @@ async function recalculatePaymentSchedule(loan, updatedInstallmentIndex, newTota
       continue;
     }
 
-    // Recalculate future installments
     const remainingInstallments = loan.paymentSchedule.length - i;
     if (remainingInstallments <= 0) break;
 
     const newPrincipal = remainingPrincipal / remainingInstallments;
     const newMarkupAmount = (newPrincipal * Number(loan.markupValue)) / 100;
-    const newTotalPayment = newPrincipal + newMarkupAmount; // Potential shadowing issue
+    const futureTotalPayment = newPrincipal + newMarkupAmount;
     remainingPrincipal -= newPrincipal;
     totalMarkup += newMarkupAmount;
 
@@ -172,7 +220,7 @@ async function recalculatePaymentSchedule(loan, updatedInstallmentIndex, newTota
       ...entry,
       principal: await encrypt(newPrincipal.toString()),
       markupAmount: await encrypt(newMarkupAmount.toString()),
-      totalPayment: await encrypt(newTotalPayment.toString()),
+      totalPayment: await encrypt(futureTotalPayment.toString()),
       outstanding: await encrypt(Math.max(0, remainingPrincipal).toString()),
     });
   }
@@ -183,12 +231,13 @@ async function recalculatePaymentSchedule(loan, updatedInstallmentIndex, newTota
     totalToBePaid: await encrypt((decryptedLoanAmount + totalMarkup).toString()),
   };
 }
+
 // -----------------------------------------------------------------------------
 // Routes
 // -----------------------------------------------------------------------------
 
-// 1) Get all employees (id+name)
-router.get("/employees", async (req, res) => {
+// Employees list (id + name)
+router.get("/employees", async (_req, res) => {
   try {
     const employees = await Employee.find().select("_id name");
     res.json({ employees });
@@ -197,6 +246,8 @@ router.get("/employees", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch employees", details: err.message });
   }
 });
+
+// Fetch loans by employee (with optional decryption key for viewing)
 router.get("/", decryptWithKey, async (req, res) => {
   try {
     const { employee } = req.query;
@@ -207,54 +258,46 @@ router.get("/", decryptWithKey, async (req, res) => {
 
     const decryptedLoans = await Promise.all(
       loans.map(async (loan) => {
-        const decryptedLoan = { ...loan };
+        const out = { ...loan };
         const isUnlocked = !!req.decryptionKey;
 
-        // Decrypt sensitive fields
         for (const field of sensitiveFields) {
           if (isUnlocked && loan[field]) {
             try {
-              const decryptedVal = await decrypt(loan[field], req.decryptionKey);
-              decryptedLoan[field] =
-                decryptedVal !== "[Decryption Error]" &&
-                decryptedVal !== "[Wrong Key]" &&
-                decryptedVal !== "" &&
-                decryptedVal !== undefined
-                  ? decryptedVal
+              const dec = await decrypt(loan[field], req.decryptionKey);
+              out[field] =
+                dec !== "[Decryption Error]" && dec !== "[Wrong Key]" && dec !== "" && dec !== undefined
+                  ? dec
                   : loan[field];
             } catch {
-              decryptedLoan[field] = "[Decryption Error]";
+              out[field] = "[Decryption Error]";
             }
           }
         }
 
-        // Decrypt payment schedule fields
         if (loan.paymentSchedule && Array.isArray(loan.paymentSchedule)) {
-          decryptedLoan.paymentSchedule = await Promise.all(
+          out.paymentSchedule = await Promise.all(
             loan.paymentSchedule.map(async (entry) => {
-              const decryptedEntry = { ...entry };
-              for (const field of paymentScheduleSensitiveFields) {
-                if (isUnlocked && entry[field]) {
+              const d = { ...entry };
+              for (const f of paymentScheduleSensitiveFields) {
+                if (isUnlocked && entry[f]) {
                   try {
-                    const decryptedVal = await decrypt(entry[field], req.decryptionKey);
-                    decryptedEntry[field] =
-                      decryptedVal !== "[Decryption Error]" &&
-                      decryptedVal !== "[Wrong Key]" &&
-                      decryptedVal !== "" &&
-                      decryptedVal !== undefined
-                        ? decryptedVal
-                        : entry[field];
+                    const dec = await decrypt(entry[f], req.decryptionKey);
+                    d[f] =
+                      dec !== "[Decryption Error]" && dec !== "[Wrong Key]" && dec !== "" && dec !== undefined
+                        ? dec
+                        : entry[f];
                   } catch {
-                    decryptedEntry[field] = "[Decryption Error]";
+                    d[f] = "[Decryption Error]";
                   }
                 }
               }
-              return decryptedEntry;
+              return d;
             })
           );
         }
 
-        return decryptedLoan;
+        return out;
       })
     );
 
@@ -265,7 +308,7 @@ router.get("/", decryptWithKey, async (req, res) => {
   }
 });
 
-// 3) Save or update a loan for one employee
+// Create/Update a loan
 router.post("/loan/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -274,17 +317,9 @@ router.post("/loan/:employeeId", async (req, res) => {
     }
 
     const {
-      type,
-      loanAmount,
-      loanTerm,
-      markupType,
-      markupValue,
-      scheduleStartMonth,
-      scheduleStartYear,
-      monthlyInstallment,
-      totalMarkup,
-      totalToBePaid,
-      paymentSchedule,
+      type, loanAmount, loanTerm, markupType, markupValue,
+      scheduleStartMonth, scheduleStartYear,
+      monthlyInstallment, totalMarkup, totalToBePaid, paymentSchedule,
     } = req.body;
 
     const encryptedData = {
@@ -296,13 +331,13 @@ router.post("/loan/:employeeId", async (req, res) => {
 
     const encryptedPaymentSchedule = await Promise.all(
       (paymentSchedule || []).map(async (entry) => {
-        const encryptedEntry = { ...entry };
-        for (const field of paymentScheduleSensitiveFields) {
-          if (entry[field] !== undefined && entry[field] !== null) {
-            encryptedEntry[field] = await encrypt(entry[field].toString());
+        const e = { ...entry };
+        for (const f of paymentScheduleSensitiveFields) {
+          if (entry[f] !== undefined && entry[f] !== null) {
+            e[f] = await encrypt(entry[f].toString());
           }
         }
-        return encryptedEntry;
+        return e;
       })
     );
 
@@ -313,7 +348,6 @@ router.post("/loan/:employeeId", async (req, res) => {
     });
 
     if (loan) {
-      // Update existing
       loan.type = type;
       loan.loanAmount = encryptedData.loanAmount;
       loan.loanTerm = loanTerm;
@@ -327,7 +361,6 @@ router.post("/loan/:employeeId", async (req, res) => {
       loan.paymentSchedule = encryptedPaymentSchedule;
       await loan.save();
     } else {
-      // Create new
       loan = await LoanDetail.create({
         employee: employeeId,
         type,
@@ -344,7 +377,7 @@ router.post("/loan/:employeeId", async (req, res) => {
       });
     }
 
-    // Recompute across existing slips (owner-scoped if available)
+    // recompute for existing slips for this employee
     const ownerId = resolveOwnerId(req.user);
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
 
@@ -361,73 +394,60 @@ router.post("/loan/:employeeId", async (req, res) => {
   }
 });
 
-// 4) Get single loan detail (optionally decrypted)
+// Single loan detail (optional decryption for viewing)
 router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
   try {
     const { loanId } = req.params;
     if (!Types.ObjectId.isValid(loanId)) {
       return res.status(400).json({ error: "Invalid loan ID" });
     }
-    const loan = await LoanDetail.findById(loanId).populate("employee", "name").lean();
-    if (!loan) {
-      return res.status(404).json({ error: "Loan not found" });
-    }
 
-    const decryptedLoan = { ...loan };
+    const loan = await LoanDetail.findById(loanId).populate("employee", "name").lean();
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    const out = { ...loan };
     const isUnlocked = !!req.decryptionKey;
 
-    // Decrypt sensitive fields
-    for (const field of sensitiveFields) {
-      if (isUnlocked && loan[field]) {
+    for (const f of sensitiveFields) {
+      if (isUnlocked && loan[f]) {
         try {
-          const decryptedVal = await decrypt(loan[field], req.decryptionKey);
-          decryptedLoan[field] =
-            decryptedVal !== "[Decryption Error]" &&
-            decryptedVal !== "[Wrong Key]" &&
-            decryptedVal !== "" &&
-            decryptedVal !== undefined
-              ? decryptedVal
-              : loan[field];
+          const d = await decrypt(loan[f], req.decryptionKey);
+          out[f] = d !== "[Decryption Error]" && d !== "[Wrong Key]" && d !== "" && d !== undefined ? d : loan[f];
         } catch {
-          decryptedLoan[field] = "[Decryption Error]";
+          out[f] = "[Decryption Error]";
         }
       }
     }
 
-    // Decrypt payment schedule fields
     if (loan.paymentSchedule && Array.isArray(loan.paymentSchedule)) {
-      decryptedLoan.paymentSchedule = await Promise.all(
+      out.paymentSchedule = await Promise.all(
         loan.paymentSchedule.map(async (entry) => {
-          const decryptedEntry = { ...entry };
-          for (const field of paymentScheduleSensitiveFields) {
-            if (isUnlocked && entry[field]) {
+          const d = { ...entry };
+          for (const f of paymentScheduleSensitiveFields) {
+            if (isUnlocked && entry[f]) {
               try {
-                const decryptedVal = await decrypt(entry[field], req.decryptionKey);
-                decryptedEntry[field] =
-                  decryptedVal !== "[Decryption Error]" &&
-                  decryptedVal !== "[Wrong Key]" &&
-                  decryptedVal !== "" &&
-                  decryptedVal !== undefined
-                    ? decryptedVal
-                    : entry[field];
+                const val = await decrypt(entry[f], req.decryptionKey);
+                d[f] = val !== "[Decryption Error]" && val !== "[Wrong Key]" && val !== "" && val !== undefined
+                  ? val
+                  : entry[f];
               } catch {
-                decryptedEntry[field] = "[Decryption Error]";
+                d[f] = "[Decryption Error]";
               }
             }
           }
-          return decryptedEntry;
+          return d;
         })
       );
     }
 
-    res.json(decryptedLoan);
+    res.json(out);
   } catch (err) {
     console.error("Error fetching loan:", err);
     res.status(500).json({ error: "Failed to fetch loan", details: err.message });
   }
 });
 
-// 5) Delete a loan
+// Delete a loan + recompute slips
 router.delete("/loan/:loanId", async (req, res) => {
   try {
     const { loanId } = req.params;
@@ -436,15 +456,11 @@ router.delete("/loan/:loanId", async (req, res) => {
     }
 
     const loan = await LoanDetail.findById(loanId);
-    if (!loan) {
-      return res.status(404).json({ error: "Loan not found" });
-    }
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
 
     const employeeId = loan.employee;
-
     await LoanDetail.deleteOne({ _id: loanId });
 
-    // Recompute after deletion (only existing slips), owner-scoped if available
     const ownerId = resolveOwnerId(req.user);
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
 
@@ -455,7 +471,7 @@ router.delete("/loan/:loanId", async (req, res) => {
   }
 });
 
-// 6) Loan benefits (calculation for a given month/year)
+// Loan benefits (kept consistent with schedule-first rule)
 router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -465,42 +481,35 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
       return res.status(400).json({ error: "monthYear query parameter is required" });
     }
 
-    // Example format: "July 2025"
-    const [monthName, yearStr] = monthYear.split(" ");
+    const [monthName, yearStr] = String(monthYear).split(" ");
     const year = parseInt(yearStr, 10);
-
     if (!monthName || !yearStr || Number.isNaN(year)) {
-      return res.status(400).json({
-        error: "Invalid monthYear format. Expected format like 'July 2025'",
-      });
+      return res.status(400).json({ error: "Invalid monthYear format. Expected 'July 2025'" });
     }
 
     const loans = await LoanDetail.find({ employee: employeeId }).lean();
+    const month = normMonth(monthName);
 
     const loanDetails = [];
     let totalLoanBenefits = 0;
     let totalLoanInstallments = 0;
 
     for (const loan of loans) {
-      if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) continue;
-
-      const entry = loan.paymentSchedule.find(
-        (ps) => ps.month === monthName && Number(ps.year) === year
-      );
-      if (!entry) continue;
+      const entry = Array.isArray(loan.paymentSchedule)
+        ? loan.paymentSchedule.find((ps) => normMonth(ps.month) === month && Number(ps.year) === year)
+        : null;
+      if (!entry) continue; // only count months that actually have a schedule row
 
       try {
         const markupAmount = entry.markupAmount
           ? parseFloat(await decrypt(entry.markupAmount, req.decryptionKey)) || 0
           : 0;
 
-        const monthlyInstallment = loan.monthlyInstallment
-          ? parseFloat(await decrypt(loan.monthlyInstallment, req.decryptionKey)) || 0
-          : 0;
-
-        let paymentAmount = monthlyInstallment;
-        if (loan.markupType === "custom" && entry.totalPayment) {
+        let paymentAmount = 0;
+        if (entry.totalPayment) {
           paymentAmount = parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) || 0;
+        } else if (loan.monthlyInstallment) {
+          paymentAmount = parseFloat(await decrypt(loan.monthlyInstallment, req.decryptionKey)) || 0;
         }
 
         const loanAmount = loan.loanAmount
@@ -531,7 +540,6 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
         totalLoanInstallments += paymentAmount;
       } catch (e) {
         console.error(`Decryption failed for loan ${loan._id}:`, e);
-        continue;
       }
     }
 
@@ -543,56 +551,47 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
     });
   } catch (err) {
     console.error("Error in loan-benefits:", err);
-    res.status(500).json({
-      error: "Failed to calculate benefits",
-      details: err.message,
-      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
-    });
+    res.status(500).json({ error: "Failed to calculate benefits", details: err.message });
   }
 });
 
-// 7) Update a specific installment in a loan's payment schedule
+// Update one installment + recompute slips for changed months
 router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
   try {
     const { loanId, installmentNo } = req.params;
     const { totalPayment } = req.body;
 
-    if (!Types.ObjectId.isValid(loanId)) {
-      return res.status(400).json({ error: "Invalid loan ID" });
-    }
-    if (!Number.isInteger(Number(installmentNo)) || Number(installmentNo) < 1) {
+    if (!Types.ObjectId.isValid(loanId)) return res.status(400).json({ error: "Invalid loan ID" });
+    if (!Number.isInteger(Number(installmentNo)) || Number(installmentNo) < 1)
       return res.status(400).json({ error: "Invalid installment number" });
-    }
-    if (typeof totalPayment !== "number" || totalPayment < 0) {
+    if (typeof totalPayment !== "number" || totalPayment < 0)
       return res.status(400).json({ error: "Invalid total payment amount" });
-    }
 
     const loan = await LoanDetail.findById(loanId);
-    if (!loan) {
-      return res.status(404).json({ error: "Loan not found" });
-    }
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
 
-    const installmentIndex = Number(installmentNo) - 1;
-    if (!loan.paymentSchedule || installmentIndex >= loan.paymentSchedule.length) {
+    const idx = Number(installmentNo) - 1;
+    if (!loan.paymentSchedule || idx >= loan.paymentSchedule.length)
       return res.status(400).json({ error: "Installment not found" });
-    }
 
-    // Recalculate the payment schedule
-    const { paymentSchedule, totalMarkup, totalToBePaid } = await recalculatePaymentSchedule(
-      loan,
-      installmentIndex,
-      totalPayment
-    );
+    const { paymentSchedule, totalMarkup, totalToBePaid } =
+      await recalculatePaymentSchedule(loan, idx, totalPayment);
 
-    // Update the loan with the new schedule and totals
     loan.paymentSchedule = paymentSchedule;
     loan.totalMarkup = totalMarkup;
     loan.totalToBePaid = totalToBePaid;
     await loan.save();
 
-    // Recompute salary slips
     const ownerId = resolveOwnerId(req.user);
-    await recomputeOtherLoansForExistingSlips(loan.employee, ownerId);
+    // Recompute affected months only (from edited row onward)
+    const changed = new Set();
+    for (let i = idx; i < loan.paymentSchedule.length; i++) {
+      changed.add(`${loan.paymentSchedule[i].month}-${loan.paymentSchedule[i].year}`);
+    }
+    for (const key of changed) {
+      const [m, y] = key.split("-");
+      await recomputeSingleMonthOtherLoans(loan.employee, m, Number(y), ownerId);
+    }
 
     res.json({ message: "Installment updated successfully", loan });
   } catch (err) {

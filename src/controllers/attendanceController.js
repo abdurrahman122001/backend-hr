@@ -6,8 +6,11 @@ const PayrollPeriod = require("../models/PayrollPeriod");
 const SalarySlip = require("../models/SalarySlip");
 const Attendance = require("../models/Attendance");
 const { decrypt, encrypt } = require("../utils/encryption");
-const { updateLeaveEntitlementForEmployee } = require("../utils/leaveEntitlement");
+const {
+  updateLeaveEntitlementForEmployee,
+} = require("../utils/leaveEntitlement");
 const Salaries = require("../models/Salaries");
+const LoanDetail = require("../models/LoanDetail");
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -24,8 +27,8 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
   return Employee.findOne({
     _id: oid(employeeId),
     $or: [
-      { owner: { $in: [ownerId, userId] } },   // legacy owner array
-      { createdBy: { $in: [ownerId, userId] } } // new creator scoping
+      { owner: { $in: [ownerId, userId] } }, // legacy owner array
+      { createdBy: { $in: [ownerId, userId] } }, // new creator scoping
     ],
   }).lean();
 }
@@ -75,7 +78,11 @@ exports.markAttendance = async (req, res) => {
     }
 
     // Guard: employee must belong to this tenant or be created by this user/tenant
-    const employee = await ensureEmployeeAccessible(employeeId, ownerId, userId);
+    const employee = await ensureEmployeeAccessible(
+      employeeId,
+      ownerId,
+      userId
+    );
     if (!employee) {
       return res
         .status(404)
@@ -114,7 +121,9 @@ exports.markAttendance = async (req, res) => {
     // If employee has multiple shifts, pick the first for period mapping (adjust if needed)
     const shiftId = employee.shifts?.[0];
     const payroll = allPayrolls.find(
-      (p) => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+      (p) =>
+        Array.isArray(p.shifts) &&
+        p.shifts.map(String).includes(String(shiftId))
     );
     if (!payroll) {
       return res.status(404).json({ error: "Payroll period not found." });
@@ -152,7 +161,9 @@ exports.markAttendance = async (req, res) => {
       if (payroll.payrollPeriodType === "weekly") length = 7;
       if (payroll.payrollPeriodType === "bimonthly") length = 15;
       if (payroll.payrollPeriodType === "10-days") length = 10;
-      const diff = Math.floor((attendanceDate - anchor) / (1000 * 60 * 60 * 24));
+      const diff = Math.floor(
+        (attendanceDate - anchor) / (1000 * 60 * 60 * 24)
+      );
       const cycles = Math.floor(diff / length);
       periodStart = new Date(anchor);
       periodStart.setDate(anchor.getDate() + cycles * length);
@@ -229,7 +240,9 @@ exports.markAttendance = async (req, res) => {
         if (slip.leaveDeductions) {
           prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
         }
-        const leaveDeduction = Math.round(perDay * result.unpaid + prevDeduction);
+        const leaveDeduction = Math.round(
+          perDay * result.unpaid + prevDeduction
+        );
         slip.leaveDeductions = await encrypt(leaveDeduction.toString());
         await slip.save();
       }
@@ -279,12 +292,74 @@ exports.markAttendance = async (req, res) => {
         if (slip.leaveDeductions) {
           prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
         }
-        const leaveDeduction = Math.round((perDay / 2) * result.unpaid + prevDeduction);
+        const leaveDeduction = Math.round(
+          (perDay / 2) * result.unpaid + prevDeduction
+        );
         slip.leaveDeductions = await encrypt(leaveDeduction.toString());
         await slip.save();
       }
     }
+    const monthName = payrollMonth; // e.g., "August"
+    const yearNum = Number(payrollYear); // e.g., 2025
 
+    // Get all loans for this employee
+    const loans = await LoanDetail.find({ employee: employeeId }).lean();
+
+    let totalLoanInstallments = 0; // to write into slip.loanDeductions.otherLoans
+    let totalLoanBenefits = 0; // optional: per-month markup sum
+
+    for (const loan of loans) {
+      if (!Array.isArray(loan.paymentSchedule)) continue;
+
+      // Only deduct if a schedule row exists for THIS (month, year)
+      const row = loan.paymentSchedule.find(
+        (ps) => ps?.month === monthName && Number(ps?.year) === yearNum
+      );
+      if (!row) continue; // ← prevents deductions before the loan starts
+
+      // Deduction: prefer the schedule row's totalPayment; fallback to loan.monthlyInstallment
+      let installmentAmount = 0;
+      if (row.totalPayment) {
+        installmentAmount = Number(await decrypt(row.totalPayment)) || 0;
+      } else if (loan.monthlyInstallment) {
+        installmentAmount = Number(await decrypt(loan.monthlyInstallment)) || 0;
+      }
+      totalLoanInstallments += installmentAmount;
+
+      // (Optional) “loan benefit” for the month = that row's markupAmount
+      if (row.markupAmount) {
+        const markupAmt = Number(await decrypt(row.markupAmount)) || 0;
+        totalLoanBenefits += markupAmt;
+      }
+    }
+
+    // Ensure nested object exists
+    if (!slip.loanDeductions) slip.loanDeductions = {};
+
+    // Write the loan deduction for this month
+    slip.loanDeductions.otherLoans = await encrypt(
+      String(totalLoanInstallments || 0)
+    );
+    slip.markModified("loanDeductions");
+
+    // OPTIONAL: add the month’s loan benefit to an allowance bucket.
+    // If you store it elsewhere, replace 'othersAllowances' below.
+    if (totalLoanBenefits > 0) {
+      const prev = slip.othersAllowances
+        ? Number(await decrypt(slip.othersAllowances)) || 0
+        : 0;
+      slip.othersAllowances = await encrypt(String(prev + totalLoanBenefits));
+    }
+
+    // Safe defaults for related fields
+    if (!slip.loanDeductions.vehicleLoan) {
+      slip.loanDeductions.vehicleLoan = await encrypt("0");
+    }
+    if (!slip.gratuityFundDeduction) {
+      slip.gratuityFundDeduction = await encrypt("0");
+    }
+
+    await slip.save();
     // 9) Respond with current attendance record
     res.json(rec);
   } catch (err) {
@@ -389,7 +464,9 @@ exports.getRecordsByEmployee = async (req, res) => {
     // guard: ensure employee belongs to tenant (new/legacy)
     const emp = await ensureEmployeeAccessible(id, ownerId, userId);
     if (!emp) {
-      return res.status(404).json({ error: "Employee not found or unauthorized" });
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
     }
 
     const records = await Attendance.find({
@@ -421,7 +498,9 @@ exports.getStatsByEmployee = async (req, res) => {
     // guard
     const emp = await ensureEmployeeAccessible(id, ownerId, userId);
     if (!emp) {
-      return res.status(404).json({ error: "Employee not found or unauthorized" });
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
     }
 
     const match = {
