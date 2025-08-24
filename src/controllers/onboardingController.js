@@ -87,15 +87,14 @@ module.exports = {
       }
 
       // ---- SHIFT HANDLING: always use an array ----
-let shiftArr = [];
-if (shift && typeof shift === "string" && shift.trim() !== "") {
-  shiftArr = [shift];
-} else if (Array.isArray(shifts) && shifts.length > 0) {
-  shiftArr = shifts;
-} else {
-  shiftArr = ["6849ac46fa83715da425e2b5"];
-}
-
+      let shiftArr = [];
+      if (shift && typeof shift === "string" && shift.trim() !== "") {
+        shiftArr = [shift];
+      } else if (Array.isArray(shifts) && shifts.length > 0) {
+        shiftArr = shifts;
+      } else {
+        shiftArr = ["6849ac46fa83715da425e2b5"];
+      }
 
       // --- Encrypt salary fields with await ---
       const encryptedSalary = {};
@@ -214,6 +213,7 @@ if (shift && typeof shift === "string" && shift.trim() !== "") {
       html = enforceImgCss(html);
 
       await sendEmail({
+        from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
         to: candidateEmail,
         subject,
         html,

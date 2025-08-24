@@ -1,11 +1,11 @@
 // services/mailService.js
-require('dotenv').config();
-const nodemailer = require('nodemailer');
+require("dotenv").config();
+const nodemailer = require("nodemailer");
 
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
   port: Number(process.env.MAIL_PORT),
-  secure: process.env.MAIL_PORT === '465',
+  secure: process.env.MAIL_PORT === "465", // true for 465, false for 587
   auth: {
     user: process.env.MAIL_USERNAME,
     pass: process.env.MAIL_PASSWORD,
@@ -13,18 +13,27 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false },
 });
 
-async function sendEmail({ to, subject, text, html, attachments }) {
+async function sendEmail({ from, to, subject, text, html, attachments }) {
   if (!to) {
-    throw new Error('No recipients defined');
+    throw new Error("No recipients defined");
   }
+
+  // ✅ Build proper "From" header
+  const fromAddress =
+    from ||
+    `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`;
+
   const mailOptions = {
-    from: process.env.MAIL_FROM || transporter.options.auth.user,
+    from: fromAddress,
     to,
     subject,
     text,
     html,
     attachments,
   };
+
+  console.log("[mailService] Sending email with From:", fromAddress);
+
   return transporter.sendMail(mailOptions);
 }
 
