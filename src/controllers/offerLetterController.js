@@ -283,7 +283,6 @@ async function generateOfferLetter(req, res) {
         <p>
           We're truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let's make great things happen together!
         </p>
-        <p>Regards,</p>
         ${signatureBlock}
       </div>
     `.trim();

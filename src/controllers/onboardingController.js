@@ -2,12 +2,13 @@
 require("dotenv").config();
 const Employee = require("../models/Employees");
 const Salaries = require("../models/Salaries");
+const CompanyProfile = require("../models/CompanyProfile"); // <-- fetch company name from here
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
 
-// Company info from ENV with fallbacks
-const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
+// ENV fallbacks (used only if CompanyProfile has no name)
+const COMPANY_NAME_FALLBACK = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
@@ -112,7 +113,7 @@ module.exports = {
         startDate,
         reportingTime,
         salaryBreakup = {},
-        shift, // may be a string (single shift id)
+        shift,      // may be a string (single shift id)
         shifts = [], // may be array (future)
       } = req.body;
 
@@ -131,6 +132,12 @@ module.exports = {
         return res.status(401).json({ error: "Unauthorized: owner not found" });
       }
       const ownerId = req.user._id;
+
+      // Pull company name from CompanyProfile (fallback to env)
+      const companyDoc = await CompanyProfile
+        .findOne({ owner: ownerId }, { name: 1 })
+        .lean();
+      const COMPANY_NAME = (companyDoc?.name || "").trim() || COMPANY_NAME_FALLBACK;
 
       // ---- SHIFT HANDLING: always use an array ----
       let shiftArr = [];
@@ -164,14 +171,14 @@ module.exports = {
       const employee = await Employee.findOneAndUpdate(
         { email: candidateEmail },
         {
-          owner: ownerId, // schema expects a single ObjectId
+          owner: ownerId,                 // schema expects a single ObjectId
           name: candidateName,
           email: candidateEmail,
           designation: position,
           department,
           joiningDate: startDate,
-          rt: normalizedRT, // <-- SAVE TO 'rt' FIELD HERE
-          salaryBreakup: salaryBreakup, // if your schema allows it
+          rt: normalizedRT,               // <-- SAVE TO 'rt' FIELD HERE
+          salaryBreakup: salaryBreakup,   // (if you store this ad-hoc view)
           shifts: shiftArr,
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -209,9 +216,7 @@ module.exports = {
           <div style="margin-top:32px;margin-bottom:12px;">
             ${
               signature.signatureImage
-                ? `<img src="${process.env.SERVER_URL || ""}${
-                    signature.signatureImage
-                  }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+                ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
                 : ""
             }
             <div style="text-align:left;">
