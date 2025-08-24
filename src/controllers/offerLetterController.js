@@ -89,6 +89,15 @@ function formatTime12hr(timeStr) {
   return `${hour}:${min.padStart(2, "0")} ${suffix}`;
 }
 
+// normalize to 24h HH:mm
+function normalizeTime(timeStr) {
+  if (!timeStr || typeof timeStr !== "string") return "";
+  const [hRaw = "", mRaw = ""] = timeStr.split(":");
+  const h = String(hRaw).padStart(2, "0");
+  const m = String(mRaw).padStart(2, "0");
+  return `${h}:${m}`;
+}
+
 function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
@@ -188,10 +197,14 @@ async function generateOfferLetter(req, res) {
         <p>Dear <strong>${candidateName}</strong>,</p>
         <p>We're thrilled to have you on board!</p>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${
+      company.name
+    }</b>.
         </p>
         <p>
-          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)}</b>, after successful completion of which your position will be confirmed as permanent.
+          Your appointment is subject to a <b>${probationDaysToMonths(
+            probationDays
+          )}</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
         <p>
           We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job it's a journey, and we're looking forward to seeing you thrive with us.
@@ -283,6 +296,7 @@ async function sendOfferLetter(req, res) {
     }
 
     const probationDaysNum = Number(probationDays) || 0;
+    const normalizedRT = normalizeTime(reportingTime);
 
     // Create employee; if on probation, initialize leaveEntitlement.total = 0
     let employee = await Employee.create({
@@ -293,6 +307,7 @@ async function sendOfferLetter(req, res) {
       department: department || null,
       owner: req.user?._id,
       createdBy: req.user?._id,
+      rt: normalizedRT, // <-- save here
       shifts: shift ? [shift] : undefined,
       ...(probationDaysNum > 0
         ? {
@@ -332,7 +347,7 @@ async function sendOfferLetter(req, res) {
       candidateEmail: await encrypt(candidateEmail),
       position: await encrypt(position),
       startDate: await encrypt(startDate),
-      reportingTime: await encrypt(reportingTime),
+      reportingTime: await encrypt(normalizedRT),   // <-- store normalized time
       confirmationDeadlineDate: await encrypt(confirmationDeadlineDate),
       grossSalary: await encrypt(grossSalaryRaw.toString()),
       owner: req.user?._id,

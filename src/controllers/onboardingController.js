@@ -1,9 +1,10 @@
+// controllers/onboardingController.js
 require("dotenv").config();
 const Employee = require("../models/Employees");
 const Salaries = require("../models/Salaries");
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
-const Signature = require("../models/Signature"); // add this to your requires
+const Signature = require("../models/Signature");
 
 // Company info from ENV with fallbacks
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -18,7 +19,7 @@ const SALARY_COMPONENTS = [
   "conveyanceAllowance",
   "medicalAllowance",
   "utilityAllowance",
-  "overtimeComp", // <-- make sure this matches the other controller
+  "overtimeComp", // keep in sync with the rest of backend
   "dislocationAllowance",
   "leaveEncashment",
   "bonus",
@@ -28,6 +29,15 @@ const SALARY_COMPONENTS = [
   "fuelAllowance",
   "othersAllowances",
 ];
+
+// Normalize a time string to HH:mm (zero-padded 24h)
+function normalizeTime(timeStr) {
+  if (!timeStr || typeof timeStr !== "string") return "";
+  const [hRaw = "", mRaw = ""] = timeStr.split(":");
+  const h = String(hRaw).padStart(2, "0");
+  const m = String(mRaw).padStart(2, "0");
+  return `${h}:${m}`;
+}
 
 // --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
 function enforceComicSans(html) {
@@ -64,8 +74,8 @@ module.exports = {
         startDate,
         reportingTime,
         salaryBreakup = {},
-        shift, // might be a string (single shift id)
-        shifts = [], // might be array (for future)
+        shift,      // may be a string (single shift id)
+        shifts = [], // may be array (future)
       } = req.body;
 
       if (
@@ -79,12 +89,10 @@ module.exports = {
         return res.status(400).json({ error: "Missing required fields." });
       }
 
-      let ownerId = null;
-      if (req.user && req.user._id) {
-        ownerId = req.user._id;
-      } else {
+      if (!req.user || !req.user._id) {
         return res.status(401).json({ error: "Unauthorized: owner not found" });
       }
+      const ownerId = req.user._id;
 
       // ---- SHIFT HANDLING: always use an array ----
       let shiftArr = [];
@@ -96,35 +104,37 @@ module.exports = {
         shiftArr = ["6849ac46fa83715da425e2b5"];
       }
 
-      // --- Encrypt salary fields with await ---
+      // Normalize reporting time (store as HH:mm) and map to Employee.rt
+      const normalizedRT = normalizeTime(reportingTime);
+
+      // --- Encrypt salary fields ---
       const encryptedSalary = {};
       for (let field of SALARY_COMPONENTS) {
-        let value = salaryBreakup[field] || 0;
+        const value = salaryBreakup[field] || 0;
         encryptedSalary[field] = await encrypt(String(value));
       }
 
       // Calculate gross salary and encrypt
       let grossSalaryRaw = 0;
       for (let field of SALARY_COMPONENTS) {
-        let val = salaryBreakup[field] || 0;
+        const val = salaryBreakup[field] || 0;
         grossSalaryRaw += Number(val || 0);
       }
-
       const encryptedGrossSalary = await encrypt(String(grossSalaryRaw));
 
       // Save/update employee
       const employee = await Employee.findOneAndUpdate(
         { email: candidateEmail },
         {
+          owner: ownerId,                 // schema expects a single ObjectId
           name: candidateName,
           email: candidateEmail,
           designation: position,
           department,
           joiningDate: startDate,
-          reportingTime,
-          salaryBreakup: salaryBreakup, // not encrypted, for quick ref on employee
-          shifts: shiftArr, // always array
-          owner: [ownerId],
+          rt: normalizedRT,               // <-- SAVE TO 'rt' FIELD HERE
+          salaryBreakup: salaryBreakup,   // (if you store this ad-hoc view)
+          shifts: shiftArr,
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
@@ -134,7 +144,7 @@ module.exports = {
       const monthName = baseDate.toLocaleString("en-US", { month: "long" }); // "July"
       const year = baseDate.getFullYear().toString();
 
-      // Save Salaries with encrypted fields
+      // Save Salaries with encrypted fields (keep your Salaries schema naming)
       const slipData = {
         employee: employee._id,
         candidateName: await encrypt(candidateName),
@@ -142,17 +152,19 @@ module.exports = {
         position: await encrypt(position),
         department: await encrypt(department),
         startDate: await encrypt(startDate),
-        reportingTime: await encrypt(reportingTime),
-        shifts: shiftArr, // always array
+        reportingTime: await encrypt(normalizedRT), // <-- store normalized time in Salaries too
+        shifts: shiftArr,
         ...encryptedSalary,
         grossSalary: encryptedGrossSalary,
         month: monthName,
         year: year,
-        owner: ownerId, // Fix: Include owner field
-        createdBy: ownerId, // Add createdBy for consistency with offerLetter.js
+        owner: ownerId,
+        createdBy: ownerId,
       };
 
       await Salaries.create(slipData);
+
+      // Signature (if available)
       const signature = await Signature.findOne({ owner: ownerId });
 
       let signatureBlock = "";
@@ -172,14 +184,15 @@ module.exports = {
         </div>
       `;
       }
-      // --- EMAIL HTML (Comic Sans, layout, logo, disclaimer, enforced CSS everywhere) ---
+
+      // --- EMAIL HTML ---
       const subject =
-        "🚀 Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
+        "Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
 
       let html = `
         <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
           <p>Dear <strong>${candidateName}</strong>,</p>
-          <p>Welcome to the beginning of something amazing! 🌟</p>
+          <p>Welcome to the beginning of something amazing!</p>
           <p>
             I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
             While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.
@@ -188,11 +201,11 @@ module.exports = {
             As the first step to complete your profile, please reply with the following documents:
           </p>
           <ul style="margin:0 0 1em 2em;padding:0;">
-            <li style="margin-bottom:4px;">✅ <strong>Copy of your CNIC</strong> (front & back, JPG or PNG format)</li>
-            <li style="margin-bottom:4px;">✅ <strong>Your latest CV/Resume</strong> (PDF)</li>
+            <li style="margin-bottom:4px;"> <strong>Copy of your CNIC</strong> (front & back, JPG or PNG format)</li>
+            <li style="margin-bottom:4px;"> <strong>Your latest CV/Resume</strong> (PDF)</li>
           </ul>
           <p>
-            <em>🎯 Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em>
+            <em>Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em>
           </p>
           <p>
             The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!
@@ -203,13 +216,11 @@ module.exports = {
           <p>
             Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
           </p>
-                ${signatureBlock}
+          ${signatureBlock}
         </div>
       `;
 
-      // Enforce Comic Sans everywhere except disclaimer block
       html = enforceComicSans(html);
-      // Enforce <img> CSS everywhere
       html = enforceImgCss(html);
 
       await sendEmail({
