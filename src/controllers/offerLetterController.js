@@ -1,3 +1,4 @@
+// controllers/offerLetterController.js
 const mongoose = require("mongoose");
 const CompanyProfile = require("../models/CompanyProfile");
 const Salaries = require("../models/Salaries");
@@ -10,7 +11,7 @@ require("dotenv").config();
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
   port: Number(process.env.MAIL_PORT),
-  secure: process.env.MAIL_PORT === "465",
+  secure: Number(process.env.MAIL_PORT) === 465,
   auth: {
     user: process.env.MAIL_USERNAME,
     pass: process.env.MAIL_PASSWORD,
@@ -41,23 +42,77 @@ const SALARY_COMPONENTS = [
   "othersAllowances",
 ];
 
-// --- Helper: Enforce Comic Sans ---
+// --- Helper: force Comic Sans on blocks (NO margin changes on <p>) ---
+// --- Helper: Force Comic Sans + HARD margin:0 on <p> across clients ---
 function enforceComicSans(html) {
-  const fontStyle =
-    "font-family: 'Comic Sans MS', Comic Sans, cursive, sans-serif;";
-  return html
-    .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
-    .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
-    .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
-    .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
-    .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
+  const family =
+    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
+  // Works better across Gmail/Outlook: include margin-block and MSO fallbacks
+  const pRequired = [
+    "margin:0 !important",
+    "margin-block-start:0",
+    "margin-block-end:0",
+    "mso-margin-top-alt:0",
+    "mso-margin-bottom-alt:0",
+    "mso-line-height-rule:exactly",
+    family,
+  ].join("; ");
+
+  // Normalize <p> …> style
+  html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
+    // If style exists, rewrite it
+    if (/style\s*=/.test(attrs)) {
+      const newAttrs = attrs.replace(/style\s*=\s*"([^"]*)"/i, (_m, style) => {
+        let cleaned = style
+          // strip any margin-related declarations
+          .replace(/(^|;)\s*margin[^;]*;?/gi, "")
+          .replace(/(^|;)\s*margin-block-(start|end)\s*:[^;]*;?/gi, "")
+          // strip font-family + old MSO margin hints
+          .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/(^|;)\s*mso-[^;]*;?/gi, "")
+          // tidy ; ;
+          .replace(/;;+/g, ";")
+          .replace(/^\s*;|;\s*$/g, "");
+        return `style="${pRequired}${cleaned ? "; " + cleaned : ""}"`;
+      });
+      // Ensure there is a leading space before remaining attrs
+      const spaced = newAttrs.trim().length ? " " + newAttrs.trim() : "";
+      return `<p${spaced}>`;
+    }
+    // No style attr: inject one
+    const spaced = attrs.trim().length ? " " + attrs.trim() : "";
+    return `<p style="${pRequired}"${spaced}>`;
+  });
+
+  // Apply Comic Sans to ul/ol/li/div (preserve their margins)
+  const addFamily = (tag) => {
+    // with existing style
+    html = html.replace(
+      new RegExp(`<${tag}\\b([^>]*)style="([^"]*)"([^>]*)>`, "gi"),
+      (full, pre, style, post) => {
+        const cleaned = style
+          .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/;;+/g, ";")
+          .replace(/^\s*;|;\s*$/g, "");
+        return `<${tag}${pre}style="${family}${cleaned ? " " + cleaned : ""}"${post}>`;
+      }
+    );
+    // without style
+    html = html.replace(
+      new RegExp(`<${tag}\\b(?![^>]*\\bstyle=)([^>]*)>`, "gi"),
+      `<${tag} style="${family}"$1>`
+    );
+  };
+  ["ul", "ol", "li", "div"].forEach(addFamily);
+
+  return html;
 }
 
 // --- Helper: Enforce <img> CSS ---
 function enforceImgCss(html) {
-  html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
+  html = html.replace(/<img([^>]*?)style="[^"]*"/gi, `<img$1`);
   html = html.replace(
-    /<img([^>]*?)\/?>/g,
+    /<img([^>]*?)\/?>/gi,
     `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
   );
   return html;
@@ -106,9 +161,7 @@ function probationDaysToMonths(probationDays) {
   const days = Number(probationDays) || 0;
   if (!days) return "";
   const months = Math.round(days / 30);
-  return months > 0
-    ? `${months} month${months > 1 ? "s" : ""}`
-    : `${days} days`;
+  return months > 0 ? `${months} month${months > 1 ? "s" : ""}` : `${days} days`;
 }
 
 // --- Generate Offer Letter ---
@@ -180,9 +233,7 @@ async function generateOfferLetter(req, res) {
         <div style="margin-top:32px;margin-bottom:12px;">
           ${
             signature.signatureImage
-              ? `<img src="${process.env.SERVER_URL || ""}${
-                  signature.signatureImage
-                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
               : ""
           }
           <div style="text-align:left;">
@@ -192,26 +243,31 @@ async function generateOfferLetter(req, res) {
       `;
     }
 
+    // Container has no margin reset on <p>; we keep default paragraph margins
     let bodyHtml = `
-      <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
+      <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; padding:0; max-width:600px;">
         <p>Dear <strong>${candidateName}</strong>,</p>
+        <br>
         <p>We're thrilled to have you on board!</p>
+        <br>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${
-      company.name
-    }</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
         </p>
+        <br>
         <p>
-          Your appointment is subject to a <b>${probationDaysToMonths(
-            probationDays
-          )}</b>, after successful completion of which your position will be confirmed as permanent.
+          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)}</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
+        <br>
         <p>
-          We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job it's a journey, and we're looking forward to seeing you thrive with us.
+          We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job—it's a journey, and we're looking forward to seeing you thrive with us.
         </p>
+        <br>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
+        <br>
         <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
-        <p>In this role, you'll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
+        <br>
+        <p>In this role, you'll be working 45 hours per week, from Monday to Friday—a full week of opportunities to grow, collaborate, and contribute.</p>
+        <br>
         <p>
           To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:
         </p>
@@ -223,12 +279,11 @@ async function generateOfferLetter(req, res) {
         <p>
           By accepting this offer, you also agree to the terms set forth in our Employment Contract and Non-Disclosure Agreement (NDA), which we will share with you separately.
         </p>
+        <br>
         <p>
           We're truly excited to have you join us. Your future teammates are just as eager to welcome you, support you, and learn from you as you are to begin this new chapter. Let's make great things happen together!
         </p>
-        <p style="margin-top:12px">
-          Regards,
-        </p>
+        <p>Regards,</p>
         ${signatureBlock}
       </div>
     `.trim();
@@ -268,7 +323,7 @@ async function sendOfferLetter(req, res) {
       confirmationDeadlineDate,
       department,
       shift,
-      probationDays, // from frontend
+      probationDays,
     } = req.body;
 
     const candidate = candidateName || "Candidate";
@@ -307,7 +362,7 @@ async function sendOfferLetter(req, res) {
       department: department || null,
       owner: req.user?._id,
       createdBy: req.user?._id,
-      rt: normalizedRT, // <-- save here
+      rt: normalizedRT,
       shifts: shift ? [shift] : undefined,
       ...(probationDaysNum > 0
         ? {
@@ -320,7 +375,6 @@ async function sendOfferLetter(req, res) {
         : {}),
     });
 
-    // Extra safety: enforce total=0 after creation (handles schema defaults/middleware overwriting)
     if (probationDaysNum > 0) {
       await Employee.updateOne(
         { _id: employee._id },
@@ -347,18 +401,18 @@ async function sendOfferLetter(req, res) {
       candidateEmail: await encrypt(candidateEmail),
       position: await encrypt(position),
       startDate: await encrypt(startDate),
-      reportingTime: await encrypt(normalizedRT),   // <-- store normalized time
+      reportingTime: await encrypt(normalizedRT),
       confirmationDeadlineDate: await encrypt(confirmationDeadlineDate),
       grossSalary: await encrypt(grossSalaryRaw.toString()),
       owner: req.user?._id,
       createdBy: req.user?._id,
       ...encryptedSalaryBreakup,
-      probationDays: await encrypt(probationDaysNum.toString()),
+      probationDays: await encrypt((Number(probationDays) || 0).toString()),
     };
 
     await Salaries.create(slipData);
 
-    let html = enforceComicSans(letter);
+    let html = enforceComicSans(letter); // Comic Sans only; no margin resets on <p>
     html = enforceImgCss(html);
     const text = html.replace(/<[^>]+>/g, " ");
 

@@ -39,25 +39,63 @@ function normalizeTime(timeStr) {
   return `${h}:${m}`;
 }
 
-// --- Helper: Enforce Comic Sans everywhere except disclaimer block ---
+// --- Helper: Force Comic Sans + margin:0 on <p> (safe, no duplicate style attrs) ---
 function enforceComicSans(html) {
-  const fontStyle =
+  const family =
     "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
-  return html
-    .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
-    .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
-    .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
-    .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
-    .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
+  const pRequired = `margin:0 !important; ${family}`;
+
+  // 1) <p> tags — ensure margin:0 !important + Comic Sans, without duplicate style=""
+  html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
+    if (/style\s*=/.test(attrs)) {
+      // rewrite existing style: remove margin* and font-family, then prepend ours
+      const newAttrs = attrs.replace(/style\s*=\s*"([^"]*)"/i, (_m, style) => {
+        let cleaned = style
+          .replace(/(^|;)\s*margin[^;]*;?/gi, "")
+          .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/;;+/g, ";")
+          .replace(/^\s*;|;\s*$/g, "");
+        return `style="${pRequired}${cleaned ? "; " + cleaned : ""}"`;
+      });
+      return `<p${newAttrs}>`;
+    }
+    // no style attribute -> inject one
+    return `<p style="${pRequired}"${attrs}>`;
+  });
+
+  // 2) Other blocks (ul/ol/li/div) — apply Comic Sans, keep their margins intact
+  const tags = ["ul", "ol", "li", "div"];
+  for (const tag of tags) {
+    // if style exists: strip any font-family and prepend ours
+    html = html.replace(
+      new RegExp(`<${tag}\\b([^>]*)style="([^"]*)"([^>]*)>`, "gi"),
+      (full, pre, style, post) => {
+        const cleaned = style
+          .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/;;+/g, ";")
+          .replace(/^\s*;|;\s*$/g, "");
+        return `<${tag}${pre}style="${family}${
+          cleaned ? " " + cleaned : ""
+        }"${post}>`;
+      }
+    );
+    // if no style exists: add one
+    html = html.replace(
+      new RegExp(`<${tag}\\b(?![^>]*\\bstyle=)([^>]*)>`, "gi"),
+      `<${tag} style="${family}"$1>`
+    );
+  }
+
+  return html;
 }
 
 // --- Helper: Enforce <img> CSS everywhere ---
 function enforceImgCss(html) {
   // Remove any existing style attr on <img>
-  html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
+  html = html.replace(/<img([^>]*?)style="[^"]*"/gi, `<img$1`);
   // Add our enforced style
   html = html.replace(
-    /<img([^>]*?)\/?>/g,
+    /<img([^>]*?)\/?>/gi,
     `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
   );
   return html;
@@ -74,7 +112,7 @@ module.exports = {
         startDate,
         reportingTime,
         salaryBreakup = {},
-        shift,      // may be a string (single shift id)
+        shift, // may be a string (single shift id)
         shifts = [], // may be array (future)
       } = req.body;
 
@@ -126,25 +164,25 @@ module.exports = {
       const employee = await Employee.findOneAndUpdate(
         { email: candidateEmail },
         {
-          owner: ownerId,                 // schema expects a single ObjectId
+          owner: ownerId, // schema expects a single ObjectId
           name: candidateName,
           email: candidateEmail,
           designation: position,
           department,
           joiningDate: startDate,
-          rt: normalizedRT,               // <-- SAVE TO 'rt' FIELD HERE
-          salaryBreakup: salaryBreakup,   // (if you store this ad-hoc view)
+          rt: normalizedRT, // <-- SAVE TO 'rt' FIELD HERE
+          salaryBreakup: salaryBreakup, // if your schema allows it
           shifts: shiftArr,
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
 
-      // Use startDate (employee joining date) or today if not available
+      // Month/Year for salary entry
       const baseDate = startDate ? new Date(startDate) : new Date();
-      const monthName = baseDate.toLocaleString("en-US", { month: "long" }); // "July"
+      const monthName = baseDate.toLocaleString("en-US", { month: "long" });
       const year = baseDate.getFullYear().toString();
 
-      // Save Salaries with encrypted fields (keep your Salaries schema naming)
+      // Create salary record
       const slipData = {
         employee: employee._id,
         candidateName: await encrypt(candidateName),
@@ -152,37 +190,35 @@ module.exports = {
         position: await encrypt(position),
         department: await encrypt(department),
         startDate: await encrypt(startDate),
-        reportingTime: await encrypt(normalizedRT), // <-- store normalized time in Salaries too
+        reportingTime: await encrypt(normalizedRT), // store normalized time
         shifts: shiftArr,
         ...encryptedSalary,
         grossSalary: encryptedGrossSalary,
         month: monthName,
-        year: year,
+        year,
         owner: ownerId,
         createdBy: ownerId,
       };
-
       await Salaries.create(slipData);
 
       // Signature (if available)
       const signature = await Signature.findOne({ owner: ownerId });
-
       let signatureBlock = "";
       if (signature) {
         signatureBlock = `
-        <div style="margin-top:32px;margin-bottom:12px;">
-          ${
-            signature.signatureImage
-              ? `<img src="${process.env.SERVER_URL || ""}${
-                  signature.signatureImage
-                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-              : ""
-          }
-          <div style="text-align:left;">
-            ${signature.signatureText}
+          <div style="margin-top:32px;margin-bottom:12px;">
+            ${
+              signature.signatureImage
+                ? `<img src="${process.env.SERVER_URL || ""}${
+                    signature.signatureImage
+                  }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+                : ""
+            }
+            <div style="text-align:left;">
+              ${signature.signatureText}
+            </div>
           </div>
-        </div>
-      `;
+        `;
       }
 
       // --- EMAIL HTML ---
@@ -190,39 +226,36 @@ module.exports = {
         "Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
 
       let html = `
-        <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; margin:0; padding:0; max-width:600px;">
+        <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 13px; color: #212121; text-align: left; margin:0; padding:0">
           <p>Dear <strong>${candidateName}</strong>,</p>
+          <br>
           <p>Welcome to the beginning of something amazing!</p>
-          <p>
-            I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!<br/>
-            While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.
-          </p>
-          <p>
-            As the first step to complete your profile, please reply with the following documents:
-          </p>
-          <ul style="margin:0 0 1em 2em;padding:0;">
-            <li style="margin-bottom:4px;"> <strong>Copy of your CNIC</strong> (front & back, JPG or PNG format)</li>
-            <li style="margin-bottom:4px;"> <strong>Your latest CV/Resume</strong> (PDF)</li>
+          <br>
+          <p>I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!</p>
+          <br>
+          <p>While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.</p>
+          <br>
+          <p>As the first step to complete your profile, please reply with the following documents:</p>
+          <ul style="margin:2em 0;padding:0;">
+            <li style="margin-bottom:4px;"><strong>Copy of your CNIC</strong> (front & back, JPG or PNG format)</li>
+            <li style="margin-bottom:4px;"><strong>Your latest CV/Resume</strong> (PDF)</li>
           </ul>
-          <p>
-            <em>Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em>
-          </p>
-          <p>
-            The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!
-          </p>
-          <p>
-            If you have any questions or feel stuck, I'm just a message away.
-          </p>
-          <p>
-            Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!
-          </p>
+          <p><em>Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em></p>
+          <br>
+          <p>The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!</p>
+          <br>
+          <p>If you have any questions or feel stuck, I'm just a message away.</p>
+          <br>
+          <p>Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!</p>
           ${signatureBlock}
         </div>
       `;
 
+      // Enforce styles
       html = enforceComicSans(html);
       html = enforceImgCss(html);
 
+      // Send email with explicit From header
       await sendEmail({
         from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
         to: candidateEmail,
