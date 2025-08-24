@@ -213,7 +213,8 @@ module.exports = {
       let signatureBlock = "";
       if (signature) {
         signatureBlock = `
-          <div style="margin-top:32px;margin-bottom:12px;">
+          <div>
+          <br>
             ${
               signature.signatureImage
                 ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`

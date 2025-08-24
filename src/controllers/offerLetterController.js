@@ -8,6 +8,7 @@ const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
 require("dotenv").config();
 
+/* ----------------------------- Mail Transport ----------------------------- */
 const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
   port: Number(process.env.MAIL_PORT),
@@ -19,11 +20,16 @@ const transporter = nodemailer.createTransport({
   tls: { rejectUnauthorized: false },
 });
 
-const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
-const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "HR@mavensadvisor.com";
-const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
-const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
+/* ----------------------------- Env Fallbacks ------------------------------ */
+const FALLBACKS = {
+  name: process.env.COMPANY_NAME || "Mavens Advisors",
+  email: process.env.COMPANY_EMAIL || "HR@mavensadvisor.com",
+  phone: process.env.COMPANY_CONTACT || "+92 312 3850846",
+  website: process.env.COMPANY_WEBSITE || "www.mavensadvisor.com",
+  address: "GULSHAN-E-MAYMAR, KARACHI",
+};
 
+/* ------------------------------ Salary Fields ----------------------------- */
 const SALARY_COMPONENTS = [
   "basic",
   "dearnessAllowance",
@@ -42,7 +48,30 @@ const SALARY_COMPONENTS = [
   "othersAllowances",
 ];
 
-// --- Helper: force Comic Sans on blocks (NO margin changes on <p>) ---
+/* ----------------------------- Helper: Company ---------------------------- */
+async function getCompanyContext(ownerId) {
+  let companyDoc = null;
+  try {
+    companyDoc = await CompanyProfile.findOne(
+      { owner: ownerId },
+      { name: 1, email: 1, phone: 1, website: 1, address: 1 }
+    ).lean();
+  } catch (_) {
+    // ignore and fall back
+  }
+  const name = (companyDoc?.name || "").trim() || FALLBACKS.name;
+  const email = (companyDoc?.email || "").trim() || FALLBACKS.email;
+  const phone = (companyDoc?.phone || "").trim() || FALLBACKS.phone;
+  const website = (companyDoc?.website || "").trim() || FALLBACKS.website;
+  const address =
+    (companyDoc?.address && String(companyDoc.address).trim()) ||
+    FALLBACKS.address;
+
+  return { name, email, phone, website, address };
+}
+
+/* ----------------------------- Helper: Styles ----------------------------- */
+// Enforce Comic Sans on common blocks WITHOUT altering paragraph margins.
 // --- Helper: Force Comic Sans + HARD margin:0 on <p> across clients ---
 function enforceComicSans(html) {
   const family =
@@ -107,18 +136,17 @@ function enforceComicSans(html) {
 
   return html;
 }
-
-// --- Helper: Enforce <img> CSS ---
 function enforceImgCss(html) {
+  // Remove any existing style attr on <img>
   html = html.replace(/<img([^>]*?)style="[^"]*"/gi, `<img$1`);
+  // Add our enforced style
   html = html.replace(
     /<img([^>]*?)\/?>/gi,
     `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
   );
   return html;
 }
-
-// --- Formatting Helpers ---
+/* --------------------------- Helper: Formatting --------------------------- */
 function formatDateDMY(dateInput) {
   if (!dateInput) return "";
   const dateObj = new Date(dateInput);
@@ -164,7 +192,7 @@ function probationDaysToMonths(probationDays) {
   return months > 0 ? `${months} month${months > 1 ? "s" : ""}` : `${days} days`;
 }
 
-// --- Generate Offer Letter ---
+/* ------------------------ Controller: Generate Letter --------------------- */
 async function generateOfferLetter(req, res) {
   try {
     const {
@@ -208,14 +236,8 @@ async function generateOfferLetter(req, res) {
     if (!(ownerId instanceof mongoose.Types.ObjectId)) {
       ownerId = new mongoose.Types.ObjectId(ownerId);
     }
-    const company = await CompanyProfile.findOne({ owner: ownerId });
-    if (!company) {
-      return res.status(404).json({ error: "Company profile not found." });
-    }
-    let address = company.address;
-    if (!address || typeof address !== "string" || !address.trim()) {
-      address = "GULSHAN-E-MAYMAR, KARACHI";
-    }
+
+    const companyCtx = await getCompanyContext(ownerId);
 
     const formattedStartDate = formatDateDMY(startDate);
     const formattedDeadline = formatDateDMY(confirmationDeadlineDate);
@@ -243,7 +265,7 @@ async function generateOfferLetter(req, res) {
       `;
     }
 
-    // Container has no margin reset on <p>; we keep default paragraph margins
+    // Keep natural paragraph margins; Comic Sans is enforced later
     let bodyHtml = `
       <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; padding:0; max-width:600px;">
         <p>Dear <strong>${candidateName}</strong>,</p>
@@ -251,11 +273,13 @@ async function generateOfferLetter(req, res) {
         <p>We're thrilled to have you on board!</p>
         <br>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${company.name}</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.
         </p>
         <br>
         <p>
-          Your appointment is subject to a <b>${probationDaysToMonths(probationDays)}</b>, after successful completion of which your position will be confirmed as permanent.
+          Your appointment is subject to a <b>${probationDaysToMonths(
+            probationDays
+          )}</b>, after successful completion of which your position will be confirmed as permanent.
         </p>
         <br>
         <p>
@@ -264,7 +288,7 @@ async function generateOfferLetter(req, res) {
         <br>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
         <br>
-        <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${address}</b> by <b>${formattedTime}</b>.</p>
+        <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${companyCtx.address}</b> by <b>${formattedTime}</b>.</p>
         <br>
         <p>In this role, you'll be working 45 hours per week, from Monday to Friday—a full week of opportunities to grow, collaborate, and contribute.</p>
         <br>
@@ -287,7 +311,7 @@ async function generateOfferLetter(req, res) {
       </div>
     `.trim();
 
-    bodyHtml = enforceComicSans(bodyHtml);
+    bodyHtml = enforceComicSans(bodyHtml); // font only, keep paragraph margins
     bodyHtml = enforceImgCss(bodyHtml);
 
     return res.json({
@@ -301,6 +325,8 @@ async function generateOfferLetter(req, res) {
       reportingTime,
       confirmationDeadlineDate,
       department,
+      // (Optional) expose company context if frontend wants to show it
+      company: companyCtx,
     });
   } catch (err) {
     console.error("Offer gen error:", err);
@@ -308,7 +334,7 @@ async function generateOfferLetter(req, res) {
   }
 }
 
-// --- Send Offer Letter ---
+/* -------------------------- Controller: Send Letter ----------------------- */
 async function sendOfferLetter(req, res) {
   try {
     const {
@@ -349,18 +375,24 @@ async function sendOfferLetter(req, res) {
       });
     }
 
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: "No user context found." });
+    }
+    const ownerId = req.user._id;
+    const companyCtx = await getCompanyContext(ownerId);
+
     const probationDaysNum = Number(probationDays) || 0;
     const normalizedRT = normalizeTime(reportingTime);
 
-    // Create employee; if on probation, initialize leaveEntitlement.total = 0
+    // Create employee (probation -> 0 total leave)
     let employee = await Employee.create({
       name: candidate,
       email: candidateEmail,
       designation: position,
       joiningDate: startDate,
       department: department || null,
-      owner: req.user?._id,
-      createdBy: req.user?._id,
+      owner: ownerId,
+      createdBy: ownerId,
       rt: normalizedRT,
       shifts: shift ? [shift] : undefined,
       ...(probationDaysNum > 0
@@ -387,6 +419,7 @@ async function sendOfferLetter(req, res) {
       (sum, k) => sum + (Number(salaryBreakup[k]) || 0),
       0
     );
+
     const encryptedSalaryFields = await Promise.all(
       SALARY_COMPONENTS.map(async (k) => ({
         [k]: await encrypt((salaryBreakup[k] || 0).toString()),
@@ -403,22 +436,23 @@ async function sendOfferLetter(req, res) {
       reportingTime: await encrypt(normalizedRT),
       confirmationDeadlineDate: await encrypt(confirmationDeadlineDate),
       grossSalary: await encrypt(grossSalaryRaw.toString()),
-      owner: req.user?._id,
-      createdBy: req.user?._id,
+      owner: ownerId,
+      createdBy: ownerId,
       ...encryptedSalaryBreakup,
       probationDays: await encrypt((Number(probationDays) || 0).toString()),
     };
 
     await Salaries.create(slipData);
 
-    let html = enforceComicSans(letter); // Comic Sans only; no margin resets on <p>
+    // Apply Comic Sans & image CSS to the provided letter (do NOT change <p> margins)
+    let html = enforceComicSans(letter);
     html = enforceImgCss(html);
     const text = html.replace(/<[^>]+>/g, " ");
 
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: candidateEmail,
-      subject: "Welcome Aboard – Offer of Employment",
+      subject: `Welcome Aboard – Offer of Employment at ${companyCtx.name}`,
       text,
       html,
     });
