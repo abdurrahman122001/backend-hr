@@ -5,45 +5,29 @@ const { encrypt, decrypt } = require('../utils/encryption');
 
 exports.getEmployeeAndSalarySlip = async (req, res) => {
   try {
-    // Validate employee ID
     if (!req.params.id || !req.params.id.match(/^[0-9a-fA-F]{24}$/)) {
       return res.status(400).json({ error: "Invalid employee ID format" });
     }
 
-    // Fetch employee
     const employee = await Employee.findById(req.params.id);
     if (!employee) {
       return res.status(404).json({ error: "Employee not found" });
     }
 
-    // Fetch single salary slip for the employee
     const salarySlip = await SalarySlip.findOne({ employee: req.params.id });
 
-    // Fetch shifts by owner (employee.owner)
+    // fetch shifts
     let shifts = [];
     if (employee.owner) {
-      shifts = await Shift.find({ owner: employee.owner }).select('_id name start end timezone');
+      shifts = await Shift.find({ owner: employee.owner })
+        .select("_id name start end timezone");
     }
 
-    // Prepare employee object with defaults for all required fields
     let employeeObj = employee.toObject ? employee.toObject() : employee;
 
-    // Fill missing main fields
-    const requiredEmployeeFields = [
-      "cnic", "companyEmail", "email", "photographUrl",
-      "department", "designation", "joiningDate", "shifts"
-    ];
-    for (const key of requiredEmployeeFields) {
-      if (employeeObj[key] === undefined || employeeObj[key] === null) {
-        employeeObj[key] = key === "shifts" ? [] : "";
-      }
-    }
-
-    // Ensure nested objects exist and have defaults
+    // --- keep only defaults for nested objects (safe) ---
     employeeObj.compensation = employeeObj.compensation ?? {};
     employeeObj.providentFund = employeeObj.providentFund ?? {};
-
-    // For leaveEntitlement
     employeeObj.leaveEntitlement = {
       total: employeeObj.leaveEntitlement?.total ?? 0,
       usedPaid: employeeObj.leaveEntitlement?.usedPaid ?? 0,
@@ -51,13 +35,13 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       manuallySet: !!employeeObj.leaveEntitlement?.manuallySet,
     };
 
-    // Add required fields for compensation if missing
+    // compensation numeric fields
     const compFields = [
-      'basic', 'dearnessAllowance', 'houseRentAllowance',
-      'conveyanceAllowance', 'medicalAllowance', 'utilityAllowance',
-      'overtimeCompensation', 'dislocationAllowance', 'leaveEncashment',
-      'bonus', 'arrears', 'autoAllowance', 'incentive',
-      'fuelAllowance', 'othersAllowances', 'grossSalary'
+      "basic", "dearnessAllowance", "houseRentAllowance",
+      "conveyanceAllowance", "medicalAllowance", "utilityAllowance",
+      "overtimeCompensation", "dislocationAllowance", "leaveEncashment",
+      "bonus", "arrears", "autoAllowance", "incentive",
+      "fuelAllowance", "othersAllowances", "grossSalary"
     ];
     for (const field of compFields) {
       if (employeeObj.compensation[field] === undefined || employeeObj.compensation[field] === null) {
@@ -65,18 +49,21 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       }
     }
 
-    // For providentFund
     employeeObj.providentFund.override = !!employeeObj.providentFund.override;
 
-    // Decrypt salary slip fields if available, ensure all fields present
+    // salary slip
     let decryptedSalarySlip = salarySlip ? { ...salarySlip.toObject() } : {};
     if (salarySlip) {
       for (const field of compFields) {
         if (decryptedSalarySlip[field]) {
           try {
-            // Await the async decrypt function, pass key from query if present
-            const decryptedValue = await decrypt(decryptedSalarySlip[field], req.query.key);
-            decryptedSalarySlip[field] = isNaN(Number(decryptedValue)) ? 0 : Number(decryptedValue);
+            const decryptedValue = await decrypt(
+              decryptedSalarySlip[field],
+              req.query.key
+            );
+            decryptedSalarySlip[field] = isNaN(Number(decryptedValue))
+              ? 0
+              : Number(decryptedValue);
           } catch (err) {
             console.warn(`Failed to decrypt ${field}:`, err);
             decryptedSalarySlip[field] = 0;
@@ -85,20 +72,18 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
           decryptedSalarySlip[field] = 0;
         }
       }
-      // Set non-numeric fields
       decryptedSalarySlip.isActive = decryptedSalarySlip.isActive ?? true;
     } else {
-      // Provide default salary slip if none exists
       decryptedSalarySlip = {
-        candidateName: employeeObj.name || '',
-        candidateEmail: employeeObj.email || '',
-        position: employeeObj.designation || '',
-        department: employeeObj.department || '',
-        startDate: employeeObj.joiningDate || '',
-        reportingTime: employeeObj.rt || '',
+        candidateName: employeeObj.name || "",
+        candidateEmail: employeeObj.email || "",
+        position: employeeObj.designation || "",
+        department: employeeObj.department || "",
+        startDate: employeeObj.joiningDate || "",
+        reportingTime: employeeObj.rt || "",
         month: new Date().toLocaleString("en-US", { month: "long" }),
         year: new Date().getFullYear().toString(),
-        isActive: true
+        isActive: true,
       };
       for (const field of compFields) {
         decryptedSalarySlip[field] = 0;
@@ -111,13 +96,14 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       shifts,
     });
   } catch (err) {
-    console.error('Error in getEmployeeAndSalarySlip:', err);
-    res.status(500).json({ 
-      error: 'Internal server error', 
-      details: err.message 
+    console.error("Error in getEmployeeAndSalarySlip:", err);
+    res.status(500).json({
+      error: "Internal server error",
+      details: err.message,
     });
   }
 };
+
 
 exports.updateEmployeeAndSalarySlip = async (req, res) => {
   try {
