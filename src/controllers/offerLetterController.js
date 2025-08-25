@@ -283,7 +283,7 @@ async function generateOfferLetter(req, res) {
         </p>
         <br>
         <p>
-          We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job—it's a journey, and we're looking forward to seeing you thrive with us.
+          We believe you will be a valuable addition to our growing team, and we're excited about what we can build together. This isn't just a job it's a journey, and we're looking forward to seeing you thrive with us.
         </p>
         <br>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
