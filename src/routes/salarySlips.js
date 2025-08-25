@@ -53,36 +53,57 @@ router.get('/', requireAuth, async (req, res) => {
   try {
     const { employee, month, year } = req.query;
     let query = {};
-
     if (employee) query.employee = employee;
 
-    // --- Filtering by month name + year ---
+    // --- Filtering by month name + year (preferred for your schema) ---
+    // Accepts ?month=July&year=2024
     if (month && year) {
       query.month = month; // e.g. "July"
-      query.year = year;   // e.g. "2024"
+      query.year = year;   // e.g. "2024" (string or number, match your schema)
     }
-    // --- Backward compatibility: also accept YYYY-MM ---
+    // --- (Optional) Backward compatibility: also accept ?month=2024-07 ---
     else if (month && month.includes('-')) {
       const [yearNum, monNum] = month.split('-').map(Number);
       if (isNaN(yearNum) || isNaN(monNum)) {
-        return res
-          .status(400)
-          .json({ status: 'error', message: 'Invalid month format. Use YYYY-MM.' });
+        return res.status(400).json({ status: 'error', message: 'Invalid month format. Use YYYY-MM.' });
       }
+      // Fallback: filter using createdAt (for legacy data)
       query.createdAt = {
         $gte: new Date(yearNum, monNum - 1, 1),
         $lt: new Date(yearNum, monNum, 1),
       };
     }
+    // else: No month filter, return all slips for employee (or all, if allowed)
 
-    // --- ✅ Only fetch slips where this login user is the owner ---
-    query.owner = req.user._id;
+    // Role-based filtering: get allowed employee IDs
+    let allowedEmployeeIds = [];
+    let userFilter = {};
+    if (req.user.role === 'super-admin') {
+      allowedEmployeeIds = null;
+    } else if (req.user.role === 'admin' && req.user.createdBy) {
+      userFilter = { owner: req.user.createdBy };
+    } else {
+      userFilter = { owner: req.user._id };
+    }
 
-    const slips = await SalarySlip.find(query)
+    if (allowedEmployeeIds !== null) {
+      const emps = await Employee.find(userFilter).select('_id').lean();
+      allowedEmployeeIds = emps.map(e => e._id);
+      if (query.employee) {
+        if (!allowedEmployeeIds.some(id => String(id) === String(query.employee))) {
+          return res.json({ slips: [] });
+        }
+      } else {
+        query.employee = { $in: allowedEmployeeIds };
+      }
+    }
+
+    const slips = await SalarySlip
+      .find(query)
       .populate('employee')
       .sort({ createdAt: -1 });
 
-    const slipsWithNet = slips.map((slip) => {
+    const slipsWithNet = slips.map(slip => {
       const slipObj = slip.toObject();
       slipObj.netSalary = calcNet(slipObj);
       return slipObj;
@@ -94,7 +115,6 @@ router.get('/', requireAuth, async (req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
-
 
 // ---------- CREATE salary slip ----------
 router.post('/', requireAuth, async (req, res) => {

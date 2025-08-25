@@ -41,20 +41,14 @@ function buildEmployeeScope(user) {
 // ------------------------------
 router.get('/', requireAuth, async (req, res) => {
   try {
-    const userId = req.user._id; // logged-in user
-    const list = await Employee.find({ owner: userId })
-      .sort({ name: 1 })
-      .lean();
-
-    if (!list.length) {
-      return res.status(404).json({ status: 'error', message: 'No employees found for this user' });
-    }
-
+    const scope = buildEmployeeScope(req.user);
+    const list = await Employee.find(scope).sort({ name: 1 }).lean();
     res.json({ status: 'success', data: list });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
 // ------------------------------
 // GET /api/employees/birthdays
 // (delegates to controller)
