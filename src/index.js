@@ -85,7 +85,7 @@ app.use('/uploads', express.static(path.join(__dirname, './uploads'))); // Serve
 app.use("/api/auth", authRouter);
 app.use('/api/emp-auth', empAuthRouter);
 // === Protected routes ===
-app.use("/api/employees", employeesRouter);
+app.use("/api/employees", requireAuth, employeesRouter);
 app.use("/api/attendance", requireAuth, attendanceRouter);
 app.use("/api/leaves", requireAuth, leavesRouter);
 app.use("/api/settings", requireAuth, settingsRouter);
