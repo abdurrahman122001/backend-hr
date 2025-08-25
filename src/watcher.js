@@ -110,7 +110,7 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerI
   const signatureBlock = await getSignatureBlock(ownerId);
 
   const html = `
-    <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;width:100%">
+    <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
       <p>Dear <strong>${employeeName || "Employee"}</strong>,</p>
       <p>Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
       <p>As your HR AI Agent, I've been busy building a smarter, more connected system to support you better. 
@@ -273,7 +273,7 @@ async function processMessage(stream) {
         to: fromAddr,
         subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
         html: `
-          <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121; width:100%;">
+          <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; width:100%;">
             <p>Dear <strong>${bestName}</strong>,</p>
             <p>
               We are absolutely delighted to receive your acceptance! 🎉<br>
@@ -307,7 +307,7 @@ async function processMessage(stream) {
         to: fromAddr,
         subject: "Thank You for Your Response – Offer Not Accepted",
         html: `
-          <div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;width:100%">
+          <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #222; width:100%">
             <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
             <p>
               Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
@@ -323,13 +323,13 @@ async function processMessage(stream) {
       await sendEmail({
         to: fromAddr,
         subject: "Approval/Decision Recorded",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Thank you for your response. Your approval/rejection has been recorded. ${signatureBlock}</div>`,
+        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; max-width:600px;">Thank you for your response. Your approval/rejection has been recorded. ${signatureBlock}</div>`,
       });
     } else if (label === "leave_request") {
       await sendEmail({
         to: fromAddr,
         subject: "Leave Request Received",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#212121;max-width:600px;">Your leave request has been received and will be reviewed. ${signatureBlock}</div>`,
+        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; max-width:600px;">Your leave request has been received and will be reviewed. ${signatureBlock}</div>`,
       });
     } else {
       // AI-powered fallback
@@ -337,7 +337,7 @@ async function processMessage(stream) {
       await sendEmail({
         to: fromAddr,
         subject: "Regarding Your Message",
-        html: `<div style="font-family:'Comic Sans MS','Comic Sans',cursive,Arial,sans-serif;font-size:13px;line-height:1.7;color:#222;max-width:600px;"> ${signatureBlock}</div>`,
+        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #222; max-width:600px;"> ${signatureBlock}</div>`,
       });
     }
   } catch (error) {

@@ -75,7 +75,7 @@ async function getCompanyContext(ownerId) {
 // --- Helper: Force Comic Sans + HARD margin:0 on <p> across clients ---
 function enforceComicSans(html) {
   const family =
-    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
+    "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
   // Works better across Gmail/Outlook: include margin-block and MSO fallbacks
   const pRequired = [
     "margin:0 !important",
@@ -268,7 +268,7 @@ async function generateOfferLetter(req, res) {
 
     // Keep natural paragraph margins; Comic Sans is enforced later
     let bodyHtml = `
-      <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 16px; color: #212121; line-height: 1.7; text-align: left; padding:0; max-width:600px;">
+      <div style="font-family: Arial, Helvetica, sans-serif; font-size: 18px; color: #212121; line-height: 1.7; text-align: left; padding:0; max-width:600px;">
         <p>Dear <strong>${candidateName}</strong>,</p>
         <br>
         <p>We're thrilled to have you on board!</p>

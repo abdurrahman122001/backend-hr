@@ -43,7 +43,7 @@ function normalizeTime(timeStr) {
 // --- Helper: Force Comic Sans + margin:0 on <p> (safe, no duplicate style attrs) ---
 function enforceComicSans(html) {
   const family =
-    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
+    "font-family: Arial, Helvetica, sans-serif;";
   const pRequired = `margin:0 !important; ${family}`;
 
   // 1) <p> tags — ensure margin:0 !important + Comic Sans, without duplicate style=""
@@ -232,7 +232,7 @@ module.exports = {
         "Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
 
       let html = `
-        <div style="font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif; font-size: 13px; color: #212121; text-align: left; margin:0; padding:0">
+        <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #212121; text-align: left; margin:0; padding:0">
           <p>Dear <strong>${candidateName}</strong>,</p>
           <br>
           <p>Welcome to the beginning of something amazing!</p>
