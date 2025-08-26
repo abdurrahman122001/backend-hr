@@ -29,6 +29,13 @@ const FALLBACKS = {
   address: "GULSHAN-E-MAYMAR, KARACHI",
 };
 
+function sanitizeName(raw = "") {
+  return String(raw)
+    .replace(/[0-9]/g, "") // strip digits
+    .replace(/\s+/g, " ") // collapse multiple spaces
+    .trim(); // remove leading/trailing spaces
+}
+
 /* ------------------------------ Salary Fields ----------------------------- */
 const SALARY_COMPONENTS = [
   "basic",
@@ -74,8 +81,7 @@ async function getCompanyContext(ownerId) {
 // Enforce Comic Sans on common blocks WITHOUT altering paragraph margins.
 // --- Helper: Force Comic Sans + HARD margin:0 on <p> across clients ---
 function enforceComicSans(html) {
-  const family =
-    "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
+  const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
   // Works better across Gmail/Outlook: include margin-block and MSO fallbacks
   const pRequired = [
     "margin:0 !important",
@@ -123,7 +129,9 @@ function enforceComicSans(html) {
           .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
           .replace(/;;+/g, ";")
           .replace(/^\s*;|;\s*$/g, "");
-        return `<${tag}${pre}style="${family}${cleaned ? " " + cleaned : ""}"${post}>`;
+        return `<${tag}${pre}style="${family}${
+          cleaned ? " " + cleaned : ""
+        }"${post}>`;
       }
     );
     // without style
@@ -189,7 +197,9 @@ function probationDaysToMonths(probationDays) {
   const days = Number(probationDays) || 0;
   if (!days) return "";
   const months = Math.round(days / 30);
-  return months > 0 ? `${months} month${months > 1 ? "s" : ""}` : `${days} days`;
+  return months > 0
+    ? `${months} month${months > 1 ? "s" : ""}`
+    : `${days} days`;
 }
 
 /* ------------------------ Controller: Generate Letter --------------------- */
@@ -256,7 +266,9 @@ async function generateOfferLetter(req, res) {
         <br>
           ${
             signature.signatureImage
-              ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+              ? `<img src="${process.env.SERVER_URL || ""}${
+                  signature.signatureImage
+                }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
               : ""
           }
           <div style="text-align:left;">
@@ -265,16 +277,19 @@ async function generateOfferLetter(req, res) {
         </div>
       `;
     }
-
+    const rawCandidateName = candidateName;
+    const safeCandidateName = sanitizeName(rawCandidateName);
     // Keep natural paragraph margins; Comic Sans is enforced later
     let bodyHtml = `
       <div style="font-family: Arial, Helvetica, sans-serif; font-size: 18px; color: #212121; line-height: 1.7; text-align: left; padding:0; max-width:600px;">
-        <p>Dear <strong>${candidateName}</strong>,</p>
+        <p>Dear <strong>${safeCandidateName}</strong>,</p>
         <br>
         <p>We're thrilled to have you on board!</p>
         <br>
         <p>
-          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.
+          After getting to know you during your recent interview, we were truly inspired by your passion, potential, and the energy you bring. It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${
+      companyCtx.name
+    }</b>.
         </p>
         <br>
         <p>
@@ -289,7 +304,9 @@ async function generateOfferLetter(req, res) {
         <br>
         <p>Your monthly gross salary will be <b>PKR ${grossSalary}</b>, paid through online bank transfer at the end of each month.</p>
         <br>
-        <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${companyCtx.address}</b> by <b>${formattedTime}</b>.</p>
+        <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${
+      companyCtx.address
+    }</b> by <b>${formattedTime}</b>.</p>
         <br>
         <p>In this role, you'll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
         <br>
