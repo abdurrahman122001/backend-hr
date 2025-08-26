@@ -291,7 +291,7 @@ async function generateOfferLetter(req, res) {
         <br>
         <p>If you accept this offer, your anticipated start date will be <b>${formattedStartDate}</b>, and we look forward to welcoming you in person at our <b>${companyCtx.address}</b> by <b>${formattedTime}</b>.</p>
         <br>
-        <p>In this role, you'll be working 45 hours per week, from Monday to Friday—a full week of opportunities to grow, collaborate, and contribute.</p>
+        <p>In this role, you'll be working 45 hours per week, from Monday to Friday a full week of opportunities to grow, collaborate, and contribute.</p>
         <br>
         <p>
           To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:

@@ -1,7 +1,7 @@
 // backend/src/controllers/employeeController.js
 
-const Employee = require('../models/Employees');
-const dayjs = require('dayjs');
+const Employee = require("../models/Employees");
+const dayjs = require("dayjs");
 
 // Helper: Get the "owner" id for data isolation
 function getEffectiveOwnerId(user) {
@@ -28,10 +28,9 @@ function getNextBirthday(dob) {
 exports.getAllEmployees = async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
-    const list = await Employee
-      .find({ owner: { $in: [ownerId] } })
+    const list = await Employee.find({ owner: { $in: [ownerId] } })
       .sort({ name: 1 })
-      .populate('shifts', 'name')
+      .populate("shifts", "name")
       .lean();
     res.json(list);
   } catch (err) {
@@ -43,16 +42,15 @@ exports.getAllEmployees = async (req, res) => {
 exports.list = async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
-    const emps = await Employee
-      .find({ owner: { $in: [ownerId] } })
-      .select('-owner')
-      .populate('shifts', 'name')
+    const emps = await Employee.find({ owner: { $in: [ownerId] } })
+      .select("-owner")
+      .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
-    res.json({ status: 'success', data: emps });
+    res.json({ status: "success", data: emps });
   } catch (err) {
     console.error(err);
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: "error", message: err.message });
   }
 };
 
@@ -63,24 +61,24 @@ exports.createEmployee = async (req, res) => {
     const body = req.body;
     const emp = await Employee.create({
       owner: [ownerId],
-      name:            body.name,
-      phone:           body.phone,
-      qualification:   body.qualification,
-      presentAddress:  body.presentAddress,
-      maritalStatus:   body.maritalStatus,
-      nomineeName:     body.nomineeName,
-      emergencyContact:body.emergencyContact,
-      department:      body.department,
-      position:        body.position,
-      joiningDate:     body.joiningDate,
-      cnic:            body.cnic,
-      dateOfBirth:     body.dateOfBirth,
-      bankAccount:     body.bankAccount,
-      email:           body.email,
-      companyEmail:    body.companyEmail,
-      rt:              body.rt,
-      salaryOffered:   body.salaryOffered,
-      leaveEntitlement:body.leaveEntitlement,
+      name: body.name,
+      phone: body.phone,
+      qualification: body.qualification,
+      presentAddress: body.presentAddress,
+      maritalStatus: body.maritalStatus,
+      nomineeName: body.nomineeName,
+      emergencyContact: body.emergencyContact,
+      department: body.department,
+      position: body.position,
+      joiningDate: body.joiningDate,
+      cnic: body.cnic,
+      dateOfBirth: body.dateOfBirth,
+      bankAccount: body.bankAccount,
+      email: body.email,
+      companyEmail: body.companyEmail,
+      rt: body.rt,
+      salaryOffered: body.salaryOffered,
+      leaveEntitlement: body.leaveEntitlement,
     });
     await emp.save();
     res.status(201).json(emp);
@@ -97,10 +95,12 @@ exports.updateEmployee = async (req, res) => {
       { _id: req.params.id, owner: { $in: [ownerId] } },
       req.body,
       { new: true, runValidators: true }
-    ).populate('shifts', 'name');
+    ).populate("shifts", "name");
 
     if (!emp) {
-      return res.status(404).json({ error: 'Employee not found or unauthorized' });
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
     }
     res.json(emp);
   } catch (err) {
@@ -114,20 +114,18 @@ exports.getUpcomingBirthdays = async (req, res) => {
     const ownerId = getEffectiveOwnerId(req.user);
     const employees = await Employee.find({
       owner: { $in: [ownerId] },
-      dateOfBirth: { $exists: true, $ne: null, $ne: "" }
-    }).select('name dateOfBirth photographUrl email');
+      dateOfBirth: { $exists: true, $ne: null, $ne: "" },
+    }).select("name dateOfBirth photographUrl email");
 
     const now = dayjs();
     const upcoming = employees
-      .map(emp => {
+      .map((emp) => {
         const nextBirthday = getNextBirthday(emp.dateOfBirth);
-        return nextBirthday
-          ? { ...emp.toObject(), nextBirthday }
-          : null;
+        return nextBirthday ? { ...emp.toObject(), nextBirthday } : null;
       })
       .filter(Boolean)
-      .filter(e => {
-        const days = e.nextBirthday.diff(now, 'day');
+      .filter((e) => {
+        const days = e.nextBirthday.diff(now, "day");
         return days >= 0 && days <= 30;
       })
       .sort((a, b) => a.nextBirthday.diff(b.nextBirthday));
@@ -135,6 +133,8 @@ exports.getUpcomingBirthdays = async (req, res) => {
     res.json(upcoming);
   } catch (err) {
     console.error("Error in getUpcomingBirthdays:", err);
-    res.status(500).json({ error: "Could not fetch birthdays: " + err.message });
+    res
+      .status(500)
+      .json({ error: "Could not fetch birthdays: " + err.message });
   }
 };
