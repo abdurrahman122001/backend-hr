@@ -171,8 +171,18 @@ exports.markAttendance = async (req, res) => {
       periodEnd.setDate(periodEnd.getDate() + length - 1);
     }
 
-    const start = periodStart.toISOString().slice(0, 10);
+    // --- UPDATED: bound start by joining date, and flag before-join ---
+    const joinDate = employee.joiningDate
+      ? new Date(employee.joiningDate)
+      : null;
+    const effectiveStartDate =
+      joinDate && joinDate > periodStart ? joinDate : periodStart;
+
+    const start = effectiveStartDate.toISOString().slice(0, 10);
     const end = periodEnd.toISOString().slice(0, 10);
+
+    const beforeJoin = joinDate && attendanceDate < joinDate;
+    // -----------------------------------------------------------------
 
     const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
     const payrollYear = periodEnd.getFullYear().toString();
@@ -223,6 +233,134 @@ exports.markAttendance = async (req, res) => {
       allowanceFields.forEach((f) => (slipData[f] = salaryDoc[f] || ""));
       slip = await SalarySlip.create(slipData);
     }
+    // --- REPLACEMENT: auto-mark Absent from periodStart to day before join AND deduct (skip nonWorkingDays by date or weekday) ---
+    if (joinDate && joinDate > periodStart) {
+      const dayMs = 24 * 60 * 60 * 1000;
+      let daysToCharge = 0;
+
+      // helper: Date -> 'YYYY-MM-DD' (timezone-safe)
+      const ymd = (dt) => {
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth() + 1).padStart(2, "0");
+        const d = String(dt.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
+      };
+
+      // Build non-working rules
+      const dateSet = new Set(); // explicit dates, e.g., '2025-08-14'
+      const weekdaySet = new Set(); // 0..6 (0=Sun)
+
+      const nameToDay = {
+        sun: 0,
+        sunday: 0,
+        mon: 1,
+        monday: 1,
+        tue: 2,
+        tues: 2,
+        tuesday: 2,
+        wed: 3,
+        weds: 3,
+        wednesday: 3,
+        thu: 4,
+        thur: 4,
+        thurs: 4,
+        thursday: 4,
+        fri: 5,
+        friday: 5,
+        sat: 6,
+        saturday: 6,
+      };
+
+      (payroll.nonWorkingDays || []).forEach((raw) => {
+        if (!raw) return;
+        const s = String(raw).trim();
+
+        // 1) Exact date 'YYYY-MM-DD'
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+          dateSet.add(s);
+          return;
+        }
+
+        // 2) Numeric weekday '0'..'6'
+        if (/^[0-6]$/.test(s)) {
+          weekdaySet.add(Number(s));
+          return;
+        }
+
+        // 3) Weekday names
+        const key = s.toLowerCase();
+        if (key in nameToDay) {
+          weekdaySet.add(nameToDay[key]);
+          return;
+        }
+
+        // 4) Fallback: parseable date string -> normalize to YYYY-MM-DD
+        const nd = new Date(s);
+        if (!isNaN(nd)) {
+          dateSet.add(ymd(nd));
+        }
+      });
+
+      for (
+        let d = new Date(periodStart);
+        d < joinDate;
+        d = new Date(d.getTime() + dayMs)
+      ) {
+        const iso = ymd(d);
+        const dow = d.getDay();
+
+        // skip if non-working by explicit date or weekday
+        if (dateSet.has(iso) || weekdaySet.has(dow)) continue;
+
+        // skip if any record already exists that day (holiday/attendance)
+        const existing = await Attendance.findOne({
+          owner: ownerId,
+          date: iso,
+        }).lean();
+        if (existing) continue;
+
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date: iso },
+          {
+            $set: {
+              owner: ownerId,
+              employee: employeeId,
+              date: iso,
+              status: "Absent",
+              leaveType: "Unpaid",
+              markedByHR: true,
+              createdBy: userId,
+            },
+            $unset: { checkIn: "", checkOut: "", notes: "" },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        daysToCharge += 1;
+      }
+
+      // apply leave entitlement and monetary deduction for the pre-join absences
+      if (daysToCharge > 0) {
+        const result = await updateLeaveEntitlementForEmployee(
+          employeeId,
+          daysToCharge
+        );
+        if (result.unpaid > 0) {
+          let gross = 0;
+          if (slip.grossSalary) gross = Number(await decrypt(slip.grossSalary));
+          const perDayAuto = gross / 22; // same totalWorkingDays assumption
+
+          let prev = 0;
+          if (slip.leaveDeductions)
+            prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+
+          const add = Math.round(perDayAuto * result.unpaid);
+          slip.leaveDeductions = await encrypt(String(prev + add));
+          await slip.save();
+        }
+      }
+    }
+    // --- END REPLACEMENT ---
 
     // 5) Gross salary + per-day calc
     let grossSalary = 0;
@@ -232,8 +370,8 @@ exports.markAttendance = async (req, res) => {
     const totalWorkingDays = 22; // TODO: make dynamic if needed
     const perDay = grossSalary / totalWorkingDays;
 
-    // 6) Absent → leave entitlement & deduction
-    if (status === "Absent") {
+    // 6) Absent → leave entitlement & deduction (only from/on join date)
+    if (!beforeJoin && status === "Absent") {
       const result = await updateLeaveEntitlementForEmployee(employeeId, 1);
       if (result.unpaid > 0) {
         let prevDeduction = 0;
@@ -249,11 +387,11 @@ exports.markAttendance = async (req, res) => {
     }
 
     // 7) Late → 3 Lates = 1 day, tracked cumulatively, leave-aware
-    if (status === "Late") {
+    if (!beforeJoin && status === "Late") {
       const lateRecords = await Attendance.find({
         employee: employeeId,
         owner: ownerId, // ensure same tenant
-        date: { $gte: start, $lte: end },
+        date: { $gte: start, $lte: end }, // start is bounded by join date
         status: "Late",
       }).lean();
 
@@ -285,7 +423,7 @@ exports.markAttendance = async (req, res) => {
     }
 
     // 8) Half Day → 0.5 day leave/deduction if no paid leave left
-    if (status === "Half Day") {
+    if (!beforeJoin && status === "Half Day") {
       const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
       if (result.unpaid > 0) {
         let prevDeduction = 0;
@@ -367,7 +505,6 @@ exports.markAttendance = async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
-
 // GET /api/attendance?date=YYYY-MM-DD
 exports.getRecordsByDate = async (req, res) => {
   const { date } = req.query;
