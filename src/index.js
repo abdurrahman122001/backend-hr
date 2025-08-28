@@ -64,19 +64,6 @@ const pageRoute = require("./routes/page");
 const app = express();
 const taxRoutes = require("./routes/taxRoutes");
 const server = http.createServer(app);
-// IMAP watcher
-const { startWatcher } = require("./watcher");
-
-const app = express();
-
-/* ---------- Security / Headers (optional but recommended) ---------- */
-// Force HTTPS on clients after first visit (1 year)
-/*
-app.use((req, res, next) => {
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-  next();
-});
-*/
 
 /* ---------- Static files ---------- */
 app.use("/uploads", express.static(path.join(__dirname, "./uploads")));
