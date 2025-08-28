@@ -16,9 +16,8 @@ const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod"); // <-- adjust path if your model file differs
 
-// --- Routes ---
 const authRouter = require("./routes/auth");
-const empAuthRouter = require("./routes/empAuth");
+const empAuthRouter = require('./routes/empAuth');
 const hrAuthRoutes = require("./routes/hrAuth");
 const employeeCompleteRouter = require("./routes/employeeComplete");
 const shiftsRouter = require("./routes/shift");
@@ -38,15 +37,23 @@ const employeeSalaryRouter = require("./routes/employeeSalary");
 const hierarchyController = require("./controllers/hierarchyController");
 const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
-const loansRoutes = require("./routes/loans");
+const loansRoutes = require('./routes/loans');
 const onboardingRouter = require("./routes/onBoarding");
 const requireAuth = require("./middleware/auth");
-const requireEmployeeAuth = require("./middleware/empAuth");
+const requireEmployeeAuth = require('./middleware/empAuth');
 const empAttendanceRouter = require("./routes/empAttendance");
 const employeeBirthdays = require("./routes/empBirthdayRoutes");
+
+
 const sendSlipEmail = require("./routes/sendSlipEmail");
-const setDateRoute = require("./routes//setDate");
-const usersRoute = require("./routes/users");
+const probationPeriodRouter = require("./routes/probationPeriods");
+const leaveRecordsRouter = require('./routes/leaveRecords');
+const certificateRoutes = require('./routes/certificate');
+const ExtraFields = require('./routes/extraFields');
+const usersRoute = require('./routes/users');  // <-- Correc
+const setDateRoute = require('./routes//setDate');
+// IMAP watcher
+const { startWatcher } = require("./watcher");
 const fontSettingRoute = require("./routes/fontSetting");
 const descryptionKeys = require("./routes/decryptionKeys");
 const pfRoute = require("./routes/pf");
@@ -54,8 +61,9 @@ const GratuityRoute = require("./routes/gratuitySettings");
 const SignaturRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
+const app = express();
 const taxRoutes = require("./routes/taxRoutes");
-const probationPeriodRouter = require("./routes/probationPeriods");
+const server = http.createServer(app);
 // IMAP watcher
 const { startWatcher } = require("./watcher");
 
@@ -95,15 +103,14 @@ app.use(
     credentials: true,
   })
 );
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-/* ---------- Public routes ---------- */
+app.use('/uploads', express.static(path.join(__dirname, './uploads'))); // Serve static files from uploads folder
+// === Public routes ===
 app.use("/api/auth", authRouter);
-app.use("/api/emp-auth", empAuthRouter);
-
-/* ---------- Protected routes ---------- */
+app.use('/api/emp-auth', empAuthRouter);
+// === Protected routes ===
 app.use("/api/employees", employeesRouter);
 app.use("/api/attendance", requireAuth, attendanceRouter);
 app.use("/api/leaves", requireAuth, leavesRouter);
@@ -118,7 +125,7 @@ app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", require("./routes/companyProfile"));
 app.use("/api/docs", docsRouter);
-app.use("/api/employee-salary", employeeSalaryRouter);
+app.use("/api/employee-salary", employeeSalaryRouter);  // <--- THIS LINE
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
@@ -126,21 +133,21 @@ app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/loans", loansRoutes);
-app.use("/api/loan", loansRoutes);
+app.use('/api/loan', loansRoutes);
 app.use("/api/probation-periods", probationPeriodRouter);
-app.use("/api/leave-records", requireAuth, leaveRecordsRouter);
-app.use("/api/certificates", certificateRoutes);
+app.use('/api/leave-records', requireAuth, leaveRecordsRouter);
+app.use('/api/certificates', certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
-app.use("/api/decryption-keys", requireAuth, descryptionKeys);
-app.use("/api/extra-fields", requireAuth, ExtraFields);
-app.use("/api/pf", pfRoute);
-app.use("/api/gratuity", requireAuth, GratuityRoute);
-app.use("/api/role", requireAuth, roleRoutes);
-app.use("/api/pages", requireAuth, pageRoute);
-app.use("/api/users", requireAuth, usersRoute);
-app.use("/api/setDate", requireAuth, setDateRoute);
-app.use("/api/signature", requireAuth, SignaturRoute);
-app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
+app.use('/api/decryption-keys', requireAuth, descryptionKeys);
+app.use('/api/extra-fields', requireAuth, ExtraFields);
+app.use('/api/pf', pfRoute);
+app.use('/api/gratuity', requireAuth, GratuityRoute);
+app.use('/api/role', requireAuth, roleRoutes);
+app.use('/api/pages', requireAuth, pageRoute);
+app.use('/api/users', requireAuth, usersRoute);
+app.use('/api/setDate', requireAuth, setDateRoute)
+app.use('/api/signature', requireAuth, SignaturRoute);
+app.use('/api/emp-attendance', requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
 
