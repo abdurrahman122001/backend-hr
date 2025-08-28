@@ -3,23 +3,27 @@
 // BAND-ONLY tax (matches the sheet):
 //   annualTax = fixed + (rateOver% * (A - (from - 1)))
 //
-// FINAL LOGIC (as requested):
+// FINAL LOGIC:
 //   1) grossMonthly = sum(all allowances)
-//   2) otherDeductionsMonthly = sum(all non-tax deductions)
-//   3) netBeforeTax = grossMonthly - otherDeductionsMonthly
-//   4) medical exemption (sheet-style) = round(grossMonthly / 11),
-//      capped by netBeforeTax
+//   2) Split deductions:
+//        • baseDeductionsMonthly = all non-tax deductions EXCEPT loans
+//          (includes leaveDeductions & lateDeductions).
+//        • loanDeductionsMonthly = only loan fields.
+//   3) netBeforeTax = grossMonthly - baseDeductionsMonthly
+//   4) medical exemption (sheet-style) = round(netBeforeTax / 11), capped by netBeforeTax
 //   5) taxableMonthly = netBeforeTax - medExemptMonthly
 //   6) annualTaxable = taxableMonthly * 12
 //   7) monthlyTax = round( annualTax(annualTaxable) / 12 )
-//   8) persist encrypted values
+//   8) totalDeductions = baseDeductionsMonthly + loanDeductionsMonthly + monthlyTax
+//   9) netPayable = grossMonthly - totalDeductions
+//   10) persist encrypted values
 // ────────────────────────────────────────────────────────────────
 
 const SalarySlip = require("../models/SalarySlip");
-const TaxConfig = require("../models/TaxConfig");
+const TaxConfig   = require("../models/TaxConfig");
 const { encrypt, decrypt } = require("../utils/encryption");
 
-const DEBUG_TAX = true; // flip to false to silence logs
+const DEBUG_TAX = true;
 
 /* ---------------------------- helpers ---------------------------- */
 
@@ -31,14 +35,12 @@ const toNum = (v) => {
 };
 const toStr = (num) => Math.round(Number(num) || 0).toString();
 
-/** Decrypt (supports sync or async decrypt). Fallback to numeric parse. */
+/** Decrypt (supports sync or async). Fallback to numeric parse. */
 const readEncNumberAsync = async (maybeEnc, fieldName = "") => {
   if (maybeEnc === null || maybeEnc === undefined) return 0;
   if (typeof maybeEnc === "number") return toNum(maybeEnc);
-
   const raw = String(maybeEnc).trim();
   if (!raw) return 0;
-
   try {
     const decMaybe = decrypt(raw);
     const dec = typeof decMaybe?.then === "function" ? await decMaybe : decMaybe;
@@ -62,7 +64,7 @@ const writeEnc = async (doc, key, value) => {
   doc[key] = typeof encMaybe?.then === "function" ? await encMaybe : encMaybe;
 };
 
-/** Read first existing key (supports alias paths like "loanDeductions.vehicleLoan"). */
+/** Read first existing key (supports paths like "loanDeductions.vehicleLoan"). */
 const readFirstNumAsync = async (obj, keys) => {
   for (const k of keys) {
     const path = k.split(".");
@@ -76,6 +78,7 @@ const readFirstNumAsync = async (obj, keys) => {
 
 /* ----------------------------- config ----------------------------- */
 
+// Allowances → gross
 const ALLOWANCE_KEYS = [
   "basic",
   "dearnessAllowance",
@@ -95,7 +98,16 @@ const ALLOWANCE_KEYS = [
   "othersAllowances",
 ];
 
-const DEDUCTION_KEYS = [
+// Loans → excluded from taxable base (but reduce final net)
+const LOAN_DEDUCTION_KEYS = [
+  "loanDeductions.vehicleLoan",
+  "loanDeductions.otherLoans",
+  "vehicleLoanDeduction",
+  "otherLoanDeductions",
+];
+
+// Base deductions → included in taxable base (includes leave & late)
+const BASE_DEDUCTION_KEYS = [
   "leaveDeductions",
   "lateDeductions",
   "eobiDeduction",
@@ -108,24 +120,18 @@ const DEDUCTION_KEYS = [
   "lifeInsurance",
   "penalties",
   "othersDeductions",
-  // loans (both styles)
-  "loanDeductions.vehicleLoan",
-  "loanDeductions.otherLoans",
-  "vehicleLoanDeduction",
-  "otherLoanDeductions",
 ];
 
 /* -------------------------- tax math (band) -------------------------- */
-/** Single-slab formula with inclusive lower bound (from - 1). */
 function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   const A = Math.max(0, toNum(annualTaxable));
 
   const slabs = (rawSlabs || [])
     .map((s) => ({
-      from: toNum(s.from),
-      to: s.to === undefined || s.to === null ? Infinity : toNum(s.to),
+      from:  toNum(s.from),
+      to:    s.to === undefined || s.to === null ? Infinity : toNum(s.to),
       fixed: toNum(s.fixed),
-      rate: toNum(s.rateOver) / 100,
+      rate:  toNum(s.rateOver) / 100,
     }))
     .filter((s) => Number.isFinite(s.from) && s.to >= s.from)
     .sort((a, b) => a.from - b.from);
@@ -146,7 +152,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
     }
   }
 
-  // Above all finite bands → use top open band if present
   const last = slabs[slabs.length - 1];
   if (last && last.to === Infinity) {
     const baseInclusive = Math.max(0, last.from - 1);
@@ -165,41 +170,46 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 
 /* ---------------------- slip calculation (async) ---------------------- */
 async function calculateSlipWithTaxAsync(slip, taxCfg) {
-  // 1) gross monthly = sum(all allowances)
+  // 1) Gross monthly
   let grossMonthly = 0;
   for (const key of ALLOWANCE_KEYS) {
     grossMonthly += await readFirstNumAsync(slip, [key]);
   }
 
-  const basic = await readFirstNumAsync(slip, ["basic"]);
-  const medMonthly = await readFirstNumAsync(slip, ["medicalAllowance"]);
+  const basic     = await readFirstNumAsync(slip, ["basic"]);
+  const medMonthly = await readFirstNumAsync(slip, ["medicalAllowance"]); // (kept for debug)
 
-  // 2) All other (non-tax) deductions
-  let otherDeductionsMonthly = 0;
-  for (const key of DEDUCTION_KEYS) {
-    otherDeductionsMonthly += await readFirstNumAsync(slip, [key]);
+  // 2) Split deductions
+  let baseDeductionsMonthly = 0;
+  for (const key of BASE_DEDUCTION_KEYS) {
+    baseDeductionsMonthly += await readFirstNumAsync(slip, [key]);
   }
 
-  // 3) Net BEFORE income tax (requested base)
-  const netBeforeTax = Math.max(0, grossMonthly - otherDeductionsMonthly);
+  let loanDeductionsMonthly = 0;
+  for (const key of LOAN_DEDUCTION_KEYS) {
+    loanDeductionsMonthly += await readFirstNumAsync(slip, [key]);
+  }
 
-  // 4) SHEET-STYLE medical exemption: round(gross / 11), capped by netBeforeTax
-  //    (ignores how medical/basic were keyed to match the Excel exact outputs)
+  // 3) Net BEFORE income tax (EXCLUDES LOANS)
+  const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
+
+  // 4) SHEET-STYLE medical exemption: use NET BEFORE TAX, not gross!
+  //    This matches cases like "70000 - 12727" → annual 687,276, med = 687,276/11 /12.
   const medExemptMonthly = taxCfg?.enableMedicalExemption
-    ? Math.min(netBeforeTax, Math.round(grossMonthly / 11))
+    ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
     : 0;
 
-  // 5) Taxable monthly BASED ON net-before-tax
+  // 5) Taxable monthly
   const taxableMonthly = Math.max(0, netBeforeTax - medExemptMonthly);
 
   // 6) Annualize + compute band-only tax
   const annualTaxable = taxableMonthly * 12;
-  const annualTax = computeAnnualTaxBandOnly(annualTaxable, taxCfg?.slabs || []);
-  const monthlyTax = Math.round(annualTax / 12);
+  const annualTax     = computeAnnualTaxBandOnly(annualTaxable, taxCfg?.slabs || []);
+  const monthlyTax    = Math.round(annualTax / 12);
 
-  // 7) Final totals
-  const totalDeductions = otherDeductionsMonthly + monthlyTax;
-  const netPayable = Math.max(0, grossMonthly - totalDeductions);
+  // 7) Final totals (loans still reduce net payable)
+  const totalDeductions = baseDeductionsMonthly + loanDeductionsMonthly + monthlyTax;
+  const netPayable      = Math.max(0, grossMonthly - totalDeductions);
 
   if (DEBUG_TAX) {
     console.log(
@@ -207,7 +217,8 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
         ` basic=${basic.toLocaleString()}` +
         ` medM=${medMonthly.toLocaleString()}` +
         ` grossM=${grossMonthly.toLocaleString()}` +
-        ` otherDedM=${otherDeductionsMonthly.toLocaleString()}` +
+        ` baseDedM=${baseDeductionsMonthly.toLocaleString()}` +
+        ` loanDedM=${loanDeductionsMonthly.toLocaleString()}` +
         ` netBeforeTax=${netBeforeTax.toLocaleString()}` +
         ` medExemptM=${medExemptMonthly.toLocaleString()}` +
         ` taxableM=${taxableMonthly.toLocaleString()}` +
@@ -228,17 +239,17 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     totalAllowances: grossMonthly - basic,
     totalDeductions,
     netPayable,
-    _debug: { netBeforeTax, taxableMonthly },
+    _debug: {
+      baseDeductionsMonthly,
+      loanDeductionsMonthly,
+      netBeforeTax,
+      taxableMonthly,
+    },
   };
 }
 
 /* ---------------------------- controllers ---------------------------- */
 
-/**
- * POST /api/tax/enable
- * Body: { fiscalYear?: "2025-26" }
- * Auth: requireAuth (req.user._id)
- */
 exports.enableTaxForOwner = async (req, res) => {
   try {
     const ownerId = req.user._id;
@@ -257,7 +268,7 @@ exports.enableTaxForOwner = async (req, res) => {
     for (const slip of slips) {
       const calc = await calculateSlipWithTaxAsync(slip, taxCfg);
 
-      // Persist (encrypted) — ALWAYS await
+      // Persist (encrypted)
       await writeEnc(slip, "grossSalary",     calc.grossMonthly);
       await writeEnc(slip, "taxDeduction",    calc.monthlyTax);
       await writeEnc(slip, "totalAllowances", calc.totalAllowances);
@@ -270,9 +281,9 @@ exports.enableTaxForOwner = async (req, res) => {
         slipId: slip._id.toString(),
         employee: String(slip.employee),
         month: slip.month,
-        year: slip.year,
+        year:  slip.year,
         taxDeduction: calc.monthlyTax,
-        netPayable: calc.netPayable,
+        netPayable:   calc.netPayable,
       });
     }
 
@@ -283,10 +294,6 @@ exports.enableTaxForOwner = async (req, res) => {
   }
 };
 
-/**
- * GET /api/tax/owner-slips
- * Decrypted summary for UI lists (async decrypt).
- */
 exports.getOwnerSlipSummaries = async (req, res) => {
   try {
     const ownerId = req.user._id;
@@ -316,7 +323,7 @@ exports.getOwnerSlipSummaries = async (req, res) => {
           (await readEncNumberAsync(s?.loanDeductions?.vehicleLoan, "loanDeductions.vehicleLoan")) +
           (await readEncNumberAsync(s?.loanDeductions?.otherLoans, "loanDeductions.otherLoans")),
         taxDeduction: await readEncNumberAsync(s.taxDeduction, "taxDeduction"),
-        netPayable: await readEncNumberAsync(s.netPayable, "netPayable"),
+        netPayable:   await readEncNumberAsync(s.netPayable, "netPayable"),
       }))
     );
 
