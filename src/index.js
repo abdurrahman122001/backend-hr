@@ -49,8 +49,6 @@ const employeeBirthdays = require("./routes/empBirthdayRoutes");
 
 
 // Model imports
-const Employee = require("./models/Employees");
-const Attendance = require("./models/Attendance");
 const sendSlipEmail = require("./routes/sendSlipEmail");
 const probationPeriodRouter = require("./routes/probationPeriods");
 const leaveRecordsRouter = require('./routes/leaveRecords');
@@ -72,16 +70,6 @@ const taxRoutes = require("./routes/taxRoutes");
 // IMAP watcher
 
 const app = express();
-
-/* ---------- Security / Headers (optional but recommended) ---------- */
-// Force HTTPS on clients after first visit (1 year)
-/*
-app.use((req, res, next) => {
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-  next();
-});
-*/
-
 /* ---------- Static files ---------- */
 app.use("/uploads", express.static(path.join(__dirname, "./uploads")));
 
