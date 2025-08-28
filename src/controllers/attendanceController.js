@@ -33,6 +33,13 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
   }).lean();
 }
 
+const toNum = (v) => {
+  const s = String(v ?? "")
+    .replace(/,/g, "")
+    .trim();
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : 0;
+};
 // ---- controllers -----------------------------------------------------------
 
 exports.markAttendance = async (req, res) => {
@@ -360,6 +367,136 @@ exports.markAttendance = async (req, res) => {
         }
       }
     }
+    // --- END REPLACEMENT ---
+    // --- REPLACEMENT: auto-mark Absent from periodStart to day before join AND deduct (skip nonWorkingDays by date or weekday) ---
+    if (joinDate && joinDate > periodStart) {
+      const dayMs = 24 * 60 * 60 * 1000;
+      let daysToCharge = 0;
+
+      // helper: Date -> 'YYYY-MM-DD' (timezone-safe)
+      const ymd = (dt) => {
+        const y = dt.getFullYear();
+        const m = String(dt.getMonth() + 1).padStart(2, "0");
+        const d = String(dt.getDate()).padStart(2, "0");
+        return `${y}-${m}-${d}`;
+      };
+
+      // Build non-working rules
+      const dateSet = new Set(); // explicit dates, e.g., '2025-08-14'
+      const weekdaySet = new Set(); // 0..6 (0=Sun)
+
+      const nameToDay = {
+        sun: 0,
+        sunday: 0,
+        mon: 1,
+        monday: 1,
+        tue: 2,
+        tues: 2,
+        tuesday: 2,
+        wed: 3,
+        weds: 3,
+        wednesday: 3,
+        thu: 4,
+        thur: 4,
+        thurs: 4,
+        thursday: 4,
+        fri: 5,
+        friday: 5,
+        sat: 6,
+        saturday: 6,
+      };
+
+      (payroll.nonWorkingDays || []).forEach((raw) => {
+        if (!raw) return;
+        const s = String(raw).trim();
+
+        // 1) Exact date 'YYYY-MM-DD'
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+          dateSet.add(s);
+          return;
+        }
+
+        // 2) Numeric weekday '0'..'6'
+        if (/^[0-6]$/.test(s)) {
+          weekdaySet.add(Number(s));
+          return;
+        }
+
+        // 3) Weekday names
+        const key = s.toLowerCase();
+        if (key in nameToDay) {
+          weekdaySet.add(nameToDay[key]);
+          return;
+        }
+
+        // 4) Fallback: parseable date string -> normalize to YYYY-MM-DD
+        const nd = new Date(s);
+        if (!isNaN(nd)) {
+          dateSet.add(ymd(nd));
+        }
+      });
+
+      for (
+        let d = new Date(periodStart);
+        d < joinDate;
+        d = new Date(d.getTime() + dayMs)
+      ) {
+        const iso = ymd(d);
+        const dow = d.getDay();
+
+        // skip if non-working by explicit date or weekday
+        if (dateSet.has(iso) || weekdaySet.has(dow)) continue;
+
+        // skip if any record already exists that day (holiday/attendance)
+        const existing = await Attendance.findOne({
+          owner: ownerId,
+          date: iso,
+        }).lean();
+        if (existing) continue;
+
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date: iso },
+          {
+            $set: {
+              owner: ownerId,
+              employee: employeeId,
+              date: iso,
+              status: "Absent",
+              leaveType: "Unpaid",
+              markedByHR: true,
+              createdBy: userId,
+            },
+            $unset: { checkIn: "", checkOut: "", notes: "" },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        daysToCharge += 1;
+      }
+
+      // apply leave entitlement and monetary deduction for the pre-join absences
+      if (daysToCharge > 0) {
+        const result = await updateLeaveEntitlementForEmployee(
+          employeeId,
+          daysToCharge
+        );
+        if (result.unpaid > 0) {
+          let gross = 0;
+          if (slip.grossSalary) gross = Number(await decrypt(slip.grossSalary));
+          const perDayAuto = gross / 22; // same totalWorkingDays assumption
+
+          let prev = 0;
+          if (slip.leaveDeductions)
+            prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+
+          const add = Math.round(perDayAuto * result.unpaid);
+          slip.leaveDeductions = await encrypt(String(prev + add));
+          await slip.save();
+        }
+      }
+    }
+    // --- END REPLACEMENT ---
+
     // --- END REPLACEMENT ---
 
     // 5) Gross salary + per-day calc

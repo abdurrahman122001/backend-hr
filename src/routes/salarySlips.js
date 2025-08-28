@@ -129,6 +129,7 @@ router.post('/', requireAuth, async (req, res) => {
 // ---------- PATCH (update) endpoint ----------
 router.patch('/:id', requireAuth, async (req, res) => {
   try {
+    // All allowed top-level fields
     const allowedFields = [
       ...allowances.map(([_, key]) => key),
       ...deductions.map(([_, key]) => key),
@@ -158,28 +159,38 @@ router.patch('/:id', requireAuth, async (req, res) => {
       return res.status(403).json({ status: 'error', message: 'Not allowed to update this slip.' });
     }
 
-    // Process updates
+    // --- Process updates: handle top-level fields ---
     const updates = {};
+
     for (let key of Object.keys(req.body)) {
       if (allowedFields.includes(key)) {
         let value = req.body[key];
         if (typeof value === 'string' && value.includes(':')) {
           updates[key] = value; // Already encrypted
         } else {
-          // Ensure value is a number or string before encryption
           if (typeof value !== 'number' && typeof value !== 'string') {
             return res.status(400).json({
               status: 'error',
               message: `Invalid value type for ${key}: ${typeof value}. Expected number or string.`,
             });
           }
-          // Await encryption to resolve the Promise
           try {
             updates[key] = await encrypt(value, encryptionKey);
           } catch (encryptErr) {
-            console.error(`Encryption error for ${key}:`, encryptErr);
             return res.status(500).json({ status: 'error', message: `Encryption failed for ${key}: ${encryptErr.message}` });
           }
+        }
+      }
+    }
+
+    // --- Also allow PATCH of nested deduction objects like: { loanDeductions: { otherLoans: ... } }
+    if (req.body.loanDeductions && typeof req.body.loanDeductions === 'object') {
+      for (const [subKey, subVal] of Object.entries(req.body.loanDeductions)) {
+        // Encrypt each subfield and use dot notation for $set
+        try {
+          updates[`loanDeductions.${subKey}`] = await encrypt(subVal, encryptionKey);
+        } catch (encryptErr) {
+          return res.status(500).json({ status: 'error', message: `Encryption failed for loanDeductions.${subKey}: ${encryptErr.message}` });
         }
       }
     }
@@ -191,6 +202,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     // Log updates for debugging
     console.log('Updating salary slip with:', updates);
 
+    // Update the slip
     const updatedSlip = await SalarySlip.findByIdAndUpdate(
       req.params.id,
       { $set: updates },
@@ -201,6 +213,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Salary slip not found.' });
     }
 
+    // Net calculation with fresh object
     const slipObj = updatedSlip.toObject();
     slipObj.netSalary = calcNet(slipObj);
 
@@ -210,6 +223,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
 
 // ---------- GET: Download Salary Slip PDF ----------
 router.get('/:id/download', requireAuth, async (req, res) => {
