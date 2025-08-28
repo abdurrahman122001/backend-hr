@@ -55,7 +55,7 @@ const SignaturRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
-
+const probationPeriodRouter = require("./routes/probationPeriods");
 // IMAP watcher
 const { startWatcher } = require("./watcher");
 
