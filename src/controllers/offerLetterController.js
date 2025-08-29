@@ -313,6 +313,7 @@ async function generateOfferLetter(req, res) {
         <p>
           To move forward, please confirm your acceptance of this offer by <b>${formattedDeadline}</b>. On your first day, we kindly ask that you bring:
         </p>
+        <br>
         <ul style="margin:0 0 1em 2em;padding:0;">
           <li style="margin-bottom:4px;">All original educational and professional certificates</li>
           <li style="margin-bottom:4px;">Original CNIC with a photocopy</li>

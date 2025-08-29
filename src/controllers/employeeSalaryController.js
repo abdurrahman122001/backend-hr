@@ -101,18 +101,6 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
   }
 };
 
-/**
- * TOLERANT UPDATE:
- * - No "required" validations (name, cnic, etc.) that would 400 the request.
- * - If CNIC is provided but invalid, we IGNORE it (do not update), instead of 400.
- * - Negative leave totals are CLAMPED to 0 instead of 400.
- * - Only provided fields are updated (partial updates).
- * - SalarySlip updates are partial; only provided comp fields are encrypted and saved.
- * - grossSalary:
- *     - if provided -> saved (encrypted).
- *     - else if some comp fields provided and a key is provided -> we attempt to re-calc using merged values (best-effort).
- *     - else -> left unchanged.
- */
 exports.updateEmployeeAndSalarySlip = async (req, res) => {
   try {
     const { employee: employeeData = {}, salarySlip: salarySlipData = {} } = req.body;

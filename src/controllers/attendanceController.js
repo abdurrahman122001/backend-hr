@@ -96,6 +96,12 @@ exports.markAttendance = async (req, res) => {
         .json({ error: "Employee not found for this owner or unauthorized." });
     }
 
+    const oldRec = await Attendance.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      date,
+    }).lean();
+
     // 1) Upsert attendance (tenant-scoped)
     const updateDoc = {
       $set: {
@@ -110,7 +116,7 @@ exports.markAttendance = async (req, res) => {
         markedByHR: true,
       },
     };
-    if (status === "Absent") {
+    if (status === "Absent" || status === "Half Day") {
       updateDoc.$set.leaveType = leaveType || "Unpaid";
     } else {
       updateDoc.$unset = { leaveType: "" };
@@ -507,19 +513,109 @@ exports.markAttendance = async (req, res) => {
     const totalWorkingDays = 22; // TODO: make dynamic if needed
     const perDay = grossSalary / totalWorkingDays;
 
-    // 6) Absent → leave entitlement & deduction (only from/on join date)
-    if (!beforeJoin && status === "Absent") {
-      const result = await updateLeaveEntitlementForEmployee(employeeId, 1);
-      if (result.unpaid > 0) {
-        let prevDeduction = 0;
-        if (slip.leaveDeductions) {
-          prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        }
-        const leaveDeduction = Math.round(
-          perDay * result.unpaid + prevDeduction
+    if (
+      oldRec &&
+      oldRec.status === "Absent" &&
+      (oldRec.leaveType === "Unpaid" || !oldRec.leaveType) &&
+      !(status === "Absent" && (leaveType === "Unpaid" || !leaveType))
+    ) {
+      // 1. Reverse deduction in SalarySlip
+      if (!slip.leaveDeductions) {
+        slip.leaveDeductions = await encrypt("0");
+      }
+      let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+      const deductionToReverse = Math.round(perDay);
+      let newDeduction = Math.max(0, prevDeduction - deductionToReverse);
+      slip.leaveDeductions = await encrypt(newDeduction.toString());
+      await slip.save();
+
+      // 2. Reverse usedUnpaid leave
+      let empDoc = await Employee.findById(employeeId).lean();
+      if (
+        empDoc &&
+        empDoc.leaveEntitlement &&
+        typeof empDoc.leaveEntitlement.usedUnpaid === "number"
+      ) {
+        let oldUsed = empDoc.leaveEntitlement.usedUnpaid || 0;
+        let newUsed = Math.max(0, oldUsed - 1);
+        await Employee.updateOne(
+          { _id: employeeId },
+          { $set: { "leaveEntitlement.usedUnpaid": newUsed } }
         );
+      }
+      await Employee.updateOne(
+        { _id: employeeId },
+        { $inc: { "leaveEntitlement.usedPaid": 1 } }
+      );
+    }
+
+    if (status === "Absent") {
+      // Only increment usedUnpaid, do not touch paid leave
+      await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
+
+      if (!slip.leaveDeductions) {
+        slip.leaveDeductions = await encrypt("0");
+      }
+      let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+      const leaveDeduction = Math.round(perDay + prevDeduction);
+      slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+      await slip.save();
+
+
+      await Attendance.findOneAndUpdate(
+        { owner: ownerId, employee: employeeId, date },
+        { $set: { leaveType: "Unpaid" } }
+      );
+    }
+
+
+    if (status === "Leave") {
+      let result = { paid: 0, unpaid: 0 };
+      // No paid leave available?
+      const employeeEntitlement = employee.leaveEntitlement || {};
+      const entitlementLeft = (employeeEntitlement.total || 0) - (employeeEntitlement.usedPaid || 0);
+
+      if (entitlementLeft > 0) {
+        // Paid leave is available
+        result = await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", req.body.forcePaid);
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { status: "Absent", leaveType: "Paid" } }
+        );
+        // NO deduction
+        return res.json(rec);
+      }
+
+      // No paid leave available, ask admin
+      if (typeof req.body.forcePaid === "undefined") {
+        return res.status(200).json({
+          needsConfirmation: true,
+          message: `${employee.name} has no paid leaves available. Do you want to mark as Paid Leave?`,
+        });
+      } else if (req.body.forcePaid === true) {
+        // Admin confirmed "Force Paid Leave" (increment usedPaid, NO deduction)
+        await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", true);
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { status: "Absent", leaveType: "Paid" } }
+        );
+        return res.json(rec);
+      } else {
+        // Admin said NO (increment usedUnpaid, DO deduction)
+        await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
+
+        if (!slip.leaveDeductions) {
+          slip.leaveDeductions = await encrypt("0");
+        }
+        let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const leaveDeduction = Math.round(perDay + prevDeduction);
         slip.leaveDeductions = await encrypt(leaveDeduction.toString());
         await slip.save();
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { status: "Absent", leaveType: "Unpaid" } }
+        );
+        return res.json(rec);
       }
     }
 
@@ -573,6 +669,11 @@ exports.markAttendance = async (req, res) => {
         slip.leaveDeductions = await encrypt(leaveDeduction.toString());
         await slip.save();
       }
+      const leaveTypeToSet = result.unpaid > 0 ? "Unpaid" : "Paid";
+      await Attendance.findOneAndUpdate(
+        { owner: ownerId, employee: employeeId, date },
+        { $set: { leaveType: leaveTypeToSet } }
+      );
     }
     const monthName = payrollMonth; // e.g., "August"
     const yearNum = Number(payrollYear); // e.g., 2025

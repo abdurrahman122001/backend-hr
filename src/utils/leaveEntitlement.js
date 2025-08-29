@@ -1,7 +1,7 @@
 const Employee = require('../models/Employees');
 
 
-async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1, type = 'absent') {
+async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1, type = 'absent', forceUnpaid = false) {
   const employee = await Employee.findById(employeeId).lean();
   if (!employee) return { paid: 0, unpaid: 0 };
 
@@ -15,14 +15,19 @@ async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1,
     // For late, use up all paid leaves, then start counting as unpaid
     if (entitlementLeft >= deductionCount) {
       addPaid = deductionCount;
-      // All lates covered by paid leaves
     } else if (entitlementLeft > 0) {
       addPaid = entitlementLeft;
-      addUnpaid = deductionCount - entitlementLeft; // Remaining lates now unpaid!
+      addUnpaid = deductionCount - entitlementLeft;
     } else {
-      // All paid leaves finished, all lates are unpaid now
       addUnpaid = deductionCount;
     }
+  } else if (type === 'leave') {
+    // Always increment paid, even if negative
+    addPaid = deductionCount;
+    addUnpaid = 0;
+  } else if (type === 'absent' && forceUnpaid) {
+    // Always count as unpaid if forceUnpaid flag is true
+    addUnpaid = deductionCount;
   } else {
     // Absent logic (already correct)
     if (entitlementLeft >= deductionCount) {
