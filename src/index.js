@@ -69,6 +69,7 @@ const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
 const employeeDocsRouter = require("./routes/employeeDocs");
+const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
 
 // ---------- App ----------
 const app = express();
@@ -152,7 +153,8 @@ app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
-
+app.use("/api/employee-docs", employeeDocsRouter);
+app.use("/api/attendance", attendanceLeaveSummaryRouter);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
