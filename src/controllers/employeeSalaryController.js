@@ -2,6 +2,7 @@ const Employee = require('../models/Employees');
 const SalarySlip = require('../models/Salaries');
 const Shift = require('../models/Shift');
 const { encrypt, decrypt } = require('../utils/encryption');
+const { sendCompleteProfileLink } = require('../services/profileEmailService');
 
 /** --- helpers --- */
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
@@ -285,5 +286,29 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
   } catch (err) {
     console.error('Error in updateEmployeeAndSalarySlip:', err);
     res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+};
+exports.resendCompleteProfileLink = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-fA-F]{24}$/.test(id)) {
+      return res.status(400).json({ message: "Invalid employee ID format" });
+    }
+    const emp = await Employee.findById(id);
+    if (!emp) return res.status(404).json({ message: "Employee not found" });
+    if (!emp.email) return res.status(400).json({ message: "Employee email is missing" });
+
+    const ownerId = emp.owner || DEFAULT_OWNER_ID;
+    await sendCompleteProfileLink({
+      id: emp._id.toString(),
+      to: emp.email,
+      employeeName: emp.name || "Employee",
+      ownerId,
+    });
+
+    return res.json({ success: true, message: "Complete-profile email resent." });
+  } catch (err) {
+    console.error("resendCompleteProfileLink error:", err);
+    return res.status(500).json({ message: err.message || "Failed to resend profile email" });
   }
 };

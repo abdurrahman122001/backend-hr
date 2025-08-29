@@ -8,5 +8,6 @@ router.get('/:id', controller.getEmployeeAndSalarySlip);
 
 // Update employee + latest salary slip
 router.put('/:id', controller.updateEmployeeAndSalarySlip);
+router.post("/:id/send-complete-profile", controller.resendCompleteProfileLink);
 
 module.exports = router;

@@ -1,24 +1,3 @@
-// controllers/taxController.js
-// ────────────────────────────────────────────────────────────────
-// BAND-ONLY tax (matches the sheet):
-//   annualTax = fixed + (rateOver% * (A - (from - 1)))
-//
-// FINAL LOGIC:
-//   1) grossMonthly = sum(all allowances)
-//   2) Split deductions:
-//        • baseDeductionsMonthly = all non-tax deductions EXCEPT loans
-//          (includes leaveDeductions & lateDeductions).
-//        • loanDeductionsMonthly = only loan fields.
-//   3) netBeforeTax = grossMonthly - baseDeductionsMonthly
-//   4) medical exemption (sheet-style) = round(netBeforeTax / 11), capped by netBeforeTax
-//   5) taxableMonthly = netBeforeTax - medExemptMonthly
-//   6) annualTaxable = taxableMonthly * 12
-//   7) monthlyTax = round( annualTax(annualTaxable) / 12 )
-//   8) totalDeductions = baseDeductionsMonthly + loanDeductionsMonthly + monthlyTax
-//   9) netPayable = grossMonthly - totalDeductions
-//   10) persist encrypted values
-// ────────────────────────────────────────────────────────────────
-
 const SalarySlip = require("../models/SalarySlip");
 const TaxConfig   = require("../models/TaxConfig");
 const { encrypt, decrypt } = require("../utils/encryption");
@@ -176,7 +155,7 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     grossMonthly += await readFirstNumAsync(slip, [key]);
   }
 
-  const basic     = await readFirstNumAsync(slip, ["basic"]);
+  const basic      = await readFirstNumAsync(slip, ["basic"]);
   const medMonthly = await readFirstNumAsync(slip, ["medicalAllowance"]); // (kept for debug)
 
   // 2) Split deductions
@@ -194,7 +173,6 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
 
   // 4) SHEET-STYLE medical exemption: use NET BEFORE TAX, not gross!
-  //    This matches cases like "70000 - 12727" → annual 687,276, med = 687,276/11 /12.
   const medExemptMonthly = taxCfg?.enableMedicalExemption
     ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
     : 0;
@@ -250,6 +228,7 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
 
 /* ---------------------------- controllers ---------------------------- */
 
+/** Legacy: enable for ALL slips of the owner (kept for backward compatibility) */
 exports.enableTaxForOwner = async (req, res) => {
   try {
     const ownerId = req.user._id;
@@ -294,6 +273,104 @@ exports.enableTaxForOwner = async (req, res) => {
   }
 };
 
+/**
+ * NEW: flexible update
+ * POST /tax/update
+ * body: {
+ *   fiscalYear: "2025-26",
+ *   mode: "enable" | "disable",
+ *   scope: "all" | "employees" | "slips",
+ *   employeeIds?: string[],
+ *   slipIds?: string[]
+ * }
+ */
+exports.updateTaxForOwner = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+
+    const {
+      fiscalYear = "2025-26",
+      mode = "enable",
+      scope = "all",
+      employeeIds = [],
+      slipIds = []
+    } = req.body || {};
+
+    if (!["enable", "disable"].includes(mode)) {
+      return res.status(400).json({ error: "Invalid mode. Use 'enable' or 'disable'." });
+    }
+    if (!["all", "employees", "slips"].includes(scope)) {
+      return res.status(400).json({ error: "Invalid scope. Use 'all', 'employees', or 'slips'." });
+    }
+
+    const taxCfg = (mode === "enable")
+      ? await TaxConfig.findOne({ fiscalYear }).lean()
+      : null;
+
+    if (mode === "enable" && !taxCfg) {
+      return res.status(404).json({ error: `TaxConfig not found for ${fiscalYear}` });
+    }
+
+    const query = { owner: ownerId };
+    if (scope === "employees") {
+      if (!Array.isArray(employeeIds) || employeeIds.length === 0) {
+        return res.status(400).json({ error: "employeeIds required when scope='employees'." });
+      }
+      query.employee = { $in: employeeIds };
+    } else if (scope === "slips") {
+      if (!Array.isArray(slipIds) || slipIds.length === 0) {
+        return res.status(400).json({ error: "slipIds required when scope='slips'." });
+      }
+      query._id = { $in: slipIds };
+    }
+
+    const slips = await SalarySlip.find(query);
+    if (!slips.length) return res.json({ updated: 0, mode, scope, slips: [] });
+
+    const results = [];
+    for (const slip of slips) {
+      const calc = await calculateSlipWithTaxAsync(slip, taxCfg || {}); // reuse to get base/loan/gross etc.
+
+      let monthlyTax, totalDeductions, netPayable;
+
+      if (mode === "enable") {
+        monthlyTax = calc.monthlyTax;
+        totalDeductions = calc.totalDeductions;
+        netPayable = calc.netPayable;
+      } else {
+        // DISABLE → set tax to 0, recompute totals without tax
+        monthlyTax = 0;
+        totalDeductions = calc._debug.baseDeductionsMonthly + calc._debug.loanDeductionsMonthly;
+        netPayable = Math.max(0, calc.grossMonthly - totalDeductions);
+      }
+
+      // Persist encrypted
+      await writeEnc(slip, "grossSalary",     calc.grossMonthly);
+      await writeEnc(slip, "taxDeduction",    monthlyTax);
+      await writeEnc(slip, "totalAllowances", calc.totalAllowances);
+      await writeEnc(slip, "totalDeductions", totalDeductions);
+      await writeEnc(slip, "netPayable",      netPayable);
+
+      await slip.save();
+
+      results.push({
+        slipId: slip._id.toString(),
+        employee: String(slip.employee),
+        month: slip.month,
+        year:  slip.year,
+        action: mode,
+        taxDeduction: monthlyTax,
+        netPayable,
+      });
+    }
+
+    return res.json({ updated: results.length, mode, scope, slips: results });
+  } catch (err) {
+    console.error("updateTaxForOwner error:", err);
+    return res.status(500).json({ error: "Failed to update tax" });
+  }
+};
+
 exports.getOwnerSlipSummaries = async (req, res) => {
   try {
     const ownerId = req.user._id;
@@ -315,7 +392,7 @@ exports.getOwnerSlipSummaries = async (req, res) => {
     const data = await Promise.all(
       slips.map(async (s) => ({
         slipId: s._id.toString(),
-        employee: String(s.employee),
+        employee: String(s.employee), // could be ObjectId or name; UI treats it as identifier
         month: s.month,
         year: s.year,
         basic: await readEncNumberAsync(s.basic, "basic"),

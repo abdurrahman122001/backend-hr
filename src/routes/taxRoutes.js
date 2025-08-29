@@ -1,9 +1,9 @@
-const express = require("express");
-const router = express.Router();
-const { enableTaxForOwner } = require("../controllers/taxController");
-const requireAuth = require("../middleware/auth"); // your existing auth middleware
+const router = require("express").Router();
+const tax = require("../controllers/taxController");
+const auth = require("../middleware/auth");
 
-// Secure route — auto uses req.user._id
-router.post("/enable", requireAuth, enableTaxForOwner);
+router.post("/enable", auth, tax.enableTaxForOwner);     // legacy
+router.post("/update", auth, tax.updateTaxForOwner);     // NEW (all / selected / disable)
+router.get("/owner-slips", auth, tax.getOwnerSlipSummaries);
 
 module.exports = router;
