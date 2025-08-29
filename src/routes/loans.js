@@ -12,8 +12,8 @@ const { encrypt, decrypt } = require("../utils/encryption");
 // Constants / Helpers
 // -----------------------------------------------------------------------------
 const monthsList = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
+  "January","February","March","April","May","June",
+  "July","August","September","October","November","December",
 ];
 
 function resolveOwnerId(user) {
@@ -33,8 +33,8 @@ async function setOtherLoanFields(slip, encryptedValue) {
 }
 
 // fields used for optional decryption output in GET endpoints
-const sensitiveFields = ["loanAmount", "monthlyInstallment", "totalMarkup", "totalToBePaid"];
-const paymentScheduleSensitiveFields = ["principal", "markupPercentage", "markupAmount", "totalPayment", "outstanding", "customAmount"];
+const sensitiveFields = ["loanAmount","monthlyInstallment","totalMarkup","totalToBePaid"];
+const paymentScheduleSensitiveFields = ["principal","markupPercentage","markupAmount","totalPayment","outstanding","customAmount"];
 
 const decryptWithKey = (req, _res, next) => {
   req.decryptionKey = req.query.key || req.headers["x-decryption-key"] || "";
@@ -53,8 +53,8 @@ const decryptWithKey = (req, _res, next) => {
 async function computeLoanMonthlyContribution(loan, month, yNum) {
   const sched = Array.isArray(loan.paymentSchedule)
     ? loan.paymentSchedule.find(
-      (ps) => normMonth(ps.month) === month && Number(ps.year) === yNum
-    )
+        (ps) => normMonth(ps.month) === month && Number(ps.year) === yNum
+      )
     : null;
 
   // No schedule row for this month → do NOT deduct.
@@ -358,20 +358,20 @@ router.post("/loan/:employeeId", async (req, res) => {
       })
     );
 
-    const loan = await LoanDetail.create({
-      employee: employeeId,
-      type,
-      loanAmount: encryptedData.loanAmount,
-      loanTerm,
-      markupType,
-      markupValue,
-      scheduleStartMonth,
-      scheduleStartYear,
-      monthlyInstallment: encryptedData.monthlyInstallment,
-      totalMarkup: encryptedData.totalMarkup,
-      totalToBePaid: encryptedData.totalToBePaid,
-      paymentSchedule: encryptedPaymentSchedule,
-    });
+const loan = await LoanDetail.create({
+  employee: employeeId,
+  type,
+  loanAmount: encryptedData.loanAmount,
+  loanTerm,
+  markupType,
+  markupValue,
+  scheduleStartMonth,
+  scheduleStartYear,
+  monthlyInstallment: encryptedData.monthlyInstallment,
+  totalMarkup: encryptedData.totalMarkup,
+  totalToBePaid: encryptedData.totalToBePaid,
+  paymentSchedule: encryptedPaymentSchedule,
+});
 
     if (loan) {
       loan.type = type;
@@ -525,42 +525,33 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
       const entry = Array.isArray(loan.paymentSchedule)
         ? loan.paymentSchedule.find((ps) => normMonth(ps.month) === month && Number(ps.year) === year)
         : null;
-
+      
       // Only process loans that have a schedule entry for this month
       if (!entry) continue;
 
       try {
         const markupAmount = entry.markupAmount
-          ? (req.decryptionKey
-            ? parseFloat(await decrypt(entry.markupAmount, req.decryptionKey)) || 0
-            : "****")
-          : "****";
+          ? parseFloat(await decrypt(entry.markupAmount, req.decryptionKey)) || 0
+          : 0;
 
-        const paymentAmount = entry.totalPayment
-          ? (req.decryptionKey
-            ? parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) || 0
-            : "****")
-          : "****";
+        let paymentAmount = 0;
+        if (entry.totalPayment) {
+          paymentAmount = parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) || 0;
+        } else if (loan.monthlyInstallment) {
+          paymentAmount = parseFloat(await decrypt(loan.monthlyInstallment, req.decryptionKey)) || 0;
+        }
 
         const loanAmount = loan.loanAmount
-          ? (req.decryptionKey
-            ? parseFloat(await decrypt(loan.loanAmount, req.decryptionKey)) || 0
-            : "****")
-          : "****";
+          ? parseFloat(await decrypt(loan.loanAmount, req.decryptionKey)) || 0
+          : 0;
 
         const totalMarkup = loan.totalMarkup
-          ? (req.decryptionKey
-            ? parseFloat(await decrypt(loan.totalMarkup, req.decryptionKey)) || 0
-            : "****")
-          : "****";
+          ? parseFloat(await decrypt(loan.totalMarkup, req.decryptionKey)) || 0
+          : 0;
 
         const totalToBePaid = loan.totalToBePaid
-          ? (req.decryptionKey
-            ? parseFloat(await decrypt(loan.totalToBePaid, req.decryptionKey)) || 0
-            : "****")
-          : "****";
-
-
+          ? parseFloat(await decrypt(loan.totalToBePaid, req.decryptionKey)) || 0
+          : 0;
 
         // Create a separate entry for each loan that has a schedule in this month
         loanDetails.push({
