@@ -177,7 +177,6 @@ app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api/email-templates", emailTemplateRoutes);
 // ---------- Health ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
