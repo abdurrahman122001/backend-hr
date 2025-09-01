@@ -1,13 +1,9 @@
-// src/routes/offerLetterRoutes.js
-const express = require("express");
-const router = express.Router();
+const router = require("express").Router();
+const requireAuth = require("../middleware/auth");
+const { sendOfferLetter } = require("../controllers/offerLetterController");
 
-const {
-  generateOfferLetter,
-  sendOfferLetter,
-} = require("../controllers/offerLetterController");
-
-router.post("/generate", generateOfferLetter);
+router.use(requireAuth);
+// single-step: realtime preview on FE, server renders again & sends + persists
 router.post("/send", sendOfferLetter);
 
 module.exports = router;

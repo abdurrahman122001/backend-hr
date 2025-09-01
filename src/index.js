@@ -70,7 +70,6 @@ const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
 const employeeDocsRouter = require("./routes/employeeDocs");
 const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
-const emailTemplateRoutes = require("./routes/emailTemplates");
 
 // ---------- App ----------
 const app = express();
