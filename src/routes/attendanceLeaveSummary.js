@@ -48,9 +48,11 @@ function calculateLeaveUsed(records) {
     if (att.status === "Half Day") halfdays++;
     if (att.status === "Absent" && att.leaveType === "Paid") paidAbsents++;
   }
-  const fromLates = Math.floor(lates / 3);
-  const fromHalfDays = Math.floor(halfdays / 2);
-  const fromPaidAbsent = paidAbsents;
+  const fromLates = Math.floor(lates / 3);        // 3 Lates = 1 Leave
+  const fromHalfDays = halfdays * 0.5;            // Each Half Day = 0.5 Leave
+  const fromPaidAbsent = paidAbsents;             // Each paid absent = 1 Leave
+
+  // If you want leave as decimal (e.g., 2.5), keep as is. If you need integer, Math.floor or Math.round as needed.
   return {
     fromLates,
     fromHalfDays,
@@ -58,6 +60,7 @@ function calculateLeaveUsed(records) {
     used: fromLates + fromHalfDays + fromPaidAbsent
   };
 }
+
 
 router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
   try {

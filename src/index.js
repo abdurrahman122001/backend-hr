@@ -70,6 +70,7 @@ const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
 const employeeDocsRouter = require("./routes/employeeDocs");
 const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
+const emailTemplateRoutes = require("./routes/emailTemplates");
 
 // ---------- App ----------
 const app = express();
@@ -177,7 +178,7 @@ app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
-
+app.use("/api/email-templates", emailTemplateRoutes);
 // ---------- Health ----------
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
