@@ -33,13 +33,14 @@ function getMonthRange(year, month) {
 
 
 function getYTDRange(year, month) {
-  let monthNum = Number.isNaN(Number(month)) ?
-    new Date(Date.parse(month + " 1, " + year)).getMonth() :
-    Number(month) - 1;
+  let monthNum = Number.isNaN(Number(month))
+    ? new Date(Date.parse(month + " 1, " + year)).getMonth()
+    : Number(month) - 1;
   let from = new Date(Date.UTC(year, 0, 1)); // Jan 1
-  let to = new Date(Date.UTC(year, monthNum + 1, 25, 23, 59, 59, 999)); // 25th this month
+  let to = new Date(Date.UTC(year, monthNum, 25, 23, 59, 59, 999)); // 25th of THIS month
   return { from: toYMD(from), to: toYMD(to) };
 }
+
 
 function calculateLeaveUsed(records) {
   let lates = 0, halfdays = 0, paidAbsents = 0;
@@ -111,5 +112,75 @@ router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
     res.status(500).json({ error: e.message });
   }
 });
+
+router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { year } = req.query;
+    if (!year) {
+      console.warn("[leave-summary-history] year query param is missing.");
+      return res.status(400).json({ error: "year is required" });
+    }
+
+    // Fetch entitlement
+    const employee = await Employee.findById(employeeId);
+    if (!employee) {
+      console.warn(`[leave-summary-history] Employee not found: ${employeeId}`);
+      return res.status(404).json({ error: "Employee not found" });
+    }
+    const entitled = (employee.leaveEntitlement && employee.leaveEntitlement.total) || 22;
+
+    const months = [
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
+    ];
+
+    let results = [];
+
+    console.log(`[leave-summary-history] Starting for employee ${employeeId} (${employee.name}), year ${year}, entitled leaves: ${entitled}`);
+
+    for (let m = 0; m < 12; m++) {
+      const monthName = months[m];
+
+      // Get periods for this month
+      const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
+      const { from: ytdFrom, to: ytdTo } = getYTDRange(Number(year), monthName);
+
+      console.log(`[leave-summary-history][${monthName}] MTH: ${mthFrom} → ${mthTo}, YTD: ${ytdFrom} → ${ytdTo}`);
+
+      // Query attendances for month and YTD
+      const attendancesMth = await Attendance.find({
+        employee: employeeId,
+        date: { $gte: mthFrom, $lte: mthTo }
+      });
+      const attendancesYTD = await Attendance.find({
+        employee: employeeId,
+        date: { $gte: ytdFrom, $lte: ytdTo }
+      });
+
+      console.log(`[leave-summary-history][${monthName}] Attendances MTH: ${attendancesMth.length}, YTD: ${attendancesYTD.length}`);
+
+      const statsMth = calculateLeaveUsed(attendancesMth);
+      const statsYTD = calculateLeaveUsed(attendancesYTD);
+
+      console.log(`[leave-summary-history][${monthName}] StatsMth: ${JSON.stringify(statsMth)}, StatsYTD: ${JSON.stringify(statsYTD)}`);
+
+      results.push({
+        month: monthName,
+        usedPaid: statsYTD.used,
+        usedMonth: statsMth.used,
+        balance: entitled - statsYTD.used
+      });
+    }
+
+    console.log(`[leave-summary-history] Results for employee ${employeeId}:`, results);
+
+    res.json(results);
+  } catch (e) {
+    console.error("[leave-summary-history][ERROR]", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 module.exports = router;

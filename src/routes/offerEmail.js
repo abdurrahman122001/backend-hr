@@ -1,15 +1,9 @@
-const express = require("express");
-const router = express.Router();
-const requireAuth = require("../middleware/auth"); // must set req.user._id or req.req_id
-const ctrl = require("../controllers/offerEmailController");
+const router = require("express").Router();
+const requireAuth = require("../middleware/auth");
+const { getOfferEmailTemplate, saveOfferEmailTemplate } = require("../controllers/offerEmailTemplateController");
 
 router.use(requireAuth);
-
-// Template CRUD (simple)
-router.get("/", ctrl.getTemplate);
-router.post("/", ctrl.saveTemplate);
-
-// Optional: fetch latest generated content per candidate
-router.get("/latest", ctrl.getLatestGenerated);
+router.get("/", getOfferEmailTemplate);   // GET /api/offer-email?key=offer_letter
+router.post("/", saveOfferEmailTemplate); // POST /api/offer-email { key, subject, html }
 
 module.exports = router;
