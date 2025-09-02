@@ -100,8 +100,8 @@ function calculateLeaveUsed(records) {
         if (att.status === "Half Day") halfdays++;
         if (att.status === "Absent" && att.leaveType === "Paid") paidAbsents++;
     }
-    const fromHalfDays = halfdays * 0.5;            
-    const fromPaidAbsent = paidAbsents;             
+    const fromHalfDays = halfdays * 0.5;
+    const fromPaidAbsent = paidAbsents;
 
     return {
         fromLates,
@@ -263,7 +263,11 @@ router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) =
         }
 
 
-        res.json(results);
+        res.json({
+            total: entitled ?? "-",
+            history: results
+        });
+
 
     } catch (e) {
         console.error("[leave-summary-history][ERROR]", e);
