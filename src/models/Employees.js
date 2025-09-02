@@ -41,6 +41,7 @@ const EmployeeSchema = new Schema(
     companyEmail: { type: String, default: "" }, // Office Email Address
     permanentAddress: { type: String },
     presentAddress: { type: String },
+    role: { type: String }, // e.g. "Employee", "Manager", "HR", "Admin"
 
     // BANK DETAILS
     bankName: { type: String },

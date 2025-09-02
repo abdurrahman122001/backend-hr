@@ -6,6 +6,7 @@ const nodemailer = require("nodemailer");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
 const OfferEmailTemplate = require("../models/OfferEmailTemplate");
+const probationPeriods = require("../models/ProbationPeriod");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
 require("dotenv").config();
 
@@ -127,61 +128,71 @@ function renderWithContext(tpl="", ctx={}){
 }
 
 /* ------------------------ Build render context --------------------------- */
-async function buildContext({ ownerId, candidateName, candidateEmail, position, salaryBreakup, startDate, reportingTime, confirmationDeadlineDate, department, shift, probationDays }) {
+function probationDaysToMonths(probationDays){
+  const days = Number(probationDays) || 0;
+  if (!days) return "";
+  const months = Math.round(days / 30);
+  return months > 0
+    ? `${months} month${months > 1 ? "s" : ""}`
+    : `${days} days`;
+}
 
+async function buildContext({
+  ownerId, candidateName, candidateEmail, position,
+  salaryBreakup, startDate, reportingTime,
+  confirmationDeadlineDate, department, shift, probationDays
+}) {
   const companyCtx = await getCompanyContext(ownerId);
   const safeCandidateName = sanitizeName(candidateName);
+
   const formattedStartDate = formatDateDMY(startDate);
-  const formattedDeadline   = formatDateDMY(confirmationDeadlineDate);
-  const formattedTime       = formatTime12hr(reportingTime);
-  const grossSalaryRaw = SALARY_COMPONENTS.reduce((sum,k)=>sum+(Number(salaryBreakup?.[k])||0),0);
-  const grossSalary    = formatNumberWithCommas(grossSalaryRaw);
+  const formattedDeadline  = formatDateDMY(confirmationDeadlineDate);
+  const formattedTime      = formatTime12hr(reportingTime);
+
+  const grossSalaryRaw = SALARY_COMPONENTS.reduce(
+    (sum, k) => sum + (Number(salaryBreakup?.[k]) || 0),
+    0
+  );
+  const grossSalary = formatNumberWithCommas(grossSalaryRaw);
 
   const signature = await Signature.findOne({ owner: ownerId });
-  let signatureBlock = "";
-  if (signature) {
-    signatureBlock = `
-      <div>
-        <br>
-        ${ signature.signatureImage ? `<img src="${process.env.SERVER_URL||""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />` : "" }
-        <div style="text-align:left;">${signature.signatureText || ""}</div>
-      </div>
-    `;
-  }
+  const signatureBlock = signature ? `
+    <div>
+      <br>
+      ${ signature.signatureImage
+          ? `<img src="${process.env.SERVER_URL||""}${signature.signatureImage}" 
+                   alt="Signature" 
+                   style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+          : "" }
+      <div style="text-align:left;">${signature.signatureText || ""}</div>
+    </div>
+  ` : "";
 
-  // Context includes aliases, dot paths & the function-like token you used
+  // 🔑 do the conversion once
+  const probationDaysNum = Number(probationDays) || 0;
+  const probationPeriodText = probationDaysToMonths(probationDaysNum);
+
   const ctx = {
     candidateName: safeCandidateName,
-    safeCandidateName: safeCandidateName,
-    candidateEmail,
     position,
-    startDate,
-    reportingTime,
-    confirmationDeadlineDate,
-    department: department || "",
-    shift: shift || "",
-    probationDays,
-
     companyName: companyCtx.name,
     companyAddress: companyCtx.address,
-    "companyCtx.name": companyCtx.name,
-    "companyCtx.address": companyCtx.address,
 
     formattedStartDate,
     formattedDeadline,
     formattedTime,
-    formattedReportingTime12hr: formattedTime,
-
     grossSalary,
-    grossSalaryRaw: String(grossSalaryRaw),
 
-    "probationDaysToMonths(probationDays)": probationDaysToMonths(probationDays),
-    signatureBlock,
+    // 🔑 probation placeholders
+    probationDays: probationDaysNum,         // -> {{probationDays}} → "90"
+    probationPeriod: probationPeriodText,    // -> {{probationPeriod}} → "3 months"
+    "probationDaysToMonths(probationDays)": probationPeriodText, // -> {{probationDaysToMonths(probationDays)}} → "3 months"
+
+    signatureBlock
   };
 
-  return { ctx, companyCtx, signatureBlock, safeCandidateName, grossSalaryRaw };
+  return { ctx, companyCtx, signatureBlock };
 }
-
 /* -------------------------- Controller: Send (single-step) --------------- */
 async function sendOfferLetter(req, res) {
   try {
