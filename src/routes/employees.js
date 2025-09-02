@@ -42,12 +42,22 @@ function buildEmployeeScope(user) {
 router.get('/', requireAuth, async (req, res) => {
   try {
     const scope = buildEmployeeScope(req.user);
-    const list = await Employee.find(scope).sort({ name: 1 }).lean();
+
+    let query = { ...scope };
+
+    // If req._id is provided, filter by that as well
+    if (req._id) {
+      query._id = req._id;
+    }
+
+    const list = await Employee.find(query).sort({ name: 1 }).lean();
     res.json({ status: 'success', data: list });
   } catch (err) {
     res.status(500).json({ status: 'error', message: err.message });
   }
 });
+
+
 // ------------------------------
 // GET /api/employees/birthdays
 // (delegates to controller)
