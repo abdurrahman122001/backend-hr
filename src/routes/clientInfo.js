@@ -1,15 +1,15 @@
 const express = require("express");
 const router = express.Router();
 const requireAuth = require("../middleware/empAuth");
-const ctrl = require("../controllers/clientInfoController");
-
-// All routes need auth
-router.use(requireAuth);
+const clientInfoCtrl = require("../controllers/clientInfoController");
 
 // Manager creates client info
-router.post("/", ctrl.createClientInfo);
+router.post("/", requireAuth, clientInfoCtrl.createClientInfo);
 
-// Owner fetches their client info
-router.get("/my", ctrl.getClientInfoByOwner);
+// Owner or employee (assigned) fetch clients
+router.get("/", requireAuth, clientInfoCtrl.getClientInfo);
+
+// Employee only → fetch my assigned clients
+router.get("/my", requireAuth, clientInfoCtrl.getMyClients);
 
 module.exports = router;

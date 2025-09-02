@@ -1,3 +1,4 @@
+// backend/src/models/ClientInfo.js
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
 
@@ -5,33 +6,40 @@ const ClientInfoSchema = new Schema(
   {
     owner: {
       type: Schema.Types.ObjectId,
-      ref: "Employee", // Owner employee id
+      ref: "User",
       required: true,
-    },
-    createdBy: {
-      type: Schema.Types.ObjectId,
-      ref: "Employee", // Manager who created
-      required: true,
+      index: true,
     },
 
-    clientName: { type: String, required: true },
+    // Core identity
+    clientName: { type: String, required: true, trim: true },
+
+    // Fields you requested
     companyLocation: { type: String },
-    nameInAccountingSoftware: { type: String }, // Name in Xero/QBO
+    nameInAccountingSoftware: { type: String }, // Xero/QBO
     industry: { type: String },
     natureOfBusiness: { type: String },
     financialYear: { type: String },
     bookkeepingSoftware: { type: String },
     legalBusinessName: { type: String },
-    dba: { type: String }, // Doing Business As
+    dba: { type: String },
     naicsOrSic: { type: String },
     incorporationState: { type: String }, // US only
-    websites: { type: [String], default: [] },
-    incorporationYear: { type: Number },
-    servicesStartDate: { type: String },
+    websites: [{ type: String }],
+    incorporationYear: { type: String },   // keep string for flexibility
+    servicesStartDate: { type: String },   // YYYY-MM-DD
     monthlyTransactions: { type: Number },
-    accountingBasis: { type: String, enum: ["Cash", "Accrual", "Other"] },
+    accountingBasis: { type: String },     // Cash / Accrual
     numberOfBankFeeds: { type: Number },
     taxStatus: { type: String },
+
+    // Assignment
+    assignedTo: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );
