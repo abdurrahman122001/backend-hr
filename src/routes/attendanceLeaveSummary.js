@@ -92,22 +92,42 @@ function countLeavesFromLates(attendanceRecords) {
     return lateLeaveCount;
 }
 
-function calculateLeaveUsed(records) {
-    const fromLates = countLeavesFromLates(records);
-
-    let halfdays = 0, paidAbsents = 0;
+function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
+    // Always calculate paid absents - these can make balance negative
+    let paidAbsents = 0;
     for (const att of records) {
-        if (att.status === "Half Day") halfdays++;
         if (att.status === "Absent" && att.leaveType === "Paid") paidAbsents++;
     }
-    const fromHalfDays = halfdays * 0.5;
     const fromPaidAbsent = paidAbsents;
 
+    // Calculate lates and half days
+    const fromLates = countLeavesFromLates(records);
+    
+    let halfdays = 0;
+    for (const att of records) {
+        if (att.status === "Half Day") halfdays++;
+    }
+    const fromHalfDays = halfdays * 0.5;
+
+    // If balance is already 0 or negative, ignore lates and half days completely
+    // Only count paid absents (which can make balance more negative)
+    let actualFromLates = fromLates;
+    let actualFromHalfDays = fromHalfDays;
+    
+    if (currentBalance !== null && currentBalance <= 0) {
+        // Balance is already 0 or negative - ignore lates and half days
+        actualFromLates = 0;
+        actualFromHalfDays = 0;
+    }
+
     return {
-        fromLates,
-        fromHalfDays,
+        fromLates: actualFromLates,
+        fromHalfDays: actualFromHalfDays, 
         fromPaidAbsent,
-        used: fromLates + fromHalfDays + fromPaidAbsent
+        used: actualFromLates + actualFromHalfDays + fromPaidAbsent,
+        // Also return original values for debugging
+        originalFromLates: fromLates,
+        originalFromHalfDays: fromHalfDays
     };
 }
 
@@ -151,8 +171,9 @@ router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
         console.log(`[API] /leave-summary | Attendances (MTH): ${attendancesMth.length}`);
         console.log(`[API] /leave-summary | Attendances (YTD): ${attendancesYTD.length}`);
 
-        const statsMth = calculateLeaveUsed(attendancesMth);
-        const statsYTD = calculateLeaveUsed(attendancesYTD);
+        // In /leave-summary/:employeeId
+        const statsYTD = calculateLeaveUsed(attendancesYTD, null, entitled); // For YTD, calculate normally
+        const statsMth = calculateLeaveUsed(attendancesMth, entitled - statsYTD.used, entitled); // For month, check against remaining balance
 
         res.json({
             Annual: {
@@ -206,8 +227,31 @@ router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) =
         ];
 
         let results = [];
+        const yearAttendances = await Attendance.find({
+            employee: employeeId,
+            date: { $gte: `${year}-01-01`, $lte: `${year}-12-31` }
+        });
+
+        let lastMonthWithAttendance = -1;
+        if (yearAttendances.length > 0) {
+            lastMonthWithAttendance = Math.max(
+                ...yearAttendances.map(a => {
+                    const d = new Date(a.date);
+                    return d.getMonth(); // 0-based: Jan=0, Feb=1, ...
+                })
+            );
+        }
 
         for (let m = 0; m < 12; m++) {
+            if (m > lastMonthWithAttendance) {
+                results.push({
+                    month: months[m],
+                    usedPaid: "-",
+                    usedMonth: "-",
+                    balance: "-"
+                });
+                continue;
+            }
             const monthName = months[m];
             const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
             const { from: ytdFrom, to: ytdTo } = getYTDRange(Number(year), monthName);
@@ -251,8 +295,11 @@ router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) =
             });
 
 
-            const statsMth = calculateLeaveUsed(attendancesMth);
-            const statsYTD = calculateLeaveUsed(attendancesYTD);
+            // In /leave-summary-history/:employeeId  
+            const statsYTD = calculateLeaveUsed(attendancesYTD, null, entitled);
+            const currentBalance = entitled - statsYTD.used;
+            const statsMth = calculateLeaveUsed(attendancesMth, currentBalance, entitled);
+
 
             results.push({
                 month: monthName,
