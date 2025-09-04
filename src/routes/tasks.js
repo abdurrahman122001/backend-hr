@@ -18,5 +18,7 @@ router.get("/my", requireAuth, ctrl.getMyTasks);
 // Update & delete a task
 router.patch("/:taskId", requireAuth, ctrl.updateTask);
 router.delete("/:taskId", requireAuth, ctrl.deleteTask);
-
+router.get("/:taskId/attachments", requireAuth, ctrl.listAttachments);
+router.post("/:taskId/attachments", requireAuth, ctrl.uploadAttachments); // multipart
+router.delete("/:taskId/attachments/:attachmentId", requireAuth, ctrl.deleteAttachment);
 module.exports = router;

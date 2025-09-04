@@ -1,11 +1,56 @@
 const Task = require("../models/Task");
 const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
+const fs = require("fs");
+const path = require("path");
+const mongoose = require("mongoose");
+const multer = require("multer");
 
-/**
- * Manager: list all clients under their owner (for the select dropdown)
- * GET /api/tasks/manager/clients
- */
+const uploadRoot = path.join(__dirname, "..", "uploads");
+const taskUploadDir = path.join(uploadRoot, "tasks");
+fs.mkdirSync(taskUploadDir, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: taskUploadDir,
+  filename: (_req, file, cb) => {
+    const ext = path.extname(file.originalname || "");
+    const name = `${Date.now()}-${Math.random().toString(36).slice(2)}${ext}`;
+    cb(null, name);
+  },
+});
+
+const ALLOWED = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
+  "application/vnd.ms-excel", // .xls (optional)
+]);
+
+const fileFilter = (_req, file, cb) => {
+  if (ALLOWED.has(file.mimetype)) return cb(null, true);
+  cb(new Error("Only PDF/XLS/XLSX are allowed"));
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB each
+});
+
+// ---------- Helpers ----------
+async function canTouchTask(req, task) {
+  const me = await Employee.findById(req.employee._id).select("_id role owner");
+  if (!me || !task) return false;
+  const isManagerSameOwner = me.role === "Manager" && String(task.client.owner) === String(me.owner);
+  const isAssignee = task.assignedTo && String(task.assignedTo) === String(me._id);
+  return isManagerSameOwner || isAssignee;
+}
+
+function publicUrl(req, filename) {
+  // e.g., http://localhost:4000/uploads/tasks/<filename>
+  return `${req.protocol}://${req.get("host")}/uploads/tasks/${filename}`;
+}
+
+
 exports.clientsForManager = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
@@ -114,15 +159,23 @@ exports.getTasksForClient = async (req, res) => {
  */
 exports.getMyTasks = async (req, res) => {
   try {
-    const meId = req.employee._id;
-    const tasks = await Task.find({ assignedTo: meId })
+    const me = await Employee.findById(req.employee._id).select('_id role owner');
+    if (!me) return res.status(404).json({ error: 'Employee not found' });
+
+    const query =
+      me.role === 'Manager'
+        ? { owner: me.owner }                   // all tasks under the manager’s owner
+        : { assignedTo: me._id };               // only my tasks
+
+    const tasks = await Task.find(query)
       .sort({ createdAt: -1 })
-      .populate("client", "_id clientName")
-      .populate("assignedTo", "_id name companyEmail");
+      .populate('client', '_id clientName')
+      .populate('assignedTo', '_id name companyEmail');
+
     res.json(tasks);
   } catch (err) {
-    console.error("getMyTasks error:", err);
-    res.status(500).json({ error: "Server error" });
+    console.error('getMyTasks error:', err);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -136,16 +189,22 @@ exports.updateTask = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
-    const task = await Task.findById(req.params.taskId).populate("client", "owner assignedTo");
+    // we need client.owner here, so populate owner
+    const task = await Task.findById(req.params.taskId)
+      .populate("client", "owner assignedTo"); // keep owner!
+
     if (!task) return res.status(404).json({ error: "Task not found" });
 
     const isManagerSameOwner =
       me.role === "Manager" && String(task.client.owner) === String(me.owner);
     const isAssignee = task.assignedTo && String(task.assignedTo) === String(me._id);
-
     if (!isManagerSameOwner && !isAssignee) {
       return res.status(403).json({ error: "Forbidden" });
     }
+
+    const prevStatus = task.status;                     // <— remember previous
+    const ownerId = String(task.client.owner);          // <— for room name
+    const clientId = String(task.client._id);
 
     const allowed = ["status", "priority", "dueDate", "title", "description"];
     allowed.forEach((k) => {
@@ -155,9 +214,25 @@ exports.updateTask = async (req, res) => {
     });
 
     await task.save();
+
+    // repopulate for response
     const populated = await Task.findById(task._id)
       .populate("client", "_id clientName")
       .populate("assignedTo", "_id name companyEmail");
+
+    // --- EMIT when moved to done ---
+    if (task.status === "done" || task.status === "in_progress" || task.status === "blocked" || task.status === "todo") {
+      const io = req.app.get("io");
+      io.to(`owner:${ownerId}`).emit("task:done", {
+        clientId,
+        task: {
+          _id: String(task._id),
+          title: task.title,
+          status: task.status,
+          description: task.description || "",
+        },
+      });
+    }
 
     res.json(populated);
   } catch (err) {
@@ -187,5 +262,84 @@ exports.deleteTask = async (req, res) => {
   } catch (err) {
     console.error("deleteTask error:", err);
     res.status(500).json({ error: "Failed to delete task" });
+  }
+};
+exports.listAttachments = async (req, res) => {
+  try {
+    const task = await Task.findById(req.params.taskId)
+      .populate("client", "owner")
+      .populate("attachments.uploadedBy", "_id name companyEmail");
+
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    if (!(await canTouchTask(req, task))) return res.status(403).json({ error: "Forbidden" });
+
+    res.json(task.attachments || []);
+  } catch (err) {
+    console.error("listAttachments error:", err);
+    res.status(500).json({ error: "Failed to fetch attachments" });
+  }
+};
+
+// ---------------- NEW: upload attachments (multi) ----------------
+exports.uploadAttachments = [
+  upload.array("files", 10), // field name must be "files"
+  async (req, res) => {
+    try {
+      const task = await Task.findById(req.params.taskId).populate("client", "owner");
+      if (!task) return res.status(404).json({ error: "Task not found" });
+      if (!(await canTouchTask(req, task))) return res.status(403).json({ error: "Forbidden" });
+
+      const files = req.files || [];
+      if (!files.length) return res.status(400).json({ error: "No files uploaded" });
+
+      const toAdd = files.map((f) => ({
+        _id: new mongoose.Types.ObjectId(),
+        filename: f.filename,
+        originalName: f.originalname,
+        mimetype: f.mimetype,
+        size: f.size,
+        url: publicUrl(req, f.filename),
+        uploadedBy: req.employee._id,
+        uploadedAt: new Date(),
+      }));
+
+      task.attachments.push(...toAdd);
+      await task.save();
+
+      // return the whole list (with latest)
+      const populated = await Task.findById(task._id).populate("attachments.uploadedBy", "_id name companyEmail");
+      res.status(201).json(populated.attachments || []);
+    } catch (err) {
+      console.error("uploadAttachments error:", err);
+      res.status(500).json({ error: err.message || "Failed to upload" });
+    }
+  },
+];
+
+// ---------------- NEW: delete one attachment ----------------
+exports.deleteAttachment = async (req, res) => {
+  try {
+    const { taskId, attachmentId } = req.params;
+    const task = await Task.findById(taskId).populate("client", "owner");
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    if (!(await canTouchTask(req, task))) return res.status(403).json({ error: "Forbidden" });
+
+    const att = task.attachments.id(attachmentId);
+    if (!att) return res.status(404).json({ error: "Attachment not found" });
+
+    // remove file from disk
+    const filePath = path.join(taskUploadDir, att.filename);
+    if (fs.existsSync(filePath)) {
+      try { fs.unlinkSync(filePath); } catch (e) { console.warn("unlink error", e.message); }
+    }
+
+    // pull subdoc and save
+    att.deleteOne();
+    await task.save();
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("deleteAttachment error:", err);
+    res.status(500).json({ error: "Failed to delete attachment" });
   }
 };

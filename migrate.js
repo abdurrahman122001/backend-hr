@@ -3,7 +3,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 
 // Adjust the path if your model filename/path differs:
-const Department = require("./src/models/Departments");
+const Task = require("./src/models/Task");
 
 async function migrate() {
   try {
