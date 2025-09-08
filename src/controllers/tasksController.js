@@ -189,9 +189,8 @@ exports.updateTask = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
-    // we need client.owner here, so populate owner
     const task = await Task.findById(req.params.taskId)
-      .populate("client", "owner assignedTo"); // keep owner!
+      .populate("client", "owner assignedTo");
 
     if (!task) return res.status(404).json({ error: "Task not found" });
 
@@ -202,37 +201,24 @@ exports.updateTask = async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const prevStatus = task.status;                     // <— remember previous
-    const ownerId = String(task.client.owner);          // <— for room name
-    const clientId = String(task.client._id);
-
-    const allowed = ["status", "priority", "dueDate", "title", "description"];
+    const allowed = ["status", "priority", "dueDate", "title", "description", "assignedTo", "completed"];
     allowed.forEach((k) => {
       if (k in req.body) {
-        task[k] = k === "dueDate" && req.body[k] ? new Date(req.body[k]) : req.body[k];
+        if (k === "dueDate" && req.body[k]) {
+          task[k] = new Date(req.body[k]);
+        } else if (k === "assignedTo") {
+          task[k] = req.body[k] || undefined;
+        } else {
+          task[k] = req.body[k];
+        }
       }
     });
 
     await task.save();
 
-    // repopulate for response
     const populated = await Task.findById(task._id)
       .populate("client", "_id clientName")
       .populate("assignedTo", "_id name companyEmail");
-
-    // --- EMIT when moved to done ---
-    if (task.status === "done" || task.status === "in_progress" || task.status === "blocked" || task.status === "todo") {
-      const io = req.app.get("io");
-      io.to(`owner:${ownerId}`).emit("task:done", {
-        clientId,
-        task: {
-          _id: String(task._id),
-          title: task.title,
-          status: task.status,
-          description: task.description || "",
-        },
-      });
-    }
 
     res.json(populated);
   } catch (err) {

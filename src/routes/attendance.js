@@ -6,7 +6,8 @@ const {
   getRecordsByEmployee,
   getStatsByEmployee,
   getRecordsByDateRange, 
-  deleteRecord
+  deleteRecord,
+  creditBonusLeavesForPayrollPeriod 
 } = require('../controllers/attendanceController');
 
 // existing endpoints

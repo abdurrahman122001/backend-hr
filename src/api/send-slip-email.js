@@ -5,6 +5,8 @@ const nodemailer = require("nodemailer");
 const numberToWords = require("number-to-words");
 const SalarySlip = require('../models/SalarySlip');
 const LeaveRecord = require('../models/LeaveRecord');
+const leaveSummary = require("./leaveSummary"); // adjust the path if needed
+
 const { decrypt } = require("../utils/encryption");
 
 // Helper to format numbers as currency
@@ -172,9 +174,9 @@ function renderLoanTable(loans = []) {
         <tbody>
           ${arr.map(loan => {
     let paidPrev = '-';
-if (loan.loanPaidPreviousMonths !== undefined && loan.loanPaidPreviousMonths !== null) {
-  paidPrev = Number(loan.loanPaidPreviousMonths).toLocaleString();
-}
+    if (loan.loanPaidPreviousMonths !== undefined && loan.loanPaidPreviousMonths !== null) {
+      paidPrev = Number(loan.loanPaidPreviousMonths).toLocaleString();
+    }
     return `
               <tr>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || '-'}</td>
@@ -249,9 +251,26 @@ function renderGratuityFundTable(data = {}) {
 // Render Leave Table
 function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
   if (!Array.isArray(enabledLeaveRecords) || !enabledLeaveRecords.length) return "";
-  const cols = ["Entitled", "AvailedYTD", "AvailedMTH", "Balance"];
-  const colLabel = { Entitled: "Entitled", AvailedYTD: "Availed (YTD)", AvailedMTH: "Availed (MTH)", Balance: "Balance" };
+
+  // Detect if any leave type has a bonus > 0
+  const hasAnyBonus = enabledLeaveRecords.some(type => {
+    const key = `${type.toLowerCase()}Bonus`;
+    return Number(leaves[key] || 0) > 0;
+  });
+
+  // Table columns
+  const cols = ["Entitled"];
+  if (hasAnyBonus) cols.push("Bonus");
+  cols.push("AvailedYTD", "AvailedMTH", "Balance");
+  const colLabel = {
+    Entitled: "Entitled",
+    Bonus: "Overtime Bonus",
+    AvailedYTD: "Availed (YTD)",
+    AvailedMTH: "Availed (MTH)",
+    Balance: "Balance"
+  };
   const typeLabel = { casual: "Casual", sick: "Sick", annual: "Annual", wop: "WOP", other: "Other" };
+
   return `
     <div style="margin: 24px 0;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">Leave Records</div>
@@ -263,21 +282,32 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
           </tr>
         </thead>
         <tbody>
-          ${enabledLeaveRecords.map(type => `
-            <tr>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
-              ${cols.map(col => {
-    const key = `${type.toLowerCase()}${col}`;
-    const val = leaves && leaves[key] != null && leaves[key] !== "" && leaves[key] !== 0 ? leaves[key] : "-";
-    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${val}</td>`;
+          ${enabledLeaveRecords.map(type => {
+    const entitled = leaves[`${type.toLowerCase()}Entitled`] ?? "-";
+    const bonus = leaves[`${type.toLowerCase()}Bonus`] ?? 0;
+    const availedYTD = leaves[`${type.toLowerCase()}AvailedYTD`] ?? "-";
+    const availedMTH = leaves[`${type.toLowerCase()}AvailedMTH`] ?? "-";
+    const balance = leaves[`${type.toLowerCase()}Balance`] ?? "-";
+    return `
+              <tr>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${entitled}</td>
+                ${hasAnyBonus
+        ? `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${Number(bonus) > 0 ? bonus : "-"}</td>`
+        : ""
+      }
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${availedYTD}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${availedMTH}</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${balance}</td>
+              </tr>
+            `;
   }).join("")}
-            </tr>
-          `).join("")}
         </tbody>
       </table>
     </div>
   `;
 }
+
 
 // Net Salary Table Builder
 function buildNetSalaryTable({ netSalary, amountInWords, enabledNetSalaryFields }) {
@@ -626,7 +656,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
 
     try {
       // Decrypt the relevant amounts
-      const markupAmount = entry.markupAmount 
+      const markupAmount = entry.markupAmount
         ? parseFloat(await decrypt(entry.markupAmount, decryptionKey)) || 0
         : 0;
 
@@ -725,17 +755,11 @@ module.exports = async function sendSlipEmail(req, res) {
       }
 
       // Fetch leave records
-      const leaveRecord = await LeaveRecord.findOne({ owner: req.user._id }).lean();
-      const employeeLeaves = slip.employee?.leaveEntitlement || {};
-      leaves = {
-        annualEntitled: employeeLeaves.total != null && employeeLeaves.total !== 0 ? employeeLeaves.total : "-",
-        annualAvailedYTD: employeeLeaves.usedPaid != null && employeeLeaves.usedPaid !== 0 ? employeeLeaves.usedPaid : "-",
-        annualAvailedMTH: leaveRecord?.totalAvailedFTM != null && leaveRecord.totalAvailedFTM !== 0 ? leaveRecord.totalAvailedFTM : "-",
-        annualBalance: employeeLeaves.total != null && employeeLeaves.usedPaid != null
-          ? (employeeLeaves.total - employeeLeaves.usedPaid) !== 0
-            ? (employeeLeaves.total - employeeLeaves.usedPaid)
-            : "-"
-          : "-",
+       leaves = {
+        annualEntitled: "-",
+        annualAvailedYTD: "-",
+        annualAvailedMTH: "-",
+        annualBalance: "-",
         casualEntitled: "-",
         casualAvailedYTD: "-",
         casualAvailedMTH: "-",
@@ -753,6 +777,44 @@ module.exports = async function sendSlipEmail(req, res) {
         otherAvailedMTH: "-",
         otherBalance: "-",
       };
+
+      // --- New monthly leave calculation (uses the helper)
+      if (slip && slip.employee && slip.employee._id) {
+        // Get month/year for this slip (e.g., "July 2025" => "July", 2025)
+        let slipMonth = "";
+        let slipYear = "";
+        if (monthYearFromBody) {
+          const [m, y] = monthYearFromBody.split(" ");
+          slipMonth = m;
+          slipYear = Number(y);
+        } else {
+          const now = new Date();
+          slipMonth = now.toLocaleString("en-US", { month: "long" });
+          slipYear = now.getFullYear();
+        }
+
+        // Get entitlement (total + bonus) exactly like your router
+        const emp = slip.employee;
+        const total = emp.leaveEntitlement?.total || 0;
+        const bonus = emp.leaveEntitlement?.bonus || 0;
+        const entitled = total + bonus;
+
+        // Calculate using the exact same helper as in router
+        const leaveSummaryResult = await leaveSummary.calculateYTDLeaveWithRunningBalance(
+          emp._id,
+          entitled,
+          slipYear,
+          slipMonth
+        );
+
+        // Fill your leaves object accordingly (annual only, for now)
+        leaves.annualEntitled = total;
+        leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
+        leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
+        leaves.annualBalance = leaveSummaryResult.balance;
+        leaves.annualBonus = bonus; 
+      }
+
 
       // Decrypt fields
       const decryptField = async (encryptedValue) => {
@@ -852,78 +914,78 @@ module.exports = async function sendSlipEmail(req, res) {
         gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
       };
     } else {
-  // Manual slip mode
-  if (!employee || !email || !compensation || !deductions || netSalary == null) {
-    return res.status(400).json({
-      success: false,
-      message: "Missing required fields: employee, email, compensation, deductions, or netSalary",
-    });
-  }
+      // Manual slip mode
+      if (!employee || !email || !compensation || !deductions || netSalary == null) {
+        return res.status(400).json({
+          success: false,
+          message: "Missing required fields: employee, email, compensation, deductions, or netSalary",
+        });
+      }
 
-  // Validate email format
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  if (!emailRegex.test(email)) {
-    return res.status(400).json({ success: false, message: "Invalid email address" });
-  }
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        return res.status(400).json({ success: false, message: "Invalid email address" });
+      }
 
-  // Use provided data directly
-  employeeData = employee;
-  compensationData = compensation;
-  deductionsData = deductions;
-  netSalaryData = netSalary;
+      // Use provided data directly
+      employeeData = employee;
+      compensationData = compensation;
+      deductionsData = deductions;
+      netSalaryData = netSalary;
 
-  // LOAN DATA: use loan field if provided, else empty array (needed by renderLoanTable)
- loans = Array.isArray(req.body.loans) ? req.body.loans : (req.body.loan ? [req.body.loan] : []);
+      // LOAN DATA: use loan field if provided, else empty array (needed by renderLoanTable)
+      loans = Array.isArray(req.body.loans) ? req.body.loans : (req.body.loan ? [req.body.loan] : []);
 
-  // LEAVE DATA: use leaves field if provided, else default object (needed by renderLeaveTable)
-  leaves = req.body.leaves || {
-    annualEntitled: "-",
-    annualAvailedYTD: "-",
-    annualAvailedMTH: "-",
-    annualBalance: "-",
-    casualEntitled: "-",
-    casualAvailedYTD: "-",
-    casualAvailedMTH: "-",
-    casualBalance: "-",
-    sickEntitled: "-",
-    sickAvailedYTD: "-",
-    sickAvailedMTH: "-",
-    sickBalance: "-",
-    wopEntitled: "-",
-    wopAvailedYTD: "-",
-    wopAvailedMTH: "-",
-    wopBalance: "-",
-    otherEntitled: "-",
-    otherAvailedYTD: "-",
-    otherAvailedMTH: "-",
-    otherBalance: "-",
-  };
+      // LEAVE DATA: use leaves field if provided, else default object (needed by renderLeaveTable)
+      leaves = req.body.leaves || {
+        annualEntitled: "-",
+        annualAvailedYTD: "-",
+        annualAvailedMTH: "-",
+        annualBalance: "-",
+        casualEntitled: "-",
+        casualAvailedYTD: "-",
+        casualAvailedMTH: "-",
+        casualBalance: "-",
+        sickEntitled: "-",
+        sickAvailedYTD: "-",
+        sickAvailedMTH: "-",
+        sickBalance: "-",
+        wopEntitled: "-",
+        wopAvailedYTD: "-",
+        wopAvailedMTH: "-",
+        wopBalance: "-",
+        otherEntitled: "-",
+        otherAvailedYTD: "-",
+        otherAvailedMTH: "-",
+        otherBalance: "-",
+      };
 
-  // Provident Fund & Gratuity Fund
-  providentFundData = {
-    providentFundBalanceBF: "-",
-    employeeProvidentFundContribution: "-",
-    employerProvidentFundContribution: "-",
-    providentFundWithdrawal: "-",
-    providentFundProfit: "-",
-    providentFundBalance: "-",
-  };
-  gratuityFundData = {
-    gratuityFundBalanceBF: "-",
-    yearsOfService: "-",
-    monthlyContribution: "-",
-    gratuityFundWithdrawal: "-",
-    gratuityFundProfit: "-",
-    gratuityFundBalance: "-",
-  };
+      // Provident Fund & Gratuity Fund
+      providentFundData = {
+        providentFundBalanceBF: "-",
+        employeeProvidentFundContribution: "-",
+        employerProvidentFundContribution: "-",
+        providentFundWithdrawal: "-",
+        providentFundProfit: "-",
+        providentFundBalance: "-",
+      };
+      gratuityFundData = {
+        gratuityFundBalanceBF: "-",
+        yearsOfService: "-",
+        monthlyContribution: "-",
+        gratuityFundWithdrawal: "-",
+        gratuityFundProfit: "-",
+        gratuityFundBalance: "-",
+      };
 
-  if (providentFund) {
-    providentFundData = { ...providentFundData, ...providentFund };
-  }
-  if (gratuityFund) {
-    gratuityFundData = { ...gratuityFundData, ...gratuityFund };
-  }
-}
+      if (providentFund) {
+        providentFundData = { ...providentFundData, ...providentFund };
+      }
+      if (gratuityFund) {
+        gratuityFundData = { ...gratuityFundData, ...gratuityFund };
+      }
+    }
 
     // Month/Year handling
     let monthYear = monthYearFromBody;

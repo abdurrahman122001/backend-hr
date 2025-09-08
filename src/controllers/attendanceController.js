@@ -12,7 +12,59 @@ const {
 const Salaries = require("../models/Salaries");
 const LoanDetail = require("../models/LoanDetail");
 
-// ---- helpers ---------------------------------------------------------------
+function getHoursDiff(checkIn, checkOut) {
+  if (!checkIn || !checkOut) return 0;
+  const [inH, inM] = checkIn.split(':').map(Number);
+  const [outH, outM] = checkOut.split(':').map(Number);
+  let diff = (outH * 60 + outM) - (inH * 60 + inM);
+  // handle overnight (e.g. 22:00 to 06:00)
+  if (diff < 0) diff += 24 * 60;
+  return +(diff / 60).toFixed(2);
+}
+
+async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
+  // 1. Calculate worked hours for this attendance
+  const hours = getHoursDiff(checkIn, checkOut);
+
+  // 2. Get employee doc
+  const emp = await Employee.findById(employeeId);
+
+  // Get previous accumulated hours for the current year
+  const year = new Date(date).getFullYear();
+  let bonus = emp.leaveEntitlement?.bonus || 0;
+  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
+  let bonusYear = emp.leaveEntitlement?.bonusYear || year; // add this field if needed
+
+  // Reset if year changed
+  if (bonusYear !== year) {
+    accumulated = 0;
+    bonus = 0;
+    bonusYear = year;
+  }
+
+  // 3. Update accumulated hours
+  accumulated += hours;
+
+  // 4. Increment bonus for each 9 hours completed
+  while (accumulated >= 9) {
+    bonus += 1;
+    accumulated -= 9;
+  }
+
+  // 5. Save back to employee
+  await Employee.updateOne(
+    { _id: employeeId },
+    {
+      $set: {
+        "leaveEntitlement.bonus": bonus,
+        "leaveEntitlement.bonusHoursAccumulated": accumulated,
+        "leaveEntitlement.bonusYear": bonusYear,
+      }
+    }
+  );
+
+  return { bonus, accumulated };
+}
 
 function resolveOwnerId(user) {
   // Prefer explicit tenant/company id (user.owner) → parent admin (createdBy) → self
@@ -33,14 +85,6 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
   }).lean();
 }
 
-const toNum = (v) => {
-  const s = String(v ?? "")
-    .replace(/,/g, "")
-    .trim();
-  const n = parseFloat(s);
-  return Number.isFinite(n) ? n : 0;
-};
-// ---- controllers -----------------------------------------------------------
 
 exports.markAttendance = async (req, res) => {
   try {
@@ -141,9 +185,72 @@ exports.markAttendance = async (req, res) => {
     if (!payroll) {
       return res.status(404).json({ error: "Payroll period not found." });
     }
-
-    // 3) Compute payroll period window
+    // --- BLOCK non-working day marking for "Leave", "Late", "Absent", "Half Day" ---
     const attendanceDate = new Date(date);
+    const ymd = (d) => d.toISOString().slice(0, 10);
+    const dow = attendanceDate.getDay(); // 0=Sun ... 6=Sat
+
+    const dateSet = new Set();
+    const weekdaySet = new Set();
+    const nameToDay = {
+      sun: 0, sunday: 0,
+      mon: 1, monday: 1,
+      tue: 2, tues: 2, tuesday: 2,
+      wed: 3, weds: 3, wednesday: 3,
+      thu: 4, thur: 4, thurs: 4, thursday: 4,
+      fri: 5, friday: 5,
+      sat: 6, saturday: 6,
+    };
+    (payroll.nonWorkingDays || []).forEach((raw) => {
+      if (!raw) return;
+      const s = String(raw).trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateSet.add(s);
+      if (/^[0-6]$/.test(s)) return weekdaySet.add(Number(s));
+      const key = s.toLowerCase();
+      if (key in nameToDay) return weekdaySet.add(nameToDay[key]);
+      const nd = new Date(s);
+      if (!isNaN(nd)) dateSet.add(ymd(nd));
+    });
+
+    const isNonWorkingDay =
+      dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+
+    if (isNonWorkingDay) {
+      // Only "Present" allowed!
+      if (status !== "Present") {
+        return res.status(400).json({
+          error: "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed."
+        });
+      }
+
+      // upsert Present only
+      const rec = await Attendance.findOneAndUpdate(
+        { owner: ownerId, employee: employeeId, date },
+        {
+          $set: {
+            owner: ownerId,
+            createdBy: userId,
+            employee: employeeId,
+            date,
+            status: "Present",
+            checkIn,
+            checkOut,
+            notes,
+            markedByHR: true,
+            markedOnNonWorkingDay: true,
+          },
+          $unset: { leaveType: "" }
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+
+      // *** Update the bonus using new logic ***
+      const { bonus, accumulated } = await updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date);
+      console.log(`Employee ${employee.name} | Updated Bonus: ${bonus}, Carryover hours: ${accumulated}`);
+
+      return res.json(rec);
+    }
+
     const anchor = new Date(payroll.payrollPeriodStartDay);
 
     let periodStart, periodEnd;
@@ -195,8 +302,6 @@ exports.markAttendance = async (req, res) => {
     const end = periodEnd.toISOString().slice(0, 10);
 
     const beforeJoin = joinDate && attendanceDate < joinDate;
-    // -----------------------------------------------------------------
-
     const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
     const payrollYear = periodEnd.getFullYear().toString();
 
@@ -351,8 +456,6 @@ exports.markAttendance = async (req, res) => {
 
         daysToCharge += 1;
       }
-
-      // apply leave entitlement and monetary deduction for the pre-join absences
       if (daysToCharge > 0) {
         const result = await updateLeaveEntitlementForEmployee(
           employeeId,
@@ -373,8 +476,6 @@ exports.markAttendance = async (req, res) => {
         }
       }
     }
-    // --- END REPLACEMENT ---
-    // --- REPLACEMENT: auto-mark Absent from periodStart to day before join AND deduct (skip nonWorkingDays by date or weekday) ---
     if (joinDate && joinDate > periodStart) {
       const dayMs = 24 * 60 * 60 * 1000;
       let daysToCharge = 0;
@@ -501,9 +602,6 @@ exports.markAttendance = async (req, res) => {
         }
       }
     }
-    // --- END REPLACEMENT ---
-
-    // --- END REPLACEMENT ---
 
     // 5) Gross salary + per-day calc
     let grossSalary = 0;
@@ -552,6 +650,30 @@ exports.markAttendance = async (req, res) => {
     if (status === "Absent") {
       // Only increment usedUnpaid, do not touch paid leave
       await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
+      // Always decrement usedPaid if editing from Absent(Paid) to Absent(Unpaid)
+      if (
+        oldRec &&
+        oldRec.status === "Absent" &&
+        oldRec.leaveType === "Paid" &&
+        status === "Absent" &&
+        (leaveType === "Unpaid" || !leaveType)
+      ) {
+        // Decrement usedPaid
+        let empDoc = await Employee.findById(employeeId).lean();
+        if (
+          empDoc &&
+          empDoc.leaveEntitlement &&
+          typeof empDoc.leaveEntitlement.usedPaid === "number"
+        ) {
+          let oldUsed = empDoc.leaveEntitlement.usedPaid || 0;
+          let newUsed = Math.max(0, oldUsed - 1);
+          await Employee.updateOne(
+            { _id: employeeId },
+            { $set: { "leaveEntitlement.usedPaid": newUsed } }
+          );
+        }
+      }
+
 
       if (!slip.leaveDeductions) {
         slip.leaveDeductions = await encrypt("0");
@@ -573,7 +695,7 @@ exports.markAttendance = async (req, res) => {
       let result = { paid: 0, unpaid: 0 };
       // No paid leave available?
       const employeeEntitlement = employee.leaveEntitlement || {};
-      const entitlementLeft = (employeeEntitlement.total || 0) - (employeeEntitlement.usedPaid || 0);
+      const entitlementLeft = (employeeEntitlement.total) - (employeeEntitlement.usedPaid);
 
       if (entitlementLeft > 0) {
         // Paid leave is available
@@ -655,26 +777,42 @@ exports.markAttendance = async (req, res) => {
       }
     }
 
-    // 8) Half Day → 0.5 day leave/deduction if no paid leave left
+    if (oldRec && oldRec.status === "Half Day") {
+      if (oldRec.leaveType === "Paid") {
+        await Employee.updateOne(
+          { _id: employeeId },
+          { $inc: { "leaveEntitlement.usedPaid": -0.5 } } // or -1 if stored as 1/2 = 0.5
+        );
+      } else {
+        let prevDeduction = 0;
+        if (slip.leaveDeductions) prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+        slip.leaveDeductions = await encrypt(Math.max(0, prevDeduction - perDay / 2).toString());
+        await slip.save();
+
+        await Employee.updateOne(
+          { _id: employeeId },
+          { $inc: { "leaveEntitlement.usedUnpaid": -0.5 } }
+        );
+      }
+    }
+
+    // mark new half day
     if (!beforeJoin && status === "Half Day") {
       const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
       if (result.unpaid > 0) {
         let prevDeduction = 0;
-        if (slip.leaveDeductions) {
-          prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        }
-        const leaveDeduction = Math.round(
-          (perDay / 2) * result.unpaid + prevDeduction
-        );
-        slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+        if (slip.leaveDeductions) prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+        slip.leaveDeductions = await encrypt(Math.round(prevDeduction + (perDay / 2) * result.unpaid).toString());
         await slip.save();
       }
       const leaveTypeToSet = result.unpaid > 0 ? "Unpaid" : "Paid";
-      await Attendance.findOneAndUpdate(
+      await Attendance.updateOne(
         { owner: ownerId, employee: employeeId, date },
         { $set: { leaveType: leaveTypeToSet } }
       );
     }
+
+
     const monthName = payrollMonth; // e.g., "August"
     const yearNum = Number(payrollYear); // e.g., 2025
 

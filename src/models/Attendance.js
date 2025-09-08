@@ -12,7 +12,8 @@ const AttendanceSchema = new Schema({
   markedByHR: { type: Boolean, default: true },
   leaveType:  { type: String, enum: ['Paid','Unpaid'], default: 'Unpaid' },
   isHoliday:  { type: Boolean, default: false },
-  
+  markedOnNonWorkingDay: { type: Boolean, default: false },
+
 }, { timestamps: true });
 
 AttendanceSchema.index({ employee: 1, date: 1, owner: 1, }, { unique: true });

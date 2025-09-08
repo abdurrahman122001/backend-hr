@@ -16,7 +16,7 @@ const EmployeeSchema = new Schema(
     // PERSONAL DETAILS
     name: { type: String, required: true }, // Full Name
     fatherOrHusbandName: { type: String },
-    dateOfBirth: { type: String }, // Could be Date, but matching your frontend
+    dateOfBirth: { type: String }, 
     gender: { type: String },
     nationality: { type: String },
     maritalStatus: { type: String, enum: ["Single", "Married"] },
@@ -76,6 +76,8 @@ const EmployeeSchema = new Schema(
     // LEAVE ENTITLEMENT
     leaveEntitlement: {
       total: { type: Number, default: 22 },
+      bonus: { type: Number, default: 0 },
+      bonusHoursAccumulated: { type: Number, default: 0 },
       usedPaid: { type: Number, default: 0 },
       usedUnpaid: { type: Number, default: 0 },
     },

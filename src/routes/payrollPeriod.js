@@ -23,5 +23,6 @@ router.get('/non-working-days', getNonWorkingDays);
 // Get period for UI
 router.get('/current', getCurrentPayrollPeriod);
 router.get('/current-status', getCurrentPayrollPeriodStatus); // <-- new: returns status, days left, employees/slips
+router.get('/by-shift/:shiftId', require('../controllers/payrollPeriodController').getPayrollPeriodByShift);
 
 module.exports = router;

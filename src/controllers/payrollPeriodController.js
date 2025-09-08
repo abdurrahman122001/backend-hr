@@ -218,3 +218,22 @@ exports.getCurrentPayrollPeriod = async (req, res) => {
     res.status(500).json({ error: "Failed to get current payroll period." });
   }
 };
+exports.getPayrollPeriodByShift = async (req, res) => {
+  try {
+    const ownerId = req.user?.owner || req.user?.createdBy || req.user?._id;
+    const shiftId = req.params.shiftId;
+
+    // Find payroll period which has this shift
+    const period = await PayrollPeriod.findOne({
+      owner: ownerId,
+      shifts: { $in: [shiftId] }
+    }).lean();
+
+    if (!period) {
+      return res.status(404).json({ error: "Payroll period not found for this shift." });
+    }
+    res.json(period);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
