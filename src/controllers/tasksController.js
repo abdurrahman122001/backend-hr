@@ -1,6 +1,8 @@
+// controllers/tasksController.js
 const Task = require("../models/Task");
 const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
+const AssignmentMessage = require("../models/AssignmentMessage"); // ⟵ NEW
 const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -22,7 +24,7 @@ const storage = multer.diskStorage({
 const ALLOWED = new Set([
   "application/pdf",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", // .xlsx
-  "application/vnd.ms-excel", // .xls (optional)
+  "application/vnd.ms-excel", // .xls
 ]);
 
 const fileFilter = (_req, file, cb) => {
@@ -36,26 +38,69 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 }, // 20MB each
 });
 
-// ---------- Helpers ----------
+/* ---------------- Helpers ---------------- */
+const roleStr = (r) => String(r || "").trim().toLowerCase();
+const isManagerLike = (role) => {
+  const r = roleStr(role);
+  return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
+};
+const isTeamLead = (role) => {
+  const r = roleStr(role);
+  return r === "team lead" || r === "team_lead" || r === "teamlead";
+};
+
+const idEq = (a, b) => String(a || "") === String(b || "");
+
 async function canTouchTask(req, task) {
   const me = await Employee.findById(req.employee._id).select("_id role owner");
   if (!me || !task) return false;
-  const isManagerSameOwner = me.role === "Manager" && String(task.client.owner) === String(me.owner);
-  const isAssignee = task.assignedTo && String(task.assignedTo) === String(me._id);
-  return isManagerSameOwner || isAssignee;
+
+  const taskOwnerId = task.owner || task?.client?.owner;
+  const managerScopeOk = isManagerLike(me.role) && idEq(taskOwnerId, me.owner);
+
+  const assignedId = task.assignedTo
+    ? task.assignedTo._id
+      ? String(task.assignedTo._id)
+      : String(task.assignedTo)
+    : null;
+  const isAssignee = assignedId && idEq(assignedId, me._id);
+
+  return !!(managerScopeOk || isAssignee);
 }
 
 function publicUrl(req, filename) {
-  // e.g., http://localhost:4000/uploads/tasks/<filename>
   return `${req.protocol}://${req.get("host")}/uploads/tasks/${filename}`;
 }
 
+async function findOneByRole(ownerId, roleRegex) {
+  return Employee.findOne({ owner: ownerId, role: roleRegex }).select("_id name companyEmail");
+}
+
+async function notify(ownerId, clientId, senderId, receiverId, subject, note) {
+  try {
+    if (!receiverId) return;
+    await AssignmentMessage.create({
+      owner: ownerId,
+      client: clientId,
+      sender: senderId,
+      receiver: receiverId,
+      subject: subject || "",
+      note: note || "",
+    });
+  } catch (e) {
+    console.warn("notify() failed:", e.message);
+  }
+}
+
+/* ---------------- Controllers ---------------- */
 
 exports.clientsForManager = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (me.role !== "Manager") return res.status(403).json({ error: "Only Managers allowed" });
+    if (!isManagerLike(me.role)) {
+      return res.status(403).json({ error: "Only Managers and Team Leads allowed" });
+    }
 
     const clients = await ClientInfo.find({ owner: me.owner })
       .select("_id clientName companyLocation industry assignedTo owner")
@@ -69,7 +114,7 @@ exports.clientsForManager = async (req, res) => {
 };
 
 /**
- * Manager: create task for a client (auto-assign to client's assigned employee)
+ * Manager/Team Lead: create task for a client (auto-assign to client's assigned employee)
  * POST /api/tasks
  * body: { clientId, title, description?, priority?, dueDate? }
  */
@@ -77,14 +122,17 @@ exports.createTask = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (me.role !== "Manager") return res.status(403).json({ error: "Only Managers can create tasks" });
+    if (!isManagerLike(me.role)) {
+      return res.status(403).json({ error: "Only Managers/Team Leads can create tasks" });
+    }
 
     const { clientId, title, description, priority, dueDate } = req.body;
-    if (!clientId || !title) return res.status(400).json({ error: "clientId and title are required" });
+    if (!clientId || !title)
+      return res.status(400).json({ error: "clientId and title are required" });
 
-    const client = await ClientInfo.findById(clientId).select("_id owner assignedTo");
+    const client = await ClientInfo.findById(clientId).select("_id owner assignedTo clientName");
     if (!client) return res.status(404).json({ error: "Client not found" });
-    if (String(client.owner) !== String(me.owner)) {
+    if (!idEq(client.owner, me.owner)) {
       return res.status(403).json({ error: "Client does not belong to your owner" });
     }
 
@@ -96,6 +144,7 @@ exports.createTask = async (req, res) => {
       title,
       description: description || "",
       priority: priority || "medium",
+      status: "todo",
       dueDate: dueDate ? new Date(dueDate) : undefined,
     });
 
@@ -113,7 +162,7 @@ exports.createTask = async (req, res) => {
 /**
  * Get tasks for a specific client
  * - Owner: client must belong to them
- * - Manager: client must belong to their owner
+ * - Manager/Team Lead: client must belong to their owner
  * - Employee: only if they are assigned to that client
  * GET /api/tasks/client/:clientId
  */
@@ -126,17 +175,12 @@ exports.getTasksForClient = async (req, res) => {
     const client = await ClientInfo.findById(clientId).select("_id owner assignedTo");
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    if (me.role === "Owner") {
-      if (String(client.owner) !== String(me._id)) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
-    } else if (me.role === "Manager") {
-      if (String(client.owner) !== String(me.owner)) {
-        return res.status(403).json({ error: "Forbidden" });
-      }
+    if (roleStr(me.role) === "owner") {
+      if (!idEq(client.owner, me._id)) return res.status(403).json({ error: "Forbidden" });
+    } else if (isManagerLike(me.role)) {
+      if (!idEq(client.owner, me.owner)) return res.status(403).json({ error: "Forbidden" });
     } else {
-      // Employee
-      if (!client.assignedTo || String(client.assignedTo) !== String(me._id)) {
+      if (!client.assignedTo || !idEq(client.assignedTo, me._id)) {
         return res.status(403).json({ error: "Forbidden" });
       }
     }
@@ -154,54 +198,73 @@ exports.getTasksForClient = async (req, res) => {
 };
 
 /**
- * Employee: tasks assigned to me (for all my assigned clients)
  * GET /api/tasks/my
+ * Manager/Team Lead: all tasks under their owner
+ * Employee: only tasks assigned to them
  */
 exports.getMyTasks = async (req, res) => {
-  try {
-    const me = await Employee.findById(req.employee._id).select('_id role owner');
-    if (!me) return res.status(404).json({ error: 'Employee not found' });
-
-    const query =
-      me.role === 'Manager'
-        ? { owner: me.owner }                   // all tasks under the manager’s owner
-        : { assignedTo: me._id };               // only my tasks
-
-    const tasks = await Task.find(query)
-      .sort({ createdAt: -1 })
-      .populate('client', '_id clientName')
-      .populate('assignedTo', '_id name companyEmail');
-
-    res.json(tasks);
-  } catch (err) {
-    console.error('getMyTasks error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-/**
- * Update a task (status/priority/dueDate/title/description)
- * - Manager (same owner) OR assigned employee can update
- * PATCH /api/tasks/:taskId
- */
-exports.updateTask = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id role owner");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
-    const task = await Task.findById(req.params.taskId)
-      .populate("client", "owner assignedTo");
+    const query = isManagerLike(me.role) ? { owner: me.owner } : { assignedTo: me._id };
 
+    const tasks = await Task.find(query)
+      .sort({ createdAt: -1 })
+      .populate("client", "_id clientName")
+      .populate("assignedTo", "_id name companyEmail");
+
+    res.json(tasks);
+  } catch (err) {
+    console.error("getMyTasks error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+/**
+ * PATCH /api/tasks/:taskId
+ * body: { status?, priority?, dueDate?, title?, description?, assignedTo?, completed? }
+ *
+ * Review workflow:
+ * - If an **employee/assignee** requests status=done:
+ *      we set status => "pending_review"
+ *      and notify Team Lead (or Manager fallback): "Task ready for review"
+ * - If a **Team Lead** sets status=done from pending_review:
+ *      we set status => "done"
+ *      and notify Manager: "Task approved & done"
+ * - Managers can set status to done directly (no extra notify).
+ */
+exports.updateTask = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id role owner name companyEmail");
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+
+    const task = await Task.findById(req.params.taskId)
+      .populate("client", "owner clientName")
+      .populate("assignedTo", "_id name companyEmail");
     if (!task) return res.status(404).json({ error: "Task not found" });
 
-    const isManagerSameOwner =
-      me.role === "Manager" && String(task.client.owner) === String(me.owner);
-    const isAssignee = task.assignedTo && String(task.assignedTo) === String(me._id);
-    if (!isManagerSameOwner && !isAssignee) {
+    const managerScopeOk = isManagerLike(me.role) && idEq(task.client.owner, me.owner);
+    const assignedId = task.assignedTo
+      ? task.assignedTo._id
+        ? String(task.assignedTo._id)
+        : String(task.assignedTo)
+      : null;
+    const isAssignee = assignedId && idEq(assignedId, me._id);
+
+    if (!managerScopeOk && !isAssignee) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const allowed = ["status", "priority", "dueDate", "title", "description", "assignedTo", "completed"];
+    // Apply non-status fields first
+    const allowed = [
+      "priority",
+      "dueDate",
+      "title",
+      "description",
+      "assignedTo",
+      "completed",
+    ];
     allowed.forEach((k) => {
       if (k in req.body) {
         if (k === "dueDate" && req.body[k]) {
@@ -213,6 +276,70 @@ exports.updateTask = async (req, res) => {
         }
       }
     });
+
+    const ownerId = task.owner || task.client.owner;
+    const clientId = task.client?._id || task.client;
+
+    // Handle STATUS with the review workflow
+    if ("status" in req.body) {
+      const requested = String(req.body.status || "").toLowerCase();
+      const prevStatus = String(task.status || "").toLowerCase();
+
+      if (requested === "done") {
+        if (!managerScopeOk) {
+          // Assignee marked as done -> gate to pending_review and notify Team Lead
+          task.status = "pending_review";
+          await task.save();
+
+          // Notify TL (fallback Manager)
+          const teamLead = await findOneByRole(ownerId, /team\s*lead/i);
+          const manager = await findOneByRole(ownerId, /^manager$/i);
+
+          const receiverId = (teamLead?._id && String(teamLead._id) !== String(me._id))
+            ? teamLead._id
+            : manager?._id;
+
+          await notify(
+            ownerId,
+            clientId,
+            me._id,
+            receiverId,
+            `Task ready for review: ${task.title}`,
+            `The assignee (${me.name || me.companyEmail || me._id}) marked "${task.title}" as done. Please review.`
+          );
+
+          const populated = await Task.findById(task._id)
+            .populate("client", "_id clientName")
+            .populate("assignedTo", "_id name companyEmail");
+          return res.json(populated);
+        } else {
+          // Manager/Team Lead approval to actual DONE
+          task.status = "done";
+          await task.save();
+
+          // If Team Lead approved from pending_review -> notify Manager
+          if (isTeamLead(me.role) && prevStatus === "pending_review") {
+            const manager = await findOneByRole(ownerId, /^manager$/i);
+            await notify(
+              ownerId,
+              clientId,
+              me._id,
+              manager?._id,
+              `Task approved & done: ${task.title}`,
+              `Team Lead approved "${task.title}". Marked as done.`
+            );
+          }
+
+          const populated = await Task.findById(task._id)
+            .populate("client", "_id clientName")
+            .populate("assignedTo", "_id name companyEmail");
+          return res.json(populated);
+        }
+      } else {
+        // Any other status (todo/in_progress/blocked/pending_review etc.)
+        task.status = requested;
+      }
+    }
 
     await task.save();
 
@@ -228,8 +355,8 @@ exports.updateTask = async (req, res) => {
 };
 
 /**
- * Delete task – Manager (same owner) only
  * DELETE /api/tasks/:taskId
+ * Manager/Team Lead (same owner) only
  */
 exports.deleteTask = async (req, res) => {
   try {
@@ -239,7 +366,7 @@ exports.deleteTask = async (req, res) => {
     const task = await Task.findById(req.params.taskId).populate("client", "owner");
     if (!task) return res.status(404).json({ error: "Task not found" });
 
-    if (!(me.role === "Manager" && String(task.client.owner) === String(me.owner))) {
+    if (!(isManagerLike(me.role) && idEq(task.client.owner, me.owner))) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -250,6 +377,7 @@ exports.deleteTask = async (req, res) => {
     res.status(500).json({ error: "Failed to delete task" });
   }
 };
+
 exports.listAttachments = async (req, res) => {
   try {
     const task = await Task.findById(req.params.taskId)
@@ -266,9 +394,9 @@ exports.listAttachments = async (req, res) => {
   }
 };
 
-// ---------------- NEW: upload attachments (multi) ----------------
+// Upload attachments (multi)
 exports.uploadAttachments = [
-  upload.array("files", 10), // field name must be "files"
+  upload.array("files", 10),
   async (req, res) => {
     try {
       const task = await Task.findById(req.params.taskId).populate("client", "owner");
@@ -292,8 +420,10 @@ exports.uploadAttachments = [
       task.attachments.push(...toAdd);
       await task.save();
 
-      // return the whole list (with latest)
-      const populated = await Task.findById(task._id).populate("attachments.uploadedBy", "_id name companyEmail");
+      const populated = await Task.findById(task._id).populate(
+        "attachments.uploadedBy",
+        "_id name companyEmail"
+      );
       res.status(201).json(populated.attachments || []);
     } catch (err) {
       console.error("uploadAttachments error:", err);
@@ -302,7 +432,7 @@ exports.uploadAttachments = [
   },
 ];
 
-// ---------------- NEW: delete one attachment ----------------
+// Delete one attachment
 exports.deleteAttachment = async (req, res) => {
   try {
     const { taskId, attachmentId } = req.params;
@@ -313,13 +443,15 @@ exports.deleteAttachment = async (req, res) => {
     const att = task.attachments.id(attachmentId);
     if (!att) return res.status(404).json({ error: "Attachment not found" });
 
-    // remove file from disk
     const filePath = path.join(taskUploadDir, att.filename);
     if (fs.existsSync(filePath)) {
-      try { fs.unlinkSync(filePath); } catch (e) { console.warn("unlink error", e.message); }
+      try {
+        fs.unlinkSync(filePath);
+      } catch (e) {
+        console.warn("unlink error", e.message);
+      }
     }
 
-    // pull subdoc and save
     att.deleteOne();
     await task.save();
 

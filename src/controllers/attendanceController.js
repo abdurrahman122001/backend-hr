@@ -21,6 +21,66 @@ function getHoursDiff(checkIn, checkOut) {
   if (diff < 0) diff += 24 * 60;
   return +(diff / 60).toFixed(2);
 }
+/**
+ * Add early-bird hours to bonus entitlement (on working days).
+ * @param {String} employeeId
+ * @param {String} checkIn
+ * @param {String} shiftStart
+ * @param {String} date 
+ */
+async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, date) {
+  // 1. Parse check-in and shift start
+  if (!checkIn || !shiftStart) return;
+  const [inH, inM] = checkIn.split(":").map(Number);
+  const [shH, shM] = shiftStart.split(":").map(Number);
+
+  // 2. Calculate early minutes (positive if early, negative if late/on time)
+  const checkInMinutes = inH * 60 + inM;
+  const startMinutes = shH * 60 + shM;
+  let earlyMinutes = startMinutes - checkInMinutes; // positive = early
+
+  // Only if at least 30 minutes early
+  if (earlyMinutes < 30) return;
+
+  // Convert to hours (float)
+  const earlyHours = +(earlyMinutes / 60).toFixed(2);
+
+  // 3. Load employee bonus tracking
+  const emp = await Employee.findById(employeeId);
+  const year = new Date(date).getFullYear();
+  let bonus = emp.leaveEntitlement?.bonus || 0;
+  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
+  let bonusYear = emp.leaveEntitlement?.bonusYear || year;
+
+  // Reset if year changes
+  if (bonusYear !== year) {
+    accumulated = 0;
+    bonus = 0;
+    bonusYear = year;
+  }
+
+  accumulated += earlyHours;
+
+  // 4. Add bonus for each 9h completed
+  while (accumulated >= 9) {
+    bonus += 1;
+    accumulated -= 9;
+  }
+
+  // 5. Save
+  await Employee.updateOne(
+    { _id: employeeId },
+    {
+      $set: {
+        "leaveEntitlement.bonus": bonus,
+        "leaveEntitlement.bonusHoursAccumulated": accumulated,
+        "leaveEntitlement.bonusYear": bonusYear,
+      }
+    }
+  );
+
+  return { bonus, accumulated };
+}
 
 async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
   // 1. Calculate worked hours for this attendance
@@ -84,7 +144,55 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
     ],
   }).lean();
 }
+async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToDeduct, type = "absent", forcePaid = false) {
+  const employee = await Employee.findById(employeeId).lean();
+  if (!employee) throw new Error("Employee not found");
 
+  const entitlement = employee.leaveEntitlement || {};
+  const total = entitlement.total || 0;
+  const usedPaid = entitlement.usedPaid || 0;
+  const usedUnpaid = entitlement.usedUnpaid || 0;
+  const availableBalance = total - usedPaid;
+
+  let paidToUse = 0;
+  let unpaidToUse = 0;
+  let isProportionate = false;
+
+  if (forcePaid) {
+    // Force paid regardless of balance
+    paidToUse = daysToDeduct;
+  } else if (availableBalance <= 0) {
+    // No paid balance available
+    unpaidToUse = daysToDeduct;
+  } else if (availableBalance >= daysToDeduct) {
+    // Sufficient balance available
+    paidToUse = daysToDeduct;
+  } else {
+    // Partial balance available - this is the proportional case
+    paidToUse = availableBalance;
+    unpaidToUse = daysToDeduct - availableBalance;
+    isProportionate = true;
+  }
+
+  // Update the employee's leave entitlement
+  const updates = {};
+  if (paidToUse > 0) {
+    updates["leaveEntitlement.usedPaid"] = usedPaid + paidToUse;
+  }
+  if (unpaidToUse > 0) {
+    updates["leaveEntitlement.usedUnpaid"] = usedUnpaid + unpaidToUse;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await Employee.updateOne({ _id: employeeId }, { $set: updates });
+  }
+
+  return {
+    paid: paidToUse,
+    unpaid: unpaidToUse,
+    isProportionate
+  };
+}
 
 exports.markAttendance = async (req, res) => {
   try {
@@ -101,7 +209,6 @@ exports.markAttendance = async (req, res) => {
       leaveType,
       isHoliday,
     } = req.body;
-
     // Holiday marking — unique by date + owner (tenant-scoped)
     if (isHoliday) {
       const rec = await Attendance.findOneAndUpdate(
@@ -648,8 +755,63 @@ exports.markAttendance = async (req, res) => {
     }
 
     if (status === "Absent") {
-      // Only increment usedUnpaid, do not touch paid leave
+      // If user explicitly marked Paid, check fractional balance and handle proportionately.
+      if (leaveType === "Paid") {
+        const freshEmp = await Employee.findById(employeeId).lean();
+        const ent = freshEmp?.leaveEntitlement || {};
+        const total = ent.total || 0;
+        const usedPaid = ent.usedPaid || 0;
+        const balance = +(total - usedPaid);
+
+        if (balance > 0 && balance < 1) {
+          // Proportionate: use remaining paid balance, rest unpaid
+          await Employee.updateOne(
+            { _id: employeeId },
+            {
+              $inc: {
+                "leaveEntitlement.usedPaid": balance,
+                "leaveEntitlement.usedUnpaid": 1 - balance,
+              },
+            }
+          );
+
+          // Deduct salary only for unpaid part
+          if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+          let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+          const add = Math.round(perDay * (1 - balance));
+          slip.leaveDeductions = await encrypt(String(prevDeduction + add));
+          await slip.save();
+
+          // Mark attendance as Paid + proportionate
+          await Attendance.findOneAndUpdate(
+            { owner: ownerId, employee: employeeId, date },
+            { $set: { leaveType: "Paid", proportionate: true } }
+          );
+
+          return res.json(rec);
+        }
+
+        // If full day paid is available (>=1), keep your existing fully-paid flow:
+        if (balance >= 1) {
+          const result = await updateLeaveEntitlementForEmployee(
+            employeeId,
+            1,
+            "leave",
+            req.body.forcePaid
+          );
+          await Attendance.findOneAndUpdate(
+            { owner: ownerId, employee: employeeId, date },
+            { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+          );
+          // No deduction
+          return res.json(rec);
+        }
+        // else: no paid balance → fall through to your existing unpaid logic below
+      }
+
+      // (Existing) Unpaid Absent flow
       await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
+
       // Always decrement usedPaid if editing from Absent(Paid) to Absent(Unpaid)
       if (
         oldRec &&
@@ -658,7 +820,6 @@ exports.markAttendance = async (req, res) => {
         status === "Absent" &&
         (leaveType === "Unpaid" || !leaveType)
       ) {
-        // Decrement usedPaid
         let empDoc = await Employee.findById(employeeId).lean();
         if (
           empDoc &&
@@ -674,48 +835,79 @@ exports.markAttendance = async (req, res) => {
         }
       }
 
-
       if (!slip.leaveDeductions) {
         slip.leaveDeductions = await encrypt("0");
       }
-      let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-      const leaveDeduction = Math.round(perDay + prevDeduction);
-      slip.leaveDeductions = await encrypt(leaveDeduction.toString());
-      await slip.save();
-
+      {
+        let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const leaveDeduction = Math.round(perDay + prevDeduction);
+        slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+        await slip.save();
+      }
 
       await Attendance.findOneAndUpdate(
         { owner: ownerId, employee: employeeId, date },
-        { $set: { leaveType: "Unpaid" } }
+        { $set: { leaveType: "Unpaid", proportionate: false } }
       );
     }
 
 
     if (status === "Leave") {
+      // 👇 ADD THIS proportional guard FIRST
+      const freshEmp = await Employee.findById(employeeId).lean();
+      const ent = freshEmp?.leaveEntitlement || {};
+      const totalBal = ent.total || 0;
+      const usedPaid = ent.usedPaid || 0;
+      const balance = +(totalBal - usedPaid);
+
+      if (balance > 0 && balance < 1) {
+        // 0 < balance < 1  → take partial paid + partial unpaid
+        await Employee.updateOne(
+          { _id: employeeId },
+          {
+            $inc: {
+              "leaveEntitlement.usedPaid": balance,       // e.g. 0.5
+              "leaveEntitlement.usedUnpaid": 1 - balance, // e.g. 0.5
+            },
+          }
+        );
+
+        // Deduct ONLY the unpaid fraction
+        if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+        const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const add = Math.round(perDay * (1 - balance)); // e.g. 0.5 day
+        slip.leaveDeductions = await encrypt(String(prev + add));
+        await slip.save();
+
+        // Store it as Absent + Paid (per your app) and flag proportionate
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { status: "Absent", leaveType: "Paid", proportionate: true } }
+        );
+
+        return res.json(rec);
+      }
+
+      // 🔽 keep your existing "Leave" logic unchanged below this line
       let result = { paid: 0, unpaid: 0 };
-      // No paid leave available?
       const employeeEntitlement = employee.leaveEntitlement || {};
       const entitlementLeft = (employeeEntitlement.total) - (employeeEntitlement.usedPaid);
 
       if (entitlementLeft > 0) {
-        // Paid leave is available
         result = await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", req.body.forcePaid);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Paid" } }
         );
-        // NO deduction
         return res.json(rec);
       }
 
-      // No paid leave available, ask admin
       if (typeof req.body.forcePaid === "undefined") {
         return res.status(200).json({
           needsConfirmation: true,
           message: `${employee.name} has no paid leaves available. Do you want to mark as Paid Leave?`,
         });
       } else if (req.body.forcePaid === true) {
-        // Admin confirmed "Force Paid Leave" (increment usedPaid, NO deduction)
         await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", true);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
@@ -723,7 +915,6 @@ exports.markAttendance = async (req, res) => {
         );
         return res.json(rec);
       } else {
-        // Admin said NO (increment usedUnpaid, DO deduction)
         await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
 
         if (!slip.leaveDeductions) {
@@ -741,12 +932,13 @@ exports.markAttendance = async (req, res) => {
       }
     }
 
+
     // 7) Late → 3 Lates = 1 day, tracked cumulatively, leave-aware
     if (!beforeJoin && status === "Late") {
       const lateRecords = await Attendance.find({
         employee: employeeId,
-        owner: ownerId, // ensure same tenant
-        date: { $gte: start, $lte: end }, // start is bounded by join date
+        owner: ownerId,
+        date: { $gte: start, $lte: end },
         status: "Late",
       }).lean();
 
@@ -756,6 +948,48 @@ exports.markAttendance = async (req, res) => {
       const newLateDeductionDays = lateDeductionDays - previouslyCredited;
 
       if (newLateDeductionDays > 0) {
+        // Proportionate only when exactly 1 day is being charged and balance is fractional
+        if (newLateDeductionDays === 1) {
+          const freshEmp = await Employee.findById(employeeId).lean();
+          const ent = freshEmp?.leaveEntitlement || {};
+          const total = ent.total || 0;
+          const usedPaid = ent.usedPaid || 0;
+          const balance = +(total - usedPaid);
+
+          if (balance > 0 && balance < 1) {
+            // Take partial paid + partial unpaid
+            await Employee.updateOne(
+              { _id: employeeId },
+              {
+                $inc: {
+                  "leaveEntitlement.usedPaid": balance,
+                  "leaveEntitlement.usedUnpaid": 1 - balance,
+                },
+              }
+            );
+
+            // Deduct only for unpaid half
+            let prevLate = 0;
+            if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+            const addLate = Math.round(perDay * (1 - balance));
+            slip.lateDeductions = await encrypt(String(prevLate + addLate));
+
+            slip.lateDeductionDaysCredited = lateDeductionDays;
+            await slip.save();
+
+            // Mark the latest "Late" as proportionate
+            const lastLate = await Attendance.findOne({
+              employee: employeeId,
+              owner: ownerId,
+              status: "Late",
+              date: { $gte: start, $lte: end },
+            }).sort({ date: -1 });
+            if (lastLate) {
+              await Attendance.updateOne({ _id: lastLate._id }, { $set: { proportionate: true } });
+            }
+            return; // stop here, don't run old late updater
+          }
+        }
         const result = await updateLeaveEntitlementForEmployee(
           employeeId,
           newLateDeductionDays,
@@ -874,13 +1108,13 @@ exports.markAttendance = async (req, res) => {
     }
 
     await slip.save();
-    // 9) Respond with current attendance record
     res.json(rec);
   } catch (err) {
     console.error("Error in markAttendance:", err);
     res.status(400).json({ error: err.message });
   }
 };
+
 // GET /api/attendance?date=YYYY-MM-DD
 exports.getRecordsByDate = async (req, res) => {
   const { date } = req.query;

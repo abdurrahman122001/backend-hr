@@ -14,6 +14,7 @@ router.get("/client/:clientId", requireAuth, ctrl.getTasksForClient);
 
 // Employee: my tasks
 router.get("/my", requireAuth, ctrl.getMyTasks);
+// router.get("/self", requireAuth, ctrl.getSelfTasks); // 🔥 new endpoint (only my assigned tasks)
 
 // Update & delete a task
 router.patch("/:taskId", requireAuth, ctrl.updateTask);

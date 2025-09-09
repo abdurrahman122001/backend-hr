@@ -2,13 +2,23 @@ const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
 
-// Manager creates client info (unchanged)
+/* ---------- helpers ---------- */
+const isManagerLike = (role) => {
+  const r = String(role || "").trim().toLowerCase();
+  return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
+};
+
+/**
+ * POST /api/client-info
+ * Manager/Team Lead creates client info
+ */
 exports.createClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
     if (!emp) return res.status(404).json({ error: "Employee not found" });
-    if (emp.role !== "Manager") {
-      return res.status(403).json({ error: "Only Managers can create client info" });
+
+    if (!isManagerLike(emp.role)) {
+      return res.status(403).json({ error: "Only Managers/Team Leads can create client info" });
     }
 
     const { ownerId, ...rest } = req.body;
@@ -16,8 +26,8 @@ exports.createClientInfo = async (req, res) => {
 
     const doc = await ClientInfo.create({
       ...rest,
-      owner: ownerId,         // User _id
-      createdBy: emp._id,     // Manager employee _id
+      owner: ownerId,       // User _id
+      createdBy: emp._id,   // creator (manager or team lead)
     });
 
     res.status(201).json(doc);
@@ -27,17 +37,30 @@ exports.createClientInfo = async (req, res) => {
   }
 };
 
-// Owner or Employee fetches client info (unchanged)
+/**
+ * GET /api/client-info
+ * - Owner: all clients under their linked `owner` id
+ * - Manager/Team Lead: all clients under their `owner`
+ * - Employee: only clients assigned to them
+ */
 exports.getClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id).select("_id role owner");
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     let q;
-    if (emp.role === "Owner") {
-      if (!emp.owner) return res.status(400).json({ error: "This owner record has no linked user id." });
+    const role = String(emp.role || "").trim();
+
+    if (role === "Owner") {
+      if (!emp.owner)
+        return res.status(400).json({ error: "This owner record has no linked user id." });
+      q = { owner: emp.owner };
+    } else if (isManagerLike(role)) {
+      if (!emp.owner)
+        return res.status(400).json({ error: "Your profile is missing owner id." });
       q = { owner: emp.owner };
     } else {
+      // regular employee
       q = { assignedTo: emp._id };
     }
 
@@ -52,7 +75,10 @@ exports.getClientInfo = async (req, res) => {
   }
 };
 
-// ✅ Explicit: only my assigned clients (cast employeeId, add tiny debug)
+/**
+ * GET /api/client-info/my
+ * Explicit: only my assigned clients (any role)
+ */
 exports.getMyClients = async (req, res) => {
   try {
     const employeeId = req.employee._id;
@@ -62,7 +88,6 @@ exports.getMyClients = async (req, res) => {
       .sort({ createdAt: -1 })
       .populate("assignedTo", "_id name companyEmail");
 
-    // Optional tiny server log you can keep or remove:
     console.log(`[getMyClients] emp=${employeeId} -> ${clients.length} clients`);
 
     res.json(clients);

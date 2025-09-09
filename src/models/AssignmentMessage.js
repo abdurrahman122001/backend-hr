@@ -17,20 +17,31 @@ const AttachmentSchema = new Schema(
 
 const AssignmentMessageSchema = new Schema(
   {
-    owner: { type: Schema.Types.ObjectId, ref: "User", required: true }, // Employee.owner
-    manager: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    // Organization / data ownership scope
+    owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
+
+    // Conversation scope
     client: { type: Schema.Types.ObjectId, ref: "ClientInfo", required: true },
-    toEmployee: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+
+    // Participants
+    sender:   { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    receiver: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+
+    // Content
     subject: { type: String },
-    note: { type: String },
+    note:    { type: String },
+
+    // Files
     attachments: [AttachmentSchema],
   },
   { timestamps: true }
 );
 
-// helpful query patterns
-AssignmentMessageSchema.index({ client: 1, toEmployee: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ manager: 1, createdAt: -1 });
+/** Helpful query patterns */
 AssignmentMessageSchema.index({ owner: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ client: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ sender: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ receiver: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ client: 1, sender: 1, receiver: 1, createdAt: -1 });
 
 module.exports = mongoose.model("AssignmentMessage", AssignmentMessageSchema);
