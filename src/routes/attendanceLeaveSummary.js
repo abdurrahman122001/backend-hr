@@ -62,38 +62,6 @@ function getYTDRange(year, month) {
 }
 
 function countLeavesFromLates(attendanceRecords) {
-    // Step 1: Filter and sort all "Late" attendances
-    const lates = attendanceRecords
-        .filter(att => att.status === "Late")
-        .map(att => new Date(att.date))
-        .sort((a, b) => a - b);
-
-    // Step 2: Group lates by payroll period (26th–25th), and count leaves
-    let periods = {};
-    for (let lateDate of lates) {
-        const key = getPayrollPeriodKey(lateDate);
-        if (!periods[key]) periods[key] = [];
-        periods[key].push(lateDate);
-    }
-
-    // Step 3: For each period, count groups of 3 (reset after each period)
-    let lateLeaveCount = 0;
-    Object.values(periods).forEach(latesInPeriod => {
-        let counter = 0;
-        latesInPeriod.forEach(() => {
-            counter++;
-            if (counter === 3) {
-                lateLeaveCount++;
-                counter = 0;
-            }
-        });
-        // Leftover lates in period do not roll over!
-    });
-
-    return lateLeaveCount;
-}
-
-function countLeavesFromLates(attendanceRecords) {
     // Step 1: Filter and sort all "Late" attendances with proportionate info
     const lates = attendanceRecords
         .filter(att => att.status === "Late")
@@ -170,6 +138,66 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
         // Also return original values for debugging
         originalFromLates: fromLates,
         originalFromHalfDays: fromHalfDays
+    };
+}
+
+
+async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month) {
+    // For payroll, months are Jan=0, Feb=1, ..., Dec=11
+    const months = [
+        "January", "February", "March", "April", "May", "June",
+        "July", "August", "September", "October", "November", "December"
+    ];
+    const uptoMonthNum = Number.isNaN(Number(month))
+        ? new Date(Date.parse(month + " 1, " + year)).getMonth()
+        : Number(month) - 1;
+
+    let runningBalance = entitled ?? 0;
+    let ytdUsed = 0;
+    let monthUsed = 0;
+
+    for (let m = 0; m <= uptoMonthNum; m++) {
+        const monthName = months[m];
+        const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
+
+        // Don't fetch attendances before Jan 1
+        let fromDate = mthFrom;
+        const jan1 = new Date(Date.UTC(Number(year), 0, 1));
+        if (new Date(mthFrom) < jan1 && new Date(mthTo) >= jan1) {
+            fromDate = toYMD(jan1);
+        }
+        // Fetch for month
+        const attendancesMth = await Attendance.find({
+            employee: employeeId,
+            date: { $gte: fromDate, $lte: mthTo }
+        });
+
+        const statsMth = calculateLeaveUsed(attendancesMth);
+
+        // 1. Apply late/halfday deduction only if runningBalance > 0
+        let lateAndHalf = statsMth.fromLates + statsMth.fromHalfDays;
+        let useFromBalance = runningBalance > 0 ? Math.min(runningBalance, lateAndHalf) : 0;
+        runningBalance -= useFromBalance;
+
+        // 2. Always deduct paid absents
+        runningBalance -= statsMth.fromPaidAbsent;
+
+        // Prevent negative zero
+        if (runningBalance === -0) runningBalance = 0;
+
+        let usedThisMonth = useFromBalance + statsMth.fromPaidAbsent;
+        ytdUsed += usedThisMonth;
+
+        // Remember used for the selected month only
+        if (m === uptoMonthNum) {
+            monthUsed = usedThisMonth;
+        }
+    }
+
+    return {
+        ytdUsed,
+        monthUsed,
+        balance: runningBalance
     };
 }
 
