@@ -3,7 +3,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const Employee = require("./src/models/Employees"); // adjust path if needed
 
-const TARGET_ID = new mongoose.Types.ObjectId("68b1610b482495e0314e4386");
+const TARGET_ID = new mongoose.Types.ObjectId("68b5c3d03f9e8109d1f7a8ba");
 
 async function main() {
   const uri = process.env.MONGODB_URI;
@@ -18,7 +18,7 @@ async function main() {
 
     const result = await Employee.updateOne(
       { _id: TARGET_ID },
-      { $set: { role: "Team Lead" } }
+      { $set: { role: "Employee" } }
     );
 
     if (result.matchedCount === 0) {

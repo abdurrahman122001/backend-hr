@@ -3,7 +3,7 @@ const express = require("express");
 const router = express.Router();
 const empAuth = require("../middleware/empAuth");
 const { upload } = require("../utils/multer");
-const ctrl = require("../controllers/assignmentMessageController"); // uses the updated controller
+const ctrl = require("../controllers/assignmentMessageController");
 
 // All endpoints require employee token
 router.use(empAuth);

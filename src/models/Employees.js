@@ -16,7 +16,7 @@ const EmployeeSchema = new Schema(
     // PERSONAL DETAILS
     name: { type: String, required: true }, // Full Name
     fatherOrHusbandName: { type: String },
-    dateOfBirth: { type: String }, 
+    dateOfBirth: { type: String },
     gender: { type: String },
     nationality: { type: String },
     maritalStatus: { type: String, enum: ["Single", "Married"] },
@@ -73,6 +73,16 @@ const EmployeeSchema = new Schema(
       type: [{ type: Schema.Types.ObjectId, ref: "Shift" }],
       default: [DEFAULT_SHIFT_ID], // <-- Always select this shift by default!
     },
+
+    supervisionMode: {
+      type: String,
+      enum: ["direct", "needs_approval"],
+      default: "direct",
+      index: true,
+    },
+    // Optional fixed Team Lead who must approve (used when needs_approval)
+    supervisor: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+
     // LEAVE ENTITLEMENT
     leaveEntitlement: {
       total: { type: Number, default: 22 },

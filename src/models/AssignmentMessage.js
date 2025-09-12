@@ -24,12 +24,13 @@ const AssignmentMessageSchema = new Schema(
     client: { type: Schema.Types.ObjectId, ref: "ClientInfo", required: true },
 
     // Participants
-    sender:   { type: Schema.Types.ObjectId, ref: "Employee", required: true },
-    receiver: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    receiver: [
+      { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    ], // Change to array
 
-    // Content
     subject: { type: String },
-    note:    { type: String },
+    note: { type: String },
 
     // Files
     attachments: [AttachmentSchema],
@@ -42,6 +43,11 @@ AssignmentMessageSchema.index({ owner: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ client: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ sender: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ receiver: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ client: 1, sender: 1, receiver: 1, createdAt: -1 });
+AssignmentMessageSchema.index({
+  client: 1,
+  sender: 1,
+  receiver: 1,
+  createdAt: -1,
+});
 
 module.exports = mongoose.model("AssignmentMessage", AssignmentMessageSchema);

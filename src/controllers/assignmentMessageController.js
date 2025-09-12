@@ -1,30 +1,98 @@
 // controllers/assignmentMessageController.js
 const AssignmentMessage = require("../models/AssignmentMessage");
+const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
 
+/** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
   const base =
     process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
   return `${base}/uploads/${filename}`;
 }
 
-// Accepts strings or ObjectId instances
 const isObjId = (v) => mongoose.isValidObjectId(v);
+const oid = (v) =>
+  mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 
-/**
- * GET /api/assignment-messages
- * Query params (new):
- *  - client: ObjectId
- *  - sender: ObjectId
- *  - receiver: ObjectId
- *  - participant: ObjectId (matches either sender or receiver)
- *  - owner: ObjectId (otherwise inferred from middleware: req.employee.owner)
- *
- * Back-compat:
- *  - toEmployee => receiver
- *  - manager    => (ignored for filtering; kept only as create() fallback)
- */
+function normalizeIds(val) {
+  if (!val) return [];
+  if (Array.isArray(val)) return val.filter(isObjId).map(String);
+  if (typeof val === "string") {
+    return val
+      .split(",")
+      .map((s) => s.trim())
+      .filter(isObjId);
+  }
+  return [];
+}
+
+function normalizeRole(role) {
+  if (!role) return "";
+  const raw = String(role).trim();
+  if (raw === "Team Lead") return "team_lead";
+  if (raw === "Manager") return "manager";
+  if (raw === "Employee") return "employee";
+  const r = raw.toLowerCase().replace(/\s+/g, "_");
+  if (["teamlead", "team_lead", "team-lead", "lead"].includes(r)) return "team_lead";
+  if (r === "manager") return "manager";
+  if (["employee", "staff", "associate"].includes(r)) return "employee";
+  return r;
+}
+
+/** ---------- SIMPLE visibility: I sent it or I’m in receiver[] ---------- **/
+async function applyVisibility(q, req) {
+  if (!req.employee?._id) return q;
+
+  const me = oid(String(req.employee._id));
+  if (!me) return q;
+
+  const andParts = [];
+  if (q.$and) {
+    andParts.push(...q.$and);
+    delete q.$and;
+  }
+  if (q.$or) {
+    andParts.push({ $or: q.$or });
+    delete q.$or;
+  }
+  const base = Object.keys(q).length ? [q] : [];
+
+  // receiver is an array; Mongo matches scalars against array elements automatically
+  const visOr = [{ sender: me }, { receiver: me }];
+
+  return { $and: [...base, ...andParts, { $or: visOr }] };
+}
+
+/** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
+async function findTLsAndManagersByOwner(ownerId) {
+  if (!isObjId(ownerId)) return { tls: [], managers: [] };
+
+  // Accept both stored forms of the role (“Team Lead” from your DB and normalized hint strings)
+  const tls = await Employee.find({
+    owner: ownerId,
+    $or: [{ role: "Team Lead" }, { role: "team_lead" }, { role: /lead/i }],
+  })
+    .select("_id")
+    .lean();
+
+  const managers = await Employee.find({
+    owner: ownerId,
+    $or: [{ role: "Manager" }, { role: "manager" }],
+  })
+    .select("_id")
+    .lean();
+
+  return {
+    tls: tls.map((x) => String(x._id)),
+    managers: managers.map((x) => String(x._id)),
+  };
+}
+
+/** ----------------- CONTROLLERS ----------------- **/
+
+// GET /api/assignment-messages
+// Supports filtering by owner/client/sender/receiver/participant/between
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
@@ -33,28 +101,35 @@ exports.listMessages = async function listMessages(req, res) {
       receiver,
       participant,
       owner,
-      toEmployee, // legacy => receiver
       limit = 50,
       page = 1,
+      between: betweenRaw,
     } = req.query;
 
     const q = {};
 
-    // Scope by owner (explicit takes precedence; else infer from middleware)
-    if (owner) q.owner = owner;
+    // scope by owner (explicit or from session)
+    if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
     if (isObjId(client)) q.client = client;
 
-    const recv = receiver || toEmployee; // back-compat
-    if (isObjId(participant)) {
+    // receiver is array in the schema; matching with a scalar still works
+    const between = normalizeIds(betweenRaw);
+
+    if (between.length === 2) {
+      const [a, b] = between;
+      q.$or = [
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
+    } else if (isObjId(participant)) {
       q.$or = [{ sender: participant }, { receiver: participant }];
     } else {
       if (isObjId(sender)) q.sender = sender;
-      if (isObjId(recv)) q.receiver = recv;
+      if (isObjId(receiver)) q.receiver = receiver;
     }
 
-    // Guard against overly broad queries
     if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or) {
       return res.status(400).json({
         error:
@@ -65,20 +140,22 @@ exports.listMessages = async function listMessages(req, res) {
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
+    const qFinal = await applyVisibility(q, req);
+
     const [items, total] = await Promise.all([
-      AssignmentMessage.find(q)
+      AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail" },
-          { path: "receiver", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" }, // array
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(q),
+      AssignmentMessage.countDocuments(qFinal),
     ]);
 
     res.json({
@@ -94,18 +171,8 @@ exports.listMessages = async function listMessages(req, res) {
   }
 };
 
-/**
- * GET /api/assignment-messages/messages
- * GET /api/assignment-messages/messages/:clientId
- *
- * Kept for compatibility with your routes. Works like listMessages but
- * with slightly different param names:
- *  - clientId | client
- *  - sender | receiver | participant
- *  - owner (inferred from middleware if absent)
- * Back-compat:
- *  - toEmployee => receiver
- */
+// GET /api/assignment-messages/messages
+// GET /api/assignment-messages/messages/:clientId
 exports.listMessagesForManager = async function listMessagesForManager(req, res) {
   try {
     const clientId =
@@ -114,17 +181,25 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     const owner = req.query.owner || req.employee?.owner || null;
 
     const sender = req.query.sender || null;
-    const receiver = req.query.receiver || req.query.toEmployee || null; // back-compat
+    const receiver = req.query.receiver || req.query.toEmployee || null;
     const participant = req.query.participant || req.query.employee || null;
+    const betweenRaw = req.query.between;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
 
     const q = {};
-    if (owner) q.owner = owner; // accept ObjectId instance or string
+    if (isObjId(owner)) q.owner = owner;
     if (isObjId(clientId)) q.client = clientId;
 
-    if (isObjId(participant)) {
+    const between = normalizeIds(betweenRaw);
+    if (between.length === 2) {
+      const [a, b] = between;
+      q.$or = [
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
+    } else if (isObjId(participant)) {
       q.$or = [{ sender: participant }, { receiver: participant }];
     } else {
       if (isObjId(sender)) q.sender = sender;
@@ -138,14 +213,16 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
       });
     }
 
-    const messages = await AssignmentMessage.find(q)
+    const qFinal = await applyVisibility(q, req);
+
+    const messages = await AssignmentMessage.find(qFinal)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
       .populate([
         { path: "owner", select: "_id name companyEmail" },
-        { path: "sender", select: "_id name companyEmail" },
-        { path: "receiver", select: "_id name companyEmail" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" }, // array
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       ])
@@ -158,51 +235,75 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
   }
 };
 
-/**
- * POST /api/assignment-messages
- * body (new): { owner, client, sender, receiver, subject?, note? }
- *
- * Back-compat body: { owner, client, toEmployee, manager } -> receiver
- * If sender not provided, falls back to req.employee._id (current employee).
- * If owner not provided, falls back to req.employee.owner (from middleware).
- */
+// POST /api/assignment-messages
+// Request body:
+//   owner, client, sender
+//   receiver  (array)  OR receivers (array)  // either name is accepted
+//   subject, note
+// Behavior:
+//   - If sender's role is Employee **and** no receivers provided, the server
+//     will automatically include all Team Leads + Managers for the same owner.
+//   - Duplicates and the sender's own id are removed.
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
       owner: ownerBody,
       client,
       sender: senderBody,
-      receiver: receiverBody,
-      toEmployee, // legacy
-      manager, // legacy fallback only
+      receiver: receiverBody,  // array (preferred)
+      receivers: receiversBody, // array (legacy alias)
       subject,
       note,
     } = req.body;
 
-    const owner = ownerBody || req.employee?.owner;
+    const owner  = ownerBody || req.employee?.owner;
     const sender = senderBody || req.employee?._id;
-    const receiver = receiverBody || toEmployee || manager;
 
-    if (!owner || !client || !sender || !receiver) {
+    if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
       return res.status(400).json({
-        error:
-          "owner, client, sender and receiver are required (toEmployee/manager accepted as legacy for receiver)",
+        error: "owner, client, and sender are required (ObjectId strings)",
       });
     }
 
+    // normalize incoming receivers (accept both 'receiver' and 'receivers')
+    let receivers = [];
+    if (Array.isArray(receiverBody)) receivers = normalizeIds(receiverBody);
+    if (Array.isArray(receiversBody)) receivers = receivers.concat(normalizeIds(receiversBody));
+
+    // remove self if present
+    receivers = receivers.filter((id) => id !== String(sender));
+
+    // if sender is employee AND receivers empty → auto include all TLs & Managers for the owner
+    const senderDoc = await Employee.findById(sender).select("_id role").lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+    if (senderRole === "employee" && receivers.length === 0) {
+      const { tls, managers } = await findTLsAndManagersByOwner(owner);
+      receivers = [...tls, ...managers].filter((id) => id !== String(sender));
+    }
+
+    // final validation
+    receivers = Array.from(new Set(receivers)); // dedupe
+    if (receivers.length === 0) {
+      return res.status(400).json({
+        error:
+          "At least one receiver is required. Provide receiver(s) array or let the server auto-include TL and Manager by ensuring sender is an Employee.",
+      });
+    }
+
+    // Create single message document with receiver array
     const msg = await AssignmentMessage.create({
       owner,
       client,
       sender,
-      receiver,
+      receiver: receivers,
       subject: subject || "",
       note: note || "",
     });
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail" },
-      { path: "receiver", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" }, // array
       { path: "client", select: "_id clientName" },
     ]);
 
@@ -213,15 +314,13 @@ exports.createMessage = async function createMessage(req, res) {
   }
 };
 
-/**
- * GET /api/assignment-messages/:id
- */
+// GET /api/assignment-messages/:id
 exports.getMessage = async function getMessage(req, res) {
   try {
     const msg = await AssignmentMessage.findById(req.params.id).populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail" },
-      { path: "receiver", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
@@ -233,10 +332,7 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 
-/**
- * PATCH /api/assignment-messages/:id
- * body: { subject?, note? }
- */
+// PATCH /api/assignment-messages/:id
 exports.updateMessage = async function updateMessage(req, res) {
   try {
     const { subject, note } = req.body;
@@ -249,8 +345,8 @@ exports.updateMessage = async function updateMessage(req, res) {
     await msg.save();
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail" },
-      { path: "receiver", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
@@ -262,9 +358,7 @@ exports.updateMessage = async function updateMessage(req, res) {
   }
 };
 
-/**
- * DELETE /api/assignment-messages/:id
- */
+// DELETE /api/assignment-messages/:id
 exports.deleteMessage = async function deleteMessage(req, res) {
   try {
     const msg = await AssignmentMessage.findByIdAndDelete(req.params.id);
@@ -276,10 +370,7 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   }
 };
 
-/**
- * POST /api/assignment-messages/:id/attachments
- * (multer handles files => req.files)
- */
+// POST /api/assignment-messages/:id/attachments
 exports.uploadAttachments = async function uploadAttachments(req, res) {
   try {
     const msg = await AssignmentMessage.findById(req.params.id);
@@ -305,15 +396,12 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
   } catch (e) {
     console.error(e);
     res.status(500).json({
-      error:
-        "Attachment upload failed (only PDF/XLS/XLSX; up to 20MB each)",
+      error: "Attachment upload failed (only PDF/XLS/XLSX; up to 20MB each)",
     });
   }
 };
 
-/**
- * GET /api/assignment-messages/:id/attachments
- */
+// GET /api/assignment-messages/:id/attachments
 exports.listAttachments = async function listAttachments(req, res) {
   try {
     const msg = await AssignmentMessage.findById(req.params.id).populate([
@@ -327,9 +415,7 @@ exports.listAttachments = async function listAttachments(req, res) {
   }
 };
 
-/**
- * DELETE /api/assignment-messages/:id/attachments/:attId
- */
+// DELETE /api/assignment-messages/:id/attachments/:attId
 exports.deleteAttachment = async function deleteAttachment(req, res) {
   try {
     const { id, attId } = req.params;
@@ -337,9 +423,7 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
     if (!msg) return res.status(404).json({ error: "Not found" });
 
     const before = msg.attachments.length;
-    msg.attachments = msg.attachments.filter(
-      (a) => a._id.toString() !== attId
-    );
+    msg.attachments = msg.attachments.filter((a) => a._id.toString() !== attId);
     const after = msg.attachments.length;
 
     if (before === after)

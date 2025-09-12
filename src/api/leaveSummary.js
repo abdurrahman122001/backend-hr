@@ -61,29 +61,37 @@ function getYTDRange(year, month) {
 }
 
 function countLeavesFromLates(attendanceRecords) {
-    // Step 1: Filter and sort all "Late" attendances
+    // Step 1: Filter and sort all "Late" attendances with proportionate info
     const lates = attendanceRecords
         .filter(att => att.status === "Late")
-        .map(att => new Date(att.date))
-        .sort((a, b) => a - b);
+        .map(att => ({
+            date: new Date(att.date),
+            proportionate: att.proportionate === true || att.proportionate === "true"
+        }))
+        .sort((a, b) => a.date - b.date);
 
     // Step 2: Group lates by payroll period (26th–25th), and count leaves
     let periods = {};
-    for (let lateDate of lates) {
-        const key = getPayrollPeriodKey(lateDate);
+    for (let lateObj of lates) {
+        const key = getPayrollPeriodKey(lateObj.date);
         if (!periods[key]) periods[key] = [];
-        periods[key].push(lateDate);
+        periods[key].push(lateObj);
     }
 
     // Step 3: For each period, count groups of 3 (reset after each period)
     let lateLeaveCount = 0;
     Object.values(periods).forEach(latesInPeriod => {
-        let counter = 0;
-        latesInPeriod.forEach(() => {
-            counter++;
-            if (counter === 3) {
-                lateLeaveCount++;
-                counter = 0;
+        let group = [];
+        latesInPeriod.forEach(late => {
+            group.push(late);
+            if (group.length === 3) {
+                // If any of this group has proportionate:true, count as 0.5
+                if (group.some(l => l.proportionate)) {
+                    lateLeaveCount += 0.5;
+                } else {
+                    lateLeaveCount += 1;
+                }
+                group = [];
             }
         });
         // Leftover lates in period do not roll over!
@@ -93,16 +101,20 @@ function countLeavesFromLates(attendanceRecords) {
 }
 
 function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
-    // Always calculate paid absents - these can make balance negative
+    // Count paid absents, respecting 'proportionate'
     let paidAbsents = 0;
     for (const att of records) {
-        if (att.status === "Absent" && att.leaveType === "Paid") paidAbsents++;
+        if (att.status === "Absent" && att.leaveType === "Paid") {
+            // If proportionate true or "true", count as 0.5, else 1
+            paidAbsents += (att.proportionate === true || att.proportionate === "true") ? 0.5 : 1;
+        }
     }
     const fromPaidAbsent = paidAbsents;
 
-    // Calculate lates and half days
+    // Calculate lates (with proportionate handling)
     const fromLates = countLeavesFromLates(records);
 
+    // Half days (no proportionate logic needed here)
     let halfdays = 0;
     for (const att of records) {
         if (att.status === "Half Day") halfdays++;
@@ -110,10 +122,8 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
     const fromHalfDays = halfdays * 0.5;
 
     // If balance is already 0 or negative, ignore lates and half days completely
-    // Only count paid absents (which can make balance more negative)
     let actualFromLates = fromLates;
     let actualFromHalfDays = fromHalfDays;
-
     if (currentBalance !== null && currentBalance <= 0) {
         actualFromLates = 0;
         actualFromHalfDays = 0;
@@ -124,17 +134,28 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
         fromHalfDays: actualFromHalfDays,
         fromPaidAbsent,
         used: actualFromLates + actualFromHalfDays + fromPaidAbsent,
-        // For debugging
+        // Also return original values for debugging
         originalFromLates: fromLates,
         originalFromHalfDays: fromHalfDays
     };
 }
 
-/**
- * Calculate Year-to-Date leave used, monthly used, and balance for the employee
- */
-async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month) {
-    // For payroll, months are Jan=0, Feb=1, ..., Dec=11
+async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month, options = {}) {
+    // Fetch employee and probation info if not already provided
+    let employee = options.employee;
+    let probationEnd, joiningDate, leaveDuringProbation;
+    if (!employee) {
+        employee = await Employee.findById(employeeId);
+    }
+    if (employee) {
+        let probationPolicy = await ProbationPeriod.findOne({ owner: employee.owner }).sort({ createdAt: -1 });
+        let probationDays = probationPolicy ? probationPolicy.days : 0;
+        leaveDuringProbation = probationPolicy ? probationPolicy.leaveDuringProbation : false;
+        joiningDate = new Date(employee.joiningDate);
+        probationEnd = new Date(joiningDate);
+        probationEnd.setDate(probationEnd.getDate() + probationDays);
+    }
+
     const months = [
         "January", "February", "March", "April", "May", "June",
         "July", "August", "September", "October", "November", "December"
@@ -151,13 +172,25 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
         const monthName = months[m];
         const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
 
+        // Parse payroll period end date and joining/probation
+        let payrollPeriodEnd = new Date(mthTo);
+
+        // SKIP: before joining OR (on probation and leave not allowed)
+        if (
+            employee &&
+            (payrollPeriodEnd < joiningDate ||
+            (payrollPeriodEnd < probationEnd && leaveDuringProbation === false))
+        ) {
+            continue; // skip this month!
+        }
+
         // Don't fetch attendances before Jan 1
         let fromDate = mthFrom;
         const jan1 = new Date(Date.UTC(Number(year), 0, 1));
         if (new Date(mthFrom) < jan1 && new Date(mthTo) >= jan1) {
             fromDate = toYMD(jan1);
         }
-        // Fetch for month
+
         const attendancesMth = await Attendance.find({
             employee: employeeId,
             date: { $gte: fromDate, $lte: mthTo }
@@ -179,7 +212,6 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
         let usedThisMonth = useFromBalance + statsMth.fromPaidAbsent;
         ytdUsed += usedThisMonth;
 
-        // For the selected month only
         if (m === uptoMonthNum) {
             monthUsed = usedThisMonth;
         }
@@ -192,10 +224,6 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
     };
 }
 
-/**
- * Returns a history array of leave usage and balances for each month of the year
- * (for leave-summary-history like your router)
- */
 async function calculateLeaveSummaryHistory(employeeId, year) {
     // 1. Fetch employee
     const employee = await Employee.findById(employeeId);
@@ -245,24 +273,17 @@ async function calculateLeaveSummaryHistory(employeeId, year) {
     let runningBalance = entitled ?? 0;
 
     for (let m = 0; m < 12; m++) {
-        if (m > lastMonthWithAttendance) {
-            results.push({
-                month: months[m],
-                usedPaid: "-",
-                usedMonth: "-",
-                balance: "-"
-            });
-            continue;
-        }
         const monthName = months[m];
         const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
 
-        // Parse payroll period end date and employee's joining date
+        // Payroll period end
         let payrollPeriodEnd = new Date(mthTo);
-        let employeeJoiningDate = new Date(employee.joiningDate);
 
-        // 1. If the payroll period ends before employee joined, skip
-        if (payrollPeriodEnd < employeeJoiningDate) {
+        // SKIP: before joining OR (on probation and leave not allowed)
+        if (
+            payrollPeriodEnd < joiningDate ||
+            (payrollPeriodEnd < probationEnd && leaveDuringProbation === false)
+        ) {
             results.push({
                 month: monthName,
                 usedPaid: "-",
@@ -272,9 +293,7 @@ async function calculateLeaveSummaryHistory(employeeId, year) {
             continue;
         }
 
-        // 2. If on probation and leaves not allowed during probation, skip
-        let onProbation = payrollPeriodEnd < probationEnd;
-        if (onProbation && !leaveDuringProbation) {
+        if (m > lastMonthWithAttendance) {
             results.push({
                 month: monthName,
                 usedPaid: "-",

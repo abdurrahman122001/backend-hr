@@ -7,7 +7,7 @@ const managerCtrl = require("../controllers/managerController");
 
 // Roster (employees + clients for same owner)
 router.get("/roster", requireAuth, managerCtrl.getRoster);
-
+router.patch("/:id/supervision", requireAuth, managerCtrl.updateEmployeeSupervision);
 // Assign (JSON or multipart). If uploading files, use multipart/form-data with 'files'
 router.post(
   "/assign",

@@ -85,18 +85,29 @@ router.get("/", requireAuth, async (req, res) => {
 
     // --- ✅ Only fetch slips where this login user is the owner ---
     query.owner = req.user._id;
+    const limit = Math.max(Number(req.query.limit) || 6, 1);
+    let skip = 0;
+    if ("skip" in req.query) {
+      skip = Math.max(Number(req.query.skip) || 0, 0);
+    } else if ("page" in req.query) {
+      const page = Math.max(Number(req.query.page) || 1, 1);
+      skip = (page - 1) * limit;
+    }
+
+    const total = await SalarySlip.countDocuments(query);
 
     const slips = await SalarySlip.find(query)
       .populate("employee")
-      .sort({ createdAt: -1 });
-
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit);
     const slipsWithNet = slips.map((slip) => {
       const slipObj = slip.toObject();
       slipObj.netSalary = calcNet(slipObj);
       return slipObj;
     });
 
-    res.json({ slips: slipsWithNet });
+    res.json({ slips: slipsWithNet, limit, total, totalPages: Math.ceil(total / limit) });
   } catch (err) {
     console.error("Error fetching salary slips:", err);
     res.status(500).json({ status: "error", message: err.message });
@@ -340,10 +351,9 @@ router.get("/:id/download", requireAuth, async (req, res) => {
       .text(`Department: ${slip.employee.department || "N/A"}`, 320, y0)
       .text(`Designation: ${slip.employee.designation || "N/A"}`, 40, y0 + 15)
       .text(
-        `Joining Date: ${
-          slip.employee.joiningDate
-            ? slip.employee.joiningDate.toISOString().slice(0, 10)
-            : "N/A"
+        `Joining Date: ${slip.employee.joiningDate
+          ? slip.employee.joiningDate.toISOString().slice(0, 10)
+          : "N/A"
         }`,
         320,
         y0 + 15

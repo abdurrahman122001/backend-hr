@@ -52,15 +52,6 @@ function getPayrollPeriodKey(date) {
     return `${periodYear}-${String(periodMonth + 1).padStart(2, '0')}`;
 }
 
-function getYTDRange(year, month) {
-    let monthNum = Number.isNaN(Number(month))
-        ? new Date(Date.parse(month + " 1, " + year)).getMonth()
-        : Number(month) - 1;
-    let from = new Date(Date.UTC(year, 0, 1)); // Jan 1
-    let to = new Date(Date.UTC(year, monthNum, 25, 23, 59, 59, 999)); // 25th of THIS month
-    return { from: toYMD(from), to: toYMD(to) };
-}
-
 function countLeavesFromLates(attendanceRecords) {
     // Step 1: Filter and sort all "Late" attendances with proportionate info
     const lates = attendanceRecords
@@ -141,8 +132,7 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
     };
 }
 
-
-async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month) {
+async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month, options = {}) {
     // For payroll, months are Jan=0, Feb=1, ..., Dec=11
     const months = [
         "January", "February", "March", "April", "May", "June",
@@ -155,8 +145,9 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
     let runningBalance = entitled ?? 0;
     let ytdUsed = 0;
     let monthUsed = 0;
-
+    let skipMonthIndexes = options.skipMonthIndexes || [];
     for (let m = 0; m <= uptoMonthNum; m++) {
+        if (skipMonthIndexes.includes(m)) continue;
         const monthName = months[m];
         const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
 
@@ -213,7 +204,7 @@ router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
         const total = employee.leaveEntitlement?.total;
         const bonus = employee.leaveEntitlement?.bonus || 0;
         const entitled = total + bonus;
-
+        console.log("total: "+total+" bonus: "+bonus+" entitled: "+entitled);
         // 2. Get Probation Policy (latest one for owner)
         const probationPolicy = await ProbationPeriod.findOne({ owner: employee.owner }).sort({ createdAt: -1 });
         let probationDays = 0;
