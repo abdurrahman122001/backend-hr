@@ -1,11 +1,11 @@
 // backend/src/routes/employees.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const Employee = require('../models/Employees');
-const requireAuth = require('../middleware/auth');
-const { getUpcomingBirthdays } = require('../controllers/employeeController');
+const Employee = require("../models/Employees");
+const requireAuth = require("../middleware/auth");
+const { getUpcomingBirthdays } = require("../controllers/employeeController");
 
 // ------------------------------
 // Helpers
@@ -39,7 +39,7 @@ function buildEmployeeScope(user) {
 // GET /api/employees
 // Fetch employees by owner OR createdBy (both supported)
 // ------------------------------
-router.get('/', requireAuth, async (req, res) => {
+router.get("/", requireAuth, async (req, res) => {
   try {
     const scope = buildEmployeeScope(req.user);
 
@@ -51,30 +51,32 @@ router.get('/', requireAuth, async (req, res) => {
     }
 
     const list = await Employee.find(query).sort({ name: 1 }).lean();
-    res.json({ status: 'success', data: list });
+    res.json({ status: "success", data: list });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: "error", message: err.message });
   }
 });
-
 
 // ------------------------------
 // GET /api/employees/birthdays
 // (delegates to controller)
 // ------------------------------
-router.get('/birthdays', requireAuth, getUpcomingBirthdays);
+router.get("/birthdays", requireAuth, getUpcomingBirthdays);
 
 // ------------------------------
 // GET /api/employees/names
 // Minimal payload (id + name) with the same scope
 // ------------------------------
-router.get('/names', requireAuth, async (req, res) => {
+router.get("/names", requireAuth, async (req, res) => {
   try {
     const scope = buildEmployeeScope(req.user);
-    const docs = await Employee.find(scope).sort({ name: 1 }).select('_id name').lean();
-    res.json({ status: 'success', data: docs });
+    const docs = await Employee.find(scope)
+      .sort({ name: 1 })
+      .select("_id name")
+      .lean();
+    res.json({ status: "success", data: docs });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: "error", message: err.message });
   }
 });
 
@@ -83,7 +85,7 @@ router.get('/names', requireAuth, async (req, res) => {
 // Create employee and record BOTH owner and createdBy
 // (owner = effective tenant id, createdBy = current user id)
 // ------------------------------
-router.post('/', requireAuth, async (req, res) => {
+router.post("/", requireAuth, async (req, res) => {
   const {
     name,
     position,
@@ -101,6 +103,7 @@ router.post('/', requireAuth, async (req, res) => {
     nomineeName,
     emergencyContact,
     joiningDate,
+    leavingDate, // NEW
     cnic,
     dateOfBirth,
     bankAccount,
@@ -109,15 +112,17 @@ router.post('/', requireAuth, async (req, res) => {
   } = req.body;
 
   if (!name || !position || !department || !email) {
-    return res.status(400).json({ status: 'error', message: 'Missing required fields' });
+    return res
+      .status(400)
+      .json({ status: "error", message: "Missing required fields" });
   }
 
   try {
     const ownerId = getEffectiveOwnerId(req.user);
 
     const emp = await Employee.create({
-      owner: [ownerId],          // tenant/HR id (array as per your schema)
-      createdBy: req.user._id,   // who created this employee
+      owner: [ownerId], // tenant/HR id (array as per your schema)
+      createdBy: req.user._id, // who created this employee
       name,
       position,
       department,
@@ -130,6 +135,7 @@ router.post('/', requireAuth, async (req, res) => {
       nomineeName,
       emergencyContact,
       joiningDate,
+      leavingDate, // NEW: last working day
       cnic,
       dateOfBirth,
       bankAccount,
@@ -140,9 +146,9 @@ router.post('/', requireAuth, async (req, res) => {
       shifts,
     });
 
-    res.status(201).json({ status: 'success', data: emp });
+    res.status(201).json({ status: "success", data: emp });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: "error", message: err.message });
   }
 });
 
@@ -150,19 +156,18 @@ router.post('/', requireAuth, async (req, res) => {
 // GET /api/employees/list
 // Same scope; includes shift names
 // ------------------------------
-router.get('/list', requireAuth, async (req, res) => {
+router.get("/list", requireAuth, async (req, res) => {
   try {
     const scope = buildEmployeeScope(req.user);
-    const emps = await Employee
-      .find(scope)
-      .select('-owner')
-      .populate('shifts', 'name')
+    const emps = await Employee.find(scope)
+      .select("-owner")
+      .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
 
-    res.json({ status: 'success', data: emps });
+    res.json({ status: "success", data: emps });
   } catch (err) {
-    res.status(500).json({ status: 'error', message: err.message });
+    res.status(500).json({ status: "error", message: err.message });
   }
 });
 
@@ -170,18 +175,20 @@ router.get('/list', requireAuth, async (req, res) => {
 // GET /api/employees/:id
 // Scoped by owner OR createdBy
 // ------------------------------
-router.get('/:id', requireAuth, async (req, res) => {
+router.get("/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ status: 'error', message: 'Invalid employee id' });
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
     }
 
     const scope = buildEmployeeScope(req.user);
     const emp = await Employee.findOne({ _id: id, ...scope }).lean();
 
-    if (!emp) return res.status(404).json({ error: 'Employee not found' });
-    res.json({ status: 'success', employee: emp });
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+    res.json({ status: "success", employee: emp });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -191,11 +198,13 @@ router.get('/:id', requireAuth, async (req, res) => {
 // PATCH /api/employees/:id
 // Scoped update by owner OR createdBy
 // ------------------------------
-router.patch('/:id', requireAuth, async (req, res) => {
+router.patch("/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     if (!mongoose.isValidObjectId(id)) {
-      return res.status(400).json({ status: 'error', message: 'Invalid employee id' });
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
     }
 
     const scope = buildEmployeeScope(req.user);
@@ -203,10 +212,12 @@ router.patch('/:id', requireAuth, async (req, res) => {
       { _id: id, ...scope },
       req.body,
       { new: true, runValidators: true }
-    ).populate('shifts', 'name');
+    ).populate("shifts", "name");
 
     if (!emp) {
-      return res.status(404).json({ error: 'Employee not found or unauthorized' });
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
     }
     res.json(emp);
   } catch (err) {

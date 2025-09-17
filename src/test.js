@@ -74,7 +74,9 @@ const managerRoutes = require("./routes/manager");
 const taskRoutes = require("./routes/tasks");
 const clientInfoRoutes = require("./routes/clientInfo");
 const assignMessageRoutes = require("./routes/assignmentMessage");
-// ---------- App ----------
+const employeeLeavesRouter = require("./routes/employeeLeaves");
+const generateRouter = require("./routes/generate-pdfs");
+
 const app = express();
 
 // ---------- Static ----------
@@ -157,7 +159,7 @@ app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api/attendance", attendanceLeaveSummaryRouter);
+app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
@@ -180,12 +182,13 @@ app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
+app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
 
 app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/client-info", clientInfoRoutes);
 app.use("/api/assignment-messages", assignMessageRoutes);
-// ---------- Health ----------
+app.use("/api/generate", requireAuth, generateRouter);
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 
 // ---------- MongoDB ----------

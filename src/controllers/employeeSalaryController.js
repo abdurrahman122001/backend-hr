@@ -127,7 +127,8 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       'latestQualification','fieldOfQualification','otherQualification','otherFieldOfQualification',
       'phone','permanentAddress','presentAddress','bankName','bankAccountNumber',
       'nomineeName','nomineeRelation','nomineeCnic','nomineeNo',
-      'rt','department','designation','joiningDate','isHR','isAdmin','userAccount'
+      'rt','department','designation','joiningDate','leavingDate', // <-- added leavingDate
+      'isHR','isAdmin','userAccount'
     ];
     for (const k of shallowKeys) {
       if (k in employeeData && employeeData[k] !== undefined) {
@@ -288,6 +289,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 };
+
 exports.resendCompleteProfileLink = async (req, res) => {
   try {
     const { id } = req.params;

@@ -69,6 +69,8 @@ const EmployeeSchema = new Schema(
     department: { type: String },
     designation: { type: String },
     joiningDate: { type: String },
+    leavingDate: { type: String }, // Last working day / employment end date
+
     shifts: {
       type: [{ type: Schema.Types.ObjectId, ref: "Shift" }],
       default: [DEFAULT_SHIFT_ID], // <-- Always select this shift by default!

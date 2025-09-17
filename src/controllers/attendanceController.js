@@ -149,10 +149,12 @@ async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToD
   if (!employee) throw new Error("Employee not found");
 
   const entitlement = employee.leaveEntitlement || {};
-  const total = entitlement.total || 0;
+  const bonus = entitlement?.bonus || 0;
+  const total = (entitlement.total || 0) + bonus;
   const usedPaid = entitlement.usedPaid || 0;
   const usedUnpaid = entitlement.usedUnpaid || 0;
   const availableBalance = total - usedPaid;
+
 
   let paidToUse = 0;
   let unpaidToUse = 0;
@@ -209,7 +211,45 @@ exports.markAttendance = async (req, res) => {
       leaveType,
       isHoliday,
     } = req.body;
-    // Holiday marking — unique by date + owner (tenant-scoped)
+
+    // ========= Helpers =========
+    const allowanceFields = [
+      "basic",
+      "dearnessAllowance",
+      "houseRentAllowance",
+      "conveyanceAllowance",
+      "medicalAllowance",
+      "utilityAllowance",
+      "overtimeCompensation",
+      "dislocationAllowance",
+      "leaveEncashment",
+      "bonus",
+      "arrears",
+      "autoAllowance",
+      "incentive",
+      "fuelAllowance",
+      "othersAllowances",
+    ];
+
+    const sumEncryptedFields = async (src, fields) => {
+      let total = 0;
+      for (const f of fields) {
+        if (src && src[f]) {
+          const n = Number(await decrypt(src[f])) || 0;
+          total += n;
+        }
+      }
+      return total;
+    };
+
+    // ========= Employee (needed for logs) =========
+    const employee = await ensureEmployeeAccessible(employeeId, ownerId, userId);
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found for this owner or unauthorized." });
+    }
+    console.log(`[ATTENDANCE] [${employee.name}] Request -> Date=${date}, Status=${status}, LeaveType=${leaveType || "-"}, CheckIn=${checkIn || "-"}, CheckOut=${checkOut || "-"}`);
+
+    // ========= Holiday (tenant-scoped, no employee) =========
     if (isHoliday) {
       const rec = await Attendance.findOneAndUpdate(
         { owner: ownerId, date, isHoliday: true },
@@ -232,28 +272,21 @@ exports.markAttendance = async (req, res) => {
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+      console.log(`[ATTENDANCE] [${employee.name}] Marked HOLIDAY on ${date}`);
       return res.json(rec);
     }
 
-    // Guard: employee must belong to this tenant or be created by this user/tenant
-    const employee = await ensureEmployeeAccessible(
-      employeeId,
-      ownerId,
-      userId
-    );
-    if (!employee) {
-      return res
-        .status(404)
-        .json({ error: "Employee not found for this owner or unauthorized." });
-    }
-
+    // ========= Existing record (for reversals) =========
     const oldRec = await Attendance.findOne({
       owner: ownerId,
       employee: employeeId,
       date,
     }).lean();
+    if (oldRec) {
+      console.log(`[ATTENDANCE] [${employee.name}] Previous -> Status=${oldRec.status}, LeaveType=${oldRec.leaveType || "-"}`);
+    }
 
-    // 1) Upsert attendance (tenant-scoped)
+    // ========= Upsert attendance =========
     const updateDoc = {
       $set: {
         owner: ownerId,
@@ -278,25 +311,23 @@ exports.markAttendance = async (req, res) => {
       updateDoc,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+    console.log(`[ATTENDANCE] [${employee.name}] Upserted -> Status=${rec.status}, LeaveType=${rec.leaveType || "-"} on ${date}`);
 
-    // 2) Find payroll period for this employee (tenant-scoped)
+    // ========= Payroll period =========
     const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
-
-    // If employee has multiple shifts, pick the first for period mapping (adjust if needed)
     const shiftId = employee.shifts?.[0];
     const payroll = allPayrolls.find(
-      (p) =>
-        Array.isArray(p.shifts) &&
-        p.shifts.map(String).includes(String(shiftId))
+      (p) => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
     );
     if (!payroll) {
+      console.log(`[ERROR] [${employee.name}] Payroll period not found for shift=${String(shiftId)}`);
       return res.status(404).json({ error: "Payroll period not found." });
     }
-    // --- BLOCK non-working day marking for "Leave", "Late", "Absent", "Half Day" ---
+
+    // ========= Non-working day guard =========
     const attendanceDate = new Date(date);
     const ymd = (d) => d.toISOString().slice(0, 10);
-    const dow = attendanceDate.getDay(); // 0=Sun ... 6=Sat
-
+    const dow = attendanceDate.getDay(); // 0..6
     const dateSet = new Set();
     const weekdaySet = new Set();
     const nameToDay = {
@@ -318,20 +349,16 @@ exports.markAttendance = async (req, res) => {
       const nd = new Date(s);
       if (!isNaN(nd)) dateSet.add(ymd(nd));
     });
-
-    const isNonWorkingDay =
-      dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+    const isNonWorkingDay = dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
 
     if (isNonWorkingDay) {
-      // Only "Present" allowed!
       if (status !== "Present") {
+        console.log(`[BLOCK] [${employee.name}] ${date} is non-working. Only 'Present' allowed. Requested=${status}`);
         return res.status(400).json({
-          error: "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed."
+          error: "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed.",
         });
       }
-
-      // upsert Present only
-      const rec = await Attendance.findOneAndUpdate(
+      const recNwd = await Attendance.findOneAndUpdate(
         { owner: ownerId, employee: employeeId, date },
         {
           $set: {
@@ -346,51 +373,34 @@ exports.markAttendance = async (req, res) => {
             markedByHR: true,
             markedOnNonWorkingDay: true,
           },
-          $unset: { leaveType: "" }
+          $unset: { leaveType: "" },
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
-
-      // *** Update the bonus using new logic ***
       const { bonus, accumulated } = await updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date);
-      console.log(`Employee ${employee.name} | Updated Bonus: ${bonus}, Carryover hours: ${accumulated}`);
-
-      return res.json(rec);
+      console.log(`[BONUS] [${employee.name}] Non-working Present -> Bonus=${bonus}, CarryoverHours=${accumulated}`);
+      return res.json(recNwd);
     }
 
+    // ========= Payroll period dates =========
     const anchor = new Date(payroll.payrollPeriodStartDay);
-
     let periodStart, periodEnd;
     if (payroll.payrollPeriodType === "monthly") {
       const anchorDay = anchor.getDate();
-      const thisMonthStart = new Date(
-        attendanceDate.getFullYear(),
-        attendanceDate.getMonth(),
-        anchorDay
-      );
+      const thisMonthStart = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth(), anchorDay);
       if (attendanceDate >= thisMonthStart) {
         periodStart = thisMonthStart;
       } else {
-        periodStart = new Date(
-          attendanceDate.getFullYear(),
-          attendanceDate.getMonth() - 1,
-          anchorDay
-        );
+        periodStart = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth() - 1, anchorDay);
       }
-      periodEnd = new Date(
-        periodStart.getFullYear(),
-        periodStart.getMonth() + 1,
-        periodStart.getDate()
-      );
+      periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, periodStart.getDate());
       periodEnd.setDate(periodEnd.getDate() - 1);
     } else {
       let length = payroll.payrollPeriodLength;
       if (payroll.payrollPeriodType === "weekly") length = 7;
       if (payroll.payrollPeriodType === "bimonthly") length = 15;
       if (payroll.payrollPeriodType === "10-days") length = 10;
-      const diff = Math.floor(
-        (attendanceDate - anchor) / (1000 * 60 * 60 * 24)
-      );
+      const diff = Math.floor((attendanceDate - anchor) / (1000 * 60 * 60 * 24));
       const cycles = Math.floor(diff / length);
       periodStart = new Date(anchor);
       periodStart.setDate(anchor.getDate() + cycles * length);
@@ -398,55 +408,32 @@ exports.markAttendance = async (req, res) => {
       periodEnd.setDate(periodEnd.getDate() + length - 1);
     }
 
-    // --- UPDATED: bound start by joining date, and flag before-join ---
-    const joinDate = employee.joiningDate
-      ? new Date(employee.joiningDate)
-      : null;
-    const effectiveStartDate =
-      joinDate && joinDate > periodStart ? joinDate : periodStart;
-
+    const joinDate = employee.joiningDate ? new Date(employee.joiningDate) : null;
+    const effectiveStartDate = joinDate && joinDate > periodStart ? joinDate : periodStart;
     const start = effectiveStartDate.toISOString().slice(0, 10);
     const end = periodEnd.toISOString().slice(0, 10);
-
-    const beforeJoin = joinDate && attendanceDate < joinDate;
+    const beforeJoin = !!(joinDate && attendanceDate < joinDate);
     const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
-    const payrollYear = periodEnd.getFullYear().toString();
+    const payrollYear = String(periodEnd.getFullYear());
 
-    // 4) Fetch or create SalarySlip (tenant-scoped)
+    console.log(`[PERIOD] [${employee.name}] Start=${start}, End=${end}, BeforeJoin=${beforeJoin ? "YES" : "NO"}`);
+
+    // ========= SalarySlip (tenant-scoped) =========
     let slip = await SalarySlip.findOne({
       owner: ownerId,
       employee: employeeId,
       month: payrollMonth,
       year: payrollYear,
-    }); // not lean on purpose
+    }); // not lean (we may modify)
+
+    let grossSalary = 0;
+
     if (!slip) {
-      const salaryDoc = await Salaries.findOne({
-        employee: employeeId,
-        owner: ownerId,
-      });
+      const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
       if (!salaryDoc) {
-        return res
-          .status(404)
-          .json({ error: "Salary structure not found for employee." });
+        console.log(`[ERROR] [${employee.name}] Salary structure not found in Salaries.`);
+        return res.status(404).json({ error: "Salary structure not found for employee." });
       }
-      const allowanceFields = [
-        "basic",
-        "dearnessAllowance",
-        "houseRentAllowance",
-        "conveyanceAllowance",
-        "medicalAllowance",
-        "utilityAllowance",
-        "overtimeCompensation",
-        "dislocationAllowance",
-        "leaveEncashment",
-        "bonus",
-        "arrears",
-        "autoAllowance",
-        "incentive",
-        "fuelAllowance",
-        "othersAllowances",
-        "grossSalary",
-      ];
       const slipData = {
         owner: ownerId,
         employee: employeeId,
@@ -457,292 +444,110 @@ exports.markAttendance = async (req, res) => {
       };
       allowanceFields.forEach((f) => (slipData[f] = salaryDoc[f] || ""));
       slip = await SalarySlip.create(slipData);
-    }
-    // --- REPLACEMENT: auto-mark Absent from periodStart to day before join AND deduct (skip nonWorkingDays by date or weekday) ---
-    if (joinDate && joinDate > periodStart) {
-      const dayMs = 24 * 60 * 60 * 1000;
-      let daysToCharge = 0;
 
-      // helper: Date -> 'YYYY-MM-DD' (timezone-safe)
-      const ymd = (dt) => {
-        const y = dt.getFullYear();
-        const m = String(dt.getMonth() + 1).padStart(2, "0");
-        const d = String(dt.getDate()).padStart(2, "0");
-        return `${y}-${m}-${d}`;
-      };
-
-      // Build non-working rules
-      const dateSet = new Set(); // explicit dates, e.g., '2025-08-14'
-      const weekdaySet = new Set(); // 0..6 (0=Sun)
-
-      const nameToDay = {
-        sun: 0,
-        sunday: 0,
-        mon: 1,
-        monday: 1,
-        tue: 2,
-        tues: 2,
-        tuesday: 2,
-        wed: 3,
-        weds: 3,
-        wednesday: 3,
-        thu: 4,
-        thur: 4,
-        thurs: 4,
-        thursday: 4,
-        fri: 5,
-        friday: 5,
-        sat: 6,
-        saturday: 6,
-      };
-
-      (payroll.nonWorkingDays || []).forEach((raw) => {
-        if (!raw) return;
-        const s = String(raw).trim();
-
-        // 1) Exact date 'YYYY-MM-DD'
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-          dateSet.add(s);
-          return;
-        }
-
-        // 2) Numeric weekday '0'..'6'
-        if (/^[0-6]$/.test(s)) {
-          weekdaySet.add(Number(s));
-          return;
-        }
-
-        // 3) Weekday names
-        const key = s.toLowerCase();
-        if (key in nameToDay) {
-          weekdaySet.add(nameToDay[key]);
-          return;
-        }
-
-        // 4) Fallback: parseable date string -> normalize to YYYY-MM-DD
-        const nd = new Date(s);
-        if (!isNaN(nd)) {
-          dateSet.add(ymd(nd));
-        }
-      });
-
-      for (
-        let d = new Date(periodStart);
-        d < joinDate;
-        d = new Date(d.getTime() + dayMs)
-      ) {
-        const iso = ymd(d);
-        const dow = d.getDay();
-
-        // skip if non-working by explicit date or weekday
-        if (dateSet.has(iso) || weekdaySet.has(dow)) continue;
-
-        // skip if any record already exists that day (holiday/attendance)
-        const existing = await Attendance.findOne({
-          owner: ownerId,
-          date: iso,
-        }).lean();
-        if (existing) continue;
-
-        await Attendance.findOneAndUpdate(
-          { owner: ownerId, employee: employeeId, date: iso },
-          {
-            $set: {
-              owner: ownerId,
-              employee: employeeId,
-              date: iso,
-              status: "Absent",
-              leaveType: "Unpaid",
-              markedByHR: true,
-              createdBy: userId,
-            },
-            $unset: { checkIn: "", checkOut: "", notes: "" },
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
-        daysToCharge += 1;
-      }
-      if (daysToCharge > 0) {
-        const result = await updateLeaveEntitlementForEmployee(
-          employeeId,
-          daysToCharge
-        );
-        if (result.unpaid > 0) {
-          let gross = 0;
-          if (slip.grossSalary) gross = Number(await decrypt(slip.grossSalary));
-          const perDayAuto = gross / 22; // same totalWorkingDays assumption
-
-          let prev = 0;
-          if (slip.leaveDeductions)
-            prev = Number(await decrypt(slip.leaveDeductions)) || 0;
-
-          const add = Math.round(perDayAuto * result.unpaid);
-          slip.leaveDeductions = await encrypt(String(prev + add));
-          await slip.save();
-        }
-      }
-    }
-    if (joinDate && joinDate > periodStart) {
-      const dayMs = 24 * 60 * 60 * 1000;
-      let daysToCharge = 0;
-
-      // helper: Date -> 'YYYY-MM-DD' (timezone-safe)
-      const ymd = (dt) => {
-        const y = dt.getFullYear();
-        const m = String(dt.getMonth() + 1).padStart(2, "0");
-        const d = String(dt.getDate()).padStart(2, "0");
-        return `${y}-${m}-${d}`;
-      };
-
-      // Build non-working rules
-      const dateSet = new Set(); // explicit dates, e.g., '2025-08-14'
-      const weekdaySet = new Set(); // 0..6 (0=Sun)
-
-      const nameToDay = {
-        sun: 0,
-        sunday: 0,
-        mon: 1,
-        monday: 1,
-        tue: 2,
-        tues: 2,
-        tuesday: 2,
-        wed: 3,
-        weds: 3,
-        wednesday: 3,
-        thu: 4,
-        thur: 4,
-        thurs: 4,
-        thursday: 4,
-        fri: 5,
-        friday: 5,
-        sat: 6,
-        saturday: 6,
-      };
-
-      (payroll.nonWorkingDays || []).forEach((raw) => {
-        if (!raw) return;
-        const s = String(raw).trim();
-
-        // 1) Exact date 'YYYY-MM-DD'
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-          dateSet.add(s);
-          return;
-        }
-
-        // 2) Numeric weekday '0'..'6'
-        if (/^[0-6]$/.test(s)) {
-          weekdaySet.add(Number(s));
-          return;
-        }
-
-        // 3) Weekday names
-        const key = s.toLowerCase();
-        if (key in nameToDay) {
-          weekdaySet.add(nameToDay[key]);
-          return;
-        }
-
-        // 4) Fallback: parseable date string -> normalize to YYYY-MM-DD
-        const nd = new Date(s);
-        if (!isNaN(nd)) {
-          dateSet.add(ymd(nd));
-        }
-      });
-
-      for (
-        let d = new Date(periodStart);
-        d < joinDate;
-        d = new Date(d.getTime() + dayMs)
-      ) {
-        const iso = ymd(d);
-        const dow = d.getDay();
-
-        // skip if non-working by explicit date or weekday
-        if (dateSet.has(iso) || weekdaySet.has(dow)) continue;
-
-        // skip if any record already exists that day (holiday/attendance)
-        const existing = await Attendance.findOne({
-          owner: ownerId,
-          date: iso,
-        }).lean();
-        if (existing) continue;
-
-        await Attendance.findOneAndUpdate(
-          { owner: ownerId, employee: employeeId, date: iso },
-          {
-            $set: {
-              owner: ownerId,
-              employee: employeeId,
-              date: iso,
-              status: "Absent",
-              leaveType: "Unpaid",
-              markedByHR: true,
-              createdBy: userId,
-            },
-            $unset: { checkIn: "", checkOut: "", notes: "" },
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
-        daysToCharge += 1;
-      }
-
-      // apply leave entitlement and monetary deduction for the pre-join absences
-      if (daysToCharge > 0) {
-        const result = await updateLeaveEntitlementForEmployee(
-          employeeId,
-          daysToCharge
-        );
-        if (result.unpaid > 0) {
-          let gross = 0;
-          if (slip.grossSalary) gross = Number(await decrypt(slip.grossSalary));
-          const perDayAuto = gross / 22; // same totalWorkingDays assumption
-
-          let prev = 0;
-          if (slip.leaveDeductions)
-            prev = Number(await decrypt(slip.leaveDeductions)) || 0;
-
-          const add = Math.round(perDayAuto * result.unpaid);
-          slip.leaveDeductions = await encrypt(String(prev + add));
-          await slip.save();
-        }
-      }
+      // compute gross from salaryDoc
+      grossSalary = await sumEncryptedFields(salaryDoc, allowanceFields);
+      console.log(`[GROSS] [${employee.name}] (new slip) Gross from Salaries sum = ${grossSalary}`);
+    } else {
+      // compute gross from slip fields
+      grossSalary = await sumEncryptedFields(slip, allowanceFields);
+      console.log(`[GROSS] [${employee.name}] (existing slip) Gross from Slip sum = ${grossSalary}`);
     }
 
-    // 5) Gross salary + per-day calc
-    let grossSalary = 0;
-    if (slip.grossSalary) {
-      grossSalary = Number(await decrypt(slip.grossSalary));
-    }
-    const totalWorkingDays = 22; // TODO: make dynamic if needed
+    // ========= Per-day calc =========
+    const totalWorkingDays = 22; // keep your assumption
     const perDay = grossSalary / totalWorkingDays;
+    console.log(`[PERDAY] [${employee.name}] Gross=${grossSalary}, WorkingDays=${totalWorkingDays}, PerDay=${perDay}`);
 
+    // ========= Auto-absent before join (skip non-working days) =========
+    if (joinDate && joinDate > periodStart) {
+      const dayMs = 24 * 60 * 60 * 1000;
+      let daysToCharge = 0;
+
+      const buildNonWorkingSets = () => {
+        const ds = new Set();
+        const ws = new Set();
+        (payroll.nonWorkingDays || []).forEach((raw) => {
+          if (!raw) return;
+          const s = String(raw).trim();
+          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds.add(s);
+          if (/^[0-6]$/.test(s)) return ws.add(Number(s));
+          const key = s.toLowerCase();
+          const nameToDay2 = {
+            sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2,
+            wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
+            fri: 5, friday: 5, sat: 6, saturday: 6,
+          };
+          if (key in nameToDay2) return ws.add(nameToDay2[key]);
+          const nd = new Date(s);
+          if (!isNaN(nd)) ds.add(ymd(nd));
+        });
+        return { ds, ws };
+      };
+
+      const { ds, ws } = buildNonWorkingSets();
+
+      for (let d = new Date(periodStart); d < joinDate; d = new Date(d.getTime() + dayMs)) {
+        const iso = ymd(d);
+        const weekday = d.getDay();
+        if (ds.has(iso) || ws.has(weekday)) continue;
+
+        const existing = await Attendance.findOne({ owner: ownerId, date: iso }).lean();
+        if (existing) continue;
+
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date: iso },
+          {
+            $set: {
+              owner: ownerId,
+              employee: employeeId,
+              date: iso,
+              status: "Absent",
+              leaveType: "Unpaid",
+              markedByHR: true,
+              createdBy: userId,
+            },
+            $unset: { checkIn: "", checkOut: "", notes: "" },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        daysToCharge += 1;
+      }
+
+      if (daysToCharge > 0) {
+        const result = await updateLeaveEntitlementForEmployee(employeeId, daysToCharge);
+        if (result.unpaid > 0) {
+          let prev = 0;
+          if (slip.leaveDeductions) prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+          const add = Math.round(perDay * result.unpaid);
+          slip.leaveDeductions = await encrypt(String(prev + add));
+          await slip.save();
+          console.log(`[PREJOIN] [${employee.name}] Auto Absent Days=${daysToCharge}, Unpaid=${result.unpaid}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+        } else {
+          console.log(`[PREJOIN] [${employee.name}] Auto Absent Days=${daysToCharge}, Fully covered by paid leaves.`);
+        }
+      }
+    }
+
+    // ========= Reversal if switching from Unpaid Absent =========
     if (
       oldRec &&
       oldRec.status === "Absent" &&
       (oldRec.leaveType === "Unpaid" || !oldRec.leaveType) &&
       !(status === "Absent" && (leaveType === "Unpaid" || !leaveType))
     ) {
-      // 1. Reverse deduction in SalarySlip
-      if (!slip.leaveDeductions) {
-        slip.leaveDeductions = await encrypt("0");
-      }
+      if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
       let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
       const deductionToReverse = Math.round(perDay);
       let newDeduction = Math.max(0, prevDeduction - deductionToReverse);
       slip.leaveDeductions = await encrypt(newDeduction.toString());
       await slip.save();
 
-      // 2. Reverse usedUnpaid leave
-      let empDoc = await Employee.findById(employeeId).lean();
-      if (
-        empDoc &&
-        empDoc.leaveEntitlement &&
-        typeof empDoc.leaveEntitlement.usedUnpaid === "number"
-      ) {
-        let oldUsed = empDoc.leaveEntitlement.usedUnpaid || 0;
-        let newUsed = Math.max(0, oldUsed - 1);
+      // reverse unpaid counter, credit one paid
+      const empDoc = await Employee.findById(employeeId).lean();
+      if (empDoc && empDoc.leaveEntitlement && typeof empDoc.leaveEntitlement.usedUnpaid === "number") {
+        const oldUsed = empDoc.leaveEntitlement.usedUnpaid || 0;
+        const newUsed = Math.max(0, oldUsed - 1);
         await Employee.updateOne(
           { _id: employeeId },
           { $set: { "leaveEntitlement.usedUnpaid": newUsed } }
@@ -752,98 +557,113 @@ exports.markAttendance = async (req, res) => {
         { _id: employeeId },
         { $inc: { "leaveEntitlement.usedPaid": 1 } }
       );
+      console.log(`[DEDUCTION-REVERSAL] [${employee.name}] Reversed=${deductionToReverse}, New leaveDeductions=${newDeduction}, Credited 1 paid leave`);
     }
 
+    // ========= ABSENT =========
     if (status === "Absent") {
-      // If user explicitly marked Paid, check fractional balance and handle proportionately.
-      if (leaveType === "Paid") {
-        const freshEmp = await Employee.findById(employeeId).lean();
-        const ent = freshEmp?.leaveEntitlement || {};
-        const total = ent.total || 0;
-        const usedPaid = ent.usedPaid || 0;
-        const balance = +(total - usedPaid);
+      const isFriday = attendanceDate.getDay() === 5; // 5 = Friday
+      const effectiveDays = isFriday ? 3 : 1;
 
-        if (balance > 0 && balance < 1) {
-          // Proportionate: use remaining paid balance, rest unpaid
-          await Employee.updateOne(
-            { _id: employeeId },
-            {
-              $inc: {
-                "leaveEntitlement.usedPaid": balance,
-                "leaveEntitlement.usedUnpaid": 1 - balance,
-              },
-            }
-          );
+      const freshEmp = await Employee.findById(employeeId).lean();
+      const ent = freshEmp?.leaveEntitlement || {};
+      const bonusEnt = ent?.bonus || 0;
+      const totalEnt = (ent.total || 0) + bonusEnt;
+      const usedPaid = ent.usedPaid || 0;
+      const usedUnpaid = ent.usedUnpaid || 0;
+      const balance = +(totalEnt - usedPaid);
 
-          // Deduct salary only for unpaid part
+      console.log(`[LEAVE] [${employee.name}] Absent -> Entitled=${totalEnt}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, Balance=${balance}, Requested=${leaveType || "Unpaid"}, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`);
+
+      // --- Friday special handling (3 days) ---
+      if (isFriday) {
+        if (leaveType === "Paid") {
+          // Use proportional helper for 3 days.
+          const result = await updateLeaveEntitlementForEmployeeProportional(employeeId, effectiveDays, "leave", false);
+          const unpaidDays = result.unpaid || 0;
+          const paidDays = result.paid || 0;
+
+          if (unpaidDays > 0) {
+            if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+            const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+            const add = Math.round(perDay * unpaidDays);
+            slip.leaveDeductions = await encrypt(String(prev + add));
+            await slip.save();
+            console.log(`[DEDUCTION] [${employee.name}] Friday Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid=${unpaidDays}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+            await Attendance.findOneAndUpdate(
+              { owner: ownerId, employee: employeeId, date },
+              { $set: { leaveType: "Paid", proportionate: true } }
+            );
+          } else {
+            console.log(`[DEDUCTION] [${employee.name}] Friday Absent fully covered by paid -> Paid=${paidDays}, Unpaid=0, NO deduction`);
+            await Attendance.findOneAndUpdate(
+              { owner: ownerId, employee: employeeId, date },
+              { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+            );
+          }
+          return res.json(rec);
+        } else {
+          // Unpaid for 3 days
+          await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "absent", true);
           if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
-          let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-          const add = Math.round(perDay * (1 - balance));
-          slip.leaveDeductions = await encrypt(String(prevDeduction + add));
+          const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+          const add = Math.round(perDay * effectiveDays);
+          slip.leaveDeductions = await encrypt(String(prev + add));
           await slip.save();
-
-          // Mark attendance as Paid + proportionate
+          console.log(`[DEDUCTION] [${employee.name}] Friday Absent(Unpaid) -> Days=${effectiveDays}, Deduction=${add}, New leaveDeductions=${prev + add}`);
           await Attendance.findOneAndUpdate(
             { owner: ownerId, employee: employeeId, date },
-            { $set: { leaveType: "Paid", proportionate: true } }
+            { $set: { leaveType: "Unpaid", proportionate: false } }
           );
-
           return res.json(rec);
         }
-
-        // If full day paid is available (>=1), keep your existing fully-paid flow:
-        if (balance >= 1) {
-          const result = await updateLeaveEntitlementForEmployee(
-            employeeId,
-            1,
-            "leave",
-            req.body.forcePaid
-          );
-          await Attendance.findOneAndUpdate(
-            { owner: ownerId, employee: employeeId, date },
-            { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
-          );
-          // No deduction
-          return res.json(rec);
-        }
-        // else: no paid balance → fall through to your existing unpaid logic below
       }
 
-      // (Existing) Unpaid Absent flow
-      await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
-
-      // Always decrement usedPaid if editing from Absent(Paid) to Absent(Unpaid)
-      if (
-        oldRec &&
-        oldRec.status === "Absent" &&
-        oldRec.leaveType === "Paid" &&
-        status === "Absent" &&
-        (leaveType === "Unpaid" || !leaveType)
-      ) {
-        let empDoc = await Employee.findById(employeeId).lean();
-        if (
-          empDoc &&
-          empDoc.leaveEntitlement &&
-          typeof empDoc.leaveEntitlement.usedPaid === "number"
-        ) {
-          let oldUsed = empDoc.leaveEntitlement.usedPaid || 0;
-          let newUsed = Math.max(0, oldUsed - 1);
-          await Employee.updateOne(
-            { _id: employeeId },
-            { $set: { "leaveEntitlement.usedPaid": newUsed } }
-          );
-        }
-      }
-
-      if (!slip.leaveDeductions) {
-        slip.leaveDeductions = await encrypt("0");
-      }
-      {
-        let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        const leaveDeduction = Math.round(perDay + prevDeduction);
-        slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+      // --- Normal (non-Friday) existing logic below ---
+      // Proportionate paid+unpaid (for 1 day)
+      if (leaveType === "Paid" && balance > 0 && balance < 1) {
+        await Employee.updateOne(
+          { _id: employeeId },
+          {
+            $inc: {
+              "leaveEntitlement.usedPaid": balance,
+              "leaveEntitlement.usedUnpaid": 1 - balance,
+            },
+          }
+        );
+        if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+        const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const add = Math.round(perDay * (1 - balance));
+        slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
+        console.log(`[DEDUCTION] [${employee.name}] Absent proportionate -> Paid=${balance}, Unpaid=${1 - balance}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { leaveType: "Paid", proportionate: true } }
+        );
+        return res.json(rec);
       }
+
+      // Full paid absent (no deduction)
+      if (leaveType === "Paid" && balance >= 1) {
+        await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", req.body.forcePaid);
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+        );
+        console.log(`[DEDUCTION] [${employee.name}] Absent fully paid -> NO deduction`);
+        return res.json(rec);
+      }
+
+      // Unpaid absent
+      await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
+      if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+      const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+      const add = Math.round(perDay);
+      slip.leaveDeductions = await encrypt(String(prev + add));
+      await slip.save();
+      console.log(`[DEDUCTION] [${employee.name}] Absent unpaid -> Deduction=${add}, New leaveDeductions=${prev + add}`);
 
       await Attendance.findOneAndUpdate(
         { owner: ownerId, employee: employeeId, date },
@@ -851,79 +671,98 @@ exports.markAttendance = async (req, res) => {
       );
     }
 
-
+    // ========= LEAVE =========
     if (status === "Leave") {
-      // 👇 ADD THIS proportional guard FIRST
+      const isFriday = attendanceDate.getDay() === 5; // 5 = Friday
+      const effectiveDays = isFriday ? 3 : 1;
+
       const freshEmp = await Employee.findById(employeeId).lean();
       const ent = freshEmp?.leaveEntitlement || {};
-      const totalBal = ent.total || 0;
+      const bonusBal = ent?.bonus || 0;
+      const totalBal = (ent.total || 0) + bonusBal;
       const usedPaid = ent.usedPaid || 0;
+      const usedUnpaid = ent.usedUnpaid || 0;
       const balance = +(totalBal - usedPaid);
 
-      if (balance > 0 && balance < 1) {
-        // 0 < balance < 1  → take partial paid + partial unpaid
+      console.log(
+        `[LEAVE] [${employee.name}] Leave -> Entitled=${totalBal}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, ` +
+        `Balance=${balance}, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`
+      );
+
+      // Proportionate case: some paid available but less than needed (e.g., Fri=3 but balance 1 or 2)
+      if (balance > 0 && balance < effectiveDays) {
         await Employee.updateOne(
           { _id: employeeId },
           {
             $inc: {
-              "leaveEntitlement.usedPaid": balance,       // e.g. 0.5
-              "leaveEntitlement.usedUnpaid": 1 - balance, // e.g. 0.5
+              "leaveEntitlement.usedPaid": balance,
+              "leaveEntitlement.usedUnpaid": (effectiveDays - balance),
             },
           }
         );
 
-        // Deduct ONLY the unpaid fraction
         if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
         const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
-        const add = Math.round(perDay * (1 - balance)); // e.g. 0.5 day
+        const add = Math.round(perDay * (effectiveDays - balance));
         slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
 
-        // Store it as Absent + Paid (per your app) and flag proportionate
+        console.log(
+          `[DEDUCTION] [${employee.name}] Leave proportionate -> Paid=${balance}, Unpaid=${effectiveDays - balance}, ` +
+          `Deduction=${add}, New leaveDeductions=${prev + add}`
+        );
+
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Paid", proportionate: true } }
         );
-
         return res.json(rec);
       }
 
-      // 🔽 keep your existing "Leave" logic unchanged below this line
-      let result = { paid: 0, unpaid: 0 };
-      const employeeEntitlement = employee.leaveEntitlement || {};
-      const entitlementLeft = (employeeEntitlement.total) - (employeeEntitlement.usedPaid);
-
-      if (entitlementLeft > 0) {
-        result = await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", req.body.forcePaid);
+      // Fully covered by paid balance
+      if (balance >= effectiveDays) {
+        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", req.body.forcePaid);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid" } }
+          { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+        );
+        console.log(
+          `[DEDUCTION] [${employee.name}] Leave fully paid -> Days=${effectiveDays}, NO deduction`
         );
         return res.json(rec);
       }
 
+      // No balance left
       if (typeof req.body.forcePaid === "undefined") {
+        console.log(`[LEAVE] [${employee.name}] No paid leave left -> needs confirmation (Days=${effectiveDays})`);
         return res.status(200).json({
           needsConfirmation: true,
           message: `${employee.name} has no paid leaves available. Do you want to mark as Paid Leave?`,
         });
       } else if (req.body.forcePaid === true) {
-        await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", true);
+        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", true);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Paid" } }
         );
+        console.log(
+          `[LEAVE] [${employee.name}] Forced paid leave -> Days=${effectiveDays}, NO deduction`
+        );
         return res.json(rec);
       } else {
-        await updateLeaveEntitlementForEmployee(employeeId, 1, "absent", true);
-
-        if (!slip.leaveDeductions) {
-          slip.leaveDeductions = await encrypt("0");
-        }
-        let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        const leaveDeduction = Math.round(perDay + prevDeduction);
-        slip.leaveDeductions = await encrypt(leaveDeduction.toString());
+        // unpaid for all effectiveDays
+        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "absent", true);
+        if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+        const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const add = Math.round(perDay * effectiveDays);
+        slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
+
+        console.log(
+          `[DEDUCTION] [${employee.name}] Leave unpaid -> Days=${effectiveDays}, Deduction=${add}, ` +
+          `New leaveDeductions=${prev + add}`
+        );
+
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Unpaid" } }
@@ -933,7 +772,7 @@ exports.markAttendance = async (req, res) => {
     }
 
 
-    // 7) Late → 3 Lates = 1 day, tracked cumulatively, leave-aware
+    // ========= LATE (3 = 1 day) =========
     if (!beforeJoin && status === "Late") {
       const lateRecords = await Attendance.find({
         employee: employeeId,
@@ -946,18 +785,18 @@ exports.markAttendance = async (req, res) => {
       const lateDeductionDays = Math.floor(lateCount / 3);
       const previouslyCredited = slip.lateDeductionDaysCredited || 0;
       const newLateDeductionDays = lateDeductionDays - previouslyCredited;
+      console.log(`[LATE] [${employee.name}] LatesInPeriod=${lateCount}, DeductionDaysTotal=${lateDeductionDays}, NewToApply=${newLateDeductionDays}`);
 
       if (newLateDeductionDays > 0) {
-        // Proportionate only when exactly 1 day is being charged and balance is fractional
         if (newLateDeductionDays === 1) {
           const freshEmp = await Employee.findById(employeeId).lean();
           const ent = freshEmp?.leaveEntitlement || {};
-          const total = ent.total || 0;
+          const bonus = ent.bonus || 0;
+          const total = (ent.total || 0) + bonus;
           const usedPaid = ent.usedPaid || 0;
           const balance = +(total - usedPaid);
 
           if (balance > 0 && balance < 1) {
-            // Take partial paid + partial unpaid
             await Employee.updateOne(
               { _id: employeeId },
               {
@@ -967,17 +806,14 @@ exports.markAttendance = async (req, res) => {
                 },
               }
             );
-
-            // Deduct only for unpaid half
             let prevLate = 0;
             if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
             const addLate = Math.round(perDay * (1 - balance));
             slip.lateDeductions = await encrypt(String(prevLate + addLate));
-
             slip.lateDeductionDaysCredited = lateDeductionDays;
             await slip.save();
 
-            // Mark the latest "Late" as proportionate
+            // mark last late proportionate
             const lastLate = await Attendance.findOne({
               employee: employeeId,
               owner: ownerId,
@@ -987,85 +823,87 @@ exports.markAttendance = async (req, res) => {
             if (lastLate) {
               await Attendance.updateOne({ _id: lastLate._id }, { $set: { proportionate: true } });
             }
-            return; // stop here, don't run old late updater
+            console.log(`[LATE-DEDUCTION] [${employee.name}] Proportionate -> Paid=${balance}, Unpaid=${1 - balance}, Deduction=${addLate}, New lateDeductions=${prevLate + addLate}`);
+            // do not run full-late flow
+          } else {
+            const result = await updateLeaveEntitlementForEmployee(employeeId, 1, "late");
+            let prevLate = 0;
+            if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+            const addLate = Math.round(perDay * (result.unpaid || 0));
+            slip.lateDeductions = await encrypt(String(prevLate + addLate));
+            slip.lateDeductionDaysCredited = lateDeductionDays;
+            await slip.save();
+            console.log(`[LATE-DEDUCTION] [${employee.name}] Full day late deduction -> Days=${result.unpaid || 0}, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`);
           }
+        } else {
+          // apply multiple days
+          const result = await updateLeaveEntitlementForEmployee(employeeId, newLateDeductionDays, "late");
+          let prevLate = 0;
+          if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+          const addLate = Math.round(perDay * (result.unpaid || 0));
+          slip.lateDeductions = await encrypt(String(prevLate + addLate));
+          slip.lateDeductionDaysCredited = lateDeductionDays;
+          await slip.save();
+          console.log(`[LATE-DEDUCTION] [${employee.name}] Multi-day late deduction -> Days=${result.unpaid || 0}, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`);
         }
-        const result = await updateLeaveEntitlementForEmployee(
-          employeeId,
-          newLateDeductionDays,
-          "late"
-        );
-
-        let prevLateDeduction = 0;
-        if (slip.lateDeductions) {
-          prevLateDeduction = Number(await decrypt(slip.lateDeductions)) || 0;
-        }
-        const deductionDays = result.unpaid || 0; // unpaid days count
-        const newDeductionAmount = Math.round(perDay * deductionDays);
-        slip.lateDeductions = await encrypt(
-          (prevLateDeduction + newDeductionAmount).toString()
-        );
-
-        slip.lateDeductionDaysCredited = lateDeductionDays;
-        await slip.save();
       }
     }
 
-    if (oldRec && oldRec.status === "Half Day") {
+    // ========= Reverse previous Half Day if changed away =========
+    if (oldRec && oldRec.status === "Half Day" && status !== "Half Day") {
       if (oldRec.leaveType === "Paid") {
         await Employee.updateOne(
           { _id: employeeId },
-          { $inc: { "leaveEntitlement.usedPaid": -0.5 } } // or -1 if stored as 1/2 = 0.5
+          { $inc: { "leaveEntitlement.usedPaid": -0.5 } }
         );
+        console.log(`[HALF-REV] [${employee.name}] Reversed HalfDay Paid -> -0.5 paid`);
       } else {
-        let prevDeduction = 0;
-        if (slip.leaveDeductions) prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        slip.leaveDeductions = await encrypt(Math.max(0, prevDeduction - perDay / 2).toString());
+        let prevDed = 0;
+        if (slip.leaveDeductions) prevDed = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const newDed = Math.max(0, prevDed - perDay / 2);
+        slip.leaveDeductions = await encrypt(String(newDed));
         await slip.save();
-
         await Employee.updateOne(
           { _id: employeeId },
           { $inc: { "leaveEntitlement.usedUnpaid": -0.5 } }
         );
+        console.log(`[HALF-REV] [${employee.name}] Reversed HalfDay Unpaid -> Refund=${perDay / 2}, New leaveDeductions=${newDed}`);
       }
     }
 
-    // mark new half day
+    // ========= Half Day marking =========
     if (!beforeJoin && status === "Half Day") {
       const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
       if (result.unpaid > 0) {
-        let prevDeduction = 0;
-        if (slip.leaveDeductions) prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-        slip.leaveDeductions = await encrypt(Math.round(prevDeduction + (perDay / 2) * result.unpaid).toString());
+        let prev = 0;
+        if (slip.leaveDeductions) prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        const add = Math.round((perDay / 2) * result.unpaid);
+        slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
+        console.log(`[HALF] [${employee.name}] HalfDay Unpaid -> Deduction=${add}, New leaveDeductions=${prev + add}`);
+      } else {
+        console.log(`[HALF] [${employee.name}] HalfDay Paid -> NO deduction`);
       }
-      const leaveTypeToSet = result.unpaid > 0 ? "Unpaid" : "Paid";
+      const leaveTypeToSet = (result.unpaid > 0 ? "Unpaid" : "Paid");
       await Attendance.updateOne(
         { owner: ownerId, employee: employeeId, date },
         { $set: { leaveType: leaveTypeToSet } }
       );
     }
 
-
-    const monthName = payrollMonth; // e.g., "August"
-    const yearNum = Number(payrollYear); // e.g., 2025
-
-    // Get all loans for this employee
+    // ========= Loans this month (kept as in your flow) =========
+    const monthName = payrollMonth;
+    const yearNum = Number(payrollYear);
     const loans = await LoanDetail.find({ employee: employeeId }).lean();
 
-    let totalLoanInstallments = 0; // to write into slip.loanDeductions.otherLoans
-    let totalLoanBenefits = 0; // optional: per-month markup sum
+    let totalLoanInstallments = 0;
+    let totalLoanBenefits = 0;
 
     for (const loan of loans) {
       if (!Array.isArray(loan.paymentSchedule)) continue;
+      const row = loan.paymentSchedule.find((ps) => ps?.month === monthName && Number(ps?.year) === yearNum);
+      if (!row) continue;
 
-      // Only deduct if a schedule row exists for THIS (month, year)
-      const row = loan.paymentSchedule.find(
-        (ps) => ps?.month === monthName && Number(ps?.year) === yearNum
-      );
-      if (!row) continue; // ← prevents deductions before the loan starts
-
-      // Deduction: prefer the schedule row's totalPayment; fallback to loan.monthlyInstallment
       let installmentAmount = 0;
       if (row.totalPayment) {
         installmentAmount = Number(await decrypt(row.totalPayment)) || 0;
@@ -1074,44 +912,42 @@ exports.markAttendance = async (req, res) => {
       }
       totalLoanInstallments += installmentAmount;
 
-      // (Optional) “loan benefit” for the month = that row's markupAmount
       if (row.markupAmount) {
         const markupAmt = Number(await decrypt(row.markupAmount)) || 0;
         totalLoanBenefits += markupAmt;
       }
     }
 
-    // Ensure nested object exists
     if (!slip.loanDeductions) slip.loanDeductions = {};
-
-    // Write the loan deduction for this month
-    slip.loanDeductions.otherLoans = await encrypt(
-      String(totalLoanInstallments || 0)
-    );
+    slip.loanDeductions.otherLoans = await encrypt(String(totalLoanInstallments || 0));
     slip.markModified("loanDeductions");
-
-    // OPTIONAL: add the month’s loan benefit to an allowance bucket.
-    // If you store it elsewhere, replace 'othersAllowances' below.
     if (totalLoanBenefits > 0) {
-      const prev = slip.othersAllowances
-        ? Number(await decrypt(slip.othersAllowances)) || 0
-        : 0;
+      const prev = slip.othersAllowances ? Number(await decrypt(slip.othersAllowances)) || 0 : 0;
       slip.othersAllowances = await encrypt(String(prev + totalLoanBenefits));
     }
-
-    // Safe defaults for related fields
-    if (!slip.loanDeductions.vehicleLoan) {
-      slip.loanDeductions.vehicleLoan = await encrypt("0");
-    }
-    if (!slip.gratuityFundDeduction) {
-      slip.gratuityFundDeduction = await encrypt("0");
-    }
+    if (!slip.loanDeductions.vehicleLoan) slip.loanDeductions.vehicleLoan = await encrypt("0");
+    if (!slip.gratuityFundDeduction) slip.gratuityFundDeduction = await encrypt("0");
 
     await slip.save();
-    res.json(rec);
+
+    // ========= Final snapshot =========
+    const leaveDedVal = slip.leaveDeductions ? (Number(await decrypt(slip.leaveDeductions)) || 0) : 0;
+    const lateDedVal = slip.lateDeductions ? (Number(await decrypt(slip.lateDeductions)) || 0) : 0;
+
+    // Re-fetch current employee leave counters for accurate snapshot
+    const empNow = await Employee.findById(employeeId).lean();
+    const usedPaidNow = empNow?.leaveEntitlement?.usedPaid || 0;
+    const usedUnpaidNow = empNow?.leaveEntitlement?.usedUnpaid || 0;
+
+    console.log(
+      `[SNAPSHOT] [${employee.name}] Month=${payrollMonth} ${payrollYear} | Gross=${grossSalary} | PerDay=${perDay} | ` +
+      `LeaveDeductions=${leaveDedVal} | LateDeductions=${lateDedVal} | UsedPaid=${usedPaidNow} | UsedUnpaid=${usedUnpaidNow}`
+    );
+
+    return res.json(rec);
   } catch (err) {
     console.error("Error in markAttendance:", err);
-    res.status(400).json({ error: err.message });
+    return res.status(400).json({ error: err.message });
   }
 };
 

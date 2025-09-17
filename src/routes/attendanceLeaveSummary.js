@@ -3,6 +3,7 @@ const router = express.Router();
 const requireAuth = require("../middleware/auth");
 const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employees");
+const requireEmpAuth = require("../middleware/empAuth");
 const ProbationPeriod = require("../models/ProbationPeriod");
 
 // Helper to get YYYY-MM-DD string
@@ -192,7 +193,7 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
     };
 }
 
-router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
+router.get("/leave-summary/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { month, year } = req.query;
@@ -283,7 +284,7 @@ router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
     }
 });
 
-router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) => {
+router.get("/leave-summary-history/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year } = req.query;
@@ -421,5 +422,6 @@ router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) =
         res.status(500).json({ error: e.message });
     }
 });
+
 
 module.exports = router;

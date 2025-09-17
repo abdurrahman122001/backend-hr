@@ -755,7 +755,7 @@ module.exports = async function sendSlipEmail(req, res) {
       }
 
       // Fetch leave records
-       leaves = {
+      leaves = {
         annualEntitled: "-",
         annualAvailedYTD: "-",
         annualAvailedMTH: "-",
@@ -812,7 +812,7 @@ module.exports = async function sendSlipEmail(req, res) {
         leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
         leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
         leaves.annualBalance = leaveSummaryResult.balance;
-        leaves.annualBonus = bonus; 
+        leaves.annualBonus = bonus;
       }
 
 

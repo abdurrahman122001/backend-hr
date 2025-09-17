@@ -27,7 +27,7 @@
     "fs-extra": "^11.3.0",
     "handlebars": "^4.7.8",
     "imap": "^0.8.19",
-    "imapflow": "^1.0.195",
+    "imapflow": "^1.0.196",
     "jimp": "^1.6.0",
     "jsonwebtoken": "^9.0.2",
     "mailparser": "^3.7.3",
