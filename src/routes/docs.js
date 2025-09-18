@@ -18,14 +18,68 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
+// replaces your current fmtDate()
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "—";
-  const dd = String(dt.getDate()).padStart(2, "0");
-  const mm = String(dt.getMonth() + 1).padStart(2, "0");
-  const yyyy = dt.getFullYear();
-  return `${dd}-${mm}-${yyyy}`;
+
+  // Prefer reliable locale formatting
+  try {
+    return dt.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+  } catch {
+    // Fallback without Intl
+    const months = [
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
+    ];
+    return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
+  }
+}
+// Month-aware Y/M difference (no rounding up at month edges)
+function diffToYearsMonths(start, end) {
+  if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
+  const s = new Date(start);
+  const e = new Date(end);
+  if (isNaN(s.getTime()) || isNaN(e.getTime())) {
+    return { years: 0, months: 0, totalMonths: 0 };
+  }
+
+  // total month diff
+  let totalMonths =
+    (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+
+  // If end's day is before start's day, we haven't completed this month yet
+  if (e.getDate() < s.getDate()) totalMonths -= 1;
+
+  if (totalMonths < 0) totalMonths = 0;
+
+  const years = Math.floor(totalMonths / 12);
+  const months = totalMonths % 12;
+  return { years, months, totalMonths };
+}
+
+function formatTenure(start, end) {
+  const { years, months, totalMonths } = diffToYearsMonths(start, end);
+  if (totalMonths <= 0) return "less than 1 month";
+  const parts = [];
+  if (years > 0) parts.push(`${years} year${years === 1 ? "" : "s"}`);
+  if (months > 0) parts.push(`${months} month${months === 1 ? "" : "s"}`);
+  return parts.join(" ");
 }
 
 function defaultsFromTemplate(tpl) {
@@ -33,17 +87,24 @@ function defaultsFromTemplate(tpl) {
 }
 
 function tokenMap(emp, defaults = {}) {
+  const join = emp?.joiningDate;
+  const endDate = emp?.leavingDate || new Date();
+
+  const tenureHuman = formatTenure(join, endDate);
+  const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
   return {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
-    "sign.title": defaults.signTitle || "CHIEF OF OPERATIONS",
+    "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
     "doc.qualitiesLine":
       defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
     "dates.issue": fmtDate(new Date()),
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
+    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
+    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
 
     "employee.name": emp?.name || "—",
     "employee.cnic": emp?.cnic || "—",
@@ -165,7 +226,9 @@ function pageToHTML(page, tokens) {
 <style>
   @page{
     size:${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
-    margin:${pxToMm(page.header)}mm ${pxToMm(20)}mm ${pxToMm(page.footer)}mm ${pxToMm(20)}mm;
+    margin:${pxToMm(page.header)}mm ${pxToMm(20)}mm ${pxToMm(
+    page.footer
+  )}mm ${pxToMm(20)}mm;
   }
   html,body{margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
   .page{
@@ -257,7 +320,9 @@ router.get("/doc-templates/:type", async (req, res) => {
     const type = normType(req.params.type);
     const tpl = await DocTemplate.findOne({ type }).lean();
     if (!tpl) return res.status(200).json({ data: null });
-    res.json({ data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} } });
+    res.json({
+      data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} },
+    });
   } catch {
     res.status(500).json({ message: "Failed to load by type" });
   }
@@ -275,7 +340,10 @@ router.post("/doc-templates/:type", async (req, res) => {
       { upsert: true, new: true }
     ).lean();
 
-    res.json({ ok: true, data: { canvas: up.canvas, defaultValues: up.defaultValues || {} } });
+    res.json({
+      ok: true,
+      data: { canvas: up.canvas, defaultValues: up.defaultValues || {} },
+    });
   } catch {
     res.status(500).json({ message: "Failed to save by type" });
   }
@@ -291,7 +359,10 @@ router.post("/doc-templates/:type", async (req, res) => {
 ────────────────────────────────────────────────────────────── */
 router.get("/templates", async (req, res) => {
   try {
-    const rows = await DocTemplate.find({}, { canvas: 1, type: 1, updatedAt: 1 })
+    const rows = await DocTemplate.find(
+      {},
+      { canvas: 1, type: 1, updatedAt: 1 }
+    )
       .sort({ updatedAt: -1 })
       .lean();
 
@@ -329,7 +400,9 @@ router.post("/templates", async (req, res) => {
   try {
     const { type, canvas, defaultValues } = req.body || {};
     if (!type || !canvas) {
-      return res.status(400).json({ message: "`type` and `canvas` are required" });
+      return res
+        .status(400)
+        .json({ message: "`type` and `canvas` are required" });
     }
     const doc = await DocTemplate.create({
       type,
