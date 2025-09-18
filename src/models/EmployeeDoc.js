@@ -1,16 +1,33 @@
-// backend/src/models/EmployeeDoc.js
+// models/EmployeeDoc.js
 const mongoose = require("mongoose");
+const { Schema } = mongoose;
 
-const EmployeeDocSchema = new mongoose.Schema(
+const EmployeeDocSchema = new Schema(
   {
-    employee: { type: mongoose.Schema.Types.ObjectId, ref: "Employees", required: true, index: true },
+    employee: { type: Schema.Types.ObjectId, ref: "Employees", index: true, required: true },
     type: {
       type: String,
-      enum: ["nda", "contract", "salary_certificate", "experience_letter"],
       required: true,
+      enum: ["nda", "contract", "salary_certificate", "experience_letter"],
       index: true,
     },
-    data: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // What the user sees on Canvas (full JSON). No server-side typesetting.
+    canvas: {
+      type: Object,
+      required: true,
+      default: () => ({
+        id: "doc",
+        name: "Document",
+        pages: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }),
+    },
+    // Optional dynamic values (employee overrides)
+    values: {
+      type: Object,
+      default: {},
+    },
   },
   { timestamps: true }
 );
