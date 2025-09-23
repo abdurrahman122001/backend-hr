@@ -470,6 +470,52 @@ if (ENABLE_HTTPS && fs.existsSync(CERT_FULLCHAIN) && fs.existsSync(CERT_PRIVKEY)
     }
   });
 }
+cron.schedule("* * * * *", async () => {
+  console.log("⏳ Checking probation periods every minute...");
+
+  try {
+    const employees = await Employee.find({});
+    for (const emp of employees) {
+      if (!emp.joiningDate) continue;
+
+      const probation = await ProbationPeriod.findOne({ owner: emp.owner });
+      const probationDays = probation ? probation.days : 90; // default 90
+
+      const joiningDate = new Date(emp.joiningDate);
+      const today = new Date();
+
+      // Calculate days difference
+      const diffTime = today - joiningDate;
+      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+      if (diffDays >= probationDays) {
+        // only update if entitlement is 0 (not assigned yet)
+        if (emp.leaveEntitlement?.total === 0) {
+          const endProbationDate = new Date(joiningDate);
+          endProbationDate.setDate(endProbationDate.getDate() + probationDays);
+
+          const totalLeaves = 22; // yearly leaves
+          const monthsRemaining = 12 - endProbationDate.getMonth(); // months after probation end
+          const proratedLeaves = Math.round((totalLeaves / 12) * monthsRemaining);
+
+          emp.leaveEntitlement.total = proratedLeaves;
+          await emp.save();
+
+          console.log(
+            `✅ ${emp.name}: probation completed. Assigned ${proratedLeaves} leaves.`
+          );
+        } else {
+          console.log(
+            `⏭️ ${emp.name}: probation completed but already has ${emp.leaveEntitlement.total} leaves. Skipping.`
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error in probation watcher:", err);
+  }
+});
+
 
 
 // ---------- Socket.IO on the primary server ----------
