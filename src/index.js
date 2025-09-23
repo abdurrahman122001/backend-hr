@@ -23,6 +23,7 @@ const AttendanceConfig = require("./models/AttendanceConfig");
 const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
+const ProbationPeriod = require("./models/ProbationPeriod");
 
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
