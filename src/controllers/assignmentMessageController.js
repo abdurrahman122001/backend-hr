@@ -34,7 +34,8 @@ function normalizeRole(role) {
   if (raw === "Manager") return "manager";
   if (raw === "Employee") return "employee";
   const r = raw.toLowerCase().replace(/\s+/g, "_");
-  if (["teamlead", "team_lead", "team-lead", "lead"].includes(r)) return "team_lead";
+  if (["teamlead", "team_lead", "team-lead", "lead"].includes(r))
+    return "team_lead";
   if (r === "manager") return "manager";
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
@@ -66,7 +67,7 @@ async function applyVisibility(q, req) {
 
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
 async function findTLsAndManagersByOwner(ownerId) {
-  if (!isObjId(ownerId)) return { tls: [], managers: [] };
+  if (!isObjId(ownerId)) return { tls: [], managers: [], employees: [] };
 
   // Accept both stored forms of the role (“Team Lead” from your DB and normalized hint strings)
   const tls = await Employee.find({
@@ -83,9 +84,17 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
+  const employees = await Employee.find({
+    owner: ownerId,
+    $or: [{ role: "Employee" }, { role: "employee" }],
+  })
+    .select("_id")
+    .lean();
+
   return {
     tls: tls.map((x) => String(x._id)),
     managers: managers.map((x) => String(x._id)),
+    employees: employees.map((x) => String(x._id)),
   };
 }
 
@@ -173,7 +182,10 @@ exports.listMessages = async function listMessages(req, res) {
 
 // GET /api/assignment-messages/messages
 // GET /api/assignment-messages/messages/:clientId
-exports.listMessagesForManager = async function listMessagesForManager(req, res) {
+exports.listMessagesForManager = async function listMessagesForManager(
+  req,
+  res
+) {
   try {
     const clientId =
       req.params.clientId || req.query.clientId || req.query.client || null;
@@ -186,7 +198,10 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     const betweenRaw = req.query.between;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 100, 1),
+      200
+    );
 
     const q = {};
     if (isObjId(owner)) q.owner = owner;
@@ -234,29 +249,372 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+// exports.createMessage = async function createMessage(req, res) {
+//   try {
+//     const {
+//       owner: ownerBody,
+//       client,
+//       sender: senderBody,
+//       receiver: receiverBody,
+//       receivers: receiversBody,
+//       subject,
+//       note,
+//     } = req.body;
 
-// POST /api/assignment-messages
-// Request body:
-//   owner, client, sender
-//   receiver  (array)  OR receivers (array)  // either name is accepted
-//   subject, note
-// Behavior:
-//   - If sender's role is Employee **and** no receivers provided, the server
-//     will automatically include all Team Leads + Managers for the same owner.
-//   - Duplicates and the sender's own id are removed.
+//     const owner = ownerBody || req.employee?.owner;
+//     const sender = senderBody || req.employee?._id;
+
+//     if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+//       return res.status(400).json({
+//         error: "owner, client, and sender are required (ObjectId strings)",
+//       });
+//     }
+
+//     // Normalize incoming receivers
+//     let receivers = [];
+//     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+//     if (receiversBody)
+//       receivers = receivers.concat(normalizeIds(receiversBody));
+//     receivers = receivers.filter((id) => id !== String(sender));
+
+//     // Fetch sender details
+//     const senderDoc = await Employee.findById(sender)
+//       .select("_id role supervisor supervisionMode owner")
+//       .lean();
+//     const senderRole = normalizeRole(senderDoc?.role || "");
+
+//     let approvalStatus;
+//     const needsApproval =
+//       String(senderDoc?.supervisionMode || "").toLowerCase() ===
+//       "needs_approval";
+
+//     if (needsApproval) {
+//       approvalStatus = "pending";
+//       // Only send to TLs at first
+//       const { tls } = await findTLsAndManagersByOwner(owner);
+//       receivers = [...tls];
+//     }
+
+//     // If still no receivers, fall back to role-based logic
+//     if (receivers.length === 0) {
+//       const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+//       if (senderRole === "employee") {
+//         receivers = [...tls]; // Employees always → TLs first
+//         approvalStatus = "pending"; // always pending for employees
+//       } else if (senderRole === "team_lead") {
+//         receivers = [...managers]; // TLs → Managers
+//       } else if (senderRole === "manager") {
+//         receivers = [...tls]; // Managers → TLs
+//       }
+//     }
+
+//     receivers = Array.from(new Set(receivers)).filter(
+//       (id) => id !== String(sender)
+//     );
+
+//     if (receivers.length === 0) {
+//       return res.status(400).json({ error: "No valid receivers found" });
+//     }
+
+//     const msg = await AssignmentMessage.create({
+//       owner,
+//       client,
+//       sender,
+//       receiver: receivers,
+//       subject: subject || "",
+//       note: note || "",
+//       approvalStatus: approvalStatus || undefined,
+//     });
+
+//     const populated = await msg.populate([
+//       { path: "owner", select: "_id name companyEmail" },
+//       { path: "sender", select: "_id name companyEmail role" },
+//       { path: "receiver", select: "_id name companyEmail role" },
+//       { path: "client", select: "_id clientName" },
+//     ]);
+
+//     res.status(201).json(populated);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: "Failed to create assignment message" });
+//   }
+// };
+
+// Updated createMessage function in controllers/assignmentMessageController.js
+// exports.createMessage = async function createMessage(req, res) {
+//   try {
+//     const {
+//       owner: ownerBody,
+//       client,
+//       sender: senderBody,
+//       receiver: receiverBody,
+//       receivers: receiversBody,
+//       subject,
+//       note,
+//     } = req.body;
+
+//     const owner = ownerBody || req.employee?.owner;
+//     const sender = senderBody || req.employee?._id;
+
+//     if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+//       return res.status(400).json({
+//         error: "owner, client, and sender are required (ObjectId strings)",
+//       });
+//     }
+
+//     // Normalize incoming receivers
+//     let receivers = [];
+//     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+//     if (receiversBody)
+//       receivers = receivers.concat(normalizeIds(receiversBody));
+//     receivers = receivers.filter((id) => id !== String(sender));
+
+//     // Fetch sender details
+//     const senderDoc = await Employee.findById(sender)
+//       .select("_id role supervisor supervisionMode owner")
+//       .lean();
+//     const senderRole = normalizeRole(senderDoc?.role || "");
+
+//     let approvalStatus;
+//     const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+//     const needsApproval = supervisionMode === "needs_approval";
+//     const isDirect = supervisionMode === "direct";
+
+//     if (needsApproval) {
+//       approvalStatus = "pending";
+//       // Only send to TLs at first for approval
+//       const { tls } = await findTLsAndManagersByOwner(owner);
+//       receivers = [...tls];
+//     } else if (isDirect) {
+//       // Direct mode: send to both TLs and Managers
+//       const { tls, managers } = await findTLsAndManagersByOwner(owner);
+//       receivers = [...tls, ...managers];
+//       approvalStatus = "approved"; // No approval needed in direct mode
+//     }
+
+//     // If still no receivers, fall back to role-based logic
+//     if (receivers.length === 0) {
+//       const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+//       if (senderRole === "employee") {
+//         if (isDirect) {
+//           // Employee in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default employee behavior → TLs first (needs approval)
+//           receivers = [...tls];
+//           approvalStatus = "pending";
+//         }
+//       } else if (senderRole === "team_lead") {
+//         if (isDirect) {
+//           // Team Lead in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default TL behavior → Managers
+//           receivers = [...managers];
+//         }
+//       } else if (senderRole === "manager") {
+//         if (isDirect) {
+//           // Manager in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default Manager behavior → TLs
+//           receivers = [...tls];
+//         }
+//       }
+//     }
+
+//     receivers = Array.from(new Set(receivers)).filter(
+//       (id) => id !== String(sender)
+//     );
+
+//     if (receivers.length === 0) {
+//       return res.status(400).json({ error: "No valid receivers found" });
+//     }
+
+//     const msg = await AssignmentMessage.create({
+//       owner,
+//       client,
+//       sender,
+//       receiver: receivers,
+//       subject: subject || "",
+//       note: note || "",
+//       approvalStatus: approvalStatus || undefined,
+//     });
+
+//     const populated = await msg.populate([
+//       { path: "owner", select: "_id name companyEmail" },
+//       { path: "sender", select: "_id name companyEmail role" },
+//       { path: "receiver", select: "_id name companyEmail role" },
+//       { path: "client", select: "_id clientName" },
+//     ]);
+
+//     res.status(201).json(populated);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: "Failed to create assignment message" });
+//   }
+// };
+
+
+// Updated createMessage function to include Team Lead as receiver
+// exports.createMessage = async function createMessage(req, res) {
+//   try {
+//     const {
+//       owner: ownerBody,
+//       client,
+//       sender: senderBody,
+//       receiver: receiverBody,
+//       receivers: receiversBody,
+//       subject,
+//       note,
+//     } = req.body;
+
+//     const owner = ownerBody || req.employee?.owner;
+//     const sender = senderBody || req.employee?._id;
+
+//     if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+//       return res.status(400).json({
+//         error: "owner, client, and sender are required (ObjectId strings)",
+//       });
+//     }
+
+//     // Normalize incoming receivers
+//     let receivers = [];
+//     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+//     if (receiversBody)
+//       receivers = receivers.concat(normalizeIds(receiversBody));
+//     receivers = receivers.filter((id) => id !== String(sender));
+
+//     // Fetch sender details
+//     const senderDoc = await Employee.findById(sender)
+//       .select("_id role supervisor supervisionMode owner")
+//       .lean();
+//     const senderRole = normalizeRole(senderDoc?.role || "");
+
+//     let approvalStatus;
+//     const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+//     const needsApproval = supervisionMode === "needs_approval";
+//     const isDirect = supervisionMode === "direct";
+
+//     // Get client info to find assigned employee
+//     const Client = require("../models/ClientInfo"); // Make sure to import Client model
+//     const clientDoc = await Client.findById(client)
+//       .populate("assignedTo", "_id role")
+//       .lean();
+
+//     // Find Team Leads for this owner
+//     const { tls } = await findTLsAndManagersByOwner(owner);
+
+//     // Always include Team Leads as receivers for new messages
+//     if (tls.length > 0) {
+//       receivers = [...receivers, ...tls];
+//     }
+
+//     // If client has an assigned employee, include them as receiver
+//     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+//       const assignedEmployeeId = String(clientDoc.assignedTo._id);
+//       if (!receivers.includes(assignedEmployeeId) && assignedEmployeeId !== String(sender)) {
+//         receivers.push(assignedEmployeeId);
+//       }
+//     }
+
+//     if (needsApproval) {
+//       approvalStatus = "pending";
+//       // For needs_approval mode, ensure we only send to TLs initially
+//       receivers = [...tls];
+//     } else if (isDirect) {
+//       // Direct mode: send to both TLs and Managers
+//       const { managers } = await findTLsAndManagersByOwner(owner);
+//       receivers = [...receivers, ...managers];
+//       approvalStatus = "approved"; // No approval needed in direct mode
+//     }
+
+//     // If still no receivers, fall back to role-based logic
+//     if (receivers.length === 0) {
+//       const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+//       if (senderRole === "employee") {
+//         if (isDirect) {
+//           // Employee in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default employee behavior → TLs first (needs approval)
+//           receivers = [...tls];
+//           approvalStatus = "pending";
+//         }
+//       } else if (senderRole === "team_lead") {
+//         if (isDirect) {
+//           // Team Lead in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default TL behavior → Managers
+//           receivers = [...managers];
+//         }
+//       } else if (senderRole === "manager") {
+//         if (isDirect) {
+//           // Manager in direct mode → send to both TLs and Managers
+//           receivers = [...tls, ...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           // Default Manager behavior → TLs
+//           receivers = [...tls];
+//         }
+//       }
+//     }
+
+//     // Remove duplicates and exclude sender
+//     receivers = Array.from(new Set(receivers)).filter(
+//       (id) => id !== String(sender)
+//     );
+
+//     if (receivers.length === 0) {
+//       return res.status(400).json({ error: "No valid receivers found" });
+//     }
+
+//     const msg = await AssignmentMessage.create({
+//       owner,
+//       client,
+//       sender,
+//       receiver: receivers,
+//       subject: subject || "",
+//       note: note || "",
+//       approvalStatus: approvalStatus || undefined,
+//     });
+
+//     const populated = await msg.populate([
+//       { path: "owner", select: "_id name companyEmail" },
+//       { path: "sender", select: "_id name companyEmail role" },
+//       { path: "receiver", select: "_id name companyEmail role" },
+//       { path: "client", select: "_id clientName" },
+//     ]);
+
+//     res.status(201).json(populated);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: "Failed to create assignment message" });
+//   }
+// };
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
       owner: ownerBody,
       client,
       sender: senderBody,
-      receiver: receiverBody,  // array (preferred)
-      receivers: receiversBody, // array (legacy alias)
+      receiver: receiverBody,
+      receivers: receiversBody,
       subject,
       note,
     } = req.body;
 
-    const owner  = ownerBody || req.employee?.owner;
+    const owner = ownerBody || req.employee?.owner;
     const sender = senderBody || req.employee?._id;
 
     if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
@@ -265,32 +623,87 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
-    // normalize incoming receivers (accept both 'receiver' and 'receivers')
     let receivers = [];
-    if (Array.isArray(receiverBody)) receivers = normalizeIds(receiverBody);
-    if (Array.isArray(receiversBody)) receivers = receivers.concat(normalizeIds(receiversBody));
-
-    // remove self if present
+    if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+    if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
     receivers = receivers.filter((id) => id !== String(sender));
 
-    // if sender is employee AND receivers empty → auto include all TLs & Managers for the owner
-    const senderDoc = await Employee.findById(sender).select("_id role").lean();
+    const senderDoc = await Employee.findById(sender)
+      .select("_id role supervisor supervisionMode owner")
+      .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
-    if (senderRole === "employee" && receivers.length === 0) {
-      const { tls, managers } = await findTLsAndManagersByOwner(owner);
-      receivers = [...tls, ...managers].filter((id) => id !== String(sender));
+
+    let approvalStatus;
+    const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+    const needsApproval = supervisionMode === "needs_approval";
+    const isDirect = supervisionMode === "direct";
+
+    const Client = require("../models/ClientInfo");
+    const clientDoc = await Client.findById(client)
+      .populate("assignedTo", "_id role")
+      .lean();
+
+    const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+    // ✅ Always include Team Leads
+    if (tls.length > 0) {
+      receivers = [...receivers, ...tls.map((id) => String(id))];
     }
 
-    // final validation
-    receivers = Array.from(new Set(receivers)); // dedupe
+    // ✅ Always include assignedTo employee if present
+    if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+      const assignedEmployeeId = String(clientDoc.assignedTo._id);
+      if (!receivers.includes(assignedEmployeeId) && assignedEmployeeId !== String(sender)) {
+        receivers.push(assignedEmployeeId);
+      }
+    }
+
+    // 🔑 Approval status logic
+    if (senderRole === "manager") {
+      // ✅ Manager messages are always approved
+      approvalStatus = "approved";
+    } else if (senderRole === "team_lead") {
+      // ✅ Team Lead messages → assigned employee + managers
+      approvalStatus = "approved";
+      const managerIds = managers.map((id) => String(id));
+      receivers = [...receivers, ...managerIds];
+    } else if (needsApproval) {
+      approvalStatus = "pending";
+      // For needs_approval → only TLs initially
+      receivers = [...tls.map((id) => String(id))];
+    } else if (isDirect) {
+      approvalStatus = "approved";
+      receivers = [...receivers, ...managers.map((id) => String(id))];
+    }
+
+    // If still no receivers, apply fallback logic
     if (receivers.length === 0) {
-      return res.status(400).json({
-        error:
-          "At least one receiver is required. Provide receiver(s) array or let the server auto-include TL and Manager by ensuring sender is an Employee.",
-      });
+      if (senderRole === "employee") {
+        if (isDirect) {
+          receivers = [...tls, ...managers];
+          approvalStatus = "approved";
+        } else {
+          receivers = [...tls];
+          approvalStatus = "pending";
+        }
+      } else if (senderRole === "team_lead") {
+        receivers = [...managers];
+        approvalStatus = "approved";
+      } else if (senderRole === "manager") {
+        receivers = [...tls];
+        approvalStatus = "approved";
+      }
     }
 
-    // Create single message document with receiver array
+    // ✅ Remove duplicates and exclude sender
+    receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+      (id) => id !== String(sender)
+    );
+
+    if (receivers.length === 0) {
+      return res.status(400).json({ error: "No valid receivers found" });
+    }
+
     const msg = await AssignmentMessage.create({
       owner,
       client,
@@ -298,19 +711,92 @@ exports.createMessage = async function createMessage(req, res) {
       receiver: receivers,
       subject: subject || "",
       note: note || "",
+      approvalStatus: approvalStatus || undefined,
     });
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" }, // array
-      { path: "client", select: "_id clientName" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName assignedTo" },
     ]);
 
     res.status(201).json(populated);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to create assignment message" });
+  }
+};
+
+
+// PATCH /api/assignment-messages/:id/approve
+exports.approveMessage = async function approveMessage(req, res) {
+  try {
+    const { id } = req.params;
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const userRole = normalizeRole(req.employee?.role || "");
+    if (userRole !== "team_lead") {
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can approve messages" });
+    }
+
+    msg.approvalStatus = "approved";
+    await msg.save();
+
+    // Forward to managers
+    const { managers } = await findTLsAndManagersByOwner(msg.owner);
+    if (managers.length === 0) {
+      return res.json({ message: "Approved but no managers found" });
+    }
+
+    const forwardMsg = await AssignmentMessage.create({
+      owner: msg.owner,
+      client: msg.client,
+      sender: msg.sender,
+      receiver: managers,
+      subject: `Approved: ${msg.subject || "No Subject"}`,
+      note: msg.note || "",
+      attachments: msg.attachments,
+    });
+
+    const populated = await forwardMsg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+    ]);
+
+    res.json(populated);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to approve message" });
+  }
+};
+
+// PATCH /api/assignment-messages/:id/disapprove
+exports.disapproveMessage = async function disapproveMessage(req, res) {
+  try {
+    const { id } = req.params;
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const userRole = normalizeRole(req.employee?.role || "");
+    if (userRole !== "team_lead") {
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can disapprove messages" });
+    }
+
+    msg.approvalStatus = "disapproved";
+    await msg.save();
+
+    res.json(msg);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to disapprove message" });
   }
 };
 
@@ -339,6 +825,8 @@ exports.updateMessage = async function updateMessage(req, res) {
     const msg = await AssignmentMessage.findById(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
+    // Optional: prevent changing approvalStatus here from API callers.
+    // (We leave it out intentionally to keep status flow via approve/disapprove)
     if (typeof subject === "string") msg.subject = subject;
     if (typeof note === "string") msg.note = note;
 
@@ -434,5 +922,66 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to delete attachment" });
+  }
+};
+
+// GET /api/assignment-messages/sent
+// Required: client (ObjectId) – only show messages the current user sent to this client
+exports.listMySentToClient = async function listMySentToClient(req, res) {
+  try {
+    const client = req.query.client || req.query.clientId || null;
+    const owner = req.query.owner || req.employee?.owner || null;
+
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 50, 1),
+      200
+    );
+
+    const me = req.employee?._id ? String(req.employee._id) : null;
+
+    if (!isObjId(me)) {
+      return res
+        .status(401)
+        .json({ error: "Unauthorized: missing employee session" });
+    }
+    if (!isObjId(client)) {
+      return res
+        .status(400)
+        .json({ error: "client is required (ObjectId string)" });
+    }
+
+    const q = {
+      sender: me, // only messages I sent
+      client: client, // to this client
+    };
+    if (isObjId(owner)) q.owner = owner;
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(q)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(q),
+    ]);
+
+    return res.json({
+      items,
+      total,
+      page,
+      pages: Math.ceil(total / limit),
+      limit,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: "Failed to load sent messages" });
   }
 };

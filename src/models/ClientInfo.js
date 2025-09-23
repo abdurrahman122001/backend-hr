@@ -13,7 +13,7 @@ const ClientInfoSchema = new Schema(
 
     // Core identity
     clientName: { type: String, required: true, trim: true },
-
+    country: {type: String, required: true},
     // Fields you requested
     companyLocation: { type: String },
     nameInAccountingSoftware: { type: String }, // Xero/QBO

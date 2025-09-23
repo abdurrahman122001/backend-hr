@@ -3,7 +3,7 @@ require("dotenv").config();
 const mongoose = require("mongoose");
 const Employee = require("./src/models/Employees"); // adjust path if needed
 
-const TARGET_ID = new mongoose.Types.ObjectId("68b5c3d03f9e8109d1f7a8ba");
+const TARGET_ID = new mongoose.Types.ObjectId("68d2a69bec7ab794fa644f9d");
 
 async function main() {
   const uri = process.env.MONGODB_URI;

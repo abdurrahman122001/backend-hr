@@ -469,7 +469,47 @@ if (ENABLE_HTTPS && fs.existsSync(CERT_FULLCHAIN) && fs.existsSync(CERT_PRIVKEY)
     }
   });
 }
+cron.schedule("0 0 * * *", async () => {
+  console.log("⏳ Checking probation periods...");
 
+  try {
+    const employees = await Employee.find({});
+    for (const emp of employees) {
+      if (!emp.joiningDate) continue;
+
+      const probation = await ProbationPeriod.findOne({ owner: emp.owner });
+      const probationDays = probation ? probation.days : 90; // default 90
+
+      const joiningDate = new Date(emp.joiningDate);
+      const today = new Date();
+
+      // Calculate days difference
+      const diffTime = today - joiningDate;
+      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+      if (diffDays >= probationDays) {
+        // Probation completed
+        const endProbationDate = new Date(joiningDate);
+        endProbationDate.setDate(endProbationDate.getDate() + probationDays);
+
+        const totalLeaves = 22; // yearly leaves
+        const monthsRemaining =
+          12 - endProbationDate.getMonth(); // months after probation end
+        const proratedLeaves = Math.round((totalLeaves / 12) * monthsRemaining);
+
+        // Update leave entitlement
+        emp.leaveEntitlement.total = proratedLeaves;
+        await emp.save();
+
+        console.log(
+          `✅ ${emp.name}: probation completed. Assigned ${proratedLeaves} leaves.`
+        );
+      }
+    }
+  } catch (err) {
+    console.error("❌ Error in probation watcher:", err);
+  }
+});
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
 const io = new Server(primaryServer, {

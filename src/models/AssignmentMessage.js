@@ -1,4 +1,3 @@
-// models/AssignmentMessage.js
 const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
@@ -27,10 +26,15 @@ const AssignmentMessageSchema = new Schema(
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     receiver: [
       { type: Schema.Types.ObjectId, ref: "Employee", required: true },
-    ], // Change to array
+    ], // Array of receivers
 
     subject: { type: String },
     note: { type: String },
+    approvalStatus: { 
+      type: String, 
+      enum: ["pending", "approved", "disapproved"], 
+      default: null 
+    }, // Added approvalStatus field
 
     // Files
     attachments: [AttachmentSchema],
