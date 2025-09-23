@@ -469,8 +469,8 @@ if (ENABLE_HTTPS && fs.existsSync(CERT_FULLCHAIN) && fs.existsSync(CERT_PRIVKEY)
     }
   });
 }
-cron.schedule("0 0 * * *", async () => {
-  console.log("⏳ Checking probation periods...");
+cron.schedule("* * * * *", async () => {
+  console.log("⏳ Checking probation periods every minute...");
 
   try {
     const employees = await Employee.find({});
@@ -510,6 +510,8 @@ cron.schedule("0 0 * * *", async () => {
     console.error("❌ Error in probation watcher:", err);
   }
 });
+
+
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
 const io = new Server(primaryServer, {
