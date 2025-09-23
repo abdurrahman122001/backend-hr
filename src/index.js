@@ -470,8 +470,10 @@ if (ENABLE_HTTPS && fs.existsSync(CERT_FULLCHAIN) && fs.existsSync(CERT_PRIVKEY)
     }
   });
 }
-cron.schedule("* * * * *", async () => {
-  console.log("⏳ Checking probation periods every minute...");
+cron.schedule(
+  "0 0 * * *", // run daily at midnight
+  async () => {
+    console.log("⏳ Checking probation periods...")
 
   try {
     const employees = await Employee.find({});
