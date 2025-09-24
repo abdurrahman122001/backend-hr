@@ -128,7 +128,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       'phone','permanentAddress','presentAddress','bankName','bankAccountNumber',
       'nomineeName','nomineeRelation','nomineeCnic','nomineeNo',
       'rt','department','designation','joiningDate','leavingDate', // <-- added leavingDate
-      'isHR','isAdmin','userAccount'
+      'isHR','isAdmin','userAccount', 'role'
     ];
     for (const k of shallowKeys) {
       if (k in employeeData && employeeData[k] !== undefined) {

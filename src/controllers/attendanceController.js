@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const { backfillForDate } = require("../backfillAttendance");
 const Employee = require("../models/Employees");
 const PayrollPeriod = require("../models/PayrollPeriod");
+const Shift = require("../models/Shift");
 const SalarySlip = require("../models/SalarySlip");
 const Attendance = require("../models/Attendance");
 const { decrypt, encrypt } = require("../utils/encryption");
@@ -29,30 +30,27 @@ function getHoursDiff(checkIn, checkOut) {
  * @param {String} date 
  */
 async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, date) {
-  // 1. Parse check-in and shift start
-  if (!checkIn || !shiftStart) return;
+  if (!checkIn || !shiftStart) return { bonus: null, accumulated: null };
+
   const [inH, inM] = checkIn.split(":").map(Number);
   const [shH, shM] = shiftStart.split(":").map(Number);
 
-  // 2. Calculate early minutes (positive if early, negative if late/on time)
   const checkInMinutes = inH * 60 + inM;
   const startMinutes = shH * 60 + shM;
-  let earlyMinutes = startMinutes - checkInMinutes; // positive = early
+  let earlyMinutes = startMinutes - checkInMinutes;
 
-  // Only if at least 30 minutes early
-  if (earlyMinutes < 30) return;
+  if (earlyMinutes < 30) {
+    return { bonus: null, accumulated: null };
+  }
 
-  // Convert to hours (float)
   const earlyHours = +(earlyMinutes / 60).toFixed(2);
 
-  // 3. Load employee bonus tracking
   const emp = await Employee.findById(employeeId);
   const year = new Date(date).getFullYear();
   let bonus = emp.leaveEntitlement?.bonus || 0;
   let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
   let bonusYear = emp.leaveEntitlement?.bonusYear || year;
 
-  // Reset if year changes
   if (bonusYear !== year) {
     accumulated = 0;
     bonus = 0;
@@ -61,13 +59,11 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, date) {
 
   accumulated += earlyHours;
 
-  // 4. Add bonus for each 9h completed
   while (accumulated >= 9) {
     bonus += 1;
     accumulated -= 9;
   }
 
-  // 5. Save
   await Employee.updateOne(
     { _id: employeeId },
     {
@@ -81,6 +77,7 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, date) {
 
   return { bonus, accumulated };
 }
+
 
 async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
   // 1. Calculate worked hours for this attendance
@@ -312,6 +309,33 @@ exports.markAttendance = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
     console.log(`[ATTENDANCE] [${employee.name}] Upserted -> Status=${rec.status}, LeaveType=${rec.leaveType || "-"} on ${date}`);
+
+    // ========= Early Bird Bonus =========
+    if (status === "Present") {
+      let shiftStart = null;
+
+      // employee.shifts[0] holds the shift ID reference
+      const shiftId = employee.shifts?.[0];
+      if (shiftId) {
+        const shiftDoc = await Shift.findById(shiftId).lean();
+        if (shiftDoc && shiftDoc.start) {
+          shiftStart = shiftDoc.start; // e.g. "15:00"
+        }
+      }
+
+      if (shiftStart) {
+        const { bonus, accumulated } = await updateBonusForEarlyBird(
+          employeeId,
+          checkIn,
+          shiftStart,
+          date
+        );
+        console.log(`[BONUS] [${employee.name}] EarlyBird -> Bonus=${bonus}, CarryoverHours=${accumulated}`);
+      } else {
+        console.log(`[BONUS] [${employee.name}] No shiftStart found in shifts collection, skipping EarlyBird bonus.`);
+      }
+    }
+
 
     // ========= Payroll period =========
     const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
