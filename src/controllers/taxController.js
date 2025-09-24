@@ -1,5 +1,6 @@
 const SalarySlip = require("../models/SalarySlip");
 const TaxConfig = require("../models/TaxConfig");
+const LoanDetail = require("../models/LoanDetail"); // Updated import
 const { encrypt, decrypt } = require("../utils/encryption");
 
 const DEBUG_TAX = true;
@@ -152,18 +153,75 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 /* ---------------------- loan benefits calculation ---------------------- */
 async function calculateLoanBenefitsAsync(employeeId, monthYear) {
   try {
-    // This would typically call your loan service to get benefits for the employee
-    // For now, we'll simulate the calculation based on your frontend logic
+    // Parse month and year from monthYear string (e.g., "March 2024")
+    const [monthName, yearStr] = monthYear.split(' ');
+    const year = parseInt(yearStr);
     
-    // In a real implementation, you would fetch from your loan benefits API
-    const loanBenefits = await getLoanBenefitsFromAPI(employeeId, monthYear);
-    
+    if (!monthName || !year || isNaN(year)) {
+      console.warn(`[tax] Invalid monthYear format: ${monthYear}`);
+      return { totalLoanBenefits: 0, loanDetails: [] };
+    }
+
+    if (DEBUG_TAX) {
+      console.log(`[tax] Calculating loan benefits for employee ${employeeId}, ${monthYear}`);
+    }
+
+    // Get all loan details for this employee
+    const loanDetails = await LoanDetail.find({
+      employee: employeeId
+    }).lean();
+
+    if (!loanDetails || loanDetails.length === 0) {
+      if (DEBUG_TAX) {
+        console.log(`[tax] No loan details found for employee ${employeeId}`);
+      }
+      return { totalLoanBenefits: 0, loanDetails: [] };
+    }
+
+    if (DEBUG_TAX) {
+      console.log(`[tax] Found ${loanDetails.length} loan details for employee ${employeeId}`);
+    }
+
+    let totalLoanBenefits = 0;
+    const loanBenefitDetails = [];
+
+    for (const loan of loanDetails) {
+      // Calculate monthly markup/benefit for this loan from payment schedule
+      const monthlyBenefit = await calculateMonthlyLoanBenefitFromSchedule(loan, monthName, year);
+      
+      if (monthlyBenefit > 0) {
+        totalLoanBenefits += monthlyBenefit;
+        loanBenefitDetails.push({
+          loanId: loan._id,
+          loanType: loan.type || 'Personal Loan',
+          loanAmount: await readEncNumberAsync(loan.loanAmount, "loanAmount"),
+          markupValue: loan.markupValue,
+          markupType: loan.markupType,
+          markupAmount: monthlyBenefit,
+          month: monthName,
+          year: year
+        });
+        
+        if (DEBUG_TAX) {
+          console.log(`[tax] Added loan benefit: ${monthlyBenefit} for loan ${loan._id}`);
+        }
+      }
+    }
+
+    if (DEBUG_TAX) {
+      console.log(`[tax] Total loan benefits for employee ${employeeId}: ${totalLoanBenefits}`);
+      if (loanBenefitDetails.length > 0) {
+        console.log(`[tax] Loan benefit details:`, JSON.stringify(loanBenefitDetails, null, 2));
+      }
+    }
+
     return {
-      totalLoanBenefits: loanBenefits.totalLoanBenefits || 0,
-      loanDetails: loanBenefits.loanDetails || []
+      totalLoanBenefits,
+      loanDetails: loanBenefitDetails
     };
+
   } catch (error) {
-    console.warn(`[tax] Failed to fetch loan benefits for employee ${employeeId}:`, error);
+    console.error(`[tax] Failed to calculate loan benefits for employee ${employeeId}:`, error);
     return {
       totalLoanBenefits: 0,
       loanDetails: []
@@ -171,30 +229,195 @@ async function calculateLoanBenefitsAsync(employeeId, monthYear) {
   }
 }
 
-// Mock function - replace with actual API call
-async function getLoanBenefitsFromAPI(employeeId, monthYear) {
-  // This should call your actual loan benefits endpoint
-  // For example: 
-  // const response = await api.get(`/loans/loan-benefits/${employeeId}`, { params: { monthYear } });
-  // return response.data;
-  
-  return {
-    totalLoanBenefits: 0, // Default to 0 if API not available
-    loanDetails: []
-  };
+/* ---------------------- calculate monthly loan benefit from schedule ---------------------- */
+async function calculateMonthlyLoanBenefitFromSchedule(loan, targetMonth, targetYear) {
+  try {
+    if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) {
+      return 0;
+    }
+
+    // Find the installment for the target month and year
+    const installment = loan.paymentSchedule.find(installment => 
+      installment.month.toLowerCase() === targetMonth.toLowerCase() && 
+      parseInt(installment.year) === targetYear
+    );
+
+    if (!installment) {
+      if (DEBUG_TAX) {
+        console.log(`[tax] No installment found for ${targetMonth} ${targetYear} in loan ${loan._id}`);
+      }
+      return 0;
+    }
+
+    // Get markup amount from the installment
+    const markupAmount = await readEncNumberAsync(installment.markupAmount, "markupAmount");
+    
+    if (DEBUG_TAX) {
+      console.log(`[tax] Found installment for ${targetMonth} ${targetYear}:`);
+      console.log(`[tax]   Markup Amount: ${markupAmount}`);
+      console.log(`[tax]   Principal: ${await readEncNumberAsync(installment.principal, "principal")}`);
+      console.log(`[tax]   Total Payment: ${await readEncNumberAsync(installment.totalPayment, "totalPayment")}`);
+    }
+
+    return markupAmount;
+
+  } catch (error) {
+    console.warn(`[tax] Error calculating monthly loan benefit from schedule:`, error);
+    return 0;
+  }
+}
+
+/* ---------------------- alternative: calculate from markup value ---------------------- */
+async function calculateLoanBenefitsFromMarkupValue(employeeId, monthYear) {
+  try {
+    const [monthName, yearStr] = monthYear.split(' ');
+    const year = parseInt(yearStr);
+    
+    const loanDetails = await LoanDetail.find({
+      employee: employeeId
+    }).lean();
+
+    let totalBenefits = 0;
+    const benefitDetails = [];
+
+    for (const loan of loanDetails) {
+      // Check if loan is active for this month based on schedule
+      const isActive = await isLoanActiveInMonth(loan, monthName, year);
+      
+      if (isActive) {
+        // Calculate monthly benefit based on markup value and type
+        const monthlyBenefit = await calculateMonthlyBenefitFromMarkup(loan);
+        
+        if (monthlyBenefit > 0) {
+          totalBenefits += monthlyBenefit;
+          benefitDetails.push({
+            loanId: loan._id,
+            loanType: loan.type,
+            loanAmount: await readEncNumberAsync(loan.loanAmount, "loanAmount"),
+            markupType: loan.markupType,
+            markupValue: loan.markupValue,
+            markupAmount: monthlyBenefit,
+            calculationMethod: "markup_value"
+          });
+        }
+      }
+    }
+
+    if (DEBUG_TAX) {
+      console.log(`[tax] Calculated ${totalBenefits} in benefits from markup values`);
+    }
+
+    return {
+      totalLoanBenefits: totalBenefits,
+      loanDetails: benefitDetails
+    };
+
+  } catch (error) {
+    console.warn(`[tax] Error calculating benefits from markup values:`, error);
+    return { totalLoanBenefits: 0, loanDetails: [] };
+  }
+}
+
+/* ---------------------- check if loan is active in month ---------------------- */
+async function isLoanActiveInMonth(loan, targetMonth, targetYear) {
+  try {
+    if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) {
+      return false;
+    }
+
+    // Check if there's any installment for this month/year
+    const hasInstallment = loan.paymentSchedule.some(installment => 
+      installment.month.toLowerCase() === targetMonth.toLowerCase() && 
+      parseInt(installment.year) === targetYear
+    );
+
+    return hasInstallment;
+
+  } catch (error) {
+    console.warn(`[tax] Error checking loan active status:`, error);
+    return false;
+  }
+}
+
+/* ---------------------- calculate monthly benefit from markup value ---------------------- */
+async function calculateMonthlyBenefitFromMarkup(loan) {
+  try {
+    const loanAmount = await readEncNumberAsync(loan.loanAmount, "loanAmount");
+    const markupValue = parseFloat(loan.markupValue) || 0;
+    
+    if (loanAmount <= 0 || markupValue <= 0) {
+      return 0;
+    }
+
+    let monthlyBenefit = 0;
+
+    switch (loan.markupType) {
+      case "fixed":
+        // Fixed markup: (loanAmount * markupValue%) / 12
+        monthlyBenefit = (loanAmount * (markupValue / 100)) / 12;
+        break;
+      
+      case "reducing":
+        // Reducing balance - complex calculation, use average
+        monthlyBenefit = (loanAmount * (markupValue / 100)) / 12;
+        break;
+      
+      case "interestOnly":
+        // Interest only: loanAmount * markupValue% / 12
+        monthlyBenefit = (loanAmount * (markupValue / 100)) / 12;
+        break;
+      
+      case "custom":
+        // Custom - try to get from monthly installment
+        const monthlyInstallment = await readEncNumberAsync(loan.monthlyInstallment, "monthlyInstallment");
+        const principalPortion = loanAmount / (loan.paymentSchedule?.length || 12);
+        monthlyBenefit = monthlyInstallment - principalPortion;
+        break;
+      
+      default:
+        monthlyBenefit = (loanAmount * (markupValue / 100)) / 12;
+    }
+
+    return Math.max(0, Math.round(monthlyBenefit));
+
+  } catch (error) {
+    console.warn(`[tax] Error calculating benefit from markup:`, error);
+    return 0;
+  }
 }
 
 /* ---------------------- slip calculation (async) ---------------------- */
 async function calculateSlipWithTaxAsync(slip, taxCfg) {
   // 1) Calculate loan benefits first
   let loanBenefits = 0;
+  let loanDetails = [];
+  
   if (slip.employee?._id) {
     const monthYear = `${slip.month} ${slip.year}`;
-    const loanData = await calculateLoanBenefitsAsync(slip.employee._id, monthYear);
-    loanBenefits = loanData.totalLoanBenefits;
     
     if (DEBUG_TAX) {
-      console.log(`[tax] employee=${slip.employee._id} loanBenefits=${loanBenefits.toLocaleString()}`);
+      console.log("---------------------------------------------------");
+      console.log(`[tax] Starting tax calculation for slip: ${slip._id}`);
+      console.log(`[tax] Employee: ${slip.employee._id}, Month: ${monthYear}`);
+    }
+    
+    // Try calculating from payment schedule first (most accurate)
+    const scheduleBenefits = await calculateLoanBenefitsAsync(slip.employee._id, monthYear);
+    loanBenefits = scheduleBenefits.totalLoanBenefits;
+    loanDetails = scheduleBenefits.loanDetails;
+
+    // If no benefits found from schedule, try calculating from markup values
+    if (loanBenefits === 0) {
+      if (DEBUG_TAX) {
+        console.log(`[tax] No benefits from payment schedule, trying markup values...`);
+      }
+      const markupBenefits = await calculateLoanBenefitsFromMarkupValue(slip.employee._id, monthYear);
+      loanBenefits = markupBenefits.totalLoanBenefits;
+      loanDetails = markupBenefits.loanDetails;
+    }
+
+    if (DEBUG_TAX) {
+      console.log(`[tax] Final loan benefits: ${loanBenefits.toLocaleString()}`);
     }
   }
 
@@ -202,10 +425,17 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   let grossMonthly = 0;
   for (const key of ALLOWANCE_KEYS) {
     if (key === "loanBenefits") {
-      // Add loan benefits to gross
+      // ✅ ADD LOAN BENEFITS TO GROSS SALARY
       grossMonthly += loanBenefits;
+      if (DEBUG_TAX) {
+        console.log(`[tax] Added loan benefits to gross: ${loanBenefits}`);
+      }
     } else {
-      grossMonthly += await readFirstNumAsync(slip, [key]);
+      const value = await readFirstNumAsync(slip, [key]);
+      grossMonthly += value;
+      if (DEBUG_TAX && value > 0) {
+        console.log(`[tax] Added ${key}: ${value}`);
+      }
     }
   }
 
@@ -215,18 +445,26 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   // 3) Split deductions
   let baseDeductionsMonthly = 0;
   for (const key of BASE_DEDUCTION_KEYS) {
-    baseDeductionsMonthly += await readFirstNumAsync(slip, [key]);
+    const value = await readFirstNumAsync(slip, [key]);
+    baseDeductionsMonthly += value;
+    if (DEBUG_TAX && value > 0) {
+      console.log(`[tax] Base deduction ${key}: ${value}`);
+    }
   }
 
   let loanDeductionsMonthly = 0;
   for (const key of LOAN_DEDUCTION_KEYS) {
-    loanDeductionsMonthly += await readFirstNumAsync(slip, [key]);
+    const value = await readFirstNumAsync(slip, [key]);
+    loanDeductionsMonthly += value;
+    if (DEBUG_TAX && value > 0) {
+      console.log(`[tax] Loan deduction ${key}: ${value}`);
+    }
   }
 
-  // 4) Net BEFORE income tax (EXCLUDES LOAN DEDUCTIONS)
+  // 4) Net BEFORE income tax (EXCLUDES loan deductions)
   const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
 
-  // 5) SHEET-STYLE medical exemption
+  // 5) Medical exemption
   const medExemptMonthly = taxCfg?.enableMedicalExemption
     ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
     : 0;
@@ -243,24 +481,44 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   const totalDeductions = baseDeductionsMonthly + loanDeductionsMonthly + monthlyTax;
   const netPayable = Math.max(0, grossMonthly - totalDeductions);
 
+  /* ----------------- DEBUG LOGS ----------------- */
   if (DEBUG_TAX) {
-    console.log(
-      `[tax] slip=${slip._id}` +
-        ` basic=${basic.toLocaleString()}` +
-        ` medM=${medMonthly.toLocaleString()}` +
-        ` loanBenefits=${loanBenefits.toLocaleString()}` + // ADDED
-        ` grossM=${grossMonthly.toLocaleString()}` +
-        ` baseDedM=${baseDeductionsMonthly.toLocaleString()}` +
-        ` loanDedM=${loanDeductionsMonthly.toLocaleString()}` +
-        ` netBeforeTax=${netBeforeTax.toLocaleString()}` +
-        ` medExemptM=${medExemptMonthly.toLocaleString()}` +
-        ` taxableM=${taxableMonthly.toLocaleString()}` +
-        ` annualTaxable=${annualTaxable.toLocaleString()}` +
-        ` annualTax=${annualTax.toLocaleString()}` +
-        ` monthlyTax=${monthlyTax.toLocaleString()}` +
-        ` net=${netPayable.toLocaleString()}`
-    );
+    console.log("---------------------------------------------------");
+    console.log(`[tax DEBUG] Slip ID: ${slip._id}`);
+    console.log(`[tax DEBUG] Basic Salary       = ${basic}`);
+    console.log(`[tax DEBUG] Medical Allowance  = ${medMonthly}`);
+    console.log(`[tax DEBUG] Loan Benefits      = ${loanBenefits}`);
+    console.log(`[tax DEBUG] Gross Monthly      = ${grossMonthly}`);
+    console.log(`[tax DEBUG] Base Deductions    = ${baseDeductionsMonthly}`);
+    console.log(`[tax DEBUG] Loan Deductions    = ${loanDeductionsMonthly}`);
+    console.log(`[tax DEBUG] Net Before Tax     = ${netBeforeTax}`);
+    console.log(`[tax DEBUG] Medical Exemptions = ${medExemptMonthly}`);
+    console.log(`[tax DEBUG] Taxable Monthly    = ${taxableMonthly}`);
+    console.log(`[tax DEBUG] Annual Taxable     = ${annualTaxable}`);
+    console.log(`[tax DEBUG] Annual Tax         = ${annualTax}`);
+    console.log(`[tax DEBUG] Monthly Tax        = ${monthlyTax}`);
+    console.log(`[tax DEBUG] TOTAL Deductions   = ${totalDeductions}`);
+    console.log(`[tax DEBUG] Net Payable        = ${netPayable}`);
+    
+    // Side-by-side comparison: WITHOUT loan benefits
+    const grossWithoutLoan = grossMonthly - loanBenefits;
+    const netBeforeTaxNoLoan = Math.max(0, grossWithoutLoan - baseDeductionsMonthly);
+    const medExemptNoLoan = taxCfg?.enableMedicalExemption
+      ? Math.min(netBeforeTaxNoLoan, Math.round(netBeforeTaxNoLoan / 11))
+      : 0;
+    const taxableWithoutLoan = Math.max(0, netBeforeTaxNoLoan - medExemptNoLoan);
+    const annualTaxableNoLoan = taxableWithoutLoan * 12;
+    const annualTaxNoLoan = computeAnnualTaxBandOnly(annualTaxableNoLoan, taxCfg?.slabs || []);
+    const monthlyTaxNoLoan = Math.round(annualTaxNoLoan / 12);
+
+    console.log(">>> Comparison WITH vs WITHOUT Loan Benefits <<<");
+    console.log(`Gross Monthly   : With Loan=${grossMonthly.toLocaleString()} | Without Loan=${grossWithoutLoan.toLocaleString()}`);
+    console.log(`Taxable Annual  : With Loan=${annualTaxable.toLocaleString()} | Without Loan=${annualTaxableNoLoan.toLocaleString()}`);
+    console.log(`Monthly Tax     : With Loan=${monthlyTax.toLocaleString()} | Without Loan=${monthlyTaxNoLoan.toLocaleString()}`);
+    console.log(`Tax Difference  : ${monthlyTax - monthlyTaxNoLoan}`);
+    console.log("---------------------------------------------------\n");
   }
+  /* ----------------- END DEBUG ----------------- */
 
   return {
     grossMonthly,
@@ -272,13 +530,14 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     totalAllowances: grossMonthly - basic,
     totalDeductions,
     netPayable,
-    loanBenefits, // ADDED: Return loan benefits for frontend
+    loanBenefits,
+    loanDetails,
     _debug: {
       baseDeductionsMonthly,
       loanDeductionsMonthly,
       netBeforeTax,
       taxableMonthly,
-      loanBenefits // ADDED
+      loanBenefits,
     },
   };
 }
@@ -464,3 +723,67 @@ exports.getOwnerSlipSummaries = async (req, res) => {
   }
 };
 
+/** Get tax calculation details for a specific slip */
+exports.getTaxCalculationDetails = async (req, res) => {
+  try {
+    const { slipId } = req.params;
+    
+    const slip = await SalarySlip.findById(slipId);
+    if (!slip) {
+      return res.status(404).json({ error: "Salary slip not found" });
+    }
+
+    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    const calculation = await calculateSlipWithTaxAsync(slip, taxCfg || {});
+
+    return res.json({
+      success: true,
+      calculation: {
+        ...calculation,
+        // Include detailed breakdown
+        breakdown: {
+          grossSalary: calculation.grossMonthly,
+          baseDeductions: calculation._debug.baseDeductionsMonthly,
+          loanDeductions: calculation._debug.loanDeductionsMonthly,
+          netBeforeTax: calculation._debug.netBeforeTax,
+          medicalExemption: calculation.medExemptMonthly,
+          taxableIncome: calculation._debug.taxableMonthly,
+          annualTaxable: calculation.annualTaxable,
+          taxAmount: calculation.monthlyTax
+        }
+      }
+    });
+  } catch (err) {
+    console.error("getTaxCalculationDetails error:", err);
+    return res.status(500).json({ error: "Failed to get tax calculation details" });
+  }
+};
+
+/** Test loan benefits calculation for an employee */
+exports.testLoanBenefitsCalculation = async (req, res) => {
+  try {
+    const { employeeId, monthYear } = req.body;
+    
+    if (!employeeId || !monthYear) {
+      return res.status(400).json({ error: "Employee ID and monthYear are required" });
+    }
+
+    const scheduleBenefits = await calculateLoanBenefitsAsync(employeeId, monthYear);
+    const markupBenefits = await calculateLoanBenefitsFromMarkupValue(employeeId, monthYear);
+
+    return res.json({
+      success: true,
+      fromSchedule: scheduleBenefits,
+      fromMarkup: markupBenefits,
+      combined: {
+        totalLoanBenefits: scheduleBenefits.totalLoanBenefits + markupBenefits.totalLoanBenefits,
+        allDetails: [...scheduleBenefits.loanDetails, ...markupBenefits.loanDetails]
+      }
+    });
+  } catch (err) {
+    console.error("testLoanBenefitsCalculation error:", err);
+    return res.status(500).json({ error: "Failed to test loan benefits calculation" });
+  }
+};
+
+module.exports = exports;
