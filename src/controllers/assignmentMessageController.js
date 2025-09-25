@@ -460,7 +460,6 @@ exports.listMessagesForManager = async function listMessagesForManager(
 //   }
 // };
 
-
 // Updated createMessage function to include Team Lead as receiver
 // exports.createMessage = async function createMessage(req, res) {
 //   try {
@@ -625,7 +624,8 @@ exports.createMessage = async function createMessage(req, res) {
 
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-    if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+    if (receiversBody)
+      receivers = receivers.concat(normalizeIds(receiversBody));
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
@@ -634,7 +634,9 @@ exports.createMessage = async function createMessage(req, res) {
     const senderRole = normalizeRole(senderDoc?.role || "");
 
     let approvalStatus;
-    const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+    const supervisionMode = String(
+      senderDoc?.supervisionMode || ""
+    ).toLowerCase();
     const needsApproval = supervisionMode === "needs_approval";
     const isDirect = supervisionMode === "direct";
 
@@ -653,7 +655,10 @@ exports.createMessage = async function createMessage(req, res) {
     // ✅ Always include assignedTo employee if present
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
       const assignedEmployeeId = String(clientDoc.assignedTo._id);
-      if (!receivers.includes(assignedEmployeeId) && assignedEmployeeId !== String(sender)) {
+      if (
+        !receivers.includes(assignedEmployeeId) &&
+        assignedEmployeeId !== String(sender)
+      ) {
         receivers.push(assignedEmployeeId);
       }
     }
@@ -727,7 +732,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 
 // PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
