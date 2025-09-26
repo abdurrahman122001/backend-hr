@@ -602,6 +602,10 @@ exports.markAttendance = async (req, res) => {
           const result = await updateLeaveEntitlementForEmployeeProportional(employeeId, effectiveDays, "leave", false);
           const unpaidDays = result.unpaid || 0;
           const paidDays = result.paid || 0;
+          await Attendance.findOneAndUpdate(
+            { owner: ownerId, employee: employeeId, date },
+            { $set: { effectivePaidDays: paidDays } }
+          );
 
           if (unpaidDays > 0) {
             if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
@@ -734,7 +738,7 @@ exports.markAttendance = async (req, res) => {
 
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid", proportionate: true } }
+          { $set: { status: "Absent", leaveType: "Paid", effectivePaidDays: balance, proportionate: true } }
         );
         return res.json(rec);
       }
@@ -744,7 +748,7 @@ exports.markAttendance = async (req, res) => {
         await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", req.body.forcePaid);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+          { $set: { status: "Absent", leaveType: "Paid",  effectivePaidDays: effectiveDays, proportionate: false } }
         );
         console.log(
           `[DEDUCTION] [${employee.name}] Leave fully paid -> Days=${effectiveDays}, NO deduction`

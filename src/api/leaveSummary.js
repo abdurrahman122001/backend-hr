@@ -101,20 +101,28 @@ function countLeavesFromLates(attendanceRecords) {
 }
 
 function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
-    // Count paid absents, respecting 'proportionate'
+    // Count paid absents using effectivePaidDays / proportionate
     let paidAbsents = 0;
     for (const att of records) {
         if (att.status === "Absent" && att.leaveType === "Paid") {
-            // If proportionate true or "true", count as 0.5, else 1
-            paidAbsents += (att.proportionate === true || att.proportionate === "true") ? 0.5 : 1;
+            if (att.effectivePaidDays !== undefined && att.effectivePaidDays !== null) {
+                // ✅ Always use effectivePaidDays if present (e.g. 3 for Friday case)
+                paidAbsents += Number(att.effectivePaidDays);
+            } else if (att.proportionate === true || att.proportionate === "true") {
+                // ✅ No effectivePaidDays → check proportionate flag
+                paidAbsents += 0.5;
+            } else {
+                // ✅ Fallback → normal full day
+                paidAbsents += 1;
+            }
         }
     }
     const fromPaidAbsent = paidAbsents;
 
-    // Calculate lates (with proportionate handling)
+    // Calculate lates (unchanged)
     const fromLates = countLeavesFromLates(records);
 
-    // Half days (no proportionate logic needed here)
+    // Half days (unchanged)
     let halfdays = 0;
     for (const att of records) {
         if (att.status === "Half Day") halfdays++;
@@ -134,11 +142,13 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
         fromHalfDays: actualFromHalfDays,
         fromPaidAbsent,
         used: actualFromLates + actualFromHalfDays + fromPaidAbsent,
-        // Also return original values for debugging
+        // Debug values
         originalFromLates: fromLates,
         originalFromHalfDays: fromHalfDays
     };
 }
+
+
 
 async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month, options = {}) {
     // Fetch employee and probation info if not already provided

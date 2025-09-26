@@ -148,9 +148,17 @@ function safeAmountCell(val) {
   ) {
     return "-";
   }
-  const num = Number(val);
+  const num = Math.round(Number(val));
   return num !== 0 && !isNaN(num) ? num.toLocaleString() : "-";
 }
+
+function safeDecimalCell(val) {
+  if (val === undefined || val === null || val === "" || val === "-") return "-";
+  const num = parseFloat(val.toString().replace(/,/g, ""));
+  if (isNaN(num)) return "-";
+  return num.toLocaleString("en-PK");
+}
+
 
 // Render the Loan Table
 function renderLoanTable(loans = []) {
@@ -175,7 +183,7 @@ function renderLoanTable(loans = []) {
           ${arr.map(loan => {
     let paidPrev = '-';
     if (loan.loanPaidPreviousMonths !== undefined && loan.loanPaidPreviousMonths !== null) {
-      paidPrev = Number(loan.loanPaidPreviousMonths).toLocaleString();
+      paidPrev = safeAmountCell(loan.loanPaidPreviousMonths);
     }
     return `
               <tr>
@@ -235,7 +243,7 @@ function renderGratuityFundTable(data = {}) {
             ${GRATUITY_FUND_FIELDS.map(f => {
     let value = data && data[f.key] != null && data[f.key] !== "" && data[f.key] !== 0 ? data[f.key] : "-";
     if (f.key === "gratuityFundBalanceBF" || f.key === "monthlyContribution" || f.key === "gratuityFundWithdrawal" || f.key === "gratuityFundProfit" || f.key === "gratuityFundBalance") {
-      value = value !== "-" ? `Rs. ${Number(value).toLocaleString()}` : "-";
+      value = value !== "-" ? `Rs. ${safeDecimalCell(value)}` : "-";
     } else if (f.key === "yearsOfService") {
       value = value !== "-" ? `${value} years` : "-";
     }
@@ -316,7 +324,7 @@ function buildNetSalaryTable({ netSalary, amountInWords, enabledNetSalaryFields 
   const enabledFields = Array.isArray(enabledNetSalaryFields) && enabledNetSalaryFields.length ? enabledNetSalaryFields : ["netSalary", "amountInWords", "modeOfPayment"];
   const netRows = enabledFields.map(key => {
     let val = netValues[key];
-    if (key === "netSalary") val = val != null && val !== 0 ? "Rs. " + Number(val).toLocaleString() : "-";
+    if (key === "netSalary") val = val != null && val !== 0 ? "Rs. " + Math.round(Number(val)).toLocaleString() : "-";
     if (key === "amountInWords") val = val && val !== "-" ? val : "-";
     if (key === "modeOfPayment") val = val || "-";
     if (val == null || val === 0) val = "-";
@@ -488,14 +496,14 @@ function buildSalarySlipHtml({
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Salary & Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${compRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalEarnings != null && totalEarnings !== 0 ? totalEarnings.toLocaleString() : "-"}</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalEarnings != null && totalEarnings !== 0 ? safeAmountCell(totalEarnings) : "-"}</td></tr></tfoot>
             </table>
           </td>
           <td valign="top" width="50%" style="padding-left:10px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${dedRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalDeductions != null && totalDeductions !== 0 ? totalDeductions.toLocaleString() : "-"}</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${totalDeductions != null && totalDeductions !== 0 ? safeAmountCell(totalDeductions) : "-"}</td></tr></tfoot>
             </table>
           </td>
         </tr>
@@ -885,12 +893,12 @@ module.exports = async function sendSlipEmail(req, res) {
       const pfContribution = pfRate > 0 ? (basicSalary * pfRate) / 100 : 0;
       const pfBalanceBroughtForward = Number(await decryptField(slip.pf_balanceBF)) || pfContribution;
       providentFundData = {
-        providentFundBalanceBF: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+        providentFundBalanceBF: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? safeAmountCell(pfBalanceBroughtForward) : "-",
         employeeProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
         employerProvidentFundContribution: pfRate != null && pfRate !== 0 ? `${pfRate}%` : "-",
         providentFundWithdrawal: "-",
         providentFundProfit: "-",
-        providentFundBalance: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? pfBalanceBroughtForward.toLocaleString() : "-",
+        providentFundBalance: pfBalanceBroughtForward != null && pfBalanceBroughtForward !== 0 ? safeAmountCell(pfBalanceBroughtForward) : "-",
       };
 
       // Gratuity Fund Calculations
@@ -906,12 +914,12 @@ module.exports = async function sendSlipEmail(req, res) {
       const gfProfit = Number(await decryptField(slip.gf_profit)) || 0;
       const gfBalance = gfBalanceBroughtForward - gfWithdrawal + gfProfit;
       gratuityFundData = {
-        gratuityFundBalanceBF: gfBalanceBroughtForward != null && gfBalanceBroughtForward !== 0 ? gfBalanceBroughtForward : "-",
+        gratuityFundBalanceBF: gfBalanceBroughtForward != null && gfBalanceBroughtForward !== 0 ? safeAmountCell(gfBalanceBroughtForward) : "-",
         yearsOfService: yearsOfService != null && yearsOfService !== 0 ? yearsOfService : "-",
-        monthlyContribution: monthlyContribution != null && monthlyContribution !== 0 ? monthlyContribution : "-",
-        gratuityFundWithdrawal: gfWithdrawal != null && gfWithdrawal !== 0 ? gfWithdrawal : "-",
-        gratuityFundProfit: gfProfit != null && gfProfit !== 0 ? gfProfit : "-",
-        gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? gfBalance : "-",
+        monthlyContribution: monthlyContribution != null && monthlyContribution !== 0 ? safeAmountCell(monthlyContribution) : "-",
+        gratuityFundWithdrawal: gfWithdrawal != null && gfWithdrawal !== 0 ? safeAmountCell(gfWithdrawal) : "-",
+        gratuityFundProfit: gfProfit != null && gfProfit !== 0 ? safeAmountCell(gfProfit) : "-",
+        gratuityFundBalance: gfBalance != null && gfBalance !== 0 ? safeAmountCell(gfBalance) : "-",
       };
     } else {
       // Manual slip mode

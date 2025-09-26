@@ -93,28 +93,28 @@ function countLeavesFromLates(attendanceRecords) {
 }
 
 function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
-    // Count paid absents, respecting 'proportionate'
+    // Count paid absents using effectivePaidDays + proportionate
     let paidAbsents = 0;
     for (const att of records) {
         if (att.status === "Absent" && att.leaveType === "Paid") {
-            if (att.proportionate === true || att.proportionate === "true") {
-                // if proportionate is true → use value if available, else 0.5
-                paidAbsents += (att.proportionateValue !== undefined && att.proportionateValue !== null)
-                    ? Number(att.proportionateValue)
-                    : 0.5;
+            if (att.effectivePaidDays !== undefined && att.effectivePaidDays !== null) {
+                // ✅ Always prefer effectivePaidDays if available
+                paidAbsents += Number(att.effectivePaidDays);
+            } else if (att.proportionate === true || att.proportionate === "true") {
+                // ✅ If proportionate is true but no effectivePaidDays → count 0.5
+                paidAbsents += 0.5;
             } else {
-                // if proportionate is false → always 1
+                // ✅ Default: non-proportionate, no effectivePaidDays → count 1
                 paidAbsents += 1;
             }
         }
-
     }
     const fromPaidAbsent = paidAbsents;
 
-    // Calculate lates (with proportionate handling)
+    // Calculate lates
     const fromLates = countLeavesFromLates(records);
 
-    // Half days (no proportionate logic needed here)
+    // Half days
     let halfdays = 0;
     for (const att of records) {
         if (att.status === "Half Day") halfdays++;
@@ -134,12 +134,11 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
         fromHalfDays: actualFromHalfDays,
         fromPaidAbsent,
         used: actualFromLates + actualFromHalfDays + fromPaidAbsent,
-        // Also return original values for debugging
+        // Debug info
         originalFromLates: fromLates,
         originalFromHalfDays: fromHalfDays
     };
 }
-
 
 async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month, options = {}) {
     // For payroll, months are Jan=0, Feb=1, ..., Dec=11

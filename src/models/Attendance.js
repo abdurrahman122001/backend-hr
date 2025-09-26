@@ -13,6 +13,7 @@ const AttendanceSchema = new Schema({
   leaveType:  { type: String, enum: ['Paid','Unpaid'], default: 'Unpaid' },
   proportionate: { type: Boolean, default: false },
   proportionateValue: { type: Number},
+  effectivePaidDays: { type: Number},
   isHoliday:  { type: Boolean, default: false },
   markedOnNonWorkingDay: { type: Boolean, default: false },
 
