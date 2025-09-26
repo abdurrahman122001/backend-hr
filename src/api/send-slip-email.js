@@ -365,6 +365,7 @@ function buildSalarySlipHtml({
   enabledLeaveRecords,
   enabledCompFields,
   enabledDedFields,
+  hasActiveLoans
 }) {
   const amountInWords = netSalary != null && netSalary !== 0 ? `${numberToWords.toWords(netSalary).replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, m => m.toUpperCase()) : "-";
 
@@ -524,7 +525,7 @@ function buildSalarySlipHtml({
   );
 
   const employeeTable = renderEmployeeTable(employee || {}, labels?.employee || {}, profileFields);
-  const loansHtml = showLoanDetails ? renderLoanTable(loans) : "";
+  const loansHtml = (showLoanDetails && hasActiveLoans) ? renderLoanTable(loans) : "";
   const providentFundHtml = showProvidentFund ? renderProvidentFundTable(providentFund) : "";
   const gratuityFundHtml = showGratuityFund ? renderGratuityFundTable(gratuityFund) : "";
   const leavesHtml = renderLeaveTable(leaves, enabledLeaveRecords);
@@ -749,7 +750,7 @@ module.exports = async function sendSlipEmail(req, res) {
     const { slipId, employee, providentFund, gratuityFund, labels, monthYear: monthYearFromBody, email, profileFields, decryptionKey, compensation, deductions, netSalary } = req.body;
 
     let slip, employeeData, compensationData, deductionsData, netSalaryData, leaves = {}, loans = [], providentFundData = {}, gratuityFundData = {};
-
+    let hasActiveLoans = false;
     if (slipId) {
       // Database-driven slip
       slip = await SalarySlip.findById(slipId)
@@ -839,10 +840,16 @@ module.exports = async function sendSlipEmail(req, res) {
 
       // Calculate loan benefits and details
       let totalLoanBenefits = 0;
+      hasActiveLoans = false;
       if (employeeId && showLoanDetails) {
-        const loanData = await calculateLoanBenefits(employeeId, monthYearFromBody || new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" }), decryptionKey);
+        const loanData = await calculateLoanBenefits(
+          employeeId,
+          monthYearFromBody || new Date().toLocaleDateString("en-GB", { month: "long", year: "numeric" }),
+          decryptionKey
+        );
         loans = loanData.loanDetails;
         totalLoanBenefits = loanData.totalLoanBenefits;
+        hasActiveLoans = loans && loans.length > 0;
       }
 
       // Compensation
@@ -1033,6 +1040,7 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledLeaveRecords,
       enabledCompFields,
       enabledDedFields,
+      hasActiveLoans,
     });
 
     // Send email
