@@ -98,9 +98,17 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
     let paidAbsents = 0;
     for (const att of records) {
         if (att.status === "Absent" && att.leaveType === "Paid") {
-            // If proportionate true or "true", count as 0.5, else 1
-            paidAbsents += (att.proportionate === true || att.proportionate === "true") ? 0.5 : 1;
+            if (att.proportionate === true || att.proportionate === "true") {
+                // if proportionate is true → use value if available, else 0.5
+                paidAbsents += (att.proportionateValue !== undefined && att.proportionateValue !== null)
+                    ? Number(att.proportionateValue)
+                    : 0.5;
+            } else {
+                // if proportionate is false → always 1
+                paidAbsents += 1;
+            }
         }
+
     }
     const fromPaidAbsent = paidAbsents;
 
@@ -205,7 +213,7 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
         const total = employee.leaveEntitlement?.total;
         const bonus = employee.leaveEntitlement?.bonus || 0;
         const entitled = total + bonus;
-        console.log("total: "+total+" bonus: "+bonus+" entitled: "+entitled);
+        console.log("total: " + total + " bonus: " + bonus + " entitled: " + entitled);
         // 2. Get Probation Policy (latest one for owner)
         const probationPolicy = await ProbationPeriod.findOne({ owner: employee.owner }).sort({ createdAt: -1 });
         let probationDays = 0;

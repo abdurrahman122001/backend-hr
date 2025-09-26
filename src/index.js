@@ -1,12 +1,3 @@
-// backend/src/index.js
-// ---------------------------------------------
-// Bootstrapped, robust Express + Mongoose server
-// - Safer HTTPS handling (falls back to HTTP if certs missing)
-// - Safer Mongo change streams (no crash if not in replica set)
-// - Fixed small typos & path issues
-// - Configurable cron timezone (defaults to Asia/Karachi)
-// ---------------------------------------------
-
 require("dotenv").config();
 
 const path = require("path");

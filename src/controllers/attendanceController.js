@@ -212,32 +212,29 @@ exports.markAttendance = async (req, res) => {
     // ========= Helpers =========
     const allowanceFields = [
       "basic",
-      "dearnessAllowance",
-      "houseRentAllowance",
       "conveyanceAllowance",
       "medicalAllowance",
-      "utilityAllowance",
-      "overtimeCompensation",
-      "dislocationAllowance",
-      "leaveEncashment",
-      "bonus",
-      "arrears",
-      "autoAllowance",
-      "incentive",
-      "fuelAllowance",
-      "othersAllowances",
     ];
 
     const sumEncryptedFields = async (src, fields) => {
       let total = 0;
+      let breakdown = {}; // store each field’s value
+
       for (const f of fields) {
         if (src && src[f]) {
           const n = Number(await decrypt(src[f])) || 0;
           total += n;
+          breakdown[f] = n; // keep track
+        } else {
+          breakdown[f] = 0; // field missing, set 0
         }
       }
+
+      console.log("[GROSS BREAKDOWN]", breakdown, "Total =", total);
+
       return total;
     };
+
 
     // ========= Employee (needed for logs) =========
     const employee = await ensureEmployeeAccessible(employeeId, ownerId, userId);
@@ -469,7 +466,6 @@ exports.markAttendance = async (req, res) => {
       allowanceFields.forEach((f) => (slipData[f] = salaryDoc[f] || ""));
       slip = await SalarySlip.create(slipData);
 
-      // compute gross from salaryDoc
       grossSalary = await sumEncryptedFields(salaryDoc, allowanceFields);
       console.log(`[GROSS] [${employee.name}] (new slip) Gross from Salaries sum = ${grossSalary}`);
     } else {
