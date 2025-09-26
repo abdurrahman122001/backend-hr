@@ -97,9 +97,17 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
     let paidAbsents = 0;
     for (const att of records) {
         if (att.status === "Absent" && att.leaveType === "Paid") {
-            // If proportionate true or "true", count as 0.5, else 1
-            paidAbsents += (att.proportionate === true || att.proportionate === "true") ? 0.5 : 1;
+            if (att.proportionate === true || att.proportionate === "true") {
+                // if proportionate is true → use value if available, else 0.5
+                paidAbsents += (att.proportionateValue !== undefined && att.proportionateValue !== null)
+                    ? Number(att.proportionateValue)
+                    : 0.5;
+            } else {
+                // if proportionate is false → always 1
+                paidAbsents += 1;
+            }
         }
+
     }
     const fromPaidAbsent = paidAbsents;
 
@@ -131,6 +139,7 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
         originalFromHalfDays: fromHalfDays
     };
 }
+
 
 async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, month, options = {}) {
     // For payroll, months are Jan=0, Feb=1, ..., Dec=11
