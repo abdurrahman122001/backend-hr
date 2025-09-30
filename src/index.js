@@ -471,11 +471,147 @@ app.set("io", io);
 
 io.on("connection", (socket) => {
   console.log("🟢 Socket client connected:", socket.id);
-  socket.on("disconnect", () =>
-    console.log("🔴 Socket client disconnected:", socket.id)
-  );
-});
 
+  // Join room based on employee ID
+  socket.on("join_employee", (employeeId) => {
+    socket.join(`employee_${employeeId}`);
+    console.log(
+      `📍 Employee ${employeeId} joined room: employee_${employeeId}`
+    );
+  });
+
+  // Join room based on client ID
+  socket.on("join_client", (clientId) => {
+    socket.join(`client_${clientId}`);
+    console.log(`📍 Client ${clientId} joined room: client_${clientId}`);
+  });
+
+  // Handle sending messages - FIXED VERSION
+  socket.on("send_message", async (data, callback) => {
+    try {
+      console.log("📤 Received send_message event:", data);
+
+      const { message, client, chatId, recipientIds, senderId, broadcast } =
+        data;
+
+      if (!message || !client) {
+        console.error("❌ Invalid message data");
+        if (callback)
+          callback({ success: false, error: "Invalid message data" });
+        return;
+      }
+
+      // Populate the message with client data before broadcasting
+      const populatedMessage = await AssignmentMessage.findById(message._id)
+        .populate("client")
+        .populate("sender")
+        .populate("receiver");
+
+      if (!populatedMessage) {
+        console.error("❌ Message not found:", message._id);
+        if (callback) callback({ success: false, error: "Message not found" });
+        return;
+      }
+
+      console.log("📨 Broadcasting message to recipients...");
+
+      // 1. Always broadcast to the client room
+      io.to(`client_${client._id}`).emit("new_message", populatedMessage);
+      console.log(`📍 Broadcasted to client_${client._id}`);
+
+      // 2. Broadcast to all employee recipients
+      if (recipientIds && recipientIds.length > 0) {
+        recipientIds.forEach((employeeId) => {
+          if (employeeId !== senderId) {
+            // Don't send to sender
+            io.to(`employee_${employeeId}`).emit(
+              "new_message",
+              populatedMessage
+            );
+            console.log(`📍 Sent to employee_${employeeId}`);
+          }
+        });
+      }
+
+      // 3. If populatedMessage has receiver data, use that as fallback
+      if (
+        populatedMessage.receiver &&
+        Array.isArray(populatedMessage.receiver)
+      ) {
+        populatedMessage.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "string" ? receiver : receiver._id;
+          if (receiverId && receiverId !== senderId) {
+            io.to(`employee_${receiverId}`).emit(
+              "new_message",
+              populatedMessage
+            );
+            console.log(
+              `📍 Sent to employee_${receiverId} (from message data)`
+            );
+          }
+        });
+      }
+
+      // 4. Broadcast to managers and team leads if it's a broadcast message
+      if (broadcast) {
+        io.to("managers").emit("new_message", populatedMessage);
+        io.to("team_leads").emit("new_message", populatedMessage);
+        console.log("📢 Broadcasted to managers and team leads");
+      }
+
+      // 5. Send confirmation back to sender
+      socket.emit("new_message", populatedMessage);
+      console.log("✅ Confirmation sent to sender");
+
+      // Send success callback
+      if (callback) {
+        callback({
+          success: true,
+          message: "Message delivered to all recipients",
+          deliveredTo: {
+            clientRoom: `client_${client._id}`,
+            employeeRooms: recipientIds || [],
+            broadcast: broadcast || false,
+          },
+        });
+      }
+
+      console.log("✅ Message successfully broadcasted to all recipients");
+    } catch (error) {
+      console.error("❌ Error broadcasting message:", error);
+      if (callback) {
+        callback({ success: false, error: error.message });
+      }
+    }
+  });
+
+  // Join manager room
+  socket.on("join_managers", () => {
+    socket.join("managers");
+    console.log(`📍 ${socket.id} joined managers room`);
+  });
+
+  // Join team leads room
+  socket.on("join_team_leads", () => {
+    socket.join("team_leads");
+    console.log(`📍 ${socket.id} joined team_leads room`);
+  });
+
+  // Handle message status updates
+  socket.on("message_status_update", (data) => {
+    const { messageId, status, clientId } = data;
+    io.to(`client_${clientId}`).emit("message_status", { messageId, status });
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
+  });
+
+  socket.on("error", (error) => {
+    console.error("🔴 Socket error:", error);
+  });
+});
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
   res.send("OK");

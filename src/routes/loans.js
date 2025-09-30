@@ -654,7 +654,6 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
             0
           : 0;
 
-        // 🔹 Calculate Paid in Previous Months
         const paidPrev = Array.isArray(loan.paymentSchedule)
           ? await loan.paymentSchedule.reduce(async (accP, ps) => {
               const acc = await accP;
@@ -676,6 +675,8 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
             }, Promise.resolve(0))
           : 0;
 
+        // 🔹 Calculate net balance (just calculate, not pushed)
+        const netBalance = totalToBePaid - (paidPrev + paymentAmount);
         // Create a separate entry for each loan that has a schedule in this month
         loanDetails.push({
           type: loan.type || "Loan",
