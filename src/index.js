@@ -67,7 +67,7 @@ const clientInfoRoutes = require("./routes/clientInfo");
 const assignMessageRoutes = require("./routes/assignmentMessage");
 const employeeLeavesRouter = require("./routes/employeeLeaves");
 const generateRouter = require("./routes/generate-pdfs");
-
+const AssignmentMessage = require("./models/AssignmentMessage");
 const app = express();
 
 // ---------- Static ----------
