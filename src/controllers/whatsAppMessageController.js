@@ -1,5 +1,5 @@
-// controllers/assignmentMessageController.js
-const AssignmentMessage = require("../models/AssignmentMessage");
+// controllers/whatsAppMessageController.js
+const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -54,7 +54,7 @@ async function applyVisibility(q, req) {
     // only show messages that are truly scheduled to this user
     return {
       ...q,
-      $and: [ { $or: visOr } ]
+      $and: [{ $or: visOr }],
     };
   }
 
@@ -66,131 +66,27 @@ async function applyVisibility(q, req) {
         $and: [
           {
             $or: [
-              { isScheduled: { $ne: true } },                           // drafts & sent
-              { isScheduled: true, status: "sent" },                   // scheduled-but-sent
-              { isScheduled: true, status: "scheduled", scheduledFor: { $lte: now } } // due now
-            ]
+              { isScheduled: { $ne: true } }, // drafts & sent
+              { isScheduled: true, status: "sent" }, // scheduled-but-sent
+              {
+                isScheduled: true,
+                status: "scheduled",
+                scheduledFor: { $lte: now },
+              }, // due now
+            ],
           },
-          { $or: visOr }
-        ]
+          { $or: visOr },
+        ],
       },
       {
         ...q,
         isScheduled: true,
         status: "scheduled",
         scheduledFor: { $gt: now }, // future
-        sender: me                   // only sender may see future schedules
-      }
-    ]
+        sender: me, // only sender may see future schedules
+      },
+    ],
   };
-}
-
-/** ---------- SOCKET.IO UTILITIES ---------- **/
-function getIO(req) {
-  return req.app.get("io");
-}
-
-async function emitToAssignmentClients(io, message, eventName = "new_assignment_message") {
-  try {
-    const populatedMessage = await AssignmentMessage.findById(message._id)
-      .populate("owner")
-      .populate("sender")
-      .populate("receiver")
-      .populate("client")
-      .populate("scheduledBy")
-      .populate("attachments.uploadedBy");
-
-    if (!populatedMessage) {
-      console.error("❌ Message not found for emission:", message._id);
-      return;
-    }
-
-    const clientId = typeof populatedMessage.client === 'string' 
-      ? populatedMessage.client 
-      : populatedMessage.client?._id;
-
-    // Emit to assignment client room
-    if (clientId) {
-      io.to(`assignment_client_${clientId}`).emit(eventName, populatedMessage);
-      console.log(`📍 Emitted ${eventName} to assignment_client_${clientId}`);
-    }
-
-    // Emit to all receivers
-    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
-      populatedMessage.receiver.forEach((receiver) => {
-        const receiverId = typeof receiver === "string" ? receiver : receiver._id;
-        if (receiverId) {
-          io.to(`employee_${receiverId}`).emit(eventName, populatedMessage);
-          console.log(`📍 Emitted ${eventName} to employee_${receiverId}`);
-        }
-      });
-    }
-
-    // Emit to sender
-    const senderId = typeof populatedMessage.sender === "string" 
-      ? populatedMessage.sender 
-      : populatedMessage.sender?._id;
-    if (senderId) {
-      io.to(`employee_${senderId}`).emit(eventName, populatedMessage);
-      console.log(`📍 Emitted ${eventName} to sender employee_${senderId}`);
-    }
-
-    console.log(`✅ Successfully emitted ${eventName} for message ${message._id}`);
-  } catch (error) {
-    console.error("❌ Error emitting socket event:", error);
-  }
-}
-
-async function emitMessageUpdate(io, message, action) {
-  try {
-    const populatedMessage = await AssignmentMessage.findById(message._id)
-      .populate("owner")
-      .populate("sender")
-      .populate("receiver")
-      .populate("client");
-
-    if (!populatedMessage) return;
-
-    const clientId = typeof populatedMessage.client === 'string' 
-      ? populatedMessage.client 
-      : populatedMessage.client?._id;
-
-    if (clientId) {
-      io.to(`assignment_client_${clientId}`).emit("assignment_message_updated", {
-        message: populatedMessage,
-        action: action
-      });
-    }
-
-    // Notify all participants
-    const allParticipants = new Set();
-    
-    // Add sender
-    const senderId = typeof populatedMessage.sender === "string" 
-      ? populatedMessage.sender 
-      : populatedMessage.sender?._id;
-    if (senderId) allParticipants.add(senderId);
-
-    // Add receivers
-    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
-      populatedMessage.receiver.forEach((receiver) => {
-        const receiverId = typeof receiver === "string" ? receiver : receiver._id;
-        if (receiverId) allParticipants.add(receiverId);
-      });
-    }
-
-    // Emit to all participants
-    allParticipants.forEach(participantId => {
-      io.to(`employee_${participantId}`).emit("assignment_message_updated", {
-        message: populatedMessage,
-        action: action
-      });
-    });
-
-    console.log(`✅ Emitted assignment_message_updated for ${action}`);
-  } catch (error) {
-    console.error("❌ Error emitting message update:", error);
-  }
 }
 
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
@@ -257,66 +153,75 @@ function validateScheduleTime(scheduledFor) {
 }
 
 // GET SCHEDULED MESSAGES FOR SPECIFIC CLIENT
-exports.getScheduledMessagesForClient = async function getScheduledMessagesForClient(req, res) {
-  try {
-    const { clientId } = req.params;
-    const { limit = 50, page = 1 } = req.query;
+exports.getScheduledMessagesForClient =
+  async function getScheduledMessagesForClient(req, res) {
+    try {
+      const { clientId } = req.params;
+      const { limit = 50, page = 1 } = req.query;
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
+      if (!isObjId(clientId)) {
+        return res.status(400).json({ error: "Valid client ID is required" });
+      }
+
+      const q = {
+        client: clientId,
+        isScheduled: true,
+        status: "scheduled",
+      };
+
+      // Apply visibility rules
+      const qFinal = await applyVisibility(q, req);
+
+      const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+      const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+      const [items, total] = await Promise.all([
+        WhatsAppMessage.find(qFinal)
+          .sort({ scheduledFor: 1 })
+          .skip((pageNum - 1) * lim)
+          .limit(lim)
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role" },
+            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "client", select: "_id clientName" },
+            { path: "scheduledBy", select: "_id name companyEmail" },
+          ])
+          .lean(),
+        WhatsAppMessage.countDocuments(qFinal),
+      ]);
+
+      res.json({
+        items,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / lim),
+        limit: lim,
+        client: clientId,
+      });
+    } catch (e) {
+      console.error(e);
+      res
+        .status(500)
+        .json({ error: "Failed to fetch scheduled messages for client" });
     }
-
-    const q = {
-      client: clientId,
-      isScheduled: true,
-      status: "scheduled",
-    };
-
-    // Apply visibility rules
-    const qFinal = await applyVisibility(q, req);
-
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
-    const [items, total] = await Promise.all([
-      AssignmentMessage.find(qFinal)
-        .sort({ scheduledFor: 1 })
-        .skip((pageNum - 1) * lim)
-        .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-        ])
-        .lean(),
-      AssignmentMessage.countDocuments(qFinal),
-    ]);
-
-    res.json({
-      items,
-      total,
-      page: pageNum,
-      pages: Math.ceil(total / lim),
-      limit: lim,
-      client: clientId,
-    });
-  } catch (e) {
-    console.error(e);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch scheduled messages for client" });
-  }
-};
-
+  };
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
-      client, sender, receiver, participant, owner,
-      status, isScheduled, scheduledBefore, scheduledAfter,
-      limit = 50, page = 1, between: betweenRaw,
-      filter
+      client,
+      sender,
+      receiver,
+      participant,
+      owner,
+      status,
+      isScheduled,
+      scheduledBefore,
+      scheduledAfter,
+      limit = 50,
+      page = 1,
+      between: betweenRaw,
+      filter,
     } = req.query;
 
     const q = {};
@@ -327,12 +232,15 @@ exports.listMessages = async function listMessages(req, res) {
     if (isObjId(client)) q.client = client;
 
     // Status filter for drafts/sent/cancelled
-    if (status && ["draft","scheduled","sent","cancelled"].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
     }
 
-    // ** frontend "filter=scheduled" **
+    // ** frontend “filter=scheduled” **
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -355,19 +263,31 @@ exports.listMessages = async function listMessages(req, res) {
     // between / participant / sender / receiver
     const between = normalizeIds(betweenRaw);
     if (between.length === 2) {
-      const [a,b] = between;
-      q.$or = [ { sender: a, receiver: b }, { sender: b, receiver: a } ];
+      const [a, b] = between;
+      q.$or = [
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
     } else if (isObjId(participant)) {
-      q.$or = [ { sender: participant }, { receiver: participant } ];
+      q.$or = [{ sender: participant }, { receiver: participant }];
     } else {
       if (isObjId(sender)) q.sender = sender;
       if (isObjId(receiver)) q.receiver = receiver;
     }
 
     // Must have at least one scope
-    if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or && !q.status && q.isScheduled === undefined) {
+    if (
+      !q.owner &&
+      !q.client &&
+      !q.sender &&
+      !q.receiver &&
+      !q.$or &&
+      !q.status &&
+      q.isScheduled === undefined
+    ) {
       return res.status(400).json({
-        error: "Provide at least one scope: owner, client, sender, receiver, participant, status, or isScheduled"
+        error:
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, or isScheduled",
       });
     }
 
@@ -375,11 +295,11 @@ exports.listMessages = async function listMessages(req, res) {
     const qFinal = await applyVisibility(q, req);
 
     // Pagination & fetch
-    const pageNum = Math.max(parseInt(page,10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit,10) || 50, 1), 200);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
     const [items, total] = await Promise.all([
-      AssignmentMessage.find(qFinal)
+      WhatsAppMessage.find(qFinal)
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
@@ -392,15 +312,15 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(qFinal)
+      WhatsAppMessage.countDocuments(qFinal),
     ]);
 
     res.json({
       items,
       total,
       page: pageNum,
-      pages: Math.ceil(total/lim),
-      limit: lim
+      pages: Math.ceil(total / lim),
+      limit: lim,
     });
   } catch (e) {
     console.error(e);
@@ -408,17 +328,26 @@ exports.listMessages = async function listMessages(req, res) {
   }
 };
 
-exports.listMessagesForManager = async function listMessagesForManager(req, res) {
+exports.listMessagesForManager = async function listMessagesForManager(
+  req,
+  res
+) {
   try {
-    const clientId = req.params.clientId || req.query.clientId || req.query.client || null;
+    const clientId =
+      req.params.clientId || req.query.clientId || req.query.client || null;
+
     const owner = req.query.owner || req.employee?.owner || null;
+
     const sender = req.query.sender || null;
     const receiver = req.query.receiver || req.query.toEmployee || null;
     const participant = req.query.participant || req.query.employee || null;
     const betweenRaw = req.query.between;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 100, 1),
+      200
+    );
 
     const q = {};
     if (isObjId(owner)) q.owner = owner;
@@ -430,9 +359,16 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
 
     // FIXED: Handle status filter for drafts to exclude scheduled messages
     const status = req.query.status;
-    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
-      if (status === "draft") q.isScheduled = false;
+
+      // CRITICAL FIX: When querying for drafts, ensure we exclude scheduled messages
+      if (status === "draft") {
+        q.isScheduled = false;
+      }
     }
 
     const between = normalizeIds(betweenRaw);
@@ -452,13 +388,14 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     // FIXED: Remove overly restrictive validation
     if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or) {
       return res.status(400).json({
-        error: "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
+        error:
+          "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
       });
     }
 
     const qFinal = await applyVisibility(q, req);
 
-    const messages = await AssignmentMessage.find(qFinal)
+    const messages = await WhatsAppMessage.find(qFinal)
       .sort({ createdAt: 1 })
       .skip((page - 1) * limit)
       .limit(limit)
@@ -477,7 +414,7 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
+// CREATE MESSAGE WITH SCHEDULING SUPPORT
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -503,7 +440,8 @@ exports.createMessage = async function createMessage(req, res) {
 
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-    if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+    if (receiversBody)
+      receivers = receivers.concat(normalizeIds(receiversBody));
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
@@ -512,7 +450,9 @@ exports.createMessage = async function createMessage(req, res) {
     const senderRole = normalizeRole(senderDoc?.role || "");
 
     let approvalStatus;
-    const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+    const supervisionMode = String(
+      senderDoc?.supervisionMode || ""
+    ).toLowerCase();
     const needsApproval = supervisionMode === "needs_approval";
     const isDirect = supervisionMode === "direct";
 
@@ -531,20 +471,27 @@ exports.createMessage = async function createMessage(req, res) {
     // ✅ Always include assignedTo employee if present
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
       const assignedEmployeeId = String(clientDoc.assignedTo._id);
-      if (!receivers.includes(assignedEmployeeId) && assignedEmployeeId !== String(sender)) {
+      if (
+        !receivers.includes(assignedEmployeeId) &&
+        assignedEmployeeId !== String(sender)
+      ) {
         receivers.push(assignedEmployeeId);
       }
     }
 
     // 🔑 UPDATED: Approval status logic - Team Leads and Managers get null approvalStatus
     if (senderRole === "manager" || senderRole === "team_lead") {
+      // ✅ Manager and Team Lead messages have approvalStatus as null (automatically approved)
       approvalStatus = null;
+
+      // For Team Leads, also include managers as receivers
       if (senderRole === "team_lead") {
         const managerIds = managers.map((id) => String(id));
         receivers = [...receivers, ...managerIds];
       }
     } else if (needsApproval) {
       approvalStatus = "pending";
+      // For needs_approval → only TLs initially
       receivers = [...tls.map((id) => String(id))];
     } else if (isDirect) {
       approvalStatus = "approved";
@@ -563,10 +510,10 @@ exports.createMessage = async function createMessage(req, res) {
         }
       } else if (senderRole === "team_lead") {
         receivers = [...managers];
-        approvalStatus = null;
+        approvalStatus = null; // Team Lead gets null
       } else if (senderRole === "manager") {
         receivers = [...tls];
-        approvalStatus = null;
+        approvalStatus = null; // Manager gets null
       }
     }
 
@@ -595,7 +542,7 @@ exports.createMessage = async function createMessage(req, res) {
       status = "scheduled";
       scheduledAt = new Date();
       scheduledBy = sender;
-      sentAt = null;
+      sentAt = null; // Will be set when actually sent
     }
 
     const msgData = {
@@ -605,7 +552,7 @@ exports.createMessage = async function createMessage(req, res) {
       receiver: receivers,
       subject: subject || "",
       note: note || "",
-      approvalStatus: approvalStatus,
+      approvalStatus: approvalStatus || undefined, // This will be null for Team Leads and Managers
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
@@ -614,7 +561,7 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt: !isScheduled ? new Date() : undefined,
     };
 
-    const msg = await AssignmentMessage.create(msgData);
+    const msg = await WhatsAppMessage.create(msgData);
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
@@ -624,41 +571,10 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitToAssignmentClients(io, msg, "new_assignment_message");
-    }
-
     res.status(201).json(populated);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to create assignment message" });
-  }
-};
-
-// GET MESSAGE WITH PROPER APPROVAL STATUS
-exports.getMessage = async function getMessage(req, res) {
-  try {
-    const msg = await AssignmentMessage.findById(req.params.id).populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
-      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      { path: "scheduledBy", select: "_id name companyEmail" },
-    ]);
-    if (!msg) return res.status(404).json({ error: "Not found" });
-    
-    // Add approval status interpretation for frontend
-    const messageWithStatus = msg.toObject();
-    messageWithStatus.approvalStatusDisplay = 
-      msg.approvalStatus === null ? "auto-approved" : msg.approvalStatus;
-    
-    res.json(messageWithStatus);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to fetch message" });
   }
 };
 
@@ -668,14 +584,16 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
     const { id } = req.params;
     const { scheduledFor } = req.body;
 
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) {
       return res.status(404).json({ error: "Message not found" });
     }
 
     // Check permissions - only sender or admin can schedule
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only schedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only schedule your own messages" });
     }
 
     // Validate scheduled time
@@ -702,12 +620,6 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "scheduled");
-    }
-
     res.json({
       message: "Message scheduled successfully",
       data: populated,
@@ -723,14 +635,16 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
   try {
     const { id } = req.params;
 
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) {
       return res.status(404).json({ error: "Message not found" });
     }
 
     // Check permissions
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only unschedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only unschedule your own messages" });
     }
 
     if (!msg.isScheduled || msg.status !== "scheduled") {
@@ -738,13 +652,15 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     // Convert to draft or send immediately based on user preference
-    const { action = "draft" } = req.body;
+    const { action = "draft" } = req.body; // "draft" or "send"
 
     if (action === "send") {
+      // Send immediately
       msg.isScheduled = false;
       msg.status = "sent";
       msg.sentAt = new Date();
     } else {
+      // Convert to draft
       msg.isScheduled = false;
       msg.status = "draft";
       msg.scheduledFor = undefined;
@@ -761,14 +677,10 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, action === "send" ? "sent" : "converted_to_draft");
-    }
-
     res.json({
-      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"}`,
+      message: `Message ${
+        action === "send" ? "sent immediately" : "converted to draft"
+      }`,
       data: populated,
     });
   } catch (e) {
@@ -789,13 +701,13 @@ exports.getScheduledMessages = async function getScheduledMessages(req, res) {
 
     const qFinal = await applyVisibility(q, req);
 
-    const pageNum = Math.max(parseInt(page,10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit,10) || 50, 1), 200);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
     const [items, total] = await Promise.all([
-      AssignmentMessage.find(qFinal)
+      WhatsAppMessage.find(qFinal)
         .sort({ scheduledFor: 1 })
-        .skip((pageNum-1)*lim)
+        .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
@@ -805,15 +717,15 @@ exports.getScheduledMessages = async function getScheduledMessages(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(qFinal)
+      WhatsAppMessage.countDocuments(qFinal),
     ]);
 
     res.json({
       items,
       total,
       page: pageNum,
-      pages: Math.ceil(total/lim),
-      limit: lim
+      pages: Math.ceil(total / lim),
+      limit: lim,
     });
   } catch (e) {
     console.error(e);
@@ -827,7 +739,7 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
     const { id } = req.params;
     const { scheduledFor } = req.body;
 
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) {
       return res.status(404).json({ error: "Message not found" });
     }
@@ -838,7 +750,9 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
 
     // Check permissions
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only reschedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only reschedule your own messages" });
     }
 
     const validation = validateScheduleTime(scheduledFor);
@@ -847,7 +761,7 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
     }
 
     msg.scheduledFor = validation.scheduleTime;
-    msg.scheduledAt = new Date();
+    msg.scheduledAt = new Date(); // Update the scheduling timestamp
 
     await msg.save();
 
@@ -858,12 +772,6 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "rescheduled");
-    }
 
     res.json({
       message: "Message rescheduled successfully",
@@ -876,12 +784,14 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
 };
 
 // BULK SEND SCHEDULED MESSAGES (for cron job)
-exports.sendScheduledMessages = async function sendScheduledMessages(io = null) {
+exports.sendScheduledMessages = async function sendScheduledMessages(
+  io = null
+) {
   try {
     const now = new Date();
 
     // Find messages scheduled to be sent now or in the past
-    const scheduledMessages = await AssignmentMessage.find({
+    const scheduledMessages = await WhatsAppMessage.find({
       isScheduled: true,
       status: "scheduled",
       scheduledFor: { $lte: now },
@@ -904,13 +814,40 @@ exports.sendScheduledMessages = async function sendScheduledMessages(io = null) 
 
         // Send real-time notifications to receivers via Socket.IO
         if (io) {
-          await emitToAssignmentClients(io, message, "new_assignment_message");
+          const receiverIds = message.receiver.map((receiver) =>
+            typeof receiver === "string" ? receiver : receiver._id
+          );
+
+          // Notify each receiver
+          receiverIds.forEach((receiverId) => {
+            io.to(`employee_${receiverId}`).emit("new_assignment_message", {
+              message: message,
+              type: "scheduled_message_delivered",
+            });
+          });
+
+          // Notify in client room
+          const clientId =
+            typeof message.client === "string"
+              ? message.client
+              : message.client?._id;
+          if (clientId) {
+            io.to(`client_${clientId}`).emit("new_assignment_message", {
+              message: message,
+              type: "scheduled_message_delivered",
+            });
+          }
         }
 
-        console.log(`Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`);
+        console.log(
+          `Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`
+        );
         results.sent++;
       } catch (error) {
-        console.error(`Failed to send scheduled message ${message._id}:`, error);
+        console.error(
+          `Failed to send scheduled message ${message._id}:`,
+          error
+        );
         results.failed++;
         results.errors.push({
           messageId: message._id,
@@ -930,12 +867,14 @@ exports.sendScheduledMessages = async function sendScheduledMessages(io = null) 
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
-      return res.status(403).json({ error: "Only Team Leads can approve messages" });
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can approve messages" });
     }
 
     msg.approvalStatus = "approved";
@@ -947,7 +886,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       return res.json({ message: "Approved but no managers found" });
     }
 
-    const forwardMsg = await AssignmentMessage.create({
+    const forwardMsg = await WhatsAppMessage.create({
       owner: msg.owner,
       client: msg.client,
       sender: msg.sender,
@@ -964,13 +903,6 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "client", select: "_id clientName" },
     ]);
 
-    // EMIT REAL-TIME EVENTS FOR BOTH MESSAGES
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "approved");
-      await emitToAssignmentClients(io, forwardMsg, "new_assignment_message");
-    }
-
     res.json(populated);
   } catch (e) {
     console.error(e);
@@ -982,22 +914,18 @@ exports.approveMessage = async function approveMessage(req, res) {
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
     const { id } = req.params;
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
-      return res.status(403).json({ error: "Only Team Leads can disapprove messages" });
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can disapprove messages" });
     }
 
     msg.approvalStatus = "disapproved";
     await msg.save();
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "disapproved");
-    }
 
     res.json(msg);
   } catch (e) {
@@ -1009,7 +937,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 // GET /api/assignment-messages/:id
 exports.getMessage = async function getMessage(req, res) {
   try {
-    const msg = await AssignmentMessage.findById(req.params.id).populate([
+    const msg = await WhatsAppMessage.findById(req.params.id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
@@ -1029,9 +957,11 @@ exports.getMessage = async function getMessage(req, res) {
 exports.updateMessage = async function updateMessage(req, res) {
   try {
     const { subject, note } = req.body;
-    const msg = await AssignmentMessage.findById(req.params.id);
+    const msg = await WhatsAppMessage.findById(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
+    // Optional: prevent changing approvalStatus here from API callers.
+    // (We leave it out intentionally to keep status flow via approve/disapprove)
     if (typeof subject === "string") msg.subject = subject;
     if (typeof note === "string") msg.note = note;
 
@@ -1045,12 +975,6 @@ exports.updateMessage = async function updateMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "updated");
-    }
-
     res.json(populated);
   } catch (e) {
     console.error(e);
@@ -1061,56 +985,8 @@ exports.updateMessage = async function updateMessage(req, res) {
 // DELETE /api/assignment-messages/:id
 exports.deleteMessage = async function deleteMessage(req, res) {
   try {
-    const msg = await AssignmentMessage.findById(req.params.id);
+    const msg = await WhatsAppMessage.findByIdAndDelete(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
-
-    // Store message data for emission before deletion
-    const messageData = msg.toObject();
-
-    await AssignmentMessage.findByIdAndDelete(req.params.id);
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      const clientId = typeof messageData.client === 'string' 
-        ? messageData.client 
-        : messageData.client?._id;
-
-      if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit("assignment_message_deleted", {
-          messageId: req.params.id,
-          clientId: clientId
-        });
-      }
-
-      // Notify all participants
-      const allParticipants = new Set();
-      
-      // Add sender
-      const senderId = typeof messageData.sender === "string" 
-        ? messageData.sender 
-        : messageData.sender?._id;
-      if (senderId) allParticipants.add(senderId);
-
-      // Add receivers
-      if (messageData.receiver && Array.isArray(messageData.receiver)) {
-        messageData.receiver.forEach((receiver) => {
-          const receiverId = typeof receiver === "string" ? receiver : receiver._id;
-          if (receiverId) allParticipants.add(receiverId);
-        });
-      }
-
-      // Emit to all participants
-      allParticipants.forEach(participantId => {
-        io.to(`employee_${participantId}`).emit("assignment_message_deleted", {
-          messageId: req.params.id,
-          clientId: clientId
-        });
-      });
-
-      console.log(`✅ Emitted assignment_message_deleted for message ${req.params.id}`);
-    }
-
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1121,7 +997,7 @@ exports.deleteMessage = async function deleteMessage(req, res) {
 // POST /api/assignment-messages/:id/attachments
 exports.uploadAttachments = async function uploadAttachments(req, res) {
   try {
-    const msg = await AssignmentMessage.findById(req.params.id);
+    const msg = await WhatsAppMessage.findById(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
     const files = (req.files || []).map((f) => ({
@@ -1140,13 +1016,6 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     const populated = await msg.populate([
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "attachments_updated");
-    }
-
     res.status(201).json(populated.attachments);
   } catch (e) {
     console.error(e);
@@ -1159,7 +1028,7 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
 // GET /api/assignment-messages/:id/attachments
 exports.listAttachments = async function listAttachments(req, res) {
   try {
-    const msg = await AssignmentMessage.findById(req.params.id).populate([
+    const msg = await WhatsAppMessage.findById(req.params.id).populate([
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
     if (!msg) return res.status(404).json({ error: "Not found" });
@@ -1174,7 +1043,7 @@ exports.listAttachments = async function listAttachments(req, res) {
 exports.deleteAttachment = async function deleteAttachment(req, res) {
   try {
     const { id, attId } = req.params;
-    const msg = await AssignmentMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
     const before = msg.attachments.length;
@@ -1185,13 +1054,6 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
       return res.status(404).json({ error: "Attachment not found" });
 
     await msg.save();
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "attachment_deleted");
-    }
-
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1200,31 +1062,39 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
 };
 
 // GET /api/assignment-messages/sent
+// Required: client (ObjectId) – only show messages the current user sent to this client
 exports.listMySentToClient = async function listMySentToClient(req, res) {
   try {
     const client = req.query.client || req.query.clientId || null;
     const owner = req.query.owner || req.employee?.owner || null;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 50, 1),
+      200
+    );
 
     const me = req.employee?._id ? String(req.employee._id) : null;
 
     if (!isObjId(me)) {
-      return res.status(401).json({ error: "Unauthorized: missing employee session" });
+      return res
+        .status(401)
+        .json({ error: "Unauthorized: missing employee session" });
     }
     if (!isObjId(client)) {
-      return res.status(400).json({ error: "client is required (ObjectId string)" });
+      return res
+        .status(400)
+        .json({ error: "client is required (ObjectId string)" });
     }
 
     const q = {
-      sender: me,
-      client: client,
+      sender: me, // only messages I sent
+      client: client, // to this client
     };
     if (isObjId(owner)) q.owner = owner;
 
     const [items, total] = await Promise.all([
-      AssignmentMessage.find(q)
+      WhatsAppMessage.find(q)
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
         .limit(limit)
@@ -1237,7 +1107,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(q),
+      WhatsAppMessage.countDocuments(q),
     ]);
 
     return res.json({

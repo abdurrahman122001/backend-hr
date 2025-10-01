@@ -15,7 +15,7 @@ const AttachmentSchema = new Schema(
   { _id: true }
 );
 
-const AssignmentMessageSchema = new Schema(
+const WhatsAppMessageSchema = new Schema(
   {
     // Organization / data ownership scope
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
@@ -56,17 +56,17 @@ const AssignmentMessageSchema = new Schema(
 );
 
 /** Helpful query patterns */
-AssignmentMessageSchema.index({ owner: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ client: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ sender: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ receiver: 1, createdAt: -1 });
-AssignmentMessageSchema.index({ status: 1, scheduledFor: 1 });
-AssignmentMessageSchema.index({ isScheduled: 1, scheduledFor: 1 });
-AssignmentMessageSchema.index({
+WhatsAppMessageSchema.index({ owner: 1, createdAt: -1 });
+WhatsAppMessageSchema.index({ client: 1, createdAt: -1 });
+WhatsAppMessageSchema.index({ sender: 1, createdAt: -1 });
+WhatsAppMessageSchema.index({ receiver: 1, createdAt: -1 });
+WhatsAppMessageSchema.index({ status: 1, scheduledFor: 1 });
+WhatsAppMessageSchema.index({ isScheduled: 1, scheduledFor: 1 });
+WhatsAppMessageSchema.index({
   client: 1,
   sender: 1,
   receiver: 1,
   createdAt: -1,
 });
 
-module.exports = mongoose.model("AssignmentMessage", AssignmentMessageSchema);
+module.exports = mongoose.model("WhatsAppMessage", WhatsAppMessageSchema);

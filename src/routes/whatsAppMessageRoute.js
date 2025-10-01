@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const empAuth = require("../middleware/empAuth");
 const { upload } = require("../utils/multer");
-const ctrl = require("../controllers/assignmentMessageController");
+const ctrl = require("../controllers/whatsAppMessageController");
 
 // All routes require employee authentication
 router.use(empAuth);

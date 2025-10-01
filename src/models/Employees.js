@@ -90,6 +90,7 @@ const EmployeeSchema = new Schema(
       total: { type: Number, default: 22 },
       bonus: { type: Number, default: 0 },
       bonusHoursAccumulated: { type: Number, default: 0 },
+      bonusYear: { type: Number }, // required for yearly reset
       usedPaid: { type: Number, default: 0 },
       usedUnpaid: { type: Number, default: 0 },
     },

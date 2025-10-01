@@ -75,6 +75,32 @@ exports.updateEmployeeSupervision = async (req, res) => {
     res.status(500).json({ error: "Failed to update supervision" });
   }
 };
+// GET /manager/supervision-status
+exports.getEmployeeSupervisionStatus = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+    if (!isManagerLike(me.role))
+      return res.status(403).json({ error: "Only Managers/Team Leads" });
+    if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
+
+    const { id } = req.params;
+
+    const emp = await Employee.findOne({ _id: id, owner: me.owner })
+      .select("_id name email companyEmail role department designation supervisionMode supervisor")
+      .populate("supervisor", "_id name companyEmail");
+
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    res.json({
+      ...emp.toObject(),
+      hasSupervisionEnabled: emp.supervisionMode === "needs_approval",
+    });
+  } catch (err) {
+    console.error("getEmployeeSupervisionStatus error:", err);
+    res.status(500).json({ error: "Failed to load supervision status" });
+  }
+};
 
 // POST /manager/assign  (accepts JSON OR multipart with files[])
 // Requires Manager/Team Lead (same owner scope)

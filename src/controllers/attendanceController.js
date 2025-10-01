@@ -29,99 +29,6 @@ function getHoursDiff(checkIn, checkOut) {
  * @param {String} shiftStart
  * @param {String} date 
  */
-async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, date) {
-  if (!checkIn || !shiftStart) return { bonus: null, accumulated: null };
-
-  const [inH, inM] = checkIn.split(":").map(Number);
-  const [shH, shM] = shiftStart.split(":").map(Number);
-
-  const checkInMinutes = inH * 60 + inM;
-  const startMinutes = shH * 60 + shM;
-  let earlyMinutes = startMinutes - checkInMinutes;
-
-  if (earlyMinutes < 30) {
-    return { bonus: null, accumulated: null };
-  }
-
-  const earlyHours = +(earlyMinutes / 60).toFixed(2);
-
-  const emp = await Employee.findById(employeeId);
-  const year = new Date(date).getFullYear();
-  let bonus = emp.leaveEntitlement?.bonus || 0;
-  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
-  let bonusYear = emp.leaveEntitlement?.bonusYear || year;
-
-  if (bonusYear !== year) {
-    accumulated = 0;
-    bonus = 0;
-    bonusYear = year;
-  }
-
-  accumulated += earlyHours;
-
-  while (accumulated >= 9) {
-    bonus += 1;
-    accumulated -= 9;
-  }
-
-  await Employee.updateOne(
-    { _id: employeeId },
-    {
-      $set: {
-        "leaveEntitlement.bonus": bonus,
-        "leaveEntitlement.bonusHoursAccumulated": accumulated,
-        "leaveEntitlement.bonusYear": bonusYear,
-      }
-    }
-  );
-
-  return { bonus, accumulated };
-}
-
-
-async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
-  // 1. Calculate worked hours for this attendance
-  const hours = getHoursDiff(checkIn, checkOut);
-
-  // 2. Get employee doc
-  const emp = await Employee.findById(employeeId);
-
-  // Get previous accumulated hours for the current year
-  const year = new Date(date).getFullYear();
-  let bonus = emp.leaveEntitlement?.bonus || 0;
-  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
-  let bonusYear = emp.leaveEntitlement?.bonusYear || year; // add this field if needed
-
-  // Reset if year changed
-  if (bonusYear !== year) {
-    accumulated = 0;
-    bonus = 0;
-    bonusYear = year;
-  }
-
-  // 3. Update accumulated hours
-  accumulated += hours;
-
-  // 4. Increment bonus for each 9 hours completed
-  while (accumulated >= 9) {
-    bonus += 1;
-    accumulated -= 9;
-  }
-
-  // 5. Save back to employee
-  await Employee.updateOne(
-    { _id: employeeId },
-    {
-      $set: {
-        "leaveEntitlement.bonus": bonus,
-        "leaveEntitlement.bonusHoursAccumulated": accumulated,
-        "leaveEntitlement.bonusYear": bonusYear,
-      }
-    }
-  );
-
-  return { bonus, accumulated };
-}
 
 function resolveOwnerId(user) {
   // Prefer explicit tenant/company id (user.owner) → parent admin (createdBy) → self
@@ -141,6 +48,7 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
     ],
   }).lean();
 }
+
 async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToDeduct, type = "absent", forcePaid = false) {
   const employee = await Employee.findById(employeeId).lean();
   if (!employee) throw new Error("Employee not found");
@@ -191,6 +99,185 @@ async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToD
     unpaid: unpaidToUse,
     isProportionate
   };
+}
+
+async function reverseOldBonus(oldRec) {
+  if (!oldRec || !oldRec.bonusApplied || !oldRec.bonusHoursGiven) return;
+
+  const emp = await Employee.findById(oldRec.employee);
+  if (!emp) return;
+
+  let bonus = emp.leaveEntitlement.bonus || 0;
+  let accumulated = emp.leaveEntitlement.bonusHoursAccumulated || 0;
+
+  // Roll back the hours
+  accumulated -= oldRec.bonusHoursGiven;
+
+  // If accumulated goes negative, roll back into bonus days
+  while (accumulated < 0 && bonus > 0) {
+    bonus -= 1;
+    accumulated += 9;
+  }
+
+  if (accumulated < 0) accumulated = 0;
+
+  await Employee.updateOne(
+    { _id: oldRec.employee },
+    {
+      $set: {
+        "leaveEntitlement.bonus": bonus,
+        "leaveEntitlement.bonusHoursAccumulated": accumulated,
+      },
+    }
+  );
+
+  // Reset bonus flags on attendance record
+  await Attendance.updateOne(
+    { _id: oldRec._id },
+    { $set: { bonusApplied: false, bonusType: null, bonusHoursGiven: 0 } }
+  );
+
+  console.log(`[BONUS-REVERSAL] Employee=${oldRec.employee} Bonus=${bonus}, Accumulated=${accumulated}`);
+}
+
+async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
+  // 1. Calculate worked hours for this attendance
+  const hours = getHoursDiff(checkIn, checkOut);
+
+  // 2. Get employee doc
+  const emp = await Employee.findById(employeeId);
+
+  // Get previous accumulated hours for the current year
+  const year = new Date(date).getFullYear();
+  let bonus = emp.leaveEntitlement?.bonus || 0;
+  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
+  let bonusYear = emp.leaveEntitlement?.bonusYear || year; // add this field if needed
+
+  // Reset if year changed
+  if (bonusYear !== year) {
+    accumulated = 0;
+    bonus = 0;
+    bonusYear = year;
+  }
+
+  // 3. Update accumulated hours
+  accumulated += hours;
+
+  // 4. Increment bonus for each 9 hours completed
+  while (accumulated >= 9) {
+    bonus += 1;
+    accumulated -= 9;
+  }
+
+  // 5. Save back to employee
+  await Employee.updateOne(
+    { _id: employeeId },
+    {
+      $set: {
+        "leaveEntitlement.bonus": bonus,
+        "leaveEntitlement.bonusHoursAccumulated": accumulated,
+        "leaveEntitlement.bonusYear": bonusYear,
+      }
+    }
+  );
+
+  await Attendance.updateOne(
+    { employee: employeeId, date },
+    {
+      $set: {
+        bonusApplied: true,
+        bonusType: "NonWorkingDay",
+        bonusHoursGiven: hours, // ✅ FIXED
+      },
+    }
+  );
+
+  return { bonus, accumulated };
+}
+
+
+async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd, checkOut, date) {
+  if (!checkIn || !shiftStart || !shiftEnd || !checkOut) return { bonus: null, accumulated: null };
+
+  const toMin = (hhmm) => {
+    const [hStr, mStr = "0"] = String(hhmm).trim().split(":");
+    const h = Number(hStr);
+    const m = Number(String(mStr).replace(/[^\d]/g, ""));
+    if (Number.isNaN(h) || Number.isNaN(m)) return null;
+    return h * 60 + m;
+  };
+
+  const inMin = toMin(checkIn);
+  const startMin = toMin(shiftStart);
+  const outMin = toMin(checkOut);
+  const endMinRaw = toMin(shiftEnd);
+  if (inMin == null || startMin == null || outMin == null || endMinRaw == null) {
+    return { bonus: null, accumulated: null };
+  }
+
+  // Must be at least 30 min early
+  const earlyMinutes = startMin - inMin;
+  if (earlyMinutes < 30) {
+    return { bonus: null, accumulated: null };
+  }
+
+  // Overnight-safe: if end <= start, it ends next day (e.g., 15:00 → 00:00)
+  let endMin = endMinRaw;
+  let outMinNorm = outMin;
+  if (endMin <= startMin) {
+    endMin += 1440;                // move end to next day
+    if (outMin < startMin) outMinNorm += 1440; // move checkout too if after midnight
+  }
+
+  // Must checkout at or after shift end
+  if (outMinNorm < endMin) {
+    return { bonus: null, accumulated: null };
+  }
+
+  const earlyHours = +(earlyMinutes / 60).toFixed(2);
+
+  const emp = await Employee.findById(employeeId);
+  const year = new Date(date).getFullYear();
+  let bonus = emp.leaveEntitlement?.bonus || 0;
+  let accumulated = emp.leaveEntitlement?.bonusHoursAccumulated || 0;
+  let bonusYear = emp.leaveEntitlement?.bonusYear || year;
+
+  if (bonusYear !== year) {
+    accumulated = 0;
+    bonus = 0;
+    bonusYear = year;
+  }
+
+  accumulated += earlyHours;
+
+  while (accumulated >= 9) {
+    bonus += 1;
+    accumulated -= 9;
+  }
+
+  await Employee.updateOne(
+    { _id: employeeId },
+    {
+      $set: {
+        "leaveEntitlement.bonus": bonus,
+        "leaveEntitlement.bonusHoursAccumulated": accumulated,
+        "leaveEntitlement.bonusYear": bonusYear,
+      }
+    }
+  );
+
+  await Attendance.updateOne(
+    { employee: employeeId, date },
+    {
+      $set: {
+        bonusApplied: true,
+        bonusType: "EarlyBird",
+        bonusHoursGiven: earlyHours, // or hours
+      },
+    }
+  );
+
+  return { bonus, accumulated };
 }
 
 exports.markAttendance = async (req, res) => {
@@ -277,6 +364,7 @@ exports.markAttendance = async (req, res) => {
       date,
     }).lean();
     if (oldRec) {
+      await reverseOldBonus(oldRec);
       console.log(`[ATTENDANCE] [${employee.name}] Previous -> Status=${oldRec.status}, LeaveType=${oldRec.leaveType || "-"}`);
     }
 
@@ -310,6 +398,7 @@ exports.markAttendance = async (req, res) => {
     // ========= Early Bird Bonus =========
     if (status === "Present") {
       let shiftStart = null;
+      let shiftEnd = null;
 
       // employee.shifts[0] holds the shift ID reference
       const shiftId = employee.shifts?.[0];
@@ -318,13 +407,18 @@ exports.markAttendance = async (req, res) => {
         if (shiftDoc && shiftDoc.start) {
           shiftStart = shiftDoc.start; // e.g. "15:00"
         }
+        if (shiftDoc && shiftDoc.end) {
+          shiftEnd = shiftDoc.end; // e.g. "00:00" for 12am next day
+        }
       }
 
-      if (shiftStart) {
+      if (shiftStart && shiftEnd && checkIn && checkOut) {
         const { bonus, accumulated } = await updateBonusForEarlyBird(
           employeeId,
           checkIn,
           shiftStart,
+          shiftEnd,
+          checkOut,
           date
         );
         console.log(`[BONUS] [${employee.name}] EarlyBird -> Bonus=${bonus}, CarryoverHours=${accumulated}`);
@@ -748,7 +842,7 @@ exports.markAttendance = async (req, res) => {
         await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", req.body.forcePaid);
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid",  effectivePaidDays: effectiveDays, proportionate: false } }
+          { $set: { status: "Absent", leaveType: "Paid", effectivePaidDays: effectiveDays, proportionate: false } }
         );
         console.log(
           `[DEDUCTION] [${employee.name}] Leave fully paid -> Days=${effectiveDays}, NO deduction`
