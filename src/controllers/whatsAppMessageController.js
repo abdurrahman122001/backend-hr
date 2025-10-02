@@ -206,6 +206,7 @@ exports.getScheduledMessagesForClient =
         .json({ error: "Failed to fetch scheduled messages for client" });
     }
   };
+
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
@@ -240,7 +241,7 @@ exports.listMessages = async function listMessages(req, res) {
       if (status === "draft") q.isScheduled = false;
     }
 
-    // ** frontend “filter=scheduled” **
+    // ** frontend "filter=scheduled" **
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -414,6 +415,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+
 // CREATE MESSAGE WITH SCHEDULING SUPPORT
 exports.createMessage = async function createMessage(req, res) {
   try {
@@ -571,6 +573,31 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
+    // Emit new_message event for real-time updates
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify all receivers
+      receivers.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "new_assignment"
+        });
+      });
+
+      // Notify in client room
+      io.to(`client_${client}`).emit("new_message", {
+        message: populated,
+        type: "new_assignment"
+      });
+
+      // Notify sender about successful creation
+      io.to(`employee_${sender}`).emit("new_message", {
+        message: populated,
+        type: "message_created"
+      });
+    }
+
     res.status(201).json(populated);
   } catch (e) {
     console.error(e);
@@ -619,6 +646,25 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
+
+    // Emit new_message event for scheduling
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about successful scheduling
+      io.to(`employee_${req.employee._id}`).emit("new_message", {
+        message: populated,
+        type: "message_scheduled"
+      });
+
+      // Notify receivers that a message is scheduled for them
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "message_scheduled_for_you"
+        });
+      });
+    }
 
     res.json({
       message: "Message scheduled successfully",
@@ -676,6 +722,29 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
+
+    // Emit new_message event for unscheduling
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      const eventType = action === "send" ? "message_sent" : "message_unscheduled";
+      
+      // Notify sender
+      io.to(`employee_${req.employee._id}`).emit("new_message", {
+        message: populated,
+        type: eventType
+      });
+
+      // If sent immediately, notify receivers
+      if (action === "send") {
+        msg.receiver.forEach((receiverId) => {
+          io.to(`employee_${receiverId}`).emit("new_message", {
+            message: populated,
+            type: "new_assignment"
+          });
+        });
+      }
+    }
 
     res.json({
       message: `Message ${
@@ -773,6 +842,25 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
+    // Emit new_message event for rescheduling
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about successful rescheduling
+      io.to(`employee_${req.employee._id}`).emit("new_message", {
+        message: populated,
+        type: "message_rescheduled"
+      });
+
+      // Notify receivers about schedule update
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "message_schedule_updated"
+        });
+      });
+    }
+
     res.json({
       message: "Message rescheduled successfully",
       data: populated,
@@ -818,23 +906,34 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
             typeof receiver === "string" ? receiver : receiver._id
           );
 
-          // Notify each receiver
+          // Notify each receiver using new_message event
           receiverIds.forEach((receiverId) => {
-            io.to(`employee_${receiverId}`).emit("new_assignment_message", {
+            io.to(`employee_${receiverId}`).emit("new_message", {
               message: message,
               type: "scheduled_message_delivered",
             });
           });
 
-          // Notify in client room
+          // Notify in client room using new_message event
           const clientId =
             typeof message.client === "string"
               ? message.client
               : message.client?._id;
           if (clientId) {
-            io.to(`client_${clientId}`).emit("new_assignment_message", {
+            io.to(`client_${clientId}`).emit("new_message", {
               message: message,
               type: "scheduled_message_delivered",
+            });
+          }
+
+          // Notify sender that scheduled message was sent
+          const senderId = typeof message.sender === "string" 
+            ? message.sender 
+            : message.sender?._id;
+          if (senderId) {
+            io.to(`employee_${senderId}`).emit("new_message", {
+              message: message,
+              type: "scheduled_message_sent",
             });
           }
         }
@@ -903,6 +1002,31 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "client", select: "_id clientName" },
     ]);
 
+    // Emit new_message event for approval
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify original sender about approval
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: populated,
+        type: "message_approved"
+      });
+
+      // Notify managers about new approved message
+      managers.forEach((managerId) => {
+        io.to(`employee_${managerId}`).emit("new_message", {
+          message: populated,
+          type: "new_approved_message"
+        });
+      });
+
+      // Notify Team Lead about successful approval
+      io.to(`employee_${req.employee._id}`).emit("new_message", {
+        message: populated,
+        type: "approval_success"
+      });
+    }
+
     res.json(populated);
   } catch (e) {
     console.error(e);
@@ -926,6 +1050,23 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
     msg.approvalStatus = "disapproved";
     await msg.save();
+
+    // Emit new_message event for disapproval
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify original sender about disapproval
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: msg,
+        type: "message_disapproved"
+      });
+
+      // Notify Team Lead about successful disapproval
+      io.to(`employee_${req.employee._id}`).emit("new_message", {
+        message: msg,
+        type: "disapproval_success"
+      });
+    }
 
     res.json(msg);
   } catch (e) {
@@ -975,6 +1116,25 @@ exports.updateMessage = async function updateMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
+    // Emit new_message event for update
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about update
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: populated,
+        type: "message_updated"
+      });
+
+      // Notify receivers about update
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "message_updated"
+        });
+      });
+    }
+
     res.json(populated);
   } catch (e) {
     console.error(e);
@@ -987,6 +1147,26 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   try {
     const msg = await WhatsAppMessage.findByIdAndDelete(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
+
+    // Emit new_message event for deletion
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about deletion
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: msg,
+        type: "message_deleted"
+      });
+
+      // Notify receivers about deletion
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: msg,
+          type: "message_deleted"
+        });
+      });
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1016,6 +1196,26 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     const populated = await msg.populate([
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
+
+    // Emit new_message event for attachment upload
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about attachment upload
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: populated,
+        type: "attachments_uploaded"
+      });
+
+      // Notify receivers about new attachments
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "attachments_added"
+        });
+      });
+    }
+
     res.status(201).json(populated.attachments);
   } catch (e) {
     console.error(e);
@@ -1054,6 +1254,26 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
       return res.status(404).json({ error: "Attachment not found" });
 
     await msg.save();
+
+    // Emit new_message event for attachment deletion
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      // Notify sender about attachment deletion
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: msg,
+        type: "attachment_deleted"
+      });
+
+      // Notify receivers about attachment deletion
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: msg,
+          type: "attachment_deleted"
+        });
+      });
+    }
+
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
