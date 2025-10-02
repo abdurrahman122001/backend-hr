@@ -440,6 +440,7 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
+    // Collect receivers from body
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
     if (receiversBody)
@@ -455,8 +456,8 @@ exports.createMessage = async function createMessage(req, res) {
     const supervisionMode = String(
       senderDoc?.supervisionMode || ""
     ).toLowerCase();
-    const needsApproval = supervisionMode === "needs_approval";
-    const isDirect = supervisionMode === "direct";
+    const needsApproval = supervisionMode === "needs_approval"; // supervision enabled
+    const isDirect = supervisionMode === "direct"; // no supervision
 
     const Client = require("../models/ClientInfo");
     const clientDoc = await Client.findById(client)
@@ -464,11 +465,6 @@ exports.createMessage = async function createMessage(req, res) {
       .lean();
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
-
-    // ✅ Always include Team Leads
-    if (tls.length > 0) {
-      receivers = [...receivers, ...tls.map((id) => String(id))];
-    }
 
     // ✅ Always include assignedTo employee if present
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
@@ -481,41 +477,29 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // 🔑 UPDATED: Approval status logic - Team Leads and Managers get null approvalStatus
+    /** ------------------ ROLE-BASED LOGIC ------------------ **/
+
     if (senderRole === "manager" || senderRole === "team_lead") {
-      // ✅ Manager and Team Lead messages have approvalStatus as null (automatically approved)
+      // ✅ Managers and Team Leads → no approval flow
       approvalStatus = null;
 
-      // For Team Leads, also include managers as receivers
       if (senderRole === "team_lead") {
-        const managerIds = managers.map((id) => String(id));
-        receivers = [...receivers, ...managerIds];
+        // TLs → forward to managers too
+        receivers = [...receivers, ...managers.map((id) => String(id))];
       }
-    } else if (needsApproval) {
-      approvalStatus = "pending";
-      // For needs_approval → only TLs initially
-      receivers = [...tls.map((id) => String(id))];
-    } else if (isDirect) {
-      approvalStatus = "approved";
-      receivers = [...receivers, ...managers.map((id) => String(id))];
-    }
-
-    // If still no receivers, apply fallback logic
-    if (receivers.length === 0) {
-      if (senderRole === "employee") {
-        if (isDirect) {
-          receivers = [...tls, ...managers];
-          approvalStatus = "approved";
-        } else {
-          receivers = [...tls];
-          approvalStatus = "pending";
-        }
-      } else if (senderRole === "team_lead") {
-        receivers = [...managers];
-        approvalStatus = null; // Team Lead gets null
-      } else if (senderRole === "manager") {
-        receivers = [...tls];
-        approvalStatus = null; // Manager gets null
+    } else if (senderRole === "employee") {
+      if (needsApproval) {
+        // ✅ Employee with supervision → TLs added, pending approval
+        approvalStatus = "pending";
+        receivers = [...receivers, ...tls.map((id) => String(id))];
+      } else {
+        // ✅ Employee without supervision → TLs + Managers added, auto-approved
+        approvalStatus = "approved";
+        receivers = [
+          ...receivers,
+          ...tls.map((id) => String(id)),
+          ...managers.map((id) => String(id)),
+        ];
       }
     }
 
@@ -554,7 +538,7 @@ exports.createMessage = async function createMessage(req, res) {
       receiver: receivers,
       subject: subject || "",
       note: note || "",
-      approvalStatus: approvalStatus || undefined, // This will be null for Team Leads and Managers
+      approvalStatus: approvalStatus || undefined,
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
@@ -573,28 +557,22 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // Emit new_message event for real-time updates
+    // Emit real-time events
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
-      // Notify all receivers
       receivers.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: populated,
-          type: "new_assignment"
+          type: "new_assignment",
         });
       });
-
-      // Notify in client room
       io.to(`client_${client}`).emit("new_message", {
         message: populated,
-        type: "new_assignment"
+        type: "new_assignment",
       });
-
-      // Notify sender about successful creation
       io.to(`employee_${sender}`).emit("new_message", {
         message: populated,
-        type: "message_created"
+        type: "message_created",
       });
     }
 
@@ -650,18 +628,18 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
     // Emit new_message event for scheduling
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about successful scheduling
       io.to(`employee_${req.employee._id}`).emit("new_message", {
         message: populated,
-        type: "message_scheduled"
+        type: "message_scheduled",
       });
 
       // Notify receivers that a message is scheduled for them
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: populated,
-          type: "message_scheduled_for_you"
+          type: "message_scheduled_for_you",
         });
       });
     }
@@ -726,13 +704,14 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     // Emit new_message event for unscheduling
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
-      const eventType = action === "send" ? "message_sent" : "message_unscheduled";
-      
+
+      const eventType =
+        action === "send" ? "message_sent" : "message_unscheduled";
+
       // Notify sender
       io.to(`employee_${req.employee._id}`).emit("new_message", {
         message: populated,
-        type: eventType
+        type: eventType,
       });
 
       // If sent immediately, notify receivers
@@ -740,7 +719,7 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
         msg.receiver.forEach((receiverId) => {
           io.to(`employee_${receiverId}`).emit("new_message", {
             message: populated,
-            type: "new_assignment"
+            type: "new_assignment",
           });
         });
       }
@@ -845,18 +824,18 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
     // Emit new_message event for rescheduling
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about successful rescheduling
       io.to(`employee_${req.employee._id}`).emit("new_message", {
         message: populated,
-        type: "message_rescheduled"
+        type: "message_rescheduled",
       });
 
       // Notify receivers about schedule update
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: populated,
-          type: "message_schedule_updated"
+          type: "message_schedule_updated",
         });
       });
     }
@@ -927,9 +906,10 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
           }
 
           // Notify sender that scheduled message was sent
-          const senderId = typeof message.sender === "string" 
-            ? message.sender 
-            : message.sender?._id;
+          const senderId =
+            typeof message.sender === "string"
+              ? message.sender
+              : message.sender?._id;
           if (senderId) {
             io.to(`employee_${senderId}`).emit("new_message", {
               message: message,
@@ -961,12 +941,11 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
-
 // PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
-    const msg = await WhatsAppMessage.findById(id);
+    const msg = await WhatsAppMessage.findById(id).populate("sender");
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
@@ -979,55 +958,51 @@ exports.approveMessage = async function approveMessage(req, res) {
     msg.approvalStatus = "approved";
     await msg.save();
 
-    // Forward to managers
-    const { managers } = await findTLsAndManagersByOwner(msg.owner);
-    if (managers.length === 0) {
-      return res.json({ message: "Approved but no managers found" });
-    }
-
-    const forwardMsg = await WhatsAppMessage.create({
-      owner: msg.owner,
-      client: msg.client,
-      sender: msg.sender,
-      receiver: managers,
-      subject: `Approved: ${msg.subject || "No Subject"}`,
-      note: msg.note || "",
-      attachments: msg.attachments,
-    });
-
-    const populated = await forwardMsg.populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
-    ]);
-
-    // Emit new_message event for approval
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
-      
-      // Notify original sender about approval
-      io.to(`employee_${msg.sender}`).emit("new_message", {
-        message: populated,
-        type: "message_approved"
-      });
-
-      // Notify managers about new approved message
-      managers.forEach((managerId) => {
-        io.to(`employee_${managerId}`).emit("new_message", {
-          message: populated,
-          type: "new_approved_message"
+    // ✅ Forward only if sender was an Employee under supervision
+    const senderRole = normalizeRole(msg.sender?.role || "");
+    if (senderRole === "employee") {
+      const { managers } = await findTLsAndManagersByOwner(msg.owner);
+      if (managers.length > 0) {
+        const forwardMsg = await WhatsAppMessage.create({
+          owner: msg.owner,
+          client: msg.client,
+          sender: msg.sender,
+          receiver: managers,
+          subject: `Approved: ${msg.subject || "No Subject"}`,
+          note: msg.note || "",
+          attachments: msg.attachments,
         });
-      });
 
-      // Notify Team Lead about successful approval
-      io.to(`employee_${req.employee._id}`).emit("new_message", {
-        message: populated,
-        type: "approval_success"
-      });
+        const populated = await forwardMsg.populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+        ]);
+
+        if (req.app.get("io")) {
+          const io = req.app.get("io");
+          io.to(`employee_${msg.sender._id}`).emit("new_message", {
+            message: populated,
+            type: "message_approved",
+          });
+          managers.forEach((managerId) => {
+            io.to(`employee_${managerId}`).emit("new_message", {
+              message: populated,
+              type: "new_approved_message",
+            });
+          });
+          io.to(`employee_${req.employee._id}`).emit("new_message", {
+            message: populated,
+            type: "approval_success",
+          });
+        }
+
+        return res.json(populated);
+      }
     }
 
-    res.json(populated);
+    return res.json({ message: "Message approved" });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to approve message" });
@@ -1054,17 +1029,17 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     // Emit new_message event for disapproval
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify original sender about disapproval
       io.to(`employee_${msg.sender}`).emit("new_message", {
         message: msg,
-        type: "message_disapproved"
+        type: "message_disapproved",
       });
 
       // Notify Team Lead about successful disapproval
       io.to(`employee_${req.employee._id}`).emit("new_message", {
         message: msg,
-        type: "disapproval_success"
+        type: "disapproval_success",
       });
     }
 
@@ -1119,18 +1094,18 @@ exports.updateMessage = async function updateMessage(req, res) {
     // Emit new_message event for update
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about update
       io.to(`employee_${msg.sender}`).emit("new_message", {
         message: populated,
-        type: "message_updated"
+        type: "message_updated",
       });
 
       // Notify receivers about update
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: populated,
-          type: "message_updated"
+          type: "message_updated",
         });
       });
     }
@@ -1151,18 +1126,18 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     // Emit new_message event for deletion
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about deletion
       io.to(`employee_${msg.sender}`).emit("new_message", {
         message: msg,
-        type: "message_deleted"
+        type: "message_deleted",
       });
 
       // Notify receivers about deletion
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: msg,
-          type: "message_deleted"
+          type: "message_deleted",
         });
       });
     }
@@ -1200,18 +1175,18 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     // Emit new_message event for attachment upload
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about attachment upload
       io.to(`employee_${msg.sender}`).emit("new_message", {
         message: populated,
-        type: "attachments_uploaded"
+        type: "attachments_uploaded",
       });
 
       // Notify receivers about new attachments
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: populated,
-          type: "attachments_added"
+          type: "attachments_added",
         });
       });
     }
@@ -1258,18 +1233,18 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
     // Emit new_message event for attachment deletion
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       // Notify sender about attachment deletion
       io.to(`employee_${msg.sender}`).emit("new_message", {
         message: msg,
-        type: "attachment_deleted"
+        type: "attachment_deleted",
       });
 
       // Notify receivers about attachment deletion
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: msg,
-          type: "attachment_deleted"
+          type: "attachment_deleted",
         });
       });
     }

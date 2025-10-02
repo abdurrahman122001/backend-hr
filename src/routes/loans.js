@@ -584,9 +584,7 @@ router.delete("/loan/:loanId", async (req, res) => {
       .json({ error: "Failed to delete loan", details: err.message });
   }
 });
-
-// Loan benefits (kept consistent with schedule-first rule)
-// Loan benefits (kept consistent with schedule-first rule)
+// Loan benefits with complete balance calculation
 router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -629,13 +627,13 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
             0
           : 0;
 
-        let paymentAmount = 0;
+        let currentMonthPayment = 0;
         if (entry.totalPayment) {
-          paymentAmount =
+          currentMonthPayment =
             parseFloat(await decrypt(entry.totalPayment, req.decryptionKey)) ||
             0;
         } else if (loan.monthlyInstallment) {
-          paymentAmount =
+          currentMonthPayment =
             parseFloat(
               await decrypt(loan.monthlyInstallment, req.decryptionKey)
             ) || 0;
@@ -654,55 +652,85 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
             0
           : 0;
 
-        const paidPrev = Array.isArray(loan.paymentSchedule)
-          ? await loan.paymentSchedule.reduce(async (accP, ps) => {
-              const acc = await accP;
-              const psYear = Number(ps.year);
-              const psMonthIdx = monthsList.indexOf(normMonth(ps.month));
-              const curMonthIdx = monthsList.indexOf(month);
+        // Calculate previous months payments (all payments before current month)
+        let previousMonthsPayment = 0;
+        if (Array.isArray(loan.paymentSchedule)) {
+          for (const ps of loan.paymentSchedule) {
+            const psYear = Number(ps.year);
+            const psMonthIdx = monthsList.indexOf(normMonth(ps.month));
+            const curMonthIdx = monthsList.indexOf(month);
 
-              const isBefore =
-                psYear < year || (psYear === year && psMonthIdx < curMonthIdx);
+            const isBefore =
+              psYear < year || (psYear === year && psMonthIdx < curMonthIdx);
 
-              if (isBefore && ps.totalPayment) {
-                const val =
-                  parseFloat(
-                    await decrypt(ps.totalPayment, req.decryptionKey)
-                  ) || 0;
-                return acc + val;
-              }
-              return acc;
-            }, Promise.resolve(0))
-          : 0;
+            if (isBefore && ps.totalPayment) {
+              const val =
+                parseFloat(await decrypt(ps.totalPayment, req.decryptionKey)) ||
+                0;
+              previousMonthsPayment += val;
+            }
+          }
+        }
 
-        // 🔹 Calculate net balance (just calculate, not pushed)
-        const netBalance = totalToBePaid - (paidPrev + paymentAmount);
-        // Create a separate entry for each loan that has a schedule in this month
+        // Calculate balances
+        const totalPaidSoFar = previousMonthsPayment + currentMonthPayment;
+        const principalBalance = Math.max(0, totalToBePaid - totalPaidSoFar);
+        const markupBalance = Math.max(
+          0,
+          totalMarkup - (totalPaidSoFar - (loanAmount - principalBalance))
+        );
+
+        // Create loan detail entry with complete balance information
         loanDetails.push({
-          type: loan.type || "Loan",
-          monthlyInstallment: paymentAmount,
-          paidPrev,
-          loanAmount,
-          totalMarkup,
-          totalToBePaid,
-          markupAmount,
+          type: loan.type || "Personal Loan",
+          amountPaidCurrentMonth: currentMonthPayment,
+          amountPaidPreviousMonths: previousMonthsPayment,
+          balancePrincipal: Math.max(
+            0,
+            loanAmount -
+              (previousMonthsPayment + (currentMonthPayment - markupAmount))
+          ),
+          balanceMarkup: markupBalance,
+          netBalance: principalBalance,
+          // Additional details for reference
+          loanAmount: loanAmount,
+          totalMarkup: totalMarkup,
+          totalToBePaid: totalToBePaid,
+          markupAmount: markupAmount,
           markupValue: loan.markupValue || 0,
           markupType: loan.markupType || "fixed",
           loanId: loan._id.toString(),
         });
 
         totalLoanBenefits += markupAmount;
-        totalLoanInstallments += paymentAmount;
+        totalLoanInstallments += currentMonthPayment;
       } catch (e) {
         console.error(`Decryption failed for loan ${loan._id}:`, e);
       }
     }
 
     res.json({
-      loanDetails, // This will contain separate entries for each loan with a schedule in this month
-      markupValue: loanDetails[0]?.markupValue || 0,
+      loanDetails, // Contains complete balance information for each loan
       totalLoanBenefits: Math.round(totalLoanBenefits),
-      totalLoanInstallments,
+      totalLoanInstallments: Math.round(totalLoanInstallments),
+      summary: {
+        totalAmountPaidCurrentMonth: Math.round(totalLoanInstallments),
+        totalAmountPaidPreviousMonths: Math.round(
+          loanDetails.reduce(
+            (sum, loan) => sum + loan.amountPaidPreviousMonths,
+            0
+          )
+        ),
+        totalBalancePrincipal: Math.round(
+          loanDetails.reduce((sum, loan) => sum + loan.balancePrincipal, 0)
+        ),
+        totalBalanceMarkup: Math.round(
+          loanDetails.reduce((sum, loan) => sum + loan.balanceMarkup, 0)
+        ),
+        totalNetBalance: Math.round(
+          loanDetails.reduce((sum, loan) => sum + loan.netBalance, 0)
+        ),
+      },
     });
   } catch (err) {
     console.error("Error in loan-benefits:", err);
