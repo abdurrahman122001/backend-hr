@@ -152,7 +152,7 @@ const GRATUITY_FUND_FIELDS = [
   { label: "Balance", key: "gratuityFundBalance" },
 ];
 
-// Main cell formatter for all numbers (avoids NaN)
+// Main cell formatter for all numbers (avoids NaN) - UPDATED FOR LOAN DETAILS
 function safeAmountCell(val) {
   if (
     val === undefined ||
@@ -164,7 +164,91 @@ function safeAmountCell(val) {
     return "-";
   }
   const num = Math.round(Number(val));
-  return num !== 0 && !isNaN(num) ? num.toLocaleString() : "-";
+  return !isNaN(num) ? num.toLocaleString() : "-";
+}
+
+// Render the Loan Table with updated field names - UPDATED TO SHOW ZERO
+function renderLoanTable(loans = []) {
+  const arr = Array.isArray(loans) && loans.length ? loans : [{}];
+
+  console.log("Rendering loan table with data:", loans);
+
+  return `
+    <div style="margin-bottom: 24px;">
+      <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
+        Loan Details
+      </div>
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
+        <thead>
+          <tr style="background:#f1f5f9;">
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Type</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Current Month</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Previous Month(s)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Markup)</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Net Balance</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${arr
+            .map(
+              (loan) => `
+            <tr>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.type || "-"
+              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.amountPaidCurrentMonth !== undefined &&
+                loan.amountPaidCurrentMonth !== null &&
+                loan.amountPaidCurrentMonth !== "" &&
+                !isNaN(Number(loan.amountPaidCurrentMonth))
+                  ? Math.round(
+                      Number(loan.amountPaidCurrentMonth)
+                    ).toLocaleString()
+                  : "-"
+              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.amountPaidPreviousMonths !== undefined &&
+                loan.amountPaidPreviousMonths !== null &&
+                loan.amountPaidPreviousMonths !== "" &&
+                !isNaN(Number(loan.amountPaidPreviousMonths))
+                  ? Math.round(
+                      Number(loan.amountPaidPreviousMonths)
+                    ).toLocaleString()
+                  : "-"
+              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.balancePrincipal !== undefined &&
+                loan.balancePrincipal !== null &&
+                loan.balancePrincipal !== "" &&
+                !isNaN(Number(loan.balancePrincipal))
+                  ? Math.round(Number(loan.balancePrincipal)).toLocaleString()
+                  : "-"
+              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.balanceMarkup !== undefined &&
+                loan.balanceMarkup !== null &&
+                loan.balanceMarkup !== "" &&
+                !isNaN(Number(loan.balanceMarkup))
+                  ? Math.round(Number(loan.balanceMarkup)).toLocaleString()
+                  : "-"
+              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
+                loan.netBalance !== undefined &&
+                loan.netBalance !== null &&
+                loan.netBalance !== "" &&
+                !isNaN(Number(loan.netBalance))
+                  ? Math.round(Number(loan.netBalance)).toLocaleString()
+                  : "-"
+              }</td>
+            </tr>
+          `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
 }
 
 function safeDecimalCell(val) {
@@ -936,7 +1020,7 @@ module.exports = async function sendSlipEmail(req, res) {
     const showProvidentFund = salaryFieldsDoc?.showProvidentFund !== false;
     const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
-    
+
     // Ensure loanBenefits is included in enabledCompFields
     let enabledCompFields = normalizeFields(
       salaryFieldsDoc?.enabledSalaryFields || [...ALLOWANCE_ORDER],
@@ -1070,7 +1154,7 @@ module.exports = async function sendSlipEmail(req, res) {
       // Calculate loan benefits and details
       let totalLoanBenefits = 0;
       hasActiveLoans = false;
-      
+
       if (employeeId && showLoanDetails) {
         try {
           const loanData = await calculateLoanBenefits(
@@ -1085,19 +1169,19 @@ module.exports = async function sendSlipEmail(req, res) {
           loans = loanData.loanDetails || [];
           totalLoanBenefits = loanData.totalLoanBenefits || 0;
           hasActiveLoans = loans.length > 0;
-          
+
           console.log("Loan calculation result:", {
             loansCount: loans.length,
             totalLoanBenefits,
             hasActiveLoans,
-            loans: loans.map(loan => ({
+            loans: loans.map((loan) => ({
               type: loan.type,
               currentMonth: loan.amountPaidCurrentMonth,
               previousMonths: loan.amountPaidPreviousMonths,
               principalBalance: loan.balancePrincipal,
               markupBalance: loan.balanceMarkup,
-              netBalance: loan.netBalance
-            }))
+              netBalance: loan.netBalance,
+            })),
           });
         } catch (error) {
           console.error("Error calculating loan benefits:", error);
@@ -1349,7 +1433,7 @@ module.exports = async function sendSlipEmail(req, res) {
       showLoanDetails,
       hasActiveLoans,
       loansCount: loans.length,
-      loans: loans
+      loans: loans,
     });
 
     // Generate HTML
@@ -1389,13 +1473,13 @@ module.exports = async function sendSlipEmail(req, res) {
         pass: process.env.MAIL_PASSWORD,
       },
     });
-    
+
     console.log("Sending email with loan details:", {
       hasActiveLoans,
       loansCount: loans.length,
-      showLoanDetails
+      showLoanDetails,
     });
-    
+
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${
         process.env.MAIL_FROM_ADDRESS
