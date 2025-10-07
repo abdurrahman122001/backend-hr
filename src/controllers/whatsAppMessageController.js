@@ -40,25 +40,39 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
-
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
+
   const me = oid(String(req.employee._id));
   if (!me) return q;
 
-  const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }];
+  const currentUserRole = normalizeRole(req.employee?.role || "");
+  const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // ** STRICT scheduled-only case **
-  if (q.isScheduled === true && q.status === "scheduled") {
-    // only show messages that are truly scheduled to this user
+  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+  if (
+    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    ownerId
+  ) {
+    return { ...q, owner: ownerId };
+  }
+
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see only messages where they are a receiver
+  if (currentUserRole === "team_lead") {
     return {
       ...q,
-      $and: [{ $or: visOr }],
+      $or: [{ receiver: me }, { receiver: { $in: [me] } }],
     };
   }
 
-  // ** normal inbox case (mix of drafts, sent, and due-to-be-sent) **
+  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
+  const now = new Date();
+  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { ...q, $and: [{ $or: visOr }] };
+  }
+
   return {
     $or: [
       {
@@ -66,13 +80,13 @@ async function applyVisibility(q, req) {
         $and: [
           {
             $or: [
-              { isScheduled: { $ne: true } }, // drafts & sent
-              { isScheduled: true, status: "sent" }, // scheduled-but-sent
+              { isScheduled: { $ne: true } },
+              { isScheduled: true, status: "sent" },
               {
                 isScheduled: true,
                 status: "scheduled",
                 scheduledFor: { $lte: now },
-              }, // due now
+              },
             ],
           },
           { $or: visOr },
@@ -82,8 +96,8 @@ async function applyVisibility(q, req) {
         ...q,
         isScheduled: true,
         status: "scheduled",
-        scheduledFor: { $gt: now }, // future
-        sender: me, // only sender may see future schedules
+        scheduledFor: { $gt: now },
+        sender: me,
       },
     ],
   };
@@ -223,6 +237,7 @@ exports.listMessages = async function listMessages(req, res) {
       page = 1,
       between: betweenRaw,
       filter,
+      approvalStatus,
     } = req.query;
 
     const q = {};
@@ -232,16 +247,27 @@ exports.listMessages = async function listMessages(req, res) {
     else if (req.employee?.owner) q.owner = req.employee.owner;
     if (isObjId(client)) q.client = client;
 
-    // Status filter for drafts/sent/cancelled
+    // Status filter
     if (
       status &&
       ["draft", "scheduled", "sent", "cancelled"].includes(status)
     ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
+    } else {
+      // Exclude drafts by default
+      q.status = { $ne: "draft" };
     }
 
-    // ** frontend "filter=scheduled" **
+    // Approval status filter
+    if (
+      approvalStatus &&
+      ["pending", "approved", "disapproved"].includes(approvalStatus)
+    ) {
+      q.approvalStatus = approvalStatus;
+    }
+
+    // "filter=scheduled"
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -261,19 +287,39 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // between / participant / sender / receiver
-    const between = normalizeIds(betweenRaw);
-    if (between.length === 2) {
-      const [a, b] = between;
-      q.$or = [
-        { sender: a, receiver: b },
-        { sender: b, receiver: a },
-      ];
-    } else if (isObjId(participant)) {
-      q.$or = [{ sender: participant }, { receiver: participant }];
+    // FIXED: Team leads should only see messages where they are receivers
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const isTeamLead = currentUserRole === "team_lead";
+    const me = oid(String(req.employee._id));
+
+    if (isTeamLead && me) {
+      // Team leads can only see messages where they are in the receiver array
+      q.$or = [{ receiver: me }, { receiver: { $in: [me] } }];
     } else {
-      if (isObjId(sender)) q.sender = sender;
-      if (isObjId(receiver)) q.receiver = receiver;
+      // Normal user visibility rules
+      const between = normalizeIds(betweenRaw);
+      if (between.length === 2) {
+        const [a, b] = between;
+        q.$or = [
+          { sender: a, receiver: { $in: [b] } },
+          { sender: b, receiver: { $in: [a] } },
+          { sender: a, receiver: b },
+          { sender: b, receiver: a },
+        ];
+      } else if (isObjId(participant)) {
+        // FIX: Handle array receiver properly
+        q.$or = [
+          { sender: participant },
+          { receiver: participant }, // single receiver
+          { receiver: { $in: [participant] } }, // array receiver
+        ];
+      } else {
+        if (isObjId(sender)) q.sender = sender;
+        if (isObjId(receiver)) {
+          // FIX: Handle both single receiver and array receiver
+          q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
+        }
+      }
     }
 
     // Must have at least one scope
@@ -284,16 +330,25 @@ exports.listMessages = async function listMessages(req, res) {
       !q.receiver &&
       !q.$or &&
       !q.status &&
-      q.isScheduled === undefined
+      q.isScheduled === undefined &&
+      !q.approvalStatus
     ) {
       return res.status(400).json({
         error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, or isScheduled",
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
       });
     }
 
-    // Apply visibility rules
+    // Apply visibility rules for ALL users including team leads
     const qFinal = await applyVisibility(q, req);
+
+    console.log("🔍 Final query:", JSON.stringify(qFinal, null, 2));
+    console.log(
+      "👤 Current user role:",
+      currentUserRole,
+      "Team lead:",
+      isTeamLead
+    );
 
     // Pagination & fetch
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
@@ -316,12 +371,22 @@ exports.listMessages = async function listMessages(req, res) {
       WhatsAppMessage.countDocuments(qFinal),
     ]);
 
+    // CRITICAL FIX: Ensure receiver is always treated as array for consistency
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      receiver: Array.isArray(item.receiver)
+        ? item.receiver
+        : [item.receiver].filter(Boolean),
+    }));
+
     res.json({
-      items,
+      items: normalizedItems,
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
+      userRole: currentUserRole,
+      isTeamLead: isTeamLead,
     });
   } catch (e) {
     console.error(e);
@@ -416,7 +481,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
   }
 };
 
-// CREATE MESSAGE WITH SCHEDULING SUPPORT
+// CREATE MESSAGE WITH SUPERVISION LOGIC (UPDATED)
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -440,11 +505,13 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
-    // Collect receivers from body
+    // Start with ONLY the explicitly specified receivers
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
     if (receiversBody)
       receivers = receivers.concat(normalizeIds(receiversBody));
+
+    // Remove sender from receivers
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
@@ -456,8 +523,8 @@ exports.createMessage = async function createMessage(req, res) {
     const supervisionMode = String(
       senderDoc?.supervisionMode || ""
     ).toLowerCase();
-    const needsApproval = supervisionMode === "needs_approval"; // supervision enabled
-    const isDirect = supervisionMode === "direct"; // no supervision
+    const needsApproval = supervisionMode === "needs_approval";
+    const isDirect = supervisionMode === "direct";
 
     const Client = require("../models/ClientInfo");
     const clientDoc = await Client.findById(client)
@@ -466,7 +533,7 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // ✅ Always include assignedTo employee if present
+    // ✅ Always include assignedTo employee if present (but only if not already included)
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
       const assignedEmployeeId = String(clientDoc.assignedTo._id);
       if (
@@ -477,29 +544,43 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    /** ------------------ ROLE-BASED LOGIC ------------------ **/
-
-    if (senderRole === "manager" || senderRole === "team_lead") {
-      // ✅ Managers and Team Leads → no approval flow
+    // 🔑 CORRECTED Approval status logic - MATCHING ASSIGNMENT CONTROLLER
+    if (senderRole === "manager") {
       approvalStatus = null;
+      // Managers don't need approval, and we don't auto-add team leads
+    } else if (senderRole === "team_lead") {
+      approvalStatus = null;
+      // Team leads don't need approval, and we don't auto-add managers
+    } else if (needsApproval) {
+      // Needs approval - add team leads for review
+      approvalStatus = "pending";
+      receivers = [...receivers, ...tls.map((id) => String(id))];
+    } else if (isDirect) {
+      // DIRECT SUPERVISION - NO TEAM LEADS INVOLVED (KEY DIFFERENCE)
+      approvalStatus = "approved";
+      // Don't add any team leads or managers - message goes directly to intended receivers
+    }
 
-      if (senderRole === "team_lead") {
-        // TLs → forward to managers too
-        receivers = [...receivers, ...managers.map((id) => String(id))];
-      }
-    } else if (senderRole === "employee") {
-      if (needsApproval) {
-        // ✅ Employee with supervision → TLs added, pending approval
-        approvalStatus = "pending";
-        receivers = [...receivers, ...tls.map((id) => String(id))];
-      } else {
-        // ✅ Employee without supervision → TLs + Managers added, auto-approved
-        approvalStatus = "approved";
-        receivers = [
-          ...receivers,
-          ...tls.map((id) => String(id)),
-          ...managers.map((id) => String(id)),
-        ];
+    // 🔥 Fallback logic if no receivers are still found
+    if (receivers.length === 0) {
+      if (senderRole === "employee") {
+        if (isDirect) {
+          // For direct mode with no receivers, add managers for visibility
+          receivers = [...managers];
+          approvalStatus = "approved";
+        } else {
+          // For needs_approval mode with no receivers, add team leads
+          receivers = [...tls];
+          approvalStatus = "pending";
+        }
+      } else if (senderRole === "team_lead") {
+        // Team lead with no receivers - add managers
+        receivers = [...managers];
+        approvalStatus = null;
+      } else if (senderRole === "manager") {
+        // Manager with no receivers - add team leads
+        receivers = [...tls];
+        approvalStatus = null;
       }
     }
 
@@ -528,7 +609,7 @@ exports.createMessage = async function createMessage(req, res) {
       status = "scheduled";
       scheduledAt = new Date();
       scheduledBy = sender;
-      sentAt = null; // Will be set when actually sent
+      sentAt = null;
     }
 
     const msgData = {
@@ -538,7 +619,7 @@ exports.createMessage = async function createMessage(req, res) {
       receiver: receivers,
       subject: subject || "",
       note: note || "",
-      approvalStatus: approvalStatus || undefined,
+      approvalStatus: approvalStatus,
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
@@ -582,7 +663,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {

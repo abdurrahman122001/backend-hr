@@ -31,22 +31,30 @@ const AssignmentMessageSchema = new Schema(
 
     subject: { type: String },
     note: { type: String },
-    approvalStatus: { 
-      type: String, 
-      enum: ["pending", "approved", "disapproved"], 
-      default: null 
+    approvalStatus: {
+      type: String,
+      enum: ["pending", "approved", "disapproved"],
+      default: null
     },
 
     // Scheduling fields
     isScheduled: { type: Boolean, default: false },
+    starred: {
+      type: Boolean,
+      default: false
+    },
+    starredBy: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee"
+    }],
     scheduledFor: { type: Date }, // When the message should be sent
     scheduledAt: { type: Date }, // When the message was scheduled
     scheduledBy: { type: Schema.Types.ObjectId, ref: "Employee" }, // Who scheduled it
     sentAt: { type: Date }, // When it was actually sent
-    status: { 
-      type: String, 
-      enum: ["draft", "scheduled", "sent", "cancelled"], 
-      default: "sent" 
+    status: {
+      type: String,
+      enum: ["draft", "scheduled", "sent", "cancelled"],
+      default: "sent"
     },
 
     // Files

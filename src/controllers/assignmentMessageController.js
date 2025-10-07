@@ -40,25 +40,39 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
-
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
+
   const me = oid(String(req.employee._id));
   if (!me) return q;
 
-  const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }];
+  const currentUserRole = normalizeRole(req.employee?.role || "");
+  const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // ** STRICT scheduled-only case **
-  if (q.isScheduled === true && q.status === "scheduled") {
-    // only show messages that are truly scheduled to this user
+  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+  if (
+    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    ownerId
+  ) {
+    return { ...q, owner: ownerId };
+  }
+
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see only messages where they are a receiver
+  if (currentUserRole === "team_lead") {
     return {
       ...q,
-      $and: [ { $or: visOr } ]
+      $or: [{ receiver: me }, { receiver: { $in: [me] } }],
     };
   }
 
-  // ** normal inbox case (mix of drafts, sent, and due-to-be-sent) **
+  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
+  const now = new Date();
+  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { ...q, $and: [{ $or: visOr }] };
+  }
+
   return {
     $or: [
       {
@@ -66,22 +80,26 @@ async function applyVisibility(q, req) {
         $and: [
           {
             $or: [
-              { isScheduled: { $ne: true } },                           // drafts & sent
-              { isScheduled: true, status: "sent" },                   // scheduled-but-sent
-              { isScheduled: true, status: "scheduled", scheduledFor: { $lte: now } } // due now
-            ]
+              { isScheduled: { $ne: true } },
+              { isScheduled: true, status: "sent" },
+              {
+                isScheduled: true,
+                status: "scheduled",
+                scheduledFor: { $lte: now },
+              },
+            ],
           },
-          { $or: visOr }
-        ]
+          { $or: visOr },
+        ],
       },
       {
         ...q,
         isScheduled: true,
         status: "scheduled",
-        scheduledFor: { $gt: now }, // future
-        sender: me                   // only sender may see future schedules
-      }
-    ]
+        scheduledFor: { $gt: now },
+        sender: me,
+      },
+    ],
   };
 }
 
@@ -89,8 +107,13 @@ async function applyVisibility(q, req) {
 function getIO(req) {
   return req.app.get("io");
 }
-
-async function emitToAssignmentClients(io, message, eventName = "new_assignment_message") {
+/** ---------- TARGETED SOCKET EMISSION ---------- **/
+/** ---------- TARGETED SOCKET EMISSION WITH TEAM LEAD VISIBILITY ---------- **/
+async function emitToSpecificReceivers(
+  io,
+  message,
+  eventName = "new_assignment_message"
+) {
   try {
     const populatedMessage = await AssignmentMessage.findById(message._id)
       .populate("owner")
@@ -101,43 +124,120 @@ async function emitToAssignmentClients(io, message, eventName = "new_assignment_
       .populate("attachments.uploadedBy");
 
     if (!populatedMessage) {
-      console.error("❌ Message not found for emission:", message._id);
+      console.error("❌ Message not found for targeted emission:", message._id);
       return;
     }
 
-    const clientId = typeof populatedMessage.client === 'string' 
-      ? populatedMessage.client 
-      : populatedMessage.client?._id;
+    // CRITICAL: Extract ONLY the specific receiver IDs from the message
+    const specificReceiverIds = [];
 
-    // Emit to assignment client room
-    if (clientId) {
-      io.to(`assignment_client_${clientId}`).emit(eventName, populatedMessage);
-      console.log(`📍 Emitted ${eventName} to assignment_client_${clientId}`);
+    if (Array.isArray(populatedMessage.receiver)) {
+      populatedMessage.receiver.forEach((receiver) => {
+        const receiverId =
+          typeof receiver === "string" ? receiver : receiver._id;
+        if (
+          receiverId &&
+          receiverId.toString() !== populatedMessage.sender?._id?.toString()
+        ) {
+          specificReceiverIds.push(receiverId.toString());
+        }
+      });
+    } else if (populatedMessage.receiver) {
+      const receiverId =
+        typeof populatedMessage.receiver === "string"
+          ? populatedMessage.receiver
+          : populatedMessage.receiver?._id;
+      if (
+        receiverId &&
+        receiverId.toString() !== populatedMessage.sender?._id?.toString()
+      ) {
+        specificReceiverIds.push(receiverId.toString());
+      }
     }
 
-    // Emit to all receivers
-    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
-      populatedMessage.receiver.forEach((receiver) => {
-        const receiverId = typeof receiver === "string" ? receiver : receiver._id;
-        if (receiverId) {
-          io.to(`employee_${receiverId}`).emit(eventName, populatedMessage);
-          console.log(`📍 Emitted ${eventName} to employee_${receiverId}`);
+    // Get sender ID
+    const senderId =
+      typeof populatedMessage.sender === "string"
+        ? populatedMessage.sender
+        : populatedMessage.sender?._id;
+
+    // Combine recipients (sender + specific receivers) and remove duplicates
+    const allRecipients = [
+      ...new Set(
+        [senderId?.toString(), ...specificReceiverIds].filter(Boolean)
+      ),
+    ];
+
+    console.log(`🎯 Targeted emission for ${eventName}:`, {
+      messageId: populatedMessage._id,
+      sender: senderId,
+      specificReceivers: specificReceiverIds,
+      allRecipients: allRecipients,
+    });
+
+    // CRITICAL: Also send to ALL team leads for the owner (for supervision visibility)
+    const ownerId =
+      typeof populatedMessage.owner === "string"
+        ? populatedMessage.owner
+        : populatedMessage.owner?._id;
+
+    if (ownerId) {
+      const { tls } = await findTLsAndManagersByOwner(ownerId);
+      const teamLeadIds = tls.map((id) => id.toString());
+
+      console.log(`👥 Team leads for owner ${ownerId}:`, teamLeadIds);
+
+      // Add team leads to recipients (they get read-only access to all messages)
+      teamLeadIds.forEach((teamLeadId) => {
+        if (!allRecipients.includes(teamLeadId)) {
+          allRecipients.push(teamLeadId);
+          console.log(
+            `📍 Added team lead ${teamLeadId} for supervision visibility`
+          );
         }
       });
     }
 
-    // Emit to sender
-    const senderId = typeof populatedMessage.sender === "string" 
-      ? populatedMessage.sender 
-      : populatedMessage.sender?._id;
-    if (senderId) {
-      io.to(`employee_${senderId}`).emit(eventName, populatedMessage);
-      console.log(`📍 Emitted ${eventName} to sender employee_${senderId}`);
+    // Send to ALL recipients (specific receivers + sender + team leads)
+    allRecipients.forEach((recipientId) => {
+      if (recipientId) {
+        io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
+        console.log(`📍 Sent ${eventName} to employee_${recipientId}`);
+      }
+    });
+
+    console.log(
+      `✅ Successfully emitted ${eventName} to ${allRecipients.length} recipients (including team leads)`
+    );
+  } catch (error) {
+    console.error("❌ Error in emitToSpecificReceivers:", error);
+    throw error;
+  }
+}
+/** ---------- TARGETED MESSAGE EMISSION (REPLACES BROADCAST) ---------- **/
+async function emitToAssignmentClients(
+  io,
+  message,
+  eventName = "new_assignment_message"
+) {
+  try {
+    // For normal messages, use targeted emission instead of broadcasting
+    if (eventName === "new_assignment_message") {
+      return await emitToSpecificReceivers(io, message, eventName);
     }
 
-    console.log(`✅ Successfully emitted ${eventName} for message ${message._id}`);
+    // For other events (updates, etc.), still use targeted approach
+    const populatedMessage = await AssignmentMessage.findById(message._id)
+      .populate("owner")
+      .populate("sender")
+      .populate("receiver")
+      .populate("client");
+
+    if (!populatedMessage) return;
+
+    await emitToSpecificReceivers(io, populatedMessage, eventName);
   } catch (error) {
-    console.error("❌ Error emitting socket event:", error);
+    console.error("❌ Error in emitToAssignmentClients:", error);
   }
 }
 
@@ -151,48 +251,20 @@ async function emitMessageUpdate(io, message, action) {
 
     if (!populatedMessage) return;
 
-    const clientId = typeof populatedMessage.client === 'string' 
-      ? populatedMessage.client 
-      : populatedMessage.client?._id;
+    // Use targeted emission for updates as well
+    await emitToSpecificReceivers(
+      io,
+      populatedMessage,
+      "assignment_message_updated"
+    );
 
-    if (clientId) {
-      io.to(`assignment_client_${clientId}`).emit("assignment_message_updated", {
-        message: populatedMessage,
-        action: action
-      });
-    }
-
-    // Notify all participants
-    const allParticipants = new Set();
-    
-    // Add sender
-    const senderId = typeof populatedMessage.sender === "string" 
-      ? populatedMessage.sender 
-      : populatedMessage.sender?._id;
-    if (senderId) allParticipants.add(senderId);
-
-    // Add receivers
-    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
-      populatedMessage.receiver.forEach((receiver) => {
-        const receiverId = typeof receiver === "string" ? receiver : receiver._id;
-        if (receiverId) allParticipants.add(receiverId);
-      });
-    }
-
-    // Emit to all participants
-    allParticipants.forEach(participantId => {
-      io.to(`employee_${participantId}`).emit("assignment_message_updated", {
-        message: populatedMessage,
-        action: action
-      });
-    });
-
-    console.log(`✅ Emitted assignment_message_updated for ${action}`);
+    console.log(
+      `✅ Emitted assignment_message_updated for ${action} to specific recipients`
+    );
   } catch (error) {
     console.error("❌ Error emitting message update:", error);
   }
 }
-
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
 async function findTLsAndManagersByOwner(ownerId) {
   if (!isObjId(ownerId)) return { tls: [], managers: [], employees: [] };
@@ -257,66 +329,76 @@ function validateScheduleTime(scheduledFor) {
 }
 
 // GET SCHEDULED MESSAGES FOR SPECIFIC CLIENT
-exports.getScheduledMessagesForClient = async function getScheduledMessagesForClient(req, res) {
-  try {
-    const { clientId } = req.params;
-    const { limit = 50, page = 1 } = req.query;
+exports.getScheduledMessagesForClient =
+  async function getScheduledMessagesForClient(req, res) {
+    try {
+      const { clientId } = req.params;
+      const { limit = 50, page = 1 } = req.query;
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
+      if (!isObjId(clientId)) {
+        return res.status(400).json({ error: "Valid client ID is required" });
+      }
+
+      const q = {
+        client: clientId,
+        isScheduled: true,
+        status: "scheduled",
+      };
+
+      // Apply visibility rules
+      const qFinal = await applyVisibility(q, req);
+
+      const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+      const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+      const [items, total] = await Promise.all([
+        AssignmentMessage.find(qFinal)
+          .sort({ scheduledFor: 1 })
+          .skip((pageNum - 1) * lim)
+          .limit(lim)
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role" },
+            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "client", select: "_id clientName" },
+            { path: "scheduledBy", select: "_id name companyEmail" },
+          ])
+          .lean(),
+        AssignmentMessage.countDocuments(qFinal),
+      ]);
+
+      res.json({
+        items,
+        total,
+        page: pageNum,
+        pages: Math.ceil(total / lim),
+        limit: lim,
+        client: clientId,
+      });
+    } catch (e) {
+      console.error(e);
+      res
+        .status(500)
+        .json({ error: "Failed to fetch scheduled messages for client" });
     }
-
-    const q = {
-      client: clientId,
-      isScheduled: true,
-      status: "scheduled",
-    };
-
-    // Apply visibility rules
-    const qFinal = await applyVisibility(q, req);
-
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
-    const [items, total] = await Promise.all([
-      AssignmentMessage.find(qFinal)
-        .sort({ scheduledFor: 1 })
-        .skip((pageNum - 1) * lim)
-        .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-        ])
-        .lean(),
-      AssignmentMessage.countDocuments(qFinal),
-    ]);
-
-    res.json({
-      items,
-      total,
-      page: pageNum,
-      pages: Math.ceil(total / lim),
-      limit: lim,
-      client: clientId,
-    });
-  } catch (e) {
-    console.error(e);
-    res
-      .status(500)
-      .json({ error: "Failed to fetch scheduled messages for client" });
-  }
-};
-
+  };
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
-      client, sender, receiver, participant, owner,
-      status, isScheduled, scheduledBefore, scheduledAfter,
-      limit = 50, page = 1, between: betweenRaw,
-      filter
+      client,
+      sender,
+      receiver,
+      participant,
+      owner,
+      status,
+      isScheduled,
+      scheduledBefore,
+      scheduledAfter,
+      limit = 50,
+      page = 1,
+      between: betweenRaw,
+      filter,
+      approvalStatus,
     } = req.query;
 
     const q = {};
@@ -326,13 +408,27 @@ exports.listMessages = async function listMessages(req, res) {
     else if (req.employee?.owner) q.owner = req.employee.owner;
     if (isObjId(client)) q.client = client;
 
-    // Status filter for drafts/sent/cancelled
-    if (status && ["draft","scheduled","sent","cancelled"].includes(status)) {
+    // Status filter
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
+    } else {
+      // Exclude drafts by default
+      q.status = { $ne: "draft" };
     }
 
-    // ** frontend "filter=scheduled" **
+    // Approval status filter
+    if (
+      approvalStatus &&
+      ["pending", "approved", "disapproved"].includes(approvalStatus)
+    ) {
+      q.approvalStatus = approvalStatus;
+    }
+
+    // "filter=scheduled"
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -352,31 +448,72 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // between / participant / sender / receiver
-    const between = normalizeIds(betweenRaw);
-    if (between.length === 2) {
-      const [a,b] = between;
-      q.$or = [ { sender: a, receiver: b }, { sender: b, receiver: a } ];
-    } else if (isObjId(participant)) {
-      q.$or = [ { sender: participant }, { receiver: participant } ];
+    // FIXED: Team leads should only see messages where they are receivers
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const isTeamLead = currentUserRole === "team_lead";
+    const me = oid(String(req.employee._id));
+
+    if (isTeamLead && me) {
+      // Team leads can only see messages where they are in the receiver array
+      q.$or = [{ receiver: me }, { receiver: { $in: [me] } }];
     } else {
-      if (isObjId(sender)) q.sender = sender;
-      if (isObjId(receiver)) q.receiver = receiver;
+      // Normal user visibility rules
+      const between = normalizeIds(betweenRaw);
+      if (between.length === 2) {
+        const [a, b] = between;
+        q.$or = [
+          { sender: a, receiver: { $in: [b] } },
+          { sender: b, receiver: { $in: [a] } },
+          { sender: a, receiver: b },
+          { sender: b, receiver: a },
+        ];
+      } else if (isObjId(participant)) {
+        // FIX: Handle array receiver properly
+        q.$or = [
+          { sender: participant },
+          { receiver: participant }, // single receiver
+          { receiver: { $in: [participant] } }, // array receiver
+        ];
+      } else {
+        if (isObjId(sender)) q.sender = sender;
+        if (isObjId(receiver)) {
+          // FIX: Handle both single receiver and array receiver
+          q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
+        }
+      }
     }
 
     // Must have at least one scope
-    if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or && !q.status && q.isScheduled === undefined) {
+    if (
+      !q.owner &&
+      !q.client &&
+      !q.sender &&
+      !q.receiver &&
+      !q.$or &&
+      !q.status &&
+      q.isScheduled === undefined &&
+      !q.approvalStatus
+    ) {
       return res.status(400).json({
-        error: "Provide at least one scope: owner, client, sender, receiver, participant, status, or isScheduled"
+        error:
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
       });
     }
 
-    // Apply visibility rules
+    // Apply visibility rules for ALL users including team leads
     const qFinal = await applyVisibility(q, req);
 
+    console.log("🔍 Final query:", JSON.stringify(qFinal, null, 2));
+    console.log(
+      "👤 Current user role:",
+      currentUserRole,
+      "Team lead:",
+      isTeamLead
+    );
+
     // Pagination & fetch
-    const pageNum = Math.max(parseInt(page,10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit,10) || 50, 1), 200);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
@@ -392,25 +529,38 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(qFinal)
+      AssignmentMessage.countDocuments(qFinal),
     ]);
 
+    // CRITICAL FIX: Ensure receiver is always treated as array for consistency
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      receiver: Array.isArray(item.receiver)
+        ? item.receiver
+        : [item.receiver].filter(Boolean),
+    }));
+
     res.json({
-      items,
+      items: normalizedItems,
       total,
       page: pageNum,
-      pages: Math.ceil(total/lim),
-      limit: lim
+      pages: Math.ceil(total / lim),
+      limit: lim,
+      userRole: currentUserRole,
+      isTeamLead: isTeamLead,
     });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
-exports.listMessagesForManager = async function listMessagesForManager(req, res) {
+exports.listMessagesForManager = async function listMessagesForManager(
+  req,
+  res
+) {
   try {
-    const clientId = req.params.clientId || req.query.clientId || req.query.client || null;
+    const clientId =
+      req.params.clientId || req.query.clientId || req.query.client || null;
     const owner = req.query.owner || req.employee?.owner || null;
     const sender = req.query.sender || null;
     const receiver = req.query.receiver || req.query.toEmployee || null;
@@ -418,7 +568,10 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     const betweenRaw = req.query.between;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 100, 1), 200);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 100, 1),
+      200
+    );
 
     const q = {};
     if (isObjId(owner)) q.owner = owner;
@@ -430,7 +583,10 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
 
     // FIXED: Handle status filter for drafts to exclude scheduled messages
     const status = req.query.status;
-    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
     }
@@ -452,7 +608,8 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     // FIXED: Remove overly restrictive validation
     if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or) {
       return res.status(400).json({
-        error: "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
+        error:
+          "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
       });
     }
 
@@ -501,9 +658,13 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
+    // Start with ONLY the explicitly specified receivers
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-    if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+    if (receiversBody)
+      receivers = receivers.concat(normalizeIds(receiversBody));
+
+    // Remove sender from receivers
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
@@ -512,7 +673,9 @@ exports.createMessage = async function createMessage(req, res) {
     const senderRole = normalizeRole(senderDoc?.role || "");
 
     let approvalStatus;
-    const supervisionMode = String(senderDoc?.supervisionMode || "").toLowerCase();
+    const supervisionMode = String(
+      senderDoc?.supervisionMode || ""
+    ).toLowerCase();
     const needsApproval = supervisionMode === "needs_approval";
     const isDirect = supervisionMode === "direct";
 
@@ -523,48 +686,52 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // ✅ Always include Team Leads
-    if (tls.length > 0) {
-      receivers = [...receivers, ...tls.map((id) => String(id))];
-    }
-
-    // ✅ Always include assignedTo employee if present
+    // ✅ Always include assignedTo employee if present (but only if not already included)
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
       const assignedEmployeeId = String(clientDoc.assignedTo._id);
-      if (!receivers.includes(assignedEmployeeId) && assignedEmployeeId !== String(sender)) {
+      if (
+        !receivers.includes(assignedEmployeeId) &&
+        assignedEmployeeId !== String(sender)
+      ) {
         receivers.push(assignedEmployeeId);
       }
     }
 
-    // 🔑 UPDATED: Approval status logic - Team Leads and Managers get null approvalStatus
-    if (senderRole === "manager" || senderRole === "team_lead") {
+    // 🔑 CORRECTED Approval status logic
+    if (senderRole === "manager") {
       approvalStatus = null;
-      if (senderRole === "team_lead") {
-        const managerIds = managers.map((id) => String(id));
-        receivers = [...receivers, ...managerIds];
-      }
+      // Managers don't need approval, but we don't auto-add team leads
+    } else if (senderRole === "team_lead") {
+      approvalStatus = null;
+      // Team leads don't need approval, but we don't auto-add managers
     } else if (needsApproval) {
+      // Needs approval - add team leads for review
       approvalStatus = "pending";
-      receivers = [...tls.map((id) => String(id))];
+      receivers = [...receivers, ...tls.map((id) => String(id))];
     } else if (isDirect) {
+      // DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
       approvalStatus = "approved";
-      receivers = [...receivers, ...managers.map((id) => String(id))];
+      // Don't add any team leads or managers - message goes directly to intended receivers
     }
 
-    // If still no receivers, apply fallback logic
+    // 🔥 Fallback logic if no receivers are still found
     if (receivers.length === 0) {
       if (senderRole === "employee") {
         if (isDirect) {
-          receivers = [...tls, ...managers];
+          // For direct mode with no receivers, add managers for visibility
+          receivers = [...managers];
           approvalStatus = "approved";
         } else {
+          // For needs_approval mode with no receivers, add team leads
           receivers = [...tls];
           approvalStatus = "pending";
         }
       } else if (senderRole === "team_lead") {
+        // Team lead with no receivers - add managers
         receivers = [...managers];
         approvalStatus = null;
       } else if (senderRole === "manager") {
+        // Manager with no receivers - add team leads
         receivers = [...tls];
         approvalStatus = null;
       }
@@ -636,7 +803,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 // GET MESSAGE WITH PROPER APPROVAL STATUS
 exports.getMessage = async function getMessage(req, res) {
   try {
@@ -649,12 +815,12 @@ exports.getMessage = async function getMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
     if (!msg) return res.status(404).json({ error: "Not found" });
-    
+
     // Add approval status interpretation for frontend
     const messageWithStatus = msg.toObject();
-    messageWithStatus.approvalStatusDisplay = 
+    messageWithStatus.approvalStatusDisplay =
       msg.approvalStatus === null ? "auto-approved" : msg.approvalStatus;
-    
+
     res.json(messageWithStatus);
   } catch (e) {
     console.error(e);
@@ -675,7 +841,9 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
 
     // Check permissions - only sender or admin can schedule
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only schedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only schedule your own messages" });
     }
 
     // Validate scheduled time
@@ -730,7 +898,9 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
 
     // Check permissions
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only unschedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only unschedule your own messages" });
     }
 
     if (!msg.isScheduled || msg.status !== "scheduled") {
@@ -764,11 +934,17 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     // EMIT REAL-TIME EVENT
     const io = getIO(req);
     if (io) {
-      await emitMessageUpdate(io, msg, action === "send" ? "sent" : "converted_to_draft");
+      await emitMessageUpdate(
+        io,
+        msg,
+        action === "send" ? "sent" : "converted_to_draft"
+      );
     }
 
     res.json({
-      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"}`,
+      message: `Message ${
+        action === "send" ? "sent immediately" : "converted to draft"
+      }`,
       data: populated,
     });
   } catch (e) {
@@ -789,13 +965,13 @@ exports.getScheduledMessages = async function getScheduledMessages(req, res) {
 
     const qFinal = await applyVisibility(q, req);
 
-    const pageNum = Math.max(parseInt(page,10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit,10) || 50, 1), 200);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ scheduledFor: 1 })
-        .skip((pageNum-1)*lim)
+        .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
@@ -805,15 +981,15 @@ exports.getScheduledMessages = async function getScheduledMessages(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments(qFinal)
+      AssignmentMessage.countDocuments(qFinal),
     ]);
 
     res.json({
       items,
       total,
       page: pageNum,
-      pages: Math.ceil(total/lim),
-      limit: lim
+      pages: Math.ceil(total / lim),
+      limit: lim,
     });
   } catch (e) {
     console.error(e);
@@ -838,7 +1014,9 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
 
     // Check permissions
     if (String(msg.sender) !== String(req.employee._id)) {
-      return res.status(403).json({ error: "You can only reschedule your own messages" });
+      return res
+        .status(403)
+        .json({ error: "You can only reschedule your own messages" });
     }
 
     const validation = validateScheduleTime(scheduledFor);
@@ -876,7 +1054,9 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
 };
 
 // BULK SEND SCHEDULED MESSAGES (for cron job)
-exports.sendScheduledMessages = async function sendScheduledMessages(io = null) {
+exports.sendScheduledMessages = async function sendScheduledMessages(
+  io = null
+) {
   try {
     const now = new Date();
 
@@ -907,10 +1087,15 @@ exports.sendScheduledMessages = async function sendScheduledMessages(io = null) 
           await emitToAssignmentClients(io, message, "new_assignment_message");
         }
 
-        console.log(`Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`);
+        console.log(
+          `Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`
+        );
         results.sent++;
       } catch (error) {
-        console.error(`Failed to send scheduled message ${message._id}:`, error);
+        console.error(
+          `Failed to send scheduled message ${message._id}:`,
+          error
+        );
         results.failed++;
         results.errors.push({
           messageId: message._id,
@@ -926,7 +1111,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(io = null) 
   }
 };
 
-// PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -935,7 +1119,9 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
-      return res.status(403).json({ error: "Only Team Leads can approve messages" });
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can approve messages" });
     }
 
     msg.approvalStatus = "approved";
@@ -982,30 +1168,154 @@ exports.approveMessage = async function approveMessage(req, res) {
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
     const { id } = req.params;
+    const { disapprovalNote } = req.body;
+
     const msg = await AssignmentMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
-      return res.status(403).json({ error: "Only Team Leads can disapprove messages" });
+      return res
+        .status(403)
+        .json({ error: "Only Team Leads can disapprove messages" });
     }
 
+    // ✅ ONLY update the existing message - NO new message creation
     msg.approvalStatus = "disapproved";
+
+    // Store disapproval note if provided
+    if (disapprovalNote) {
+      msg.disapprovalNote = disapprovalNote;
+    }
+
+    msg.updatedAt = new Date();
     await msg.save();
 
-    // EMIT REAL-TIME EVENT
+    // Populate the updated message for response
+    const populated = await AssignmentMessage.findById(msg._id).populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+    ]);
+
+    // ✅ EMIT REAL-TIME EVENT FOR THE UPDATED MESSAGE ONLY
     const io = getIO(req);
     if (io) {
       await emitMessageUpdate(io, msg, "disapproved");
+
+      // Send specific disapproval notification to the sender
+      await sendDisapprovalNotification(io, msg, req.employee);
     }
 
-    res.json(msg);
+    res.json({
+      success: true,
+      message: "Message disapproved successfully",
+      data: populated,
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to disapprove message" });
   }
 };
 
+async function sendDisapprovalNotification(io, message, disapprovedBy) {
+  try {
+    if (!io || !message || !disapprovedBy) {
+      throw new Error(
+        "Socket instance, message, and disapprovedBy are required"
+      );
+    }
+
+    // Populate the message to ensure we have all data
+    const populatedMessage = await AssignmentMessage.findById(message._id)
+      .populate("sender")
+      .populate("receiver")
+      .populate("client");
+
+    if (!populatedMessage) {
+      console.error(
+        "❌ Message not found for disapproval notification:",
+        message._id
+      );
+      return;
+    }
+
+    // Send ONLY to the original sender about disapproval
+    const senderId =
+      typeof populatedMessage.sender === "string"
+        ? populatedMessage.sender
+        : populatedMessage.sender?._id;
+
+    if (senderId) {
+      io.to(`employee_${senderId}`).emit("assignment_message_disapproved", {
+        message: populatedMessage,
+        disapprovedBy: {
+          _id: disapprovedBy._id,
+          name: disapprovedBy.name,
+          companyEmail: disapprovedBy.companyEmail,
+          role: disapprovedBy.role,
+        },
+        timestamp: new Date(),
+        note:
+          populatedMessage.disapprovalNote ||
+          "Your message has been disapproved and needs revisions.",
+      });
+      console.log(
+        `📍 Sent disapproval notification to sender: employee_${senderId}`
+      );
+    }
+
+    console.log(
+      `✅ Disapproval notification sent for message ${populatedMessage._id}`
+    );
+  } catch (error) {
+    console.error("❌ Error in sendDisapprovalNotification:", error);
+    throw error;
+  }
+}
+async function sendResubmissionNotification(io, message, resubmittedBy) {
+  try {
+    if (!io || !message || !resubmittedBy) {
+      throw new Error(
+        "Socket instance, message, and resubmittedBy are required"
+      );
+    }
+
+    // Populate the message
+    const populatedMessage = await AssignmentMessage.findById(message._id)
+      .populate("sender")
+      .populate("receiver")
+      .populate("client");
+
+    if (!populatedMessage) {
+      console.error(
+        "❌ Message not found for resubmission notification:",
+        message._id
+      );
+      return;
+    }
+
+    // Notify ONLY team leads about the resubmission (not all employees)
+    io.to("assignment_team_leads").emit("assignment_message_resubmitted", {
+      message: populatedMessage,
+      action: "resubmitted",
+      resubmittedBy: {
+        _id: resubmittedBy._id,
+        name: resubmittedBy.name,
+        companyEmail: resubmittedBy.companyEmail,
+      },
+      timestamp: new Date(),
+    });
+
+    console.log(
+      `✅ Resubmission notification sent to team leads for message ${populatedMessage._id}`
+    );
+  } catch (error) {
+    console.error("❌ Error in sendResubmissionNotification:", error);
+    throw error;
+  }
+}
 // GET /api/assignment-messages/:id
 exports.getMessage = async function getMessage(req, res) {
   try {
@@ -1072,43 +1382,51 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     // EMIT REAL-TIME EVENT
     const io = getIO(req);
     if (io) {
-      const clientId = typeof messageData.client === 'string' 
-        ? messageData.client 
-        : messageData.client?._id;
+      const clientId =
+        typeof messageData.client === "string"
+          ? messageData.client
+          : messageData.client?._id;
 
       if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit("assignment_message_deleted", {
-          messageId: req.params.id,
-          clientId: clientId
-        });
+        io.to(`assignment_client_${clientId}`).emit(
+          "assignment_message_deleted",
+          {
+            messageId: req.params.id,
+            clientId: clientId,
+          }
+        );
       }
 
       // Notify all participants
       const allParticipants = new Set();
-      
+
       // Add sender
-      const senderId = typeof messageData.sender === "string" 
-        ? messageData.sender 
-        : messageData.sender?._id;
+      const senderId =
+        typeof messageData.sender === "string"
+          ? messageData.sender
+          : messageData.sender?._id;
       if (senderId) allParticipants.add(senderId);
 
       // Add receivers
       if (messageData.receiver && Array.isArray(messageData.receiver)) {
         messageData.receiver.forEach((receiver) => {
-          const receiverId = typeof receiver === "string" ? receiver : receiver._id;
+          const receiverId =
+            typeof receiver === "string" ? receiver : receiver._id;
           if (receiverId) allParticipants.add(receiverId);
         });
       }
 
       // Emit to all participants
-      allParticipants.forEach(participantId => {
+      allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_message_deleted", {
           messageId: req.params.id,
-          clientId: clientId
+          clientId: clientId,
         });
       });
 
-      console.log(`✅ Emitted assignment_message_deleted for message ${req.params.id}`);
+      console.log(
+        `✅ Emitted assignment_message_deleted for message ${req.params.id}`
+      );
     }
 
     res.json({ ok: true });
@@ -1206,15 +1524,22 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
     const owner = req.query.owner || req.employee?.owner || null;
 
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 50, 1),
+      200
+    );
 
     const me = req.employee?._id ? String(req.employee._id) : null;
 
     if (!isObjId(me)) {
-      return res.status(401).json({ error: "Unauthorized: missing employee session" });
+      return res
+        .status(401)
+        .json({ error: "Unauthorized: missing employee session" });
     }
     if (!isObjId(client)) {
-      return res.status(400).json({ error: "client is required (ObjectId string)" });
+      return res
+        .status(400)
+        .json({ error: "client is required (ObjectId string)" });
     }
 
     const q = {
@@ -1250,5 +1575,614 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Failed to load sent messages" });
+  }
+};
+// POST /api/assignment-messages/drafts - Create new draft
+exports.createDraft = async function createDraft(req, res) {
+  try {
+    const {
+      owner: ownerBody,
+      client,
+      sender: senderBody,
+      receiver: receiverBody,
+      receivers: receiversBody,
+      subject,
+      note,
+    } = req.body;
+
+    const owner = ownerBody || req.employee?.owner;
+    const sender = senderBody || req.employee?._id;
+
+    if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+      return res.status(400).json({
+        error: "owner, client, and sender are required (ObjectId strings)",
+      });
+    }
+
+    let receivers = [];
+    if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+    if (receiversBody)
+      receivers = receivers.concat(normalizeIds(receiversBody));
+    receivers = receivers.filter((id) => id !== String(sender));
+
+    // Remove duplicates
+    receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+      (id) => id !== String(sender)
+    );
+
+    const draftData = {
+      owner,
+      client,
+      sender,
+      receiver: receivers,
+      subject: subject || "Draft",
+      note: note || "",
+      status: "draft",
+      isScheduled: false,
+      // Drafts don't have sentAt
+    };
+
+    const draft = await AssignmentMessage.create(draftData);
+
+    const populated = await draft.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+    ]);
+
+    res.status(201).json(populated);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to create draft" });
+  }
+};
+
+// GET /api/assignment-messages/drafts - List all drafts for current user
+exports.listDrafts = async function listDrafts(req, res) {
+  try {
+    const { client, owner, limit = 50, page = 1 } = req.query;
+
+    const sender = req.employee?._id;
+
+    if (!isObjId(sender)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const q = {
+      sender: sender,
+      status: "draft",
+      isScheduled: false, // Ensure we don't include scheduled messages
+    };
+
+    if (isObjId(client)) q.client = client;
+    if (isObjId(owner)) q.owner = owner;
+    else if (req.employee?.owner) q.owner = req.employee.owner;
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(q)
+        .sort({ updatedAt: -1 }) // Show recently updated drafts first
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(q),
+    ]);
+
+    res.json({
+      items,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / lim),
+      limit: lim,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch drafts" });
+  }
+};
+
+// PATCH /api/assignment-messages/:id/send - Send a draft
+exports.sendDraft = async function sendDraft(req, res) {
+  try {
+    const { id } = req.params;
+    const {
+      subject,
+      note,
+      receiver: receiverBody,
+      receivers: receiversBody,
+      isScheduled: isScheduledBody,
+      scheduledFor,
+    } = req.body;
+
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Draft not found" });
+    }
+
+    // Check permissions - only sender can send their draft
+    if (String(msg.sender) !== String(req.employee._id)) {
+      return res
+        .status(403)
+        .json({ error: "You can only send your own drafts" });
+    }
+
+    // Check if draft is already sent
+    if (msg.status !== "draft") {
+      return res.status(400).json({ error: "Message is not a draft" });
+    }
+
+    // Update fields
+    if (subject !== undefined) msg.subject = subject;
+    if (note !== undefined) msg.note = note;
+
+    // Update receivers if provided
+    let receivers = msg.receiver.map((id) => String(id));
+    if (receiverBody) {
+      receivers = receivers.concat(normalizeIds(receiverBody));
+    }
+    if (receiversBody) {
+      receivers = receivers.concat(normalizeIds(receiversBody));
+    }
+    receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+      (id) => id !== String(msg.sender)
+    );
+
+    if (receivers.length > 0) {
+      msg.receiver = receivers;
+    }
+
+    // Handle scheduling
+    const isScheduled = isScheduledBody === true || isScheduledBody === "true";
+
+    if (isScheduled) {
+      const validation = validateScheduleTime(scheduledFor);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      msg.isScheduled = true;
+      msg.status = "scheduled";
+      msg.scheduledFor = validation.scheduleTime;
+      msg.scheduledAt = new Date();
+      msg.scheduledBy = req.employee._id;
+      msg.sentAt = null;
+    } else {
+      msg.isScheduled = false;
+      msg.status = "sent";
+      msg.sentAt = new Date();
+      msg.scheduledFor = undefined;
+      msg.scheduledAt = undefined;
+      msg.scheduledBy = undefined;
+    }
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "scheduledBy", select: "_id name companyEmail" },
+    ]);
+
+    // EMIT REAL-TIME EVENT (only for immediate sends, not scheduled)
+    if (!isScheduled) {
+      const io = getIO(req);
+      if (io) {
+        await emitToAssignmentClients(io, msg, "new_assignment_message");
+      }
+    }
+
+    res.json({
+      message: isScheduled
+        ? "Draft scheduled successfully"
+        : "Draft sent successfully",
+      data: populated,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to send draft" });
+  }
+};
+
+// GET /api/assignment-messages/drafts/count - Get draft count for current user
+exports.getDraftCount = async function getDraftCount(req, res) {
+  try {
+    const sender = req.employee?._id;
+
+    if (!isObjId(sender)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const count = await AssignmentMessage.countDocuments({
+      sender: sender,
+      status: "draft",
+      isScheduled: false,
+    });
+
+    res.json({ count });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get draft count" });
+  }
+};
+exports.editDisapprovedMessage = async function editDisapprovedMessage(
+  req,
+  res
+) {
+  try {
+    const { id } = req.params;
+    const { subject, note } = req.body;
+
+    // Enhanced validation
+    if (!id) {
+      return res.status(400).json({ error: "Message ID is required" });
+    }
+
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid message ID format" });
+    }
+
+    if (subject === undefined && note === undefined) {
+      return res
+        .status(400)
+        .json({ error: "No changes provided. Please update subject or note." });
+    }
+
+    // Validate subject length if provided
+    if (subject !== undefined && subject.trim().length === 0) {
+      return res.status(400).json({ error: "Subject cannot be empty" });
+    }
+
+    // Validate note length if provided
+    if (note !== undefined && note.trim().length === 0) {
+      return res.status(400).json({ error: "Note cannot be empty" });
+    }
+
+    // Find the message with proper error handling
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Check approval status
+    if (msg.approvalStatus !== "disapproved") {
+      return res.status(400).json({
+        error: "Only disapproved messages can be edited for resubmission",
+        currentStatus: msg.approvalStatus,
+      });
+    }
+
+    // Check ownership
+    const isSender = String(msg.sender) === String(req.employee._id);
+    if (!isSender) {
+      return res.status(403).json({
+        error: "You can only edit your own messages",
+        messageOwner: msg.sender,
+        currentUser: req.employee._id,
+      });
+    }
+
+    // Update message fields
+    const updateFields = {};
+    if (subject !== undefined) {
+      updateFields.subject = subject.trim();
+    }
+    if (note !== undefined) {
+      updateFields.note = note.trim();
+    }
+
+    updateFields.approvalStatus = "pending";
+    updateFields.updatedAt = new Date();
+    updateFields.resubmittedAt = new Date(); // Track resubmission time
+
+    // Update the message
+    const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
+      id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedMsg) {
+      throw new Error("Failed to update message in database");
+    }
+
+    // Populate the updated message
+    const populated = await AssignmentMessage.findById(updatedMsg._id).populate(
+      [
+        { path: "owner", select: "_id name companyEmail" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      ]
+    );
+
+    if (!populated) {
+      throw new Error("Failed to populate updated message data");
+    }
+
+    // EMIT REAL-TIME EVENT FOR RESUBMISSION (with error handling)
+    try {
+      const io = getIO(req);
+      if (io) {
+        console.log("📢 Emitting real-time events for message resubmission");
+
+        // Emit message update
+        await emitMessageUpdate(io, populated, "disapproved_message_edited");
+
+        // Send resubmission notification to Team Leads
+        await sendResubmissionNotification(io, populated, req.employee);
+
+        // Notify all relevant parties about the resubmission
+        io.to("assignment_team_leads").emit("assignment_message_resubmitted", {
+          message: populated,
+          action: "resubmitted",
+          resubmittedBy: {
+            _id: req.employee._id,
+            name: req.employee.name,
+            companyEmail: req.employee.companyEmail,
+          },
+          timestamp: new Date(),
+        });
+
+        // Notify the sender that their message was resubmitted successfully
+        io.to(`employee_${req.employee._id}`).emit(
+          "message_resubmission_success",
+          {
+            message: populated,
+            timestamp: new Date(),
+          }
+        );
+      } else {
+        console.warn(
+          "⚠️ Socket.io instance not available for real-time updates"
+        );
+      }
+    } catch (socketError) {
+      console.error("❌ Socket.io event error (non-critical):", socketError);
+      // Don't fail the entire request if socket events fail
+    }
+
+    // Log the successful resubmission
+    console.log(`✅ Message ${id} resubmitted by employee ${req.employee._id}`);
+
+    res.json({
+      success: true,
+      message: "Disapproved message edited and submitted for review",
+      data: populated,
+      timestamp: new Date(),
+    });
+  } catch (e) {
+    console.error("❌ Error in editDisapprovedMessage:", e);
+
+    // More specific error responses
+    if (e.name === "ValidationError") {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: Object.values(e.errors).map((err) => err.message),
+      });
+    }
+
+    if (e.name === "CastError") {
+      return res.status(400).json({ error: "Invalid data format" });
+    }
+
+    if (e.code === 11000) {
+      return res.status(400).json({ error: "Duplicate entry found" });
+    }
+
+    res.status(500).json({
+      error: "Failed to edit disapproved message",
+      ...(process.env.NODE_ENV === "development" && { debug: e.message }),
+    });
+  }
+};
+// GET /api/assignment-messages/review
+exports.getReviewMessages = async function getReviewMessages(req, res) {
+  try {
+    // Fetch all messages, populate sender so we can inspect supervisionMode
+    const msgs = await AssignmentMessage.find()
+      .sort({ createdAt: 1 })
+      .populate([
+        { path: "sender", select: "name supervisionMode" },
+        { path: "receiver", select: "name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "attachments.uploadedBy", select: "name companyEmail" },
+      ])
+      .lean();
+
+    // Keep only those whose sender.supervisionMode === "direct"
+    const directMsgs = msgs.filter(
+      (m) => m.sender && m.sender.supervisionMode === "direct"
+    );
+
+    res.json({
+      items: directMsgs,
+      total: directMsgs.length,
+    });
+  } catch (e) {
+    console.error("getReviewMessages error:", e);
+    res.status(500).json({ error: "Failed to fetch review messages" });
+  }
+};
+exports.getStarredMessages = async function getStarredMessages(req, res) {
+  try {
+    const {
+      client,
+      owner,
+      limit = 50,
+      page = 1,
+      filter,
+      status,
+      isScheduled,
+    } = req.query;
+
+    const currentUser = req.employee?._id;
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const q = {
+      starredBy: currentUser, // Messages starred by current user
+    };
+
+    // Apply other filters if provided
+    if (isObjId(owner)) q.owner = owner;
+    else if (req.employee?.owner) q.owner = req.employee.owner;
+    if (isObjId(client)) q.client = client;
+
+    // Status filter
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
+      q.status = status;
+      if (status === "draft") q.isScheduled = false;
+    }
+
+    // Scheduled filter
+    if (filter === "scheduled" || isScheduled === "true") {
+      q.isScheduled = true;
+      q.status = "scheduled";
+    } else if (isScheduled === "false") {
+      q.isScheduled = false;
+    }
+
+    // Apply visibility rules to ensure user can see these messages
+    const qFinal = await applyVisibility(q, req);
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(qFinal)
+        .sort({ updatedAt: -1 }) // Sort by when they were starred/updated
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+          { path: "scheduledBy", select: "_id name companyEmail" },
+          { path: "starredBy", select: "_id name companyEmail" }, // Populate who starred it
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(qFinal),
+    ]);
+
+    res.json({
+      items,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / lim),
+      limit: lim,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to fetch starred messages" });
+  }
+};
+
+// PATCH /api/assignment-messages/:id/star - Star a message
+exports.starMessage = async function starMessage(req, res) {
+  try {
+    const { id } = req.params;
+    const currentUser = req.employee?._id;
+
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Check if user has permission to see this message
+    const canView = await AssignmentMessage.findOne({
+      _id: id,
+      $or: [{ sender: currentUser }, { receiver: currentUser }],
+    });
+
+    if (!canView) {
+      return res
+        .status(403)
+        .json({ error: "You don't have permission to star this message" });
+    }
+
+    // Toggle star - add user to starredBy if not present, remove if present
+    const isStarred = msg.starredBy.includes(currentUser);
+
+    if (isStarred) {
+      // Unstar: remove user from starredBy
+      msg.starredBy.pull(currentUser);
+    } else {
+      // Star: add user to starredBy
+      msg.starredBy.addToSet(currentUser);
+    }
+
+    // Update starred flag based on whether anyone has starred it
+    msg.starred = msg.starredBy.length > 0;
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "starredBy", select: "_id name companyEmail" },
+    ]);
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      await emitMessageUpdate(io, msg, isStarred ? "unstarred" : "starred");
+    }
+
+    res.json({
+      message: isStarred ? "Message unstarred" : "Message starred",
+      data: populated,
+      starred: !isStarred,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to update star status" });
+  }
+};
+
+// GET /api/assignment-messages/starred/count - Get starred message count for current user
+exports.getStarredCount = async function getStarredCount(req, res) {
+  try {
+    const currentUser = req.employee?._id;
+
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const count = await AssignmentMessage.countDocuments({
+      starredBy: currentUser,
+    });
+
+    res.json({ count });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to get starred count" });
   }
 };

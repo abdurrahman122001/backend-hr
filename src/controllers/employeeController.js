@@ -138,3 +138,21 @@ exports.getUpcomingBirthdays = async (req, res) => {
       .json({ error: "Could not fetch birthdays: " + err.message });
   }
 };
+exports.updateEmployeeRole = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { role } = req.body;
+
+    if (!role) {
+      return res.status(400).json({ message: "Role is required" });
+    }
+
+    const employee = await Employee.findByIdAndUpdate(id, { role }, { new: true });
+    if (!employee) return res.status(404).json({ message: "Employee not found" });
+
+    res.status(200).json({ message: "Role updated successfully", employee });
+  } catch (error) {
+    console.error("Error updating role:", error);
+    res.status(500).json({ message: "Failed to update employee role" });
+  }
+};

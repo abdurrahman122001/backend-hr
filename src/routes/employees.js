@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
 const requireAuth = require("../middleware/auth");
-const { getUpcomingBirthdays } = require("../controllers/employeeController");
+const { getUpcomingBirthdays, updateEmployeeRole } = require("../controllers/employeeController");
 
 // ------------------------------
 // Helpers
@@ -224,5 +224,26 @@ router.patch("/:id", requireAuth, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+router.get("/roles", requireAuth, async (req, res) => {
+  try {
+    const scope = buildEmployeeScope(req.user);
 
+    // Distinct roles only for employees within user’s scope
+    const roles = await Employee.distinct("role", {
+      ...scope,
+      role: { $ne: null },
+    });
+
+    const formatted = roles.map((r) => ({
+      label: r,
+      value: r,
+    }));
+
+    res.json({ status: "success", data: formatted });
+  } catch (error) {
+    console.error("Error fetching roles:", error);
+    res.status(500).json({ status: "error", message: error.message });
+  }
+});
+router.patch("/:id/role", updateEmployeeRole);
 module.exports = router;
