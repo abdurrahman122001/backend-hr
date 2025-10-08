@@ -76,8 +76,17 @@ const chatRoutes = require("./routes/chat");
 const app = express();
 
 // ---------- Static ----------
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "./uploads"))
+);
 
+// If you want a separate mount for chat‐attachments you can,
+// but it isn't necessary if they're inside uploads/chat-attachments/
+app.use(
+  "/uploads/chat-attachments",
+  express.static(path.join(__dirname, "../uploads/chat-attachments"))
+);
 // ---------- CORS ----------
 // If you need wildcard subdomains, switch to a regex check.
 // For now, this is a strict allowlist.

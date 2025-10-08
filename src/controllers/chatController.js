@@ -1,13 +1,14 @@
+const express = require('express');
 const { Conversation, Message, Space } = require("../models/Chat");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-// Configure multer for file uploads
+// ✅ Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    const uploadDir = 'uploads/';
+    const uploadDir = "uploads/chat-attachments/";
     // Create uploads directory if it doesn't exist
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
@@ -16,84 +17,97 @@ const storage = multer.diskStorage({
   },
   filename: function (req, file, cb) {
     // Generate unique filename with timestamp
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
+    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
+    cb(
+      null,
+      file.fieldname + "-" + uniqueSuffix + path.extname(file.originalname)
+    );
+  },
 });
 
 // File filter for allowed types
 const fileFilter = (req, file, cb) => {
   const allowedMimes = [
-    'image/jpeg',
-    'image/jpg', 
-    'image/png',
-    'image/gif',
-    'image/webp',
-    'image/svg+xml',
-    'application/pdf',
-    'application/msword',
-    'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    'application/vnd.ms-excel',
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'text/csv',
-    'text/plain'
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/svg+xml",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/csv",
+    "text/plain",
   ];
 
   if (allowedMimes.includes(file.mimetype)) {
     cb(null, true);
   } else {
-    cb(new Error(`Invalid file type: ${file.mimetype}. Allowed types: images, PDF, Word, Excel, CSV, text files.`), false);
+    cb(
+      new Error(
+        `Invalid file type: ${file.mimetype}. Allowed types: images, PDF, Word, Excel, CSV, text files.`
+      ),
+      false
+    );
   }
 };
 
+// ✅ Create and export upload middleware
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit
-  }
+  },
 });
+
+exports.upload = upload; // ✅ Export upload middleware
 
 // Upload file endpoint
 exports.uploadFile = async (req, res) => {
   try {
     // Use multer middleware to handle file upload
-    upload.single('file')(req, res, async function (err) {
+    upload.single("file")(req, res, async function (err) {
       if (err) {
         return res.status(400).json({
           success: false,
-          error: err.message
+          error: err.message,
         });
       }
 
       if (!req.file) {
         return res.status(400).json({
           success: false,
-          error: "No file uploaded"
+          error: "No file uploaded",
         });
       }
 
-      // Create file object for response
+      // ✅ Create file object with proper full URL
       const fileData = {
         filename: req.file.filename,
         originalName: req.file.originalname,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        url: `/uploads/${req.file.filename}`,
-        uploadedAt: new Date()
+        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${req.file.filename}`, // Full URL
+        uploadedAt: new Date(),
       };
+
+      console.log("✅ File uploaded with URL:", fileData.url);
 
       res.json({
         success: true,
         message: "File uploaded successfully",
-        file: fileData
+        file: fileData,
       });
     });
   } catch (error) {
     console.error("Upload file error:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to upload file"
+      error: "Failed to upload file",
     });
   }
 };
@@ -101,41 +115,41 @@ exports.uploadFile = async (req, res) => {
 // Upload multiple files endpoint
 exports.uploadFiles = async (req, res) => {
   try {
-    upload.array('files', 10)(req, res, async function (err) {
+    upload.array("files", 10)(req, res, async function (err) {
       if (err) {
         return res.status(400).json({
           success: false,
-          error: err.message
+          error: err.message,
         });
       }
 
       if (!req.files || req.files.length === 0) {
         return res.status(400).json({
           success: false,
-          error: "No files uploaded"
+          error: "No files uploaded",
         });
       }
 
-      const uploadedFiles = req.files.map(file => ({
+      const uploadedFiles = req.files.map((file) => ({
         filename: file.filename,
         originalName: file.originalname,
         mimetype: file.mimetype,
         size: file.size,
-        url: `/uploads/${file.filename}`,
-        uploadedAt: new Date()
+        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
+        uploadedAt: new Date(),
       }));
 
       res.json({
         success: true,
         message: `${uploadedFiles.length} files uploaded successfully`,
-        files: uploadedFiles
+        files: uploadedFiles,
       });
     });
   } catch (error) {
     console.error("Upload files error:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to upload files"
+      error: "Failed to upload files",
     });
   }
 };
@@ -422,10 +436,29 @@ exports.startConversation = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { content, messageType = "text", attachments = [] } = req.body;
+    const { content, messageType = "text" } = req.body; // Remove attachments from body
+
+    console.log("📨 Send message request:", {
+      conversationId,
+      content,
+      messageType,
+      files: req.files ? req.files.length : 0
+    });
+
+    // ✅ Process uploaded files
+    const uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      uploadedAttachments.push(...req.files.map(file => ({
+        filename: file.filename,
+        originalName: file.originalname,
+        mimetype: file.mimetype,
+        size: file.size,
+        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
+      })));
+    }
 
     // ✅ UPDATED: Allow empty content if there are attachments
-    if (!content?.trim() && (!attachments || attachments.length === 0)) {
+    if (!content?.trim() && uploadedAttachments.length === 0) {
       return res.status(400).json({
         success: false,
         error: "Message content or attachments are required",
@@ -453,22 +486,59 @@ exports.sendMessage = async (req, res) => {
     // Check if this is a group conversation
     const isGroup = conversation.isGroup || conversation.space;
 
-    // Process attachments - convert file paths to full URLs if needed
-    const processedAttachments = attachments.map(attachment => ({
-      filename: attachment.filename || attachment.originalName,
-      url: attachment.url.startsWith('http') ? attachment.url : `${req.protocol}://${req.get('host')}${attachment.url}`,
-      mimetype: attachment.mimetype,
-      size: attachment.size,
-      originalName: attachment.originalName
-    }));
+    // ✅ FIXED: Enhanced message type detection for images, GIFs, and files
+    let finalMessageType = messageType;
+
+    if (uploadedAttachments.length > 0) {
+      const hasGif = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype === "image/gif" ||
+          attachment.url.includes(".gif") ||
+          (attachment.originalName &&
+            attachment.originalName.toLowerCase().endsWith(".gif"))
+      );
+
+      const hasImage = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype.startsWith("image/") &&
+          attachment.mimetype !== "image/gif"
+      );
+
+      // If it's a GIF URL from GIPHY, preserve the GIF type
+      const isGiphyUrl =
+        content &&
+        (content.includes("giphy.com") ||
+          content.includes("media.giphy.com") ||
+          content.includes("media1.giphy.com") ||
+          content.includes("media2.giphy.com") ||
+          content.includes("media3.giphy.com") ||
+          content.includes("media4.giphy.com"));
+
+      if (hasGif || isGiphyUrl) {
+        finalMessageType = "gif";
+      } else if (hasImage) {
+        finalMessageType = "image";
+      } else {
+        finalMessageType = "file";
+      }
+    }
+
+    console.log("📨 Message Type Detection:", {
+      finalMessageType,
+      attachments: uploadedAttachments.map((a) => ({
+        mimetype: a.mimetype,
+        filename: a.filename,
+        url: a.url,
+      })),
+    });
 
     // Prepare message data
     const messageData = {
       conversation: conversationId,
       sender: req.employee._id,
-      content: content?.trim() || '', // ✅ Allow empty content
-      messageType: attachments.length > 0 ? 'file' : messageType,
-      attachments: processedAttachments,
+      content: content?.trim() || "", // ✅ Allow empty content
+      messageType: finalMessageType, // ✅ Use the properly determined type
+      attachments: uploadedAttachments,
       isGroupMessage: isGroup,
       readBy: [
         {
@@ -574,8 +644,19 @@ exports.sendDirectMessage = async (req, res) => {
       participantId,
       content,
       messageType = "text",
-      attachments = [],
     } = req.body;
+
+    // ✅ Process uploaded files
+    const uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      uploadedAttachments.push(...req.files.map(file => ({
+        filename: file.filename,
+        originalName: file.originalname,
+        mimetype: file.mimetype,
+        size: file.size,
+        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
+      })));
+    }
 
     if (!participantId) {
       return res.status(400).json({
@@ -584,7 +665,7 @@ exports.sendDirectMessage = async (req, res) => {
       });
     }
 
-    if (!content && (!attachments || attachments.length === 0)) {
+    if (!content && uploadedAttachments.length === 0) {
       return res.status(400).json({
         success: false,
         error: "Message content or attachments are required",
@@ -608,14 +689,41 @@ exports.sendDirectMessage = async (req, res) => {
       await conversation.save();
     }
 
-    // Process attachments
-    const processedAttachments = attachments.map(attachment => ({
-      filename: attachment.filename || attachment.originalName,
-      url: attachment.url.startsWith('http') ? attachment.url : `${req.protocol}://${req.get('host')}${attachment.url}`,
-      mimetype: attachment.mimetype,
-      size: attachment.size,
-      originalName: attachment.originalName
-    }));
+    // ✅ FIX: Enhanced message type detection for direct messages
+    let finalMessageType = messageType;
+
+    if (uploadedAttachments.length > 0) {
+      const hasGif = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype === "image/gif" ||
+          attachment.url.includes(".gif") ||
+          (attachment.originalName &&
+            attachment.originalName.toLowerCase().endsWith(".gif"))
+      );
+
+      const hasImage = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype.startsWith("image/") &&
+          attachment.mimetype !== "image/gif"
+      );
+
+      const isGiphyUrl =
+        content &&
+        (content.includes("giphy.com") ||
+          content.includes("media.giphy.com") ||
+          content.includes("media1.giphy.com") ||
+          content.includes("media2.giphy.com") ||
+          content.includes("media3.giphy.com") ||
+          content.includes("media4.giphy.com"));
+
+      if (hasGif || isGiphyUrl) {
+        finalMessageType = "gif";
+      } else if (hasImage) {
+        finalMessageType = "image";
+      } else {
+        finalMessageType = "file";
+      }
+    }
 
     // Create message
     const receiver = conversation.participants.find(
@@ -627,8 +735,8 @@ exports.sendDirectMessage = async (req, res) => {
       sender: req.employee._id,
       receiver: receiver,
       content: content?.trim(),
-      messageType: attachments.length > 0 ? 'file' : messageType,
-      attachments: processedAttachments,
+      messageType: finalMessageType, // ✅ Use the properly determined type
+      attachments: uploadedAttachments,
       read: false,
     });
 
@@ -972,9 +1080,21 @@ exports.addSpaceMembers = async (req, res) => {
 exports.sendSpaceMessage = async (req, res) => {
   try {
     const { spaceId } = req.params;
-    const { content, messageType = "text", attachments = [] } = req.body;
+    const { content, messageType = "text" } = req.body;
 
-    if (!content && (!attachments || attachments.length === 0)) {
+    // ✅ Process uploaded files
+    const uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      uploadedAttachments.push(...req.files.map(file => ({
+        filename: file.filename,
+        originalName: file.originalname,
+        mimetype: file.mimetype,
+        size: file.size,
+        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
+      })));
+    }
+
+    if (!content && uploadedAttachments.length === 0) {
       return res.status(400).json({
         success: false,
         error: "Message content or attachments are required",
@@ -1029,14 +1149,41 @@ exports.sendSpaceMessage = async (req, res) => {
       );
     }
 
-    // Process attachments
-    const processedAttachments = attachments.map(attachment => ({
-      filename: attachment.filename || attachment.originalName,
-      url: attachment.url.startsWith('http') ? attachment.url : `${req.protocol}://${req.get('host')}${attachment.url}`,
-      mimetype: attachment.mimetype,
-      size: attachment.size,
-      originalName: attachment.originalName
-    }));
+    // ✅ FIX: Enhanced message type detection for space messages
+    let finalMessageType = messageType;
+
+    if (uploadedAttachments.length > 0) {
+      const hasGif = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype === "image/gif" ||
+          attachment.url.includes(".gif") ||
+          (attachment.originalName &&
+            attachment.originalName.toLowerCase().endsWith(".gif"))
+      );
+
+      const hasImage = uploadedAttachments.some(
+        (attachment) =>
+          attachment.mimetype.startsWith("image/") &&
+          attachment.mimetype !== "image/gif"
+      );
+
+      const isGiphyUrl =
+        content &&
+        (content.includes("giphy.com") ||
+          content.includes("media.giphy.com") ||
+          content.includes("media1.giphy.com") ||
+          content.includes("media2.giphy.com") ||
+          content.includes("media3.giphy.com") ||
+          content.includes("media4.giphy.com"));
+
+      if (hasGif || isGiphyUrl) {
+        finalMessageType = "gif";
+      } else if (hasImage) {
+        finalMessageType = "image";
+      } else {
+        finalMessageType = "file";
+      }
+    }
 
     // Get receivers (all members except sender)
     const receivers = space.members
@@ -1048,6 +1195,8 @@ exports.sendSpaceMessage = async (req, res) => {
       totalMembers: space.members.length,
       sender: req.employee._id,
       receiversCount: receivers.length,
+      messageType: finalMessageType, // ✅ Log the determined message type
+      attachments: uploadedAttachments.length
     });
 
     // Create message with multiple receivers
@@ -1057,8 +1206,8 @@ exports.sendSpaceMessage = async (req, res) => {
       receivers: receivers,
       space: spaceId,
       content: content?.trim(),
-      messageType: attachments.length > 0 ? 'file' : messageType,
-      attachments: processedAttachments,
+      messageType: finalMessageType, // ✅ Use the properly determined type
+      attachments: uploadedAttachments,
       isGroupMessage: true,
       readBy: [
         {
@@ -1359,30 +1508,81 @@ exports.deleteMessage = async (req, res) => {
   }
 };
 
-// Serve uploaded files
 exports.serveFile = async (req, res) => {
   try {
     const { filename } = req.params;
-    const filePath = path.join(__dirname, '../uploads', filename);
     
+    // ✅ CORRECTED: Use the chat-attachments subdirectory
+    const filePath = path.join(__dirname, "../uploads/chat-attachments", filename);
+
+    console.log("📁 Looking for file at:", filePath); // Debug log
+
     // Check if file exists
     if (!fs.existsSync(filePath)) {
+      console.error("❌ File not found:", filePath);
       return res.status(404).json({
         success: false,
-        error: "File not found"
+        error: "File not found",
+        requestedFile: filename,
+        actualPath: filePath
       });
     }
 
-    // Set appropriate headers
-    res.setHeader('Content-Disposition', `inline; filename="${filename}"`);
+    // ✅ Get file stats for proper headers
+    const stat = fs.statSync(filePath);
     
-    // Send file
-    res.sendFile(filePath);
+    // ✅ Set appropriate Content-Type
+    const ext = path.extname(filename).toLowerCase();
+    const mimeTypes = {
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.png': 'image/png',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.svg': 'image/svg+xml',
+      '.pdf': 'application/pdf',
+      '.doc': 'application/msword',
+      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      '.xls': 'application/vnd.ms-excel',
+      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      '.csv': 'text/csv',
+      '.txt': 'text/plain'
+    };
+
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Length', stat.size);
+    
+    // For images, allow them to be displayed inline
+    if (ext.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
+      res.setHeader('Content-Disposition', 'inline');
+    } else {
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    }
+
+    // Create read stream and pipe to response
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+
+    // Handle stream errors
+    fileStream.on('error', (error) => {
+      console.error('File stream error:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          success: false,
+          error: "Error reading file"
+        });
+      }
+    });
+
   } catch (error) {
     console.error("Serve file error:", error);
-    res.status(500).json({
-      success: false,
-      error: "Failed to serve file"
-    });
+    if (!res.headersSent) {
+      res.status(500).json({
+        success: false,
+        error: "Failed to serve file",
+        details: error.message
+      });
+    }
   }
 };

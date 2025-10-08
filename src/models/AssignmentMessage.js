@@ -56,6 +56,9 @@ const AssignmentMessageSchema = new Schema(
       enum: ["draft", "scheduled", "sent", "cancelled"],
       default: "sent"
     },
+    isTrashed: { type: Boolean, default: false },
+    trashedAt: { type: Date },
+    trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
     // Files
     attachments: [AttachmentSchema],

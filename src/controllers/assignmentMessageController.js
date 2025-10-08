@@ -382,6 +382,7 @@ exports.getScheduledMessagesForClient =
         .json({ error: "Failed to fetch scheduled messages for client" });
     }
   };
+
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
@@ -554,6 +555,7 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
+
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -806,24 +808,63 @@ exports.createMessage = async function createMessage(req, res) {
 // GET MESSAGE WITH PROPER APPROVAL STATUS
 exports.getMessage = async function getMessage(req, res) {
   try {
-    const msg = await AssignmentMessage.findById(req.params.id).populate([
+    const messageId = req.params.id;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({ error: "Invalid message ID" });
+    }
+
+    const msg = await AssignmentMessage.findById(messageId).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      { path: "scheduledBy", select: "_id name companyEmail" },
+      {
+        path: "receiver",
+        select: "_id name companyEmail role",
+        options: { allowNull: true },
+      },
     ]);
-    if (!msg) return res.status(404).json({ error: "Not found" });
 
-    // Add approval status interpretation for frontend
-    const messageWithStatus = msg.toObject();
-    messageWithStatus.approvalStatusDisplay =
-      msg.approvalStatus === null ? "auto-approved" : msg.approvalStatus;
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
 
-    res.json(messageWithStatus);
+    // Check if user has permission to view this message
+    const userId = req.employee._id.toString();
+    const senderId =
+      typeof msg.sender === "string" ? msg.sender : msg.sender?._id?.toString();
+
+    let receiverIds = [];
+    if (Array.isArray(msg.receiver)) {
+      receiverIds = msg.receiver.map((r) =>
+        typeof r === "string" ? r : r?._id?.toString()
+      );
+    } else if (msg.receiver) {
+      receiverIds = [
+        typeof msg.receiver === "string"
+          ? msg.receiver
+          : msg.receiver?._id?.toString(),
+      ];
+    }
+
+    const hasAccess = userId === senderId || receiverIds.includes(userId);
+
+    if (!hasAccess) {
+      return res
+        .status(403)
+        .json({ error: "You don't have permission to view this message" });
+    }
+
+    // Convert to plain object and ensure receiver is always an array
+    const messageData = msg.toObject ? msg.toObject() : msg;
+    if (messageData.receiver && !Array.isArray(messageData.receiver)) {
+      messageData.receiver = [messageData.receiver].filter(Boolean);
+    }
+
+    res.json(messageData);
   } catch (e) {
-    console.error(e);
+    console.error("Error in getMessage:", e);
     res.status(500).json({ error: "Failed to fetch message" });
   }
 };
@@ -2184,5 +2225,526 @@ exports.getStarredCount = async function getStarredCount(req, res) {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to get starred count" });
+  }
+};
+
+exports.moveToTrash = async function (req, res) {
+  try {
+    const msg = await AssignmentMessage.findById(req.params.id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // Check permissions - user must be sender or receiver
+    const userId = req.employee._id.toString();
+    const senderId =
+      typeof msg.sender === "string" ? msg.sender : msg.sender?._id?.toString();
+    const receiverIds = Array.isArray(msg.receiver)
+      ? msg.receiver.map((r) => (typeof r === "string" ? r : r._id?.toString()))
+      : [];
+
+    const hasAccess = userId === senderId || receiverIds.includes(userId);
+
+    if (!hasAccess) {
+      return res
+        .status(403)
+        .json({ error: "You don't have permission to delete this message" });
+    }
+
+    msg.isTrashed = true;
+    msg.trashedAt = new Date();
+    msg.trashedBy = req.employee._id;
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "trashedBy", select: "_id name companyEmail" },
+    ]);
+
+    // Emit socket event
+    const io = getIO(req);
+    if (io) await emitMessageUpdate(io, msg, "moved_to_trash");
+
+    res.json({ message: "Message moved to trash", data: populated });
+  } catch (e) {
+    console.error("Error moving to trash:", e);
+    res.status(500).json({ error: "Failed to move to trash" });
+  }
+};
+
+// Restore from trash
+exports.restoreFromTrash = async function (req, res) {
+  try {
+    const msg = await AssignmentMessage.findById(req.params.id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // Check permissions
+    const userId = req.employee._id.toString();
+    const senderId =
+      typeof msg.sender === "string" ? msg.sender : msg.sender?._id?.toString();
+    const receiverIds = Array.isArray(msg.receiver)
+      ? msg.receiver.map((r) => (typeof r === "string" ? r : r._id?.toString()))
+      : [];
+
+    const hasAccess = userId === senderId || receiverIds.includes(userId);
+
+    if (!hasAccess) {
+      return res
+        .status(403)
+        .json({ error: "You don't have permission to restore this message" });
+    }
+
+    msg.isTrashed = false;
+    msg.trashedAt = undefined;
+    msg.trashedBy = undefined;
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+    ]);
+
+    // Emit socket event
+    const io = getIO(req);
+    if (io) await emitMessageUpdate(io, msg, "restored_from_trash");
+
+    res.json({ message: "Message restored", data: populated });
+  } catch (e) {
+    console.error("Error restoring from trash:", e);
+    res.status(500).json({ error: "Failed to restore" });
+  }
+};
+
+exports.getTrashMessages = async function getTrashMessages(req, res) {
+  try {
+    console.log("🔄 getTrashMessages called");
+    console.log("📥 Query params:", req.query);
+    console.log("👤 Current user:", req.employee?._id);
+    
+    const { limit = 50, page = 1, client } = req.query;
+    const currentUser = req.employee?._id;
+    
+    if (!currentUser) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // SIMPLEST query - just get trashed messages
+    const q = { 
+      isTrashed: true
+    };
+    
+    // Add client filter if provided
+    if (client) {
+      q.client = client;
+    }
+    
+    console.log("🔍 Final trash query:", JSON.stringify(q, null, 2));
+    
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    
+    console.log("📊 Pagination:", { page: pageNum, limit: lim });
+    
+    // Basic population
+    const populateFields = [
+      { path: "sender", select: "_id name companyEmail" },
+      { path: "client", select: "_id clientName" }
+    ];
+    
+    let items, total;
+    try {
+      [items, total] = await Promise.all([
+        AssignmentMessage.find(q)
+          .sort({ updatedAt: -1 })
+          .skip((pageNum - 1) * lim)
+          .limit(lim)
+          .populate(populateFields)
+          .lean(),
+        AssignmentMessage.countDocuments(q)
+      ]);
+    } catch (dbError) {
+      console.error("❌ Database query error:", dbError);
+      return res.status(500).json({ 
+        error: "Database query failed",
+        details: dbError.message 
+      });
+    }
+    
+    // Simple processing
+    const safeItems = (items || []).map(item => {
+      const safeItem = { ...item };
+      
+      // Ensure receiver is array
+      if (safeItem.receiver && !Array.isArray(safeItem.receiver)) {
+        safeItem.receiver = [safeItem.receiver];
+      } else if (!safeItem.receiver) {
+        safeItem.receiver = [];
+      }
+      
+      return safeItem;
+    });
+
+    console.log(`✅ Found ${safeItems.length} trash messages out of ${total} total`);
+    
+    res.json({
+      items: safeItems,
+      total: total || 0,
+      page: pageNum,
+      pages: Math.ceil(total / lim) || 1,
+      limit: lim
+    });
+    
+  } catch (e) {
+    console.error("❌ Error in getTrashMessages:", e);
+    console.error("❌ Error stack:", e.stack);
+    
+    res.status(500).json({ 
+      error: "Failed to load trash messages",
+      details: e.message,
+      ...(process.env.NODE_ENV === 'development' && { stack: e.stack })
+    });
+  }
+};
+// Permanently delete a message
+// DELETE /api/assignment-messages/thread/:clientId - Delete entire thread for a client
+exports.deleteThread = async function deleteThread(req, res) {
+  try {
+    const { clientId } = req.params;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID is required" });
+    }
+
+    // Check permissions - user must be involved in the thread
+    const userId = req.employee._id.toString();
+
+    // Find all messages for this client where user is sender or receiver
+    const threadMessages = await AssignmentMessage.find({
+      client: clientId,
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        { receiver: { $in: [userId] } },
+      ],
+    });
+
+    if (threadMessages.length === 0) {
+      return res.status(404).json({ error: "No thread found for this client" });
+    }
+
+    // Store message IDs for socket emission
+    const messageIds = threadMessages.map((msg) => msg._id);
+    const clientIdForEmission = threadMessages[0]?.client;
+
+    // Delete all messages in the thread
+    await AssignmentMessage.deleteMany({
+      _id: { $in: messageIds },
+    });
+
+    // EMIT REAL-TIME EVENT FOR THREAD DELETION
+    const io = getIO(req);
+    if (io) {
+      // Notify all participants in all deleted messages
+      const allParticipants = new Set();
+
+      threadMessages.forEach((message) => {
+        // Add sender
+        const senderId =
+          typeof message.sender === "string"
+            ? message.sender
+            : message.sender?._id?.toString();
+        if (senderId) allParticipants.add(senderId);
+
+        // Add receivers
+        if (message.receiver && Array.isArray(message.receiver)) {
+          message.receiver.forEach((receiver) => {
+            const receiverId =
+              typeof receiver === "string"
+                ? receiver
+                : receiver?._id?.toString();
+            if (receiverId) allParticipants.add(receiverId);
+          });
+        }
+      });
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_thread_deleted", {
+          clientId: clientId,
+          messageIds: messageIds,
+          deletedBy: userId,
+          timestamp: new Date(),
+        });
+      });
+
+      console.log(
+        `✅ Emitted assignment_thread_deleted for client ${clientId}, ${messageIds.length} messages deleted`
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Thread deleted successfully (${messageIds.length} messages removed)`,
+      deletedCount: messageIds.length,
+    });
+  } catch (e) {
+    console.error("Error deleting thread:", e);
+    res.status(500).json({ error: "Failed to delete thread" });
+  }
+};
+
+// DELETE /api/assignment-messages/thread/:clientId/permanent - Permanently delete thread from trash
+exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
+  req,
+  res
+) {
+  try {
+    const { clientId } = req.params;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID is required" });
+    }
+
+    const userId = req.employee._id.toString();
+
+    // Find all trashed messages for this client where user is sender
+    const trashedMessages = await AssignmentMessage.find({
+      client: clientId,
+      sender: userId,
+      isTrashed: true,
+    });
+
+    if (trashedMessages.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "No trashed thread found for this client" });
+    }
+
+    const messageIds = trashedMessages.map((msg) => msg._id);
+
+    // Permanently delete all trashed messages in the thread
+    await AssignmentMessage.deleteMany({
+      _id: { $in: messageIds },
+    });
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      const allParticipants = new Set();
+
+      trashedMessages.forEach((message) => {
+        const senderId =
+          typeof message.sender === "string"
+            ? message.sender
+            : message.sender?._id?.toString();
+        if (senderId) allParticipants.add(senderId);
+
+        if (message.receiver && Array.isArray(message.receiver)) {
+          message.receiver.forEach((receiver) => {
+            const receiverId =
+              typeof receiver === "string"
+                ? receiver
+                : receiver?._id?.toString();
+            if (receiverId) allParticipants.add(receiverId);
+          });
+        }
+      });
+
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit(
+          "assignment_thread_permanently_deleted",
+          {
+            clientId: clientId,
+            messageIds: messageIds,
+            deletedBy: userId,
+            timestamp: new Date(),
+            permanent: true,
+          }
+        );
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Thread permanently deleted (${messageIds.length} messages removed)`,
+      deletedCount: messageIds.length,
+    });
+  } catch (e) {
+    console.error("Error permanently deleting thread:", e);
+    res.status(500).json({ error: "Failed to permanently delete thread" });
+  }
+};
+
+// PATCH /api/assignment-messages/thread/:clientId/trash - Move entire thread to trash
+exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
+  try {
+    const { clientId } = req.params;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID is required" });
+    }
+
+    const userId = req.employee._id.toString();
+
+    // Find all messages for this client where user is involved
+    const threadMessages = await AssignmentMessage.find({
+      client: clientId,
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        { receiver: { $in: [userId] } },
+      ],
+      isTrashed: false, // Only non-trashed messages
+    });
+
+    if (threadMessages.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "No active thread found for this client" });
+    }
+
+    // Move all messages to trash
+    await AssignmentMessage.updateMany(
+      {
+        _id: { $in: threadMessages.map((msg) => msg._id) },
+      },
+      {
+        isTrashed: true,
+        trashedAt: new Date(),
+        trashedBy: req.employee._id,
+      }
+    );
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      const allParticipants = new Set();
+
+      threadMessages.forEach((message) => {
+        const senderId =
+          typeof message.sender === "string"
+            ? message.sender
+            : message.sender?._id?.toString();
+        if (senderId) allParticipants.add(senderId);
+
+        if (message.receiver && Array.isArray(message.receiver)) {
+          message.receiver.forEach((receiver) => {
+            const receiverId =
+              typeof receiver === "string"
+                ? receiver
+                : receiver?._id?.toString();
+            if (receiverId) allParticipants.add(receiverId);
+          });
+        }
+      });
+
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_thread_trashed", {
+          clientId: clientId,
+          messageIds: threadMessages.map((msg) => msg._id),
+          trashedBy: userId,
+          timestamp: new Date(),
+        });
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Thread moved to trash (${threadMessages.length} messages)`,
+      movedCount: threadMessages.length,
+    });
+  } catch (e) {
+    console.error("Error moving thread to trash:", e);
+    res.status(500).json({ error: "Failed to move thread to trash" });
+  }
+};
+
+// PATCH /api/assignment-messages/thread/:clientId/restore - Restore entire thread from trash
+exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
+  req,
+  res
+) {
+  try {
+    const { clientId } = req.params;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID is required" });
+    }
+
+    const userId = req.employee._id.toString();
+
+    // Find all trashed messages for this client where user is involved
+    const trashedMessages = await AssignmentMessage.find({
+      client: clientId,
+      isTrashed: true,
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        { receiver: { $in: [userId] } },
+      ],
+    });
+
+    if (trashedMessages.length === 0) {
+      return res
+        .status(404)
+        .json({ error: "No trashed thread found for this client" });
+    }
+
+    // Restore all messages from trash
+    await AssignmentMessage.updateMany(
+      {
+        _id: { $in: trashedMessages.map((msg) => msg._id) },
+      },
+      {
+        isTrashed: false,
+        trashedAt: undefined,
+        trashedBy: undefined,
+      }
+    );
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      const allParticipants = new Set();
+
+      trashedMessages.forEach((message) => {
+        const senderId =
+          typeof message.sender === "string"
+            ? message.sender
+            : message.sender?._id?.toString();
+        if (senderId) allParticipants.add(senderId);
+
+        if (message.receiver && Array.isArray(message.receiver)) {
+          message.receiver.forEach((receiver) => {
+            const receiverId =
+              typeof receiver === "string"
+                ? receiver
+                : receiver?._id?.toString();
+            if (receiverId) allParticipants.add(receiverId);
+          });
+        }
+      });
+
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_thread_restored", {
+          clientId: clientId,
+          messageIds: trashedMessages.map((msg) => msg._id),
+          restoredBy: userId,
+          timestamp: new Date(),
+        });
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Thread restored from trash (${trashedMessages.length} messages)`,
+      restoredCount: trashedMessages.length,
+    });
+  } catch (e) {
+    console.error("Error restoring thread from trash:", e);
+    res.status(500).json({ error: "Failed to restore thread from trash" });
   }
 };

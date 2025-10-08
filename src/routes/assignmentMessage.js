@@ -14,9 +14,9 @@ router.get("/drafts", ctrl.listDrafts);
 router.post("/drafts", ctrl.createDraft);
 router.get("/drafts/count", ctrl.getDraftCount);
 // Starred messages routes
-router.get('/starred', ctrl.getStarredMessages);
-router.patch('/:id/star', ctrl.starMessage);
-router.get('/starred/count', ctrl.getStarredCount);
+router.get("/starred", ctrl.getStarredMessages);
+router.patch("/:id/star", ctrl.starMessage);
+router.get("/starred/count", ctrl.getStarredCount);
 
 // =============================
 // General Message Routes
@@ -68,5 +68,13 @@ router.post("/:id/reschedule", ctrl.rescheduleMessage);
 router.get("/:id", ctrl.getMessage);
 router.patch("/:id", ctrl.updateMessage);
 router.delete("/:id", ctrl.deleteMessage);
+
+// Add to routes:
+router.get("/trash", ctrl.getTrashMessages);
+// Thread deletion routes
+router.delete("/:clientId", ctrl.deleteThread);
+router.delete("/:clientId/permanent", ctrl.permanentlyDeleteThread);
+router.patch("/:clientId/trash", ctrl.moveThreadToTrash);
+router.patch("/:clientId/restore", ctrl.restoreThreadFromTrash);
 
 module.exports = router;
