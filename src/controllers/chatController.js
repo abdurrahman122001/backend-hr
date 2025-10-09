@@ -869,6 +869,83 @@ exports.markAsRead = async (req, res) => {
   }
 };
 
+// Mark conversation as unread
+exports.markAsUnread = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid conversation ID" });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Conversation not found" });
+    }
+
+    // Get the last message to set as unread
+    const lastMessage = await Message.findOne({
+      conversation: conversationId
+    }).sort({ createdAt: -1 });
+
+    if (lastMessage) {
+      // For direct messages
+      if (!conversation.isGroup && !conversation.space) {
+        await Message.updateOne(
+          { _id: lastMessage._id },
+          { 
+            read: false,
+            readAt: null,
+            $pull: { readBy: { employee: req.employee._id } }
+          }
+        );
+      } else {
+        // For group/space messages
+        await Message.updateOne(
+          { _id: lastMessage._id },
+          {
+            $pull: { readBy: { employee: req.employee._id } }
+          }
+        );
+      }
+
+      // Set unread count to 1 (simulating one unread message)
+      conversation.unreadCount.set(req.employee._id.toString(), 1);
+      await conversation.save();
+    }
+
+    // Emit socket event
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation_${conversationId}`).emit("conversation_marked_unread", {
+        conversationId,
+        userId: req.employee._id,
+        unreadCount: 1
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation marked as unread",
+      unreadCount: 1
+    });
+  } catch (error) {
+    console.error("Mark as unread error:", error);
+    res.status(500).json({ 
+      success: false, 
+      error: "Failed to mark conversation as unread" 
+    });
+  }
+};
+
 // Get conversation by participant - UPDATED WITH SOCKET
 exports.getConversationByParticipant = async (req, res) => {
   try {
@@ -1586,3 +1663,262 @@ exports.serveFile = async (req, res) => {
     }
   }
 };
+// Add this to your existing chat controller
+exports.getSharedContent = async (req, res) => {
+    try {
+        const { conversationId } = req.params;
+        const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
+
+        console.log("🔍 Fetching shared content for:", conversationId);
+
+        if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid conversation ID"
+            });
+        }
+
+        // Check if user has access to this conversation
+        const conversation = await Conversation.findOne({
+            _id: conversationId,
+            participants: req.employee._id
+        });
+
+        if (!conversation) {
+            return res.status(404).json({
+                success: false,
+                error: "Conversation not found or access denied"
+            });
+        }
+
+        // Build query based on content type
+        let messageQuery = {
+            conversation: conversationId,
+            $or: []
+        };
+
+        // Files query (non-image documents)
+        const filesQuery = {
+            $and: [
+                { 'attachments.0': { $exists: true } },
+                {
+                    $or: [
+                        { 'attachments.mimetype': { $regex: /^application\/(pdf|msword|vnd\.|json|xml)/ } },
+                        { 'attachments.mimetype': { $regex: /^text\// } },
+                        { 'attachments.originalName': { $regex: /\.(pdf|doc|docx|xls|xlsx|csv|txt|json|xml)$/i } }
+                    ]
+                }
+            ]
+        };
+
+        // Links query (messages with URLs)
+        const linksQuery = {
+            content: { $regex: /https?:\/\/[^\s]+/ },
+            messageType: { $ne: 'gif' } // Exclude GIF URLs
+        };
+
+        // Media query (images, videos, GIFs)
+        const mediaQuery = {
+            $or: [
+                { 
+                    'attachments.mimetype': { 
+                        $regex: /^(image\/|video\/)/ 
+                    } 
+                },
+                { messageType: 'gif' },
+                { 
+                    'attachments.originalName': { 
+                        $regex: /\.(jpg|jpeg|png|gif|webp|svg|mp4|avi|mov|mkv)$/i 
+                    } 
+                }
+            ]
+        };
+
+        // Add queries based on requested type
+        switch (type) {
+            case 'files':
+                messageQuery.$or.push(filesQuery);
+                break;
+            case 'links':
+                messageQuery.$or.push(linksQuery);
+                break;
+            case 'media':
+                messageQuery.$or.push(mediaQuery);
+                break;
+            default: // 'all'
+                messageQuery.$or.push(filesQuery, linksQuery, mediaQuery);
+        }
+
+        // Fetch messages with shared content
+        const messages = await Message.find(messageQuery)
+            .populate('sender', 'name companyEmail avatar')
+            .populate('attachments')
+            .sort({ createdAt: -1 })
+            .limit(200); // Limit to prevent overload
+
+        console.log(`📦 Found ${messages.length} messages with shared content`);
+
+        // Process and categorize shared content
+        const sharedContent = {
+            files: [],
+            links: [],
+            media: []
+        };
+
+        const processedUrls = new Set(); // To avoid duplicates
+
+        messages.forEach((message) => {
+            const { sender, content, messageType, attachments = [], createdAt, _id } = message;
+
+            // Extract links from text content
+            if (content && messageType !== 'gif') {
+                const urlRegex = /(https?:\/\/[^\s]+)/g;
+                const urls = content.match(urlRegex);
+
+                if (urls) {
+                    urls.forEach((url, index) => {
+                        // Skip if URL is already processed or is a file attachment
+                        if (processedUrls.has(url)) return;
+                        
+                        const isAttachmentUrl = attachments.some(att => 
+                            att.url === url || content.includes(att.url)
+                        );
+                        
+                        if (!isAttachmentUrl) {
+                            processedUrls.add(url);
+                            
+                            try {
+                                const urlObj = new URL(url);
+                                const domain = urlObj.hostname.replace('www.', '');
+                                
+                                sharedContent.links.push({
+                                    id: `link-${_id}-${index}`,
+                                    title: domain.charAt(0).toUpperCase() + domain.slice(1),
+                                    url: url,
+                                    sharedBy: sender?.name || 'Unknown',
+                                    sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
+                                    dateShared: formatSharedDate(createdAt),
+                                    messageId: _id
+                                });
+                            } catch (error) {
+                                console.log('Invalid URL:', url);
+                            }
+                        }
+                    });
+                }
+            }
+
+            // Process attachments
+            if (attachments && attachments.length > 0) {
+                attachments.forEach((attachment, index) => {
+                    const { filename, url, mimetype, size, originalName } = attachment;
+                    
+                    // Skip if this URL was already processed as a link
+                    if (processedUrls.has(url)) return;
+                    processedUrls.add(url);
+
+                    const attachmentData = {
+                        id: `attachment-${_id}-${index}`,
+                        name: filename || originalName || 'Unnamed file',
+                        url: url,
+                        sharedBy: sender?.name || 'Unknown',
+                        sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
+                        dateShared: formatSharedDate(createdAt),
+                        messageId: _id,
+                        size: size || 0
+                    };
+
+                    // Categorize by file type
+                    if (mimetype.startsWith('image/') || mimetype === 'image/gif') {
+                        sharedContent.media.push({
+                            ...attachmentData,
+                            type: 'image',
+                            thumbnail: url
+                        });
+                    } else if (mimetype.startsWith('video/')) {
+                        sharedContent.media.push({
+                            ...attachmentData,
+                            type: 'video',
+                            thumbnail: null
+                        });
+                    } else if (messageType === 'gif') {
+                        sharedContent.media.push({
+                            ...attachmentData,
+                            type: 'image',
+                            thumbnail: url,
+                            name: 'GIF'
+                        });
+                    } else {
+                        // It's a file
+                        const fileExtension = (filename || originalName || '')
+                            .split('.')
+                            .pop()
+                            ?.toLowerCase() || 'file';
+                            
+                        sharedContent.files.push({
+                            ...attachmentData,
+                            type: fileExtension
+                        });
+                    }
+                });
+            }
+
+            // Handle GIF messages (content is GIF URL)
+            if (messageType === 'gif' && content && !processedUrls.has(content)) {
+                processedUrls.add(content);
+                sharedContent.media.push({
+                    id: `gif-${_id}`,
+                    type: 'image',
+                    name: 'GIF',
+                    url: content,
+                    thumbnail: content,
+                    sharedBy: sender?.name || 'Unknown',
+                    sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
+                    dateShared: formatSharedDate(createdAt),
+                    messageId: _id,
+                    size: 0
+                });
+            }
+        });
+
+        // Sort by date (newest first)
+        sharedContent.files.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
+        sharedContent.links.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
+        sharedContent.media.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
+
+        console.log(`📊 Shared content summary:`, {
+            files: sharedContent.files.length,
+            links: sharedContent.links.length,
+            media: sharedContent.media.length
+        });
+
+        res.json({
+            success: true,
+            data: sharedContent,
+            summary: {
+                totalFiles: sharedContent.files.length,
+                totalLinks: sharedContent.links.length,
+                totalMedia: sharedContent.media.length
+            }
+        });
+
+    } catch (error) {
+        console.error('Get shared content error:', error);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to fetch shared content',
+            details: error.message
+        });
+    }
+};
+
+// Helper function to format date
+function formatSharedDate(dateString) {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric'
+    });
+}

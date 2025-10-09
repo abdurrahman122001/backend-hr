@@ -59,7 +59,12 @@ const AssignmentMessageSchema = new Schema(
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
-
+    // Spam fields
+    isSpam: { type: Boolean, default: false },
+    spamReportedAt: { type: Date },
+    spamReportedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    spamReportCount: { type: Number, default: 0 },
+    spamReporters: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
     // Files
     attachments: [AttachmentSchema],
   },

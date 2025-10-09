@@ -40,6 +40,7 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
+
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -69,14 +70,26 @@ async function applyVisibility(q, req) {
   const now = new Date();
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
 
+  // PRESERVE THE isTrashed FILTER - don't override it
+  const baseQuery = { ...q };
+
+  // Remove isTrashed from base query if it exists, we'll handle it separately
+  const isTrashedFilter = baseQuery.isTrashed;
+  delete baseQuery.isTrashed;
+
   if (q.isScheduled === true && q.status === "scheduled") {
-    return { ...q, $and: [{ $or: visOr }] };
+    const scheduledQuery = { ...baseQuery, $and: [{ $or: visOr }] };
+    // Add back the isTrashed filter if it was set
+    if (isTrashedFilter !== undefined) {
+      scheduledQuery.isTrashed = isTrashedFilter;
+    }
+    return scheduledQuery;
   }
 
-  return {
+  const finalQuery = {
     $or: [
       {
-        ...q,
+        ...baseQuery,
         $and: [
           {
             $or: [
@@ -93,7 +106,7 @@ async function applyVisibility(q, req) {
         ],
       },
       {
-        ...q,
+        ...baseQuery,
         isScheduled: true,
         status: "scheduled",
         scheduledFor: { $gt: now },
@@ -101,6 +114,13 @@ async function applyVisibility(q, req) {
       },
     ],
   };
+
+  // Add back the isTrashed filter to the entire query
+  if (isTrashedFilter !== undefined) {
+    finalQuery.isTrashed = isTrashedFilter;
+  }
+
+  return finalQuery;
 }
 
 /** ---------- SOCKET.IO UTILITIES ---------- **/
@@ -168,13 +188,6 @@ async function emitToSpecificReceivers(
       ),
     ];
 
-    console.log(`🎯 Targeted emission for ${eventName}:`, {
-      messageId: populatedMessage._id,
-      sender: senderId,
-      specificReceivers: specificReceiverIds,
-      allRecipients: allRecipients,
-    });
-
     // CRITICAL: Also send to ALL team leads for the owner (for supervision visibility)
     const ownerId =
       typeof populatedMessage.owner === "string"
@@ -185,15 +198,10 @@ async function emitToSpecificReceivers(
       const { tls } = await findTLsAndManagersByOwner(ownerId);
       const teamLeadIds = tls.map((id) => id.toString());
 
-      console.log(`👥 Team leads for owner ${ownerId}:`, teamLeadIds);
-
       // Add team leads to recipients (they get read-only access to all messages)
       teamLeadIds.forEach((teamLeadId) => {
         if (!allRecipients.includes(teamLeadId)) {
           allRecipients.push(teamLeadId);
-          console.log(
-            `📍 Added team lead ${teamLeadId} for supervision visibility`
-          );
         }
       });
     }
@@ -202,13 +210,8 @@ async function emitToSpecificReceivers(
     allRecipients.forEach((recipientId) => {
       if (recipientId) {
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
-        console.log(`📍 Sent ${eventName} to employee_${recipientId}`);
       }
     });
-
-    console.log(
-      `✅ Successfully emitted ${eventName} to ${allRecipients.length} recipients (including team leads)`
-    );
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
     throw error;
@@ -256,10 +259,6 @@ async function emitMessageUpdate(io, message, action) {
       io,
       populatedMessage,
       "assignment_message_updated"
-    );
-
-    console.log(
-      `✅ Emitted assignment_message_updated for ${action} to specific recipients`
     );
   } catch (error) {
     console.error("❌ Error emitting message update:", error);
@@ -399,8 +398,24 @@ exports.listMessages = async function listMessages(req, res) {
       page = 1,
       between: betweenRaw,
       filter,
+      isTrashed,
+      isSpam,
       approvalStatus,
     } = req.query;
+
+    console.log("📨 listMessages called with params:", {
+      client,
+      sender,
+      receiver,
+      participant,
+      owner,
+      status,
+      isScheduled,
+      filter,
+      isTrashed,
+      isSpam,
+      approvalStatus,
+    });
 
     const q = {};
 
@@ -421,6 +436,20 @@ exports.listMessages = async function listMessages(req, res) {
       q.status = { $ne: "draft" };
     }
 
+    // 🔥 CRITICAL FIX: Simplified trash/spam logic
+    if (isTrashed === "true" || isTrashed === true) {
+      console.log("🗑️ Filtering for TRASH messages");
+      q.isTrashed = true;
+    } else if (isSpam === "true" || isSpam === true) {
+      console.log("🚫 Filtering for SPAM messages");
+      q.isSpam = true;
+    } else {
+      // Default: exclude both trash and spam from normal views
+      console.log("📬 Normal view - excluding trash and spam");
+      q.isTrashed = { $ne: true };
+      q.isSpam = { $ne: true };
+    }
+
     // Approval status filter
     if (
       approvalStatus &&
@@ -429,7 +458,7 @@ exports.listMessages = async function listMessages(req, res) {
       q.approvalStatus = approvalStatus;
     }
 
-    // "filter=scheduled"
+    // Scheduled filter
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -437,7 +466,7 @@ exports.listMessages = async function listMessages(req, res) {
       q.isScheduled = false;
     }
 
-    // scheduledBefore/After
+    // Time filters
     const timeFilters = {};
     if (scheduledBefore) {
       const d = new Date(scheduledBefore);
@@ -449,14 +478,21 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // FIXED: Team leads should only see messages where they are receivers
+    // User-based filtering
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
 
+    console.log("👤 User info:", {
+      currentUserRole,
+      isTeamLead,
+      me: req.employee._id,
+    });
+
     if (isTeamLead && me) {
-      // Team leads can only see messages where they are in the receiver array
+      // Team leads can only see messages where they are receivers
       q.$or = [{ receiver: me }, { receiver: { $in: [me] } }];
+      console.log("👨‍💼 Team lead visibility filter applied");
     } else {
       // Normal user visibility rules
       const between = normalizeIds(betweenRaw);
@@ -469,52 +505,56 @@ exports.listMessages = async function listMessages(req, res) {
           { sender: b, receiver: a },
         ];
       } else if (isObjId(participant)) {
-        // FIX: Handle array receiver properly
         q.$or = [
           { sender: participant },
-          { receiver: participant }, // single receiver
-          { receiver: { $in: [participant] } }, // array receiver
+          { receiver: participant },
+          { receiver: { $in: [participant] } },
         ];
       } else {
         if (isObjId(sender)) q.sender = sender;
         if (isObjId(receiver)) {
-          // FIX: Handle both single receiver and array receiver
           q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
         }
       }
     }
 
+    console.log(
+      "🔍 Final query before visibility:",
+      JSON.stringify(q, null, 2)
+    );
+
+    // Apply visibility rules
+    const qFinal = await applyVisibility(q, req);
+
+    console.log(
+      "🔍 Final query after visibility:",
+      JSON.stringify(qFinal, null, 2)
+    );
+
     // Must have at least one scope
     if (
-      !q.owner &&
-      !q.client &&
-      !q.sender &&
-      !q.receiver &&
-      !q.$or &&
-      !q.status &&
-      q.isScheduled === undefined &&
-      !q.approvalStatus
+      !qFinal.owner &&
+      !qFinal.client &&
+      !qFinal.sender &&
+      !qFinal.receiver &&
+      !qFinal.$or &&
+      !qFinal.status &&
+      qFinal.isScheduled === undefined &&
+      !qFinal.approvalStatus &&
+      qFinal.isTrashed === undefined &&
+      qFinal.isSpam === undefined
     ) {
       return res.status(400).json({
         error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, or isScheduled",
       });
     }
-
-    // Apply visibility rules for ALL users including team leads
-    const qFinal = await applyVisibility(q, req);
-
-    console.log("🔍 Final query:", JSON.stringify(qFinal, null, 2));
-    console.log(
-      "👤 Current user role:",
-      currentUserRole,
-      "Team lead:",
-      isTeamLead
-    );
 
     // Pagination & fetch
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    console.log("📊 Executing database query...");
 
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
@@ -528,12 +568,16 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
+          { path: "trashedBy", select: "_id name companyEmail" },
+          { path: "spamReportedBy", select: "_id name companyEmail" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // CRITICAL FIX: Ensure receiver is always treated as array for consistency
+    console.log(`✅ Found ${items.length} messages out of ${total} total`);
+
+    // Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
       receiver: Array.isArray(item.receiver)
@@ -551,11 +595,10 @@ exports.listMessages = async function listMessages(req, res) {
       isTeamLead: isTeamLead,
     });
   } catch (e) {
-    console.error(e);
+    console.error("❌ Error in listMessages:", e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -1127,10 +1170,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
         if (io) {
           await emitToAssignmentClients(io, message, "new_assignment_message");
         }
-
-        console.log(
-          `Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`
-        );
         results.sent++;
       } catch (error) {
         console.error(
@@ -1302,14 +1341,7 @@ async function sendDisapprovalNotification(io, message, disapprovedBy) {
           populatedMessage.disapprovalNote ||
           "Your message has been disapproved and needs revisions.",
       });
-      console.log(
-        `📍 Sent disapproval notification to sender: employee_${senderId}`
-      );
     }
-
-    console.log(
-      `✅ Disapproval notification sent for message ${populatedMessage._id}`
-    );
   } catch (error) {
     console.error("❌ Error in sendDisapprovalNotification:", error);
     throw error;
@@ -1348,10 +1380,6 @@ async function sendResubmissionNotification(io, message, resubmittedBy) {
       },
       timestamp: new Date(),
     });
-
-    console.log(
-      `✅ Resubmission notification sent to team leads for message ${populatedMessage._id}`
-    );
   } catch (error) {
     console.error("❌ Error in sendResubmissionNotification:", error);
     throw error;
@@ -1464,10 +1492,6 @@ exports.deleteMessage = async function deleteMessage(req, res) {
           clientId: clientId,
         });
       });
-
-      console.log(
-        `✅ Emitted assignment_message_deleted for message ${req.params.id}`
-      );
     }
 
     res.json({ ok: true });
@@ -1959,8 +1983,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     try {
       const io = getIO(req);
       if (io) {
-        console.log("📢 Emitting real-time events for message resubmission");
-
         // Emit message update
         await emitMessageUpdate(io, populated, "disapproved_message_edited");
 
@@ -1996,10 +2018,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       console.error("❌ Socket.io event error (non-critical):", socketError);
       // Don't fail the entire request if socket events fail
     }
-
-    // Log the successful resubmission
-    console.log(`✅ Message ${id} resubmitted by employee ${req.employee._id}`);
-
     res.json({
       success: true,
       message: "Disapproved message edited and submitted for review",
@@ -2320,91 +2338,91 @@ exports.restoreFromTrash = async function (req, res) {
 
 exports.getTrashMessages = async function getTrashMessages(req, res) {
   try {
-    console.log("🔄 getTrashMessages called");
-    console.log("📥 Query params:", req.query);
-    console.log("👤 Current user:", req.employee?._id);
-    
+    console.log("🔄 getTrashMessages controller called");
+
     const { limit = 50, page = 1, client } = req.query;
     const currentUser = req.employee?._id;
-    
-    if (!currentUser) {
+
+    console.log("👤 Current user:", currentUser);
+    console.log("📋 Query params:", { limit, page, client });
+
+    if (!isObjId(currentUser)) {
+      console.log("❌ Unauthorized: Invalid user ID");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // SIMPLEST query - just get trashed messages
-    const q = { 
-      isTrashed: true
+    // CRITICAL: Only show messages where current user is involved AND message is trashed
+    const q = {
+      isTrashed: true,
+      $or: [
+        { sender: currentUser },
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+      ],
     };
-    
+
     // Add client filter if provided
-    if (client) {
+    if (client && mongoose.isValidObjectId(client)) {
       q.client = client;
+      console.log("🔍 Filtering by client:", client);
     }
-    
-    console.log("🔍 Final trash query:", JSON.stringify(q, null, 2));
-    
+
+    console.log("🔍 Final query:", JSON.stringify(q, null, 2));
+
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-    
-    console.log("📊 Pagination:", { page: pageNum, limit: lim });
-    
-    // Basic population
+
+    console.log(`📊 Pagination: page ${pageNum}, limit ${lim}`);
+
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
-      { path: "client", select: "_id clientName" }
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "trashedBy", select: "_id name companyEmail" },
     ];
-    
-    let items, total;
-    try {
-      [items, total] = await Promise.all([
-        AssignmentMessage.find(q)
-          .sort({ updatedAt: -1 })
-          .skip((pageNum - 1) * lim)
-          .limit(lim)
-          .populate(populateFields)
-          .lean(),
-        AssignmentMessage.countDocuments(q)
-      ]);
-    } catch (dbError) {
-      console.error("❌ Database query error:", dbError);
-      return res.status(500).json({ 
-        error: "Database query failed",
-        details: dbError.message 
-      });
-    }
-    
-    // Simple processing
-    const safeItems = (items || []).map(item => {
-      const safeItem = { ...item };
-      
-      // Ensure receiver is array
-      if (safeItem.receiver && !Array.isArray(safeItem.receiver)) {
-        safeItem.receiver = [safeItem.receiver];
-      } else if (!safeItem.receiver) {
-        safeItem.receiver = [];
-      }
-      
-      return safeItem;
-    });
 
-    console.log(`✅ Found ${safeItems.length} trash messages out of ${total} total`);
-    
+    // Execute query with detailed logging
+    console.log("🔍 Executing database query...");
+    const items = await AssignmentMessage.find(q)
+      .sort({ trashedAt: -1, updatedAt: -1 })
+      .skip((pageNum - 1) * lim)
+      .limit(lim)
+      .populate(populateFields)
+      .lean();
+
+    const total = await AssignmentMessage.countDocuments(q);
+
+    console.log(
+      `✅ Found ${items.length} trashed messages out of ${total} total`
+    );
+
+    // Ensure receiver is always treated as array for consistency
+    const normalizedItems = items.map((item) => ({
+      ...item,
+      receiver: Array.isArray(item.receiver)
+        ? item.receiver
+        : [item.receiver].filter(Boolean),
+    }));
+
+    console.log(
+      `📦 Sending ${normalizedItems.length} normalized items to frontend`
+    );
+
     res.json({
-      items: safeItems,
-      total: total || 0,
+      items: normalizedItems,
+      total,
       page: pageNum,
-      pages: Math.ceil(total / lim) || 1,
-      limit: lim
+      pages: Math.ceil(total / lim),
+      limit: lim,
     });
-    
   } catch (e) {
     console.error("❌ Error in getTrashMessages:", e);
     console.error("❌ Error stack:", e.stack);
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       error: "Failed to load trash messages",
       details: e.message,
-      ...(process.env.NODE_ENV === 'development' && { stack: e.stack })
+      ...(process.env.NODE_ENV === "development" && { stack: e.stack }),
     });
   }
 };
@@ -2479,10 +2497,6 @@ exports.deleteThread = async function deleteThread(req, res) {
           timestamp: new Date(),
         });
       });
-
-      console.log(
-        `✅ Emitted assignment_thread_deleted for client ${clientId}, ${messageIds.length} messages deleted`
-      );
     }
 
     res.json({
@@ -2746,5 +2760,190 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
   } catch (e) {
     console.error("Error restoring thread from trash:", e);
     res.status(500).json({ error: "Failed to restore thread from trash" });
+  }
+};
+// Report message as spam
+exports.reportSpam = async function reportSpam(req, res) {
+  try {
+    const { id } = req.params;
+    const currentUser = req.employee?._id;
+
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Check if user has already reported this message
+    const alreadyReported = msg.spamReporters.includes(currentUser);
+    if (alreadyReported) {
+      return res
+        .status(400)
+        .json({ error: "You have already reported this message as spam" });
+    }
+
+    // Update spam fields
+    msg.isSpam = true;
+    msg.spamReportCount += 1;
+    msg.spamReporters.push(currentUser);
+
+    // Set initial spam report time if this is the first report
+    if (msg.spamReportCount === 1) {
+      msg.spamReportedAt = new Date();
+      msg.spamReportedBy = currentUser;
+    }
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "spamReportedBy", select: "_id name companyEmail" },
+      { path: "spamReporters", select: "_id name companyEmail" },
+    ]);
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      await emitMessageUpdate(io, msg, "reported_as_spam");
+    }
+
+    res.json({
+      success: true,
+      message: "Message reported as spam successfully",
+      data: populated,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to report message as spam" });
+  }
+};
+
+// Remove from spam (for admins/moderators)
+exports.removeFromSpam = async function removeFromSpam(req, res) {
+  try {
+    const { id } = req.params;
+    const currentUser = req.employee?._id;
+
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Reset spam fields
+    msg.isSpam = false;
+    msg.spamReportCount = 0;
+    msg.spamReporters = [];
+    msg.spamReportedAt = undefined;
+    msg.spamReportedBy = undefined;
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+    ]);
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      await emitMessageUpdate(io, msg, "removed_from_spam");
+    }
+
+    res.json({
+      success: true,
+      message: "Message removed from spam successfully",
+      data: populated,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to remove message from spam" });
+  }
+};
+
+exports.getSpamMessages = async function getSpamMessages(req, res) {
+  try {
+    const { client, owner, limit = 50, page = 1 } = req.query;
+
+    const currentUser = req.employee?._id;
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Build base query for spam messages
+    const q = {
+      isSpam: true,
+    };
+
+    // Apply other filters if provided
+    if (isObjId(owner)) {
+      q.owner = owner;
+    } else if (req.employee?.owner) {
+      q.owner = req.employee.owner;
+    }
+
+    if (isObjId(client)) {
+      q.client = client;
+    }
+    // Apply visibility rules
+    const qFinal = await applyVisibility(q, req);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    // Execute query with proper error handling
+    let items, total;
+    try {
+      [items, total] = await Promise.all([
+        AssignmentMessage.find(qFinal)
+          .sort({ spamReportedAt: -1, createdAt: -1 })
+          .skip((pageNum - 1) * lim)
+          .limit(lim)
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role" },
+            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "client", select: "_id clientName" },
+            { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+            { path: "spamReportedBy", select: "_id name companyEmail" },
+            { path: "spamReporters", select: "_id name companyEmail" },
+          ])
+          .lean(),
+        AssignmentMessage.countDocuments(qFinal),
+      ]);
+    } catch (dbError) {
+      console.error("❌ Database query error:", dbError);
+      return res.status(500).json({
+        error: "Database query failed",
+        details: dbError.message,
+      });
+    }
+
+    res.json({
+      items: items || [],
+      total: total || 0,
+      page: pageNum,
+      pages: Math.ceil(total / lim) || 1,
+      limit: lim,
+    });
+  } catch (e) {
+    console.error("❌ Error in getSpamMessages:", e);
+    console.error("❌ Error stack:", e.stack);
+
+    res.status(500).json({
+      error: "Failed to fetch spam messages",
+      details: e.message,
+      ...(process.env.NODE_ENV === "development" && { stack: e.stack }),
+    });
   }
 };

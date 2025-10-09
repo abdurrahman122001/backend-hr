@@ -51,7 +51,9 @@ router.get(
 
 // Create new space
 router.post("/spaces", empAuth, chatController.createSpace);
-
+// Add this route to your chat routes file
+router.get('/conversations/:conversationId/shared-content', empAuth, chatController.getSharedContent);
+router.get('/spaces/:spaceId/shared-content', empAuth, chatController.getSharedContent);
 // Add members to space
 router.post(
   "/spaces/:spaceId/members",
@@ -76,6 +78,13 @@ router.get(
 
 // Typing indicators
 router.post("/typing", empAuth, chatController.typing);
+
+// Mark conversation as unread
+router.put(
+  "/conversations/:conversationId/unread",
+  empAuth,
+  chatController.markAsUnread
+);
 
 // Delete message
 router.delete("/messages/:messageId", empAuth, chatController.deleteMessage);

@@ -3,7 +3,6 @@ const Employee = require("../models/Employees");
 const JWT_SECRET = process.env.JWT_SECRET;
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
-  console.log("🔐 [Auth] Checking auth header…");
   const authHeader = req.headers.authorization || "";
   const token = authHeader.startsWith("Bearer ")
     ? authHeader.split(" ")[1]
@@ -18,8 +17,6 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    console.log("🔐 [Auth] JWT payload:", payload);
-
     const emp = await Employee.findById(payload.id).select(
       "_id role companyEmail name owner"
     );
@@ -37,7 +34,6 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
       name: emp.name,
       owner: emp.owner,
     };
-    console.log("🔐 [Auth] Authenticated employee:", req.employee);
     next();
   } catch (err) {
     console.error("🔐 [Auth] Token error:", err);

@@ -151,6 +151,14 @@ const EmployeeSchema = new Schema(
     ndaGenerated: { type: Boolean, default: false },
     ndaPath: { type: String },
     contractPath: { type: String },
+    trustedDevices: [
+      {
+        deviceFingerprint: { type: String, required: true },
+        userAgent: { type: String },
+        ip: { type: String },
+        addedAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,
