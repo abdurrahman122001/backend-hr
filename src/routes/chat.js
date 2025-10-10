@@ -12,6 +12,12 @@ router.get(
   empAuth,
   chatController.getMessages
 );
+// ✅ Delete a conversation
+router.delete(
+  "/conversations/:conversationId",
+  empAuth,
+  chatController.deleteConversation
+);
 
 // Start new conversation or get existing one
 router.post("/conversations/start", empAuth, chatController.startConversation);
@@ -26,8 +32,8 @@ router.post(
 
 // Send direct message (creates conversation if needed)
 router.post(
-  "/messages/direct", 
-  empAuth, 
+  "/messages/direct",
+  empAuth,
   chatController.upload.array("attachments", 10),
   chatController.sendDirectMessage
 );
@@ -51,16 +57,55 @@ router.get(
 
 // Create new space
 router.post("/spaces", empAuth, chatController.createSpace);
+router.delete("/spaces/:spaceId", empAuth, chatController.deleteSpace);
+
 // Add this route to your chat routes file
-router.get('/conversations/:conversationId/shared-content', empAuth, chatController.getSharedContent);
-router.get('/spaces/:spaceId/shared-content', empAuth, chatController.getSharedContent);
+router.get(
+  "/conversations/:conversationId/shared-content",
+  empAuth,
+  chatController.getSharedContent
+);
 // Add members to space
 router.post(
   "/spaces/:spaceId/members",
   empAuth,
   chatController.addSpaceMembers
 );
-
+// Space members management routes
+router.get("/spaces/:spaceId/members", empAuth, chatController.getSpaceMembers);
+router.post(
+  "/spaces/:spaceId/members",
+  empAuth,
+  chatController.addSpaceMembers
+);
+router.delete(
+  "/spaces/:spaceId/members/:memberId",
+  empAuth,
+  chatController.removeSpaceMember
+);
+router.patch(
+  "/spaces/:spaceId/members/:memberId/role",
+  empAuth,
+  chatController.updateMemberRole
+);
+router.get(
+  "/spaces/:spaceId/search-employees",
+  empAuth,
+  chatController.searchEmployees
+);
+// Space details routes
+router.get("/spaces/:spaceId/details", empAuth, chatController.getSpaceDetails);
+router.put(
+  "/spaces/:spaceId/details",
+  empAuth,
+  chatController.updateSpaceDetails
+);
+router.post("/spaces/:spaceId/leave", empAuth, chatController.leaveSpace);
+router.post(
+  "/spaces/:spaceId/transfer-ownership",
+  empAuth,
+  chatController.transferSpaceOwnership
+);
 // ✅ FIXED: Use chatController's upload middleware for space file uploads
 router.post(
   "/spaces/:spaceId/messages",

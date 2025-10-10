@@ -1,5 +1,6 @@
-const express = require('express');
+const express = require("express");
 const { Conversation, Message, Space } = require("../models/Chat");
+const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const path = require("path");
@@ -91,7 +92,9 @@ exports.uploadFile = async (req, res) => {
         originalName: req.file.originalname,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${req.file.filename}`, // Full URL
+        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
+          req.file.filename
+        }`, // Full URL
         uploadedAt: new Date(),
       };
 
@@ -135,7 +138,9 @@ exports.uploadFiles = async (req, res) => {
         originalName: file.originalname,
         mimetype: file.mimetype,
         size: file.size,
-        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
+        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
+          file.filename
+        }`,
         uploadedAt: new Date(),
       }));
 
@@ -154,34 +159,35 @@ exports.uploadFiles = async (req, res) => {
   }
 };
 
+// ✅ UPDATE THIS: getConversations function to include photographUrl
 exports.getConversations = async (req, res) => {
   try {
-    // Get direct conversations
+    // Get direct conversations - UPDATED to include photographUrl
     const conversations = await Conversation.find({
       participants: req.employee._id,
       isGroup: false,
     })
-      .populate("participants", "name companyEmail avatar")
+      .populate("participants", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
       .populate("lastMessage")
       .sort({ updatedAt: -1 });
 
-    // Get group conversations
+    // Get group conversations - UPDATED to include photographUrl
     const groupConversations = await Conversation.find({
       participants: req.employee._id,
       isGroup: true,
     })
-      .populate("participants", "name companyEmail avatar")
+      .populate("participants", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
       .populate("lastMessage")
-      .populate("admins", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
       .sort({ updatedAt: -1 });
 
-    // Get spaces
+    // Get spaces - UPDATED to include photographUrl
     const spaces = await Space.find({
       members: req.employee._id,
     })
-      .populate("createdBy", "name companyEmail avatar")
-      .populate("admins", "name companyEmail avatar")
-      .populate("members", "name companyEmail avatar")
+      .populate("createdBy", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+      .populate("admins", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+      .populate("members", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
       .sort({ updatedAt: -1 });
 
     res.json({
@@ -228,7 +234,6 @@ exports.getConversations = async (req, res) => {
       .json({ success: false, error: "Failed to fetch conversations" });
   }
 };
-
 exports.getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -442,19 +447,23 @@ exports.sendMessage = async (req, res) => {
       conversationId,
       content,
       messageType,
-      files: req.files ? req.files.length : 0
+      files: req.files ? req.files.length : 0,
     });
 
     // ✅ Process uploaded files
     const uploadedAttachments = [];
     if (req.files && req.files.length > 0) {
-      uploadedAttachments.push(...req.files.map(file => ({
-        filename: file.filename,
-        originalName: file.originalname,
-        mimetype: file.mimetype,
-        size: file.size,
-        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
-      })));
+      uploadedAttachments.push(
+        ...req.files.map((file) => ({
+          filename: file.filename,
+          originalName: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
+            file.filename
+          }`,
+        }))
+      );
     }
 
     // ✅ UPDATED: Allow empty content if there are attachments
@@ -640,22 +649,22 @@ exports.sendMessage = async (req, res) => {
 
 exports.sendDirectMessage = async (req, res) => {
   try {
-    const {
-      participantId,
-      content,
-      messageType = "text",
-    } = req.body;
+    const { participantId, content, messageType = "text" } = req.body;
 
     // ✅ Process uploaded files
     const uploadedAttachments = [];
     if (req.files && req.files.length > 0) {
-      uploadedAttachments.push(...req.files.map(file => ({
-        filename: file.filename,
-        originalName: file.originalname,
-        mimetype: file.mimetype,
-        size: file.size,
-        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
-      })));
+      uploadedAttachments.push(
+        ...req.files.map((file) => ({
+          filename: file.filename,
+          originalName: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
+            file.filename
+          }`,
+        }))
+      );
     }
 
     if (!participantId) {
@@ -893,7 +902,7 @@ exports.markAsUnread = async (req, res) => {
 
     // Get the last message to set as unread
     const lastMessage = await Message.findOne({
-      conversation: conversationId
+      conversation: conversationId,
     }).sort({ createdAt: -1 });
 
     if (lastMessage) {
@@ -901,10 +910,10 @@ exports.markAsUnread = async (req, res) => {
       if (!conversation.isGroup && !conversation.space) {
         await Message.updateOne(
           { _id: lastMessage._id },
-          { 
+          {
             read: false,
             readAt: null,
-            $pull: { readBy: { employee: req.employee._id } }
+            $pull: { readBy: { employee: req.employee._id } },
           }
         );
       } else {
@@ -912,7 +921,7 @@ exports.markAsUnread = async (req, res) => {
         await Message.updateOne(
           { _id: lastMessage._id },
           {
-            $pull: { readBy: { employee: req.employee._id } }
+            $pull: { readBy: { employee: req.employee._id } },
           }
         );
       }
@@ -925,23 +934,26 @@ exports.markAsUnread = async (req, res) => {
     // Emit socket event
     const io = req.app.get("io");
     if (io) {
-      io.to(`conversation_${conversationId}`).emit("conversation_marked_unread", {
-        conversationId,
-        userId: req.employee._id,
-        unreadCount: 1
-      });
+      io.to(`conversation_${conversationId}`).emit(
+        "conversation_marked_unread",
+        {
+          conversationId,
+          userId: req.employee._id,
+          unreadCount: 1,
+        }
+      );
     }
 
     res.json({
       success: true,
       message: "Conversation marked as unread",
-      unreadCount: 1
+      unreadCount: 1,
     });
   } catch (error) {
     console.error("Mark as unread error:", error);
-    res.status(500).json({ 
-      success: false, 
-      error: "Failed to mark conversation as unread" 
+    res.status(500).json({
+      success: false,
+      error: "Failed to mark conversation as unread",
     });
   }
 };
@@ -1077,6 +1089,105 @@ exports.createSpace = async (req, res) => {
   }
 };
 
+// ✅ GET SPACE MEMBERS (optimized + schema-aligned)
+exports.getSpaceMembers = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    // Validate spaceId
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID",
+      });
+    }
+
+    // ✅ Fetch space efficiently with minimal populate
+    const space = await Space.findById(spaceId)
+      .populate([
+        { path: "createdBy", select: "name companyEmail avatar photographUrl" },
+        { path: "admins", select: "name companyEmail avatar photographUrl" },
+        {
+          path: "members",
+          select:
+            "name companyEmail avatar photographUrl department position isOnline",
+        },
+      ])
+      .lean();
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // ✅ Check access
+    const isMember = space.members?.some(
+      (m) => m._id.toString() === req.employee._id.toString()
+    );
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You are not a member of this space.",
+      });
+    }
+
+    // ✅ Precompute role sets
+    const ownerId = space.createdBy?._id?.toString();
+    const adminIds = new Set(space.admins?.map((a) => a._id.toString()) || []);
+
+    // ✅ Build formatted member list
+    const members = space.members.map((member) => {
+      const memberId = member._id.toString();
+      const isOwner = memberId === ownerId;
+      const isAdmin = adminIds.has(memberId);
+
+      return {
+        id: member._id,
+        _id: member._id,
+        name: member.name,
+        email: member.companyEmail || member.email,
+        role: isOwner ? "Owner" : isAdmin ? "Admin" : "Member",
+        avatarUrl: member.photographUrl || member.avatar || null,
+        department: member.department || "N/A",
+        position: member.position || "N/A",
+        isOnline: member.isOnline ?? false,
+        statusColor: member.isOnline ? "#34a853" : "#9e9e9e",
+      };
+    });
+
+    // ✅ Sort by role
+    const sortedMembers = members.sort((a, b) => {
+      const order = { Owner: 0, Admin: 1, Member: 2 };
+      return order[a.role] - order[b.role];
+    });
+
+    // ✅ Final response
+    res.json({
+      success: true,
+      space: {
+        _id: space._id,
+        name: space.name,
+        description: space.description,
+        avatar: space.avatar,
+        createdBy: space.createdBy,
+        totalMembers: members.length,
+        isPrivate: space.isPrivate,
+        settings: space.settings,
+      },
+      members: sortedMembers,
+    });
+  } catch (error) {
+    console.error("❌ getSpaceMembers error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch space members",
+      details: error.message,
+    });
+  }
+};
+
 // Add members to space - UPDATED WITH SOCKET
 exports.addSpaceMembers = async (req, res) => {
   try {
@@ -1103,9 +1214,9 @@ exports.addSpaceMembers = async (req, res) => {
 
     // Add new members
     const newMembers = memberIds.filter(
-      (id) => !space.members.includes(mongoose.Types.ObjectId(id))
+      (id) =>
+        !space.members.some((memberId) => memberId.toString() === id.toString())
     );
-
     space.members.push(...newMembers);
     await space.save();
 
@@ -1162,13 +1273,17 @@ exports.sendSpaceMessage = async (req, res) => {
     // ✅ Process uploaded files
     const uploadedAttachments = [];
     if (req.files && req.files.length > 0) {
-      uploadedAttachments.push(...req.files.map(file => ({
-        filename: file.filename,
-        originalName: file.originalname,
-        mimetype: file.mimetype,
-        size: file.size,
-        url: `${req.protocol}://${req.get('host')}/uploads/chat-attachments/${file.filename}`,
-      })));
+      uploadedAttachments.push(
+        ...req.files.map((file) => ({
+          filename: file.filename,
+          originalName: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
+            file.filename
+          }`,
+        }))
+      );
     }
 
     if (!content && uploadedAttachments.length === 0) {
@@ -1273,7 +1388,7 @@ exports.sendSpaceMessage = async (req, res) => {
       sender: req.employee._id,
       receiversCount: receivers.length,
       messageType: finalMessageType, // ✅ Log the determined message type
-      attachments: uploadedAttachments.length
+      attachments: uploadedAttachments.length,
     });
 
     // Create message with multiple receivers
@@ -1339,6 +1454,730 @@ exports.sendSpaceMessage = async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to send message",
+      details: error.message,
+    });
+  }
+};
+// ✅ REMOVE MEMBER FROM SPACE
+exports.removeSpaceMember = async (req, res) => {
+  try {
+    const { spaceId, memberId } = req.params;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(spaceId) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID or member ID",
+      });
+    }
+
+    // Find space and verify permissions
+    const space = await Space.findById(spaceId)
+      .populate("createdBy", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar")
+      .populate("members", "name companyEmail avatar");
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // Check if user has permission to remove members
+    const isAdminOrOwner =
+      space.createdBy._id.toString() === req.employee._id.toString() ||
+      space.admins.some(
+        (admin) => admin._id.toString() === req.employee._id.toString()
+      );
+
+    if (!isAdminOrOwner) {
+      return res.status(403).json({
+        success: false,
+        error: "Only space owners and admins can remove members",
+      });
+    }
+
+    // Prevent owner from being removed
+    if (space.createdBy._id.toString() === memberId) {
+      return res.status(400).json({
+        success: false,
+        error: "Space owner cannot be removed",
+      });
+    }
+
+    // Check if member exists in space
+    const memberExists = space.members.some(
+      (member) => member._id.toString() === memberId
+    );
+
+    if (!memberExists) {
+      return res.status(404).json({
+        success: false,
+        error: "Member not found in this space",
+      });
+    }
+
+    // Remove member from space
+    space.members = space.members.filter(
+      (member) => member._id.toString() !== memberId
+    );
+
+    // Remove from admins if they were an admin
+    space.admins = space.admins.filter(
+      (admin) => admin._id.toString() !== memberId
+    );
+
+    await space.save();
+
+    // Remove from conversation participants if exists
+    const conversation = await Conversation.findOne({ space: spaceId });
+    if (conversation) {
+      conversation.participants = conversation.participants.filter(
+        (participant) => participant.toString() !== memberId
+      );
+      await conversation.save();
+    }
+
+    // ✅ EMIT SOCKET EVENT FOR MEMBER REMOVAL
+    const io = req.app.get("io");
+    if (io) {
+      // Notify the removed member
+      io.to(`employee_${memberId}`).emit("removed_from_space", {
+        space: {
+          _id: space._id,
+          name: space.name,
+        },
+        removedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        removedAt: new Date(),
+      });
+
+      // Notify other space members
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId,
+        removedMemberId: memberId,
+        updatedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        updatedAt: new Date(),
+        action: "member_removed",
+      });
+
+      console.log(`✅ Member ${memberId} removed from space ${spaceId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Member removed successfully",
+      removedMemberId: memberId,
+      totalMembers: space.members.length,
+    });
+  } catch (error) {
+    console.error("Remove space member error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to remove member from space",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ UPDATE MEMBER ROLE (Promote/Demote)
+exports.updateMemberRole = async (req, res) => {
+  try {
+    const { spaceId, memberId } = req.params;
+    const { role } = req.body; // 'admin' or 'member'
+
+    if (
+      !mongoose.Types.ObjectId.isValid(spaceId) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID or member ID",
+      });
+    }
+
+    if (!["admin", "member"].includes(role)) {
+      return res.status(400).json({
+        success: false,
+        error: "Role must be either 'admin' or 'member'",
+      });
+    }
+
+    // Find space and verify permissions
+    const space = await Space.findById(spaceId)
+      .populate("createdBy", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar")
+      .populate("members", "name companyEmail avatar");
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // Only owner can update roles
+    if (space.createdBy._id.toString() !== req.employee._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: "Only space owner can update member roles",
+      });
+    }
+
+    // Cannot change owner's role
+    if (space.createdBy._id.toString() === memberId) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot change owner's role",
+      });
+    }
+
+    // Check if member exists in space
+    const memberExists = space.members.some(
+      (member) => member._id.toString() === memberId
+    );
+
+    if (!memberExists) {
+      return res.status(404).json({
+        success: false,
+        error: "Member not found in this space",
+      });
+    }
+
+    const isCurrentlyAdmin = space.admins.some(
+      (admin) => admin._id.toString() === memberId
+    );
+
+    if (role === "admin" && !isCurrentlyAdmin) {
+      // Promote to admin
+      space.admins.push(memberId);
+    } else if (role === "member" && isCurrentlyAdmin) {
+      // Demote to member
+      space.admins = space.admins.filter(
+        (admin) => admin._id.toString() !== memberId
+      );
+    }
+
+    await space.save();
+
+    // ✅ EMIT SOCKET EVENT FOR ROLE UPDATE
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId,
+        memberId,
+        newRole: role,
+        updatedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        updatedAt: new Date(),
+        action: "role_updated",
+      });
+
+      console.log(
+        `✅ Member ${memberId} role updated to ${role} in space ${spaceId}`
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Member role updated to ${role} successfully`,
+      memberId,
+      newRole: role,
+    });
+  } catch (error) {
+    console.error("Update member role error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update member role",
+      details: error.message,
+    });
+  }
+};
+// ✅ GET SPACE DETAILS
+// ✅ GET SPACE DETAILS (from conversation schema)
+exports.getSpaceDetails = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID",
+      });
+    }
+
+    // Get space basic info
+    const space = await Space.findById(spaceId)
+      .populate("createdBy", "name companyEmail avatar photographUrl")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .lean();
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // Check if user is a member
+    const isMember = space.members?.some(
+      (m) => m.toString() === req.employee._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You are not a member of this space.",
+      });
+    }
+
+    // Get conversation for group name and description
+    const conversation = await Conversation.findOne({
+      space: spaceId,
+      isGroup: true,
+    }).select("groupName groupDescription groupAvatar");
+
+    // Format response
+    const spaceDetails = {
+      _id: space._id,
+      name: space.name,
+      description: space.description || "",
+      avatar: space.avatar,
+      groupName: conversation?.groupName || space.name,
+      groupDescription:
+        conversation?.groupDescription || space.description || "",
+      groupAvatar: conversation?.groupAvatar || space.avatar,
+      createdBy: space.createdBy,
+      admins: space.admins,
+      totalMembers: space.members?.length || 0,
+      isPrivate: space.isPrivate || false,
+      settings: space.settings || {},
+      createdAt: space.createdAt,
+      updatedAt: space.updatedAt,
+    };
+
+    res.json({
+      success: true,
+      space: spaceDetails,
+    });
+  } catch (error) {
+    console.error("Get space details error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch space details",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ UPDATE SPACE DETAILS
+exports.updateSpaceDetails = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const { groupName, groupDescription, groupAvatar } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID",
+      });
+    }
+
+    // Check if user has permission to update (admin or owner)
+    const space = await Space.findOne({
+      _id: spaceId,
+      $or: [{ createdBy: req.employee._id }, { admins: req.employee._id }],
+    });
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found or insufficient permissions",
+      });
+    }
+
+    // Find and update the conversation
+    const conversation = await Conversation.findOneAndUpdate(
+      {
+        space: spaceId,
+        isGroup: true,
+      },
+      {
+        $set: {
+          groupName: groupName?.trim(),
+          groupDescription: groupDescription?.trim(),
+          groupAvatar: groupAvatar?.trim(),
+          updatedAt: new Date(),
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    );
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found for this space",
+      });
+    }
+
+    // Also update the space name and description if they're different
+    if (groupName && groupName !== space.name) {
+      space.name = groupName.trim();
+      await space.save();
+    }
+
+    if (groupDescription && groupDescription !== space.description) {
+      space.description = groupDescription.trim();
+      await space.save();
+    }
+
+    // Populate the updated conversation
+    const updatedConversation = await Conversation.findById(conversation._id)
+      .populate("participants", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar");
+
+    // ✅ EMIT SOCKET EVENT FOR SPACE UPDATE
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_updated", {
+        spaceId,
+        updatedFields: {
+          groupName: updatedConversation.groupName,
+          groupDescription: updatedConversation.groupDescription,
+          groupAvatar: updatedConversation.groupAvatar,
+        },
+        updatedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        updatedAt: new Date(),
+      });
+
+      console.log(`✅ Space details updated for space: ${spaceId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Space details updated successfully",
+      space: {
+        _id: space._id,
+        name: space.name,
+        description: space.description,
+        groupName: updatedConversation.groupName,
+        groupDescription: updatedConversation.groupDescription,
+        groupAvatar: updatedConversation.groupAvatar,
+      },
+    });
+  } catch (error) {
+    console.error("Update space details error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update space details",
+      details: error.message,
+    });
+  }
+};
+exports.leaveSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID",
+      });
+    }
+
+    // Find the space
+    const space = await Space.findById(spaceId)
+      .populate("createdBy", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar")
+      .populate("members", "name companyEmail avatar");
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // Check if user is a member of the space
+    const isMember = space.members.some(
+      (member) => member._id.toString() === req.employee._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(400).json({
+        success: false,
+        error: "You are not a member of this space",
+      });
+    }
+
+    // Prevent space owner from leaving (they should transfer ownership first or delete the space)
+    if (space.createdBy._id.toString() === req.employee._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        error:
+          "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
+      });
+    }
+
+    // Remove user from space members
+    space.members = space.members.filter(
+      (member) => member._id.toString() !== req.employee._id.toString()
+    );
+
+    // Remove user from admins if they were an admin
+    space.admins = space.admins.filter(
+      (admin) => admin._id.toString() !== req.employee._id.toString()
+    );
+
+    await space.save();
+
+    // Remove user from conversation participants
+    const conversation = await Conversation.findOne({ space: spaceId });
+    if (conversation) {
+      conversation.participants = conversation.participants.filter(
+        (participant) => participant.toString() !== req.employee._id.toString()
+      );
+
+      // If conversation becomes empty, delete it
+      if (conversation.participants.length === 0) {
+        await Message.deleteMany({ conversation: conversation._id });
+        await Conversation.findByIdAndDelete(conversation._id);
+      } else {
+        await conversation.save();
+      }
+    }
+
+    // ✅ EMIT SOCKET EVENT FOR USER LEAVING SPACE
+    const io = req.app.get("io");
+    if (io) {
+      // Notify the user who left
+      io.to(`employee_${req.employee._id}`).emit("left_space", {
+        space: {
+          _id: space._id,
+          name: space.name,
+        },
+        leftAt: new Date(),
+      });
+
+      // Notify remaining space members
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId,
+        leftMemberId: req.employee._id,
+        leftMemberName: req.employee.name,
+        updatedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        updatedAt: new Date(),
+        action: "member_left",
+        remainingMembers: space.members.length,
+      });
+
+      console.log(`✅ User ${req.employee._id} left space ${spaceId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Successfully left the space",
+      space: {
+        _id: space._id,
+        name: space.name,
+        remainingMembers: space.members.length,
+      },
+    });
+  } catch (error) {
+    console.error("Leave space error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to leave space",
+      details: error.message,
+    });
+  }
+};
+exports.transferSpaceOwnership = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const { newOwnerId } = req.body;
+
+    if (
+      !mongoose.Types.ObjectId.isValid(spaceId) ||
+      !mongoose.Types.ObjectId.isValid(newOwnerId)
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID or new owner ID",
+      });
+    }
+
+    // Find the space
+    const space = await Space.findById(spaceId)
+      .populate("createdBy", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar")
+      .populate("members", "name companyEmail avatar");
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found",
+      });
+    }
+
+    // Check if current user is the space owner
+    if (space.createdBy._id.toString() !== req.employee._id.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: "Only space owner can transfer ownership",
+      });
+    }
+
+    // Check if new owner is a member of the space
+    const newOwnerIsMember = space.members.some(
+      (member) => member._id.toString() === newOwnerId
+    );
+
+    if (!newOwnerIsMember) {
+      return res.status(400).json({
+        success: false,
+        error: "New owner must be a member of the space",
+      });
+    }
+
+    // Prevent transferring to self
+    if (newOwnerId === req.employee._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot transfer ownership to yourself",
+      });
+    }
+
+    // Transfer ownership
+    const previousOwnerId = space.createdBy._id.toString();
+    space.createdBy = newOwnerId;
+
+    // Ensure new owner is an admin
+    if (!space.admins.some((admin) => admin._id.toString() === newOwnerId)) {
+      space.admins.push(newOwnerId);
+    }
+
+    await space.save();
+
+    // Update conversation admins if exists
+    const conversation = await Conversation.findOne({ space: spaceId });
+    if (conversation) {
+      if (!conversation.admins.includes(newOwnerId)) {
+        conversation.admins.push(newOwnerId);
+        await conversation.save();
+      }
+    }
+
+    // ✅ EMIT SOCKET EVENT FOR OWNERSHIP TRANSFER
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_ownership_transferred", {
+        spaceId,
+        previousOwnerId,
+        newOwnerId,
+        transferredBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        transferredAt: new Date(),
+      });
+
+      console.log(
+        `✅ Space ${spaceId} ownership transferred from ${previousOwnerId} to ${newOwnerId}`
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Space ownership transferred successfully",
+      space: {
+        _id: space._id,
+        name: space.name,
+        createdBy: newOwnerId,
+        admins: space.admins,
+      },
+    });
+  } catch (error) {
+    console.error("Transfer space ownership error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to transfer space ownership",
+      details: error.message,
+    });
+  }
+};
+// ✅ SEARCH EMPLOYEES FOR ADDING TO SPACE
+exports.searchEmployees = async (req, res) => {
+  try {
+    const { query } = req.query;
+    const { spaceId } = req.params;
+
+    if (!query || query.length < 2) {
+      return res.json({
+        success: true,
+        employees: [],
+      });
+    }
+
+    // Find space to get current members
+    const space = await Space.findById(spaceId).select("members");
+    const currentMemberIds = space
+      ? space.members.map((m) => m.toString())
+      : [];
+
+    // Search employees (excluding current members)
+    const employees = await Employee.find({
+      $and: [
+        {
+          $or: [
+            { name: { $regex: query, $options: "i" } },
+            { companyEmail: { $regex: query, $options: "i" } },
+          ],
+        },
+        { _id: { $ne: req.employee._id } }, // Exclude current user
+        { _id: { $nin: currentMemberIds } }, // Exclude current members
+      ],
+    })
+      .select("name companyEmail avatar photographUrl department position")
+      .limit(20);
+
+    const formattedEmployees = employees.map((emp) => ({
+      id: emp._id,
+      _id: emp._id,
+      name: emp.name,
+      email: emp.companyEmail,
+      avatarUrl: emp.photographUrl || emp.avatar,
+      department: emp.department,
+      position: emp.position,
+    }));
+
+    res.json({
+      success: true,
+      employees: formattedEmployees,
+    });
+  } catch (error) {
+    console.error("Search employees error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to search employees",
       details: error.message,
     });
   }
@@ -1588,9 +2427,13 @@ exports.deleteMessage = async (req, res) => {
 exports.serveFile = async (req, res) => {
   try {
     const { filename } = req.params;
-    
+
     // ✅ CORRECTED: Use the chat-attachments subdirectory
-    const filePath = path.join(__dirname, "../uploads/chat-attachments", filename);
+    const filePath = path.join(
+      __dirname,
+      "../uploads/chat-attachments",
+      filename
+    );
 
     console.log("📁 Looking for file at:", filePath); // Debug log
 
@@ -1601,40 +2444,45 @@ exports.serveFile = async (req, res) => {
         success: false,
         error: "File not found",
         requestedFile: filename,
-        actualPath: filePath
+        actualPath: filePath,
       });
     }
 
     // ✅ Get file stats for proper headers
     const stat = fs.statSync(filePath);
-    
+
     // ✅ Set appropriate Content-Type
     const ext = path.extname(filename).toLowerCase();
     const mimeTypes = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.svg': 'image/svg+xml',
-      '.pdf': 'application/pdf',
-      '.doc': 'application/msword',
-      '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      '.xls': 'application/vnd.ms-excel',
-      '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      '.csv': 'text/csv',
-      '.txt': 'text/plain'
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".gif": "image/gif",
+      ".webp": "image/webp",
+      ".svg": "image/svg+xml",
+      ".pdf": "application/pdf",
+      ".doc": "application/msword",
+      ".docx":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ".xls": "application/vnd.ms-excel",
+      ".xlsx":
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ".csv": "text/csv",
+      ".txt": "text/plain",
     };
 
-    const contentType = mimeTypes[ext] || 'application/octet-stream';
-    res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Length', stat.size);
-    
+    const contentType = mimeTypes[ext] || "application/octet-stream";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Length", stat.size);
+
     // For images, allow them to be displayed inline
     if (ext.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
-      res.setHeader('Content-Disposition', 'inline');
+      res.setHeader("Content-Disposition", "inline");
     } else {
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${filename}"`
+      );
     }
 
     // Create read stream and pipe to response
@@ -1642,283 +2490,489 @@ exports.serveFile = async (req, res) => {
     fileStream.pipe(res);
 
     // Handle stream errors
-    fileStream.on('error', (error) => {
-      console.error('File stream error:', error);
+    fileStream.on("error", (error) => {
+      console.error("File stream error:", error);
       if (!res.headersSent) {
         res.status(500).json({
           success: false,
-          error: "Error reading file"
+          error: "Error reading file",
         });
       }
     });
-
   } catch (error) {
     console.error("Serve file error:", error);
     if (!res.headersSent) {
       res.status(500).json({
         success: false,
         error: "Failed to serve file",
-        details: error.message
+        details: error.message,
       });
     }
   }
 };
 // Add this to your existing chat controller
 exports.getSharedContent = async (req, res) => {
-    try {
-        const { conversationId } = req.params;
-        const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
+  try {
+    const { conversationId } = req.params;
+    const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
 
-        console.log("🔍 Fetching shared content for:", conversationId);
+    console.log("🔍 Fetching shared content for:", conversationId);
 
-        if (!mongoose.Types.ObjectId.isValid(conversationId)) {
-            return res.status(400).json({
-                success: false,
-                error: "Invalid conversation ID"
-            });
-        }
-
-        // Check if user has access to this conversation
-        const conversation = await Conversation.findOne({
-            _id: conversationId,
-            participants: req.employee._id
-        });
-
-        if (!conversation) {
-            return res.status(404).json({
-                success: false,
-                error: "Conversation not found or access denied"
-            });
-        }
-
-        // Build query based on content type
-        let messageQuery = {
-            conversation: conversationId,
-            $or: []
-        };
-
-        // Files query (non-image documents)
-        const filesQuery = {
-            $and: [
-                { 'attachments.0': { $exists: true } },
-                {
-                    $or: [
-                        { 'attachments.mimetype': { $regex: /^application\/(pdf|msword|vnd\.|json|xml)/ } },
-                        { 'attachments.mimetype': { $regex: /^text\// } },
-                        { 'attachments.originalName': { $regex: /\.(pdf|doc|docx|xls|xlsx|csv|txt|json|xml)$/i } }
-                    ]
-                }
-            ]
-        };
-
-        // Links query (messages with URLs)
-        const linksQuery = {
-            content: { $regex: /https?:\/\/[^\s]+/ },
-            messageType: { $ne: 'gif' } // Exclude GIF URLs
-        };
-
-        // Media query (images, videos, GIFs)
-        const mediaQuery = {
-            $or: [
-                { 
-                    'attachments.mimetype': { 
-                        $regex: /^(image\/|video\/)/ 
-                    } 
-                },
-                { messageType: 'gif' },
-                { 
-                    'attachments.originalName': { 
-                        $regex: /\.(jpg|jpeg|png|gif|webp|svg|mp4|avi|mov|mkv)$/i 
-                    } 
-                }
-            ]
-        };
-
-        // Add queries based on requested type
-        switch (type) {
-            case 'files':
-                messageQuery.$or.push(filesQuery);
-                break;
-            case 'links':
-                messageQuery.$or.push(linksQuery);
-                break;
-            case 'media':
-                messageQuery.$or.push(mediaQuery);
-                break;
-            default: // 'all'
-                messageQuery.$or.push(filesQuery, linksQuery, mediaQuery);
-        }
-
-        // Fetch messages with shared content
-        const messages = await Message.find(messageQuery)
-            .populate('sender', 'name companyEmail avatar')
-            .populate('attachments')
-            .sort({ createdAt: -1 })
-            .limit(200); // Limit to prevent overload
-
-        console.log(`📦 Found ${messages.length} messages with shared content`);
-
-        // Process and categorize shared content
-        const sharedContent = {
-            files: [],
-            links: [],
-            media: []
-        };
-
-        const processedUrls = new Set(); // To avoid duplicates
-
-        messages.forEach((message) => {
-            const { sender, content, messageType, attachments = [], createdAt, _id } = message;
-
-            // Extract links from text content
-            if (content && messageType !== 'gif') {
-                const urlRegex = /(https?:\/\/[^\s]+)/g;
-                const urls = content.match(urlRegex);
-
-                if (urls) {
-                    urls.forEach((url, index) => {
-                        // Skip if URL is already processed or is a file attachment
-                        if (processedUrls.has(url)) return;
-                        
-                        const isAttachmentUrl = attachments.some(att => 
-                            att.url === url || content.includes(att.url)
-                        );
-                        
-                        if (!isAttachmentUrl) {
-                            processedUrls.add(url);
-                            
-                            try {
-                                const urlObj = new URL(url);
-                                const domain = urlObj.hostname.replace('www.', '');
-                                
-                                sharedContent.links.push({
-                                    id: `link-${_id}-${index}`,
-                                    title: domain.charAt(0).toUpperCase() + domain.slice(1),
-                                    url: url,
-                                    sharedBy: sender?.name || 'Unknown',
-                                    sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
-                                    dateShared: formatSharedDate(createdAt),
-                                    messageId: _id
-                                });
-                            } catch (error) {
-                                console.log('Invalid URL:', url);
-                            }
-                        }
-                    });
-                }
-            }
-
-            // Process attachments
-            if (attachments && attachments.length > 0) {
-                attachments.forEach((attachment, index) => {
-                    const { filename, url, mimetype, size, originalName } = attachment;
-                    
-                    // Skip if this URL was already processed as a link
-                    if (processedUrls.has(url)) return;
-                    processedUrls.add(url);
-
-                    const attachmentData = {
-                        id: `attachment-${_id}-${index}`,
-                        name: filename || originalName || 'Unnamed file',
-                        url: url,
-                        sharedBy: sender?.name || 'Unknown',
-                        sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
-                        dateShared: formatSharedDate(createdAt),
-                        messageId: _id,
-                        size: size || 0
-                    };
-
-                    // Categorize by file type
-                    if (mimetype.startsWith('image/') || mimetype === 'image/gif') {
-                        sharedContent.media.push({
-                            ...attachmentData,
-                            type: 'image',
-                            thumbnail: url
-                        });
-                    } else if (mimetype.startsWith('video/')) {
-                        sharedContent.media.push({
-                            ...attachmentData,
-                            type: 'video',
-                            thumbnail: null
-                        });
-                    } else if (messageType === 'gif') {
-                        sharedContent.media.push({
-                            ...attachmentData,
-                            type: 'image',
-                            thumbnail: url,
-                            name: 'GIF'
-                        });
-                    } else {
-                        // It's a file
-                        const fileExtension = (filename || originalName || '')
-                            .split('.')
-                            .pop()
-                            ?.toLowerCase() || 'file';
-                            
-                        sharedContent.files.push({
-                            ...attachmentData,
-                            type: fileExtension
-                        });
-                    }
-                });
-            }
-
-            // Handle GIF messages (content is GIF URL)
-            if (messageType === 'gif' && content && !processedUrls.has(content)) {
-                processedUrls.add(content);
-                sharedContent.media.push({
-                    id: `gif-${_id}`,
-                    type: 'image',
-                    name: 'GIF',
-                    url: content,
-                    thumbnail: content,
-                    sharedBy: sender?.name || 'Unknown',
-                    sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || 'U',
-                    dateShared: formatSharedDate(createdAt),
-                    messageId: _id,
-                    size: 0
-                });
-            }
-        });
-
-        // Sort by date (newest first)
-        sharedContent.files.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
-        sharedContent.links.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
-        sharedContent.media.sort((a, b) => new Date(b.dateShared) - new Date(a.dateShared));
-
-        console.log(`📊 Shared content summary:`, {
-            files: sharedContent.files.length,
-            links: sharedContent.links.length,
-            media: sharedContent.media.length
-        });
-
-        res.json({
-            success: true,
-            data: sharedContent,
-            summary: {
-                totalFiles: sharedContent.files.length,
-                totalLinks: sharedContent.links.length,
-                totalMedia: sharedContent.media.length
-            }
-        });
-
-    } catch (error) {
-        console.error('Get shared content error:', error);
-        res.status(500).json({
-            success: false,
-            error: 'Failed to fetch shared content',
-            details: error.message
-        });
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
     }
+
+    // Check if user has access to this conversation
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found or access denied",
+      });
+    }
+
+    // Build query based on content type
+    let messageQuery = {
+      conversation: conversationId,
+      $or: [],
+    };
+
+    // Files query (non-image documents)
+    const filesQuery = {
+      $and: [
+        { "attachments.0": { $exists: true } },
+        {
+          $or: [
+            {
+              "attachments.mimetype": {
+                $regex: /^application\/(pdf|msword|vnd\.|json|xml)/,
+              },
+            },
+            { "attachments.mimetype": { $regex: /^text\// } },
+            {
+              "attachments.originalName": {
+                $regex: /\.(pdf|doc|docx|xls|xlsx|csv|txt|json|xml)$/i,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    // Links query (messages with URLs)
+    const linksQuery = {
+      content: { $regex: /https?:\/\/[^\s]+/ },
+      messageType: { $ne: "gif" }, // Exclude GIF URLs
+    };
+
+    // Media query (images, videos, GIFs)
+    const mediaQuery = {
+      $or: [
+        {
+          "attachments.mimetype": {
+            $regex: /^(image\/|video\/)/,
+          },
+        },
+        { messageType: "gif" },
+        {
+          "attachments.originalName": {
+            $regex: /\.(jpg|jpeg|png|gif|webp|svg|mp4|avi|mov|mkv)$/i,
+          },
+        },
+      ],
+    };
+
+    // Add queries based on requested type
+    switch (type) {
+      case "files":
+        messageQuery.$or.push(filesQuery);
+        break;
+      case "links":
+        messageQuery.$or.push(linksQuery);
+        break;
+      case "media":
+        messageQuery.$or.push(mediaQuery);
+        break;
+      default: // 'all'
+        messageQuery.$or.push(filesQuery, linksQuery, mediaQuery);
+    }
+
+    // Fetch messages with shared content
+    const messages = await Message.find(messageQuery)
+      .populate("sender", "name companyEmail avatar")
+      .populate("attachments")
+      .sort({ createdAt: -1 })
+      .limit(200); // Limit to prevent overload
+
+    console.log(`📦 Found ${messages.length} messages with shared content`);
+
+    // Process and categorize shared content
+    const sharedContent = {
+      files: [],
+      links: [],
+      media: [],
+    };
+
+    const processedUrls = new Set(); // To avoid duplicates
+
+    messages.forEach((message) => {
+      const {
+        sender,
+        content,
+        messageType,
+        attachments = [],
+        createdAt,
+        _id,
+      } = message;
+
+      // Extract links from text content
+      if (content && messageType !== "gif") {
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
+        const urls = content.match(urlRegex);
+
+        if (urls) {
+          urls.forEach((url, index) => {
+            // Skip if URL is already processed or is a file attachment
+            if (processedUrls.has(url)) return;
+
+            const isAttachmentUrl = attachments.some(
+              (att) => att.url === url || content.includes(att.url)
+            );
+
+            if (!isAttachmentUrl) {
+              processedUrls.add(url);
+
+              try {
+                const urlObj = new URL(url);
+                const domain = urlObj.hostname.replace("www.", "");
+
+                sharedContent.links.push({
+                  id: `link-${_id}-${index}`,
+                  title: domain.charAt(0).toUpperCase() + domain.slice(1),
+                  url: url,
+                  sharedBy: sender?.name || "Unknown",
+                  sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+                  dateShared: formatSharedDate(createdAt),
+                  messageId: _id,
+                });
+              } catch (error) {
+                console.log("Invalid URL:", url);
+              }
+            }
+          });
+        }
+      }
+
+      // Process attachments
+      if (attachments && attachments.length > 0) {
+        attachments.forEach((attachment, index) => {
+          const { filename, url, mimetype, size, originalName } = attachment;
+
+          // Skip if this URL was already processed as a link
+          if (processedUrls.has(url)) return;
+          processedUrls.add(url);
+
+          const attachmentData = {
+            id: `attachment-${_id}-${index}`,
+            name: filename || originalName || "Unnamed file",
+            url: url,
+            sharedBy: sender?.name || "Unknown",
+            sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+            dateShared: formatSharedDate(createdAt),
+            messageId: _id,
+            size: size || 0,
+          };
+
+          // Categorize by file type
+          if (mimetype.startsWith("image/") || mimetype === "image/gif") {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "image",
+              thumbnail: url,
+            });
+          } else if (mimetype.startsWith("video/")) {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "video",
+              thumbnail: null,
+            });
+          } else if (messageType === "gif") {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "image",
+              thumbnail: url,
+              name: "GIF",
+            });
+          } else {
+            // It's a file
+            const fileExtension =
+              (filename || originalName || "")
+                .split(".")
+                .pop()
+                ?.toLowerCase() || "file";
+
+            sharedContent.files.push({
+              ...attachmentData,
+              type: fileExtension,
+            });
+          }
+        });
+      }
+
+      // Handle GIF messages (content is GIF URL)
+      if (messageType === "gif" && content && !processedUrls.has(content)) {
+        processedUrls.add(content);
+        sharedContent.media.push({
+          id: `gif-${_id}`,
+          type: "image",
+          name: "GIF",
+          url: content,
+          thumbnail: content,
+          sharedBy: sender?.name || "Unknown",
+          sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+          dateShared: formatSharedDate(createdAt),
+          messageId: _id,
+          size: 0,
+        });
+      }
+    });
+
+    // Sort by date (newest first)
+    sharedContent.files.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+    sharedContent.links.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+    sharedContent.media.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+
+    console.log(`📊 Shared content summary:`, {
+      files: sharedContent.files.length,
+      links: sharedContent.links.length,
+      media: sharedContent.media.length,
+    });
+
+    res.json({
+      success: true,
+      data: sharedContent,
+      summary: {
+        totalFiles: sharedContent.files.length,
+        totalLinks: sharedContent.links.length,
+        totalMedia: sharedContent.media.length,
+      },
+    });
+  } catch (error) {
+    console.error("Get shared content error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch shared content",
+      details: error.message,
+    });
+  }
 };
 
 // Helper function to format date
 function formatSharedDate(dateString) {
-    const date = new Date(dateString);
-    return date.toLocaleDateString('en-US', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric'
-    });
+  const date = new Date(dateString);
+  return date.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
+// ✅ DELETE CONVERSATION (DM or Group)
+exports.deleteConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { permanent = false } = req.query; // optional flag ?permanent=true
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    // Find conversation and verify user participation
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    }).populate("participants", "name companyEmail avatar");
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found or access denied",
+      });
+    }
+
+    // ✅ Option 1: Permanent delete (for everyone)
+    if (permanent === "true" || conversation.isGroup === false) {
+      // Delete all messages
+      await Message.deleteMany({ conversation: conversationId });
+
+      // Delete the conversation itself
+      await Conversation.findByIdAndDelete(conversationId);
+
+      // Emit socket event
+      const io = req.app.get("io");
+      if (io) {
+        conversation.participants.forEach((participant) => {
+          io.to(`user_${participant._id}`).emit("conversation_deleted", {
+            conversationId,
+            deletedBy: req.employee._id,
+            permanent: true,
+            deletedAt: new Date(),
+          });
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Conversation permanently deleted",
+        conversationId,
+      });
+    }
+
+    // ✅ Option 2: Soft delete for current user only (hide chat)
+    conversation.hiddenBy = conversation.hiddenBy || [];
+    if (!conversation.hiddenBy.includes(req.employee._id)) {
+      conversation.hiddenBy.push(req.employee._id);
+      await conversation.save();
+    }
+
+    // Emit socket event for UI update
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${req.employee._id}`).emit("conversation_deleted", {
+        conversationId,
+        deletedBy: req.employee._id,
+        permanent: false,
+        deletedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation hidden for this user",
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Delete conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to delete conversation",
+      details: error.message,
+    });
+  }
+};
+// ✅ DELETE SPACE (and related conversation + messages)
+exports.deleteSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const { permanent = false } = req.query; // optional flag ?permanent=true
+
+    // Validate space ID
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    // Find space and verify permissions
+    const space = await Space.findById(spaceId)
+      .populate("members", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar");
+
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    // Ensure requester is admin or creator
+    if (
+      space.createdBy.toString() !== req.employee._id.toString() &&
+      !space.admins.some(
+        (admin) => admin._id.toString() === req.employee._id.toString()
+      )
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: "Only the creator or admins can delete this space",
+      });
+    }
+
+    // Find linked conversation
+    const conversation = await Conversation.findOne({ space: spaceId });
+
+    // ✅ Option 1: Permanent delete (everything)
+    if (permanent === "true") {
+      // Delete all messages and conversation
+      if (conversation) {
+        await Message.deleteMany({ conversation: conversation._id });
+        await Conversation.findByIdAndDelete(conversation._id);
+      }
+
+      // Delete the space itself
+      await Space.findByIdAndDelete(spaceId);
+
+      // Emit socket event for all members
+      const io = req.app.get("io");
+      if (io) {
+        space.members.forEach((member) => {
+          io.to(`employee_${member._id}`).emit("space_deleted", {
+            spaceId,
+            deletedBy: req.employee._id,
+            permanent: true,
+            deletedAt: new Date(),
+          });
+        });
+      }
+
+      return res.json({
+        success: true,
+        message: "Space and related data permanently deleted",
+        spaceId,
+      });
+    }
+
+    // ✅ Option 2: Soft delete (hide for current user)
+    space.hiddenBy = space.hiddenBy || [];
+    if (!space.hiddenBy.includes(req.employee._id)) {
+      space.hiddenBy.push(req.employee._id);
+      await space.save();
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`employee_${req.employee._id}`).emit("space_deleted", {
+        spaceId,
+        deletedBy: req.employee._id,
+        permanent: false,
+        deletedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Space hidden for this user",
+      spaceId,
+    });
+  } catch (error) {
+    console.error("Delete space error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to delete space",
+      details: error.message,
+    });
+  }
+};

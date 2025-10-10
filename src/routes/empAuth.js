@@ -131,7 +131,7 @@ router.post("/login", async (req, res) => {
       "unknown";
     const when = new Date().toISOString();
 
-    const adminTo = "nashfintechnologies@gmail.com";
+    const adminTo = "qaziabdurrahman12@gmail.com";
     const adminSubject = "Employee login verification requested";
     const adminText =
       `A login verification was requested.\n` +
@@ -170,9 +170,6 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// ---------------------
-// CONFIRM CODE → verify code + trust device
-// ---------------------
 router.post("/confirm-code", async (req, res) => {
   const { code, deviceFingerprint } = req.body;
   const tempToken = req.headers.authorization?.split(" ")[1];
@@ -202,26 +199,23 @@ router.post("/confirm-code", async (req, res) => {
       "_id companyEmail role owner name trustedDevices"
     );
 
-    // ---------------------
-    // Add new trusted device to DB
-    // ---------------------
     const userAgent = req.headers["user-agent"] || "unknown";
     const ip =
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
       req.ip ||
       "unknown";
 
-    if (
-      deviceFingerprint &&
-      !emp.trustedDevices.some((d) => d.deviceFingerprint === deviceFingerprint)
-    ) {
-      emp.trustedDevices.push({
+    // ✅ Replace previous trusted device — only allow ONE trusted device at a time
+    emp.trustedDevices = [
+      {
         deviceFingerprint,
         userAgent,
         ip,
-      });
-      await emp.save();
-    }
+        addedAt: new Date(),
+      },
+    ];
+
+    await emp.save();
 
     // Final login token
     const token = jwt.sign(
@@ -231,7 +225,7 @@ router.post("/confirm-code", async (req, res) => {
     );
 
     return res.json({
-      message: "Device verified and trusted.",
+      message: "Device verified and trusted (old devices replaced).",
       token,
       user: {
         id: emp._id,
@@ -247,7 +241,6 @@ router.post("/confirm-code", async (req, res) => {
     return res.status(401).json({ error: "Invalid or expired temp token" });
   }
 });
-
 // ---------------------
 // GET current employee (protected)
 // ---------------------
