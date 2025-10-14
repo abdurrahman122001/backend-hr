@@ -11,13 +11,12 @@ const isManagerLike = (role) => {
   );
 };
 
-// GET /manager/roster
 exports.getRoster = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
     if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "" });
+      return res.status(403).json({ error: "Access denied" });
     if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
 
     const [employees, clients] = await Promise.all([
@@ -29,7 +28,7 @@ exports.getRoster = async (req, res) => {
         ],
       })
         .select(
-          "_id name email companyEmail role department designation supervisionMode supervisor"
+          "_id name email companyEmail role department designation supervisionMode supervisor photographUrl"
         )
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
@@ -51,7 +50,7 @@ exports.getEmployeeRoster = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
-   
+
     if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
 
     const [employees, clients] = await Promise.all([
@@ -63,7 +62,7 @@ exports.getEmployeeRoster = async (req, res) => {
         ],
       })
         .select(
-          "_id name email companyEmail role department designation supervisionMode supervisor"
+          "_id name email companyEmail role department designation supervisionMode supervisor photographUrl"
         )
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
@@ -75,7 +74,7 @@ exports.getEmployeeRoster = async (req, res) => {
 
     res.json({ employees, clients });
   } catch (err) {
-    console.error("getRoster error:", err);
+    console.error("getEmployeeRoster error:", err);
     res.status(500).json({ error: "Failed to load roster" });
   }
 };

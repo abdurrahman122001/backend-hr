@@ -163,12 +163,12 @@ exports.uploadFiles = async (req, res) => {
 exports.getConversations = async (req, res) => {
   try {
     // Get direct conversations - UPDATED to include pinned status
-const conversations = await Conversation.find({
-  participants: req.employee._id,
-  isGroup: false,
-  space: { $exists: false }, // This should exclude spaces, but might not be working
-  archivedBy: { $ne: req.employee._id },
-})
+    const conversations = await Conversation.find({
+      participants: req.employee._id,
+      isGroup: false,
+      space: { $exists: false }, // This should exclude spaces, but might not be working
+      archivedBy: { $ne: req.employee._id },
+    })
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
@@ -297,19 +297,34 @@ const conversations = await Conversation.find({
       .json({ success: false, error: "Failed to fetch conversations" });
   }
 };
+
 exports.getDirectMessages = async (req, res) => {
   try {
-    // Get only direct conversations (non-group, non-space)
+    // ✅ STRICTLY get only direct messages (non-group, non-space)
     const conversations = await Conversation.find({
       participants: req.employee._id,
-      isGroup: false,
-      space: { $exists: false }, // Ensure no space reference
+      isGroup: false, // Must be false for direct messages
+      space: { $exists: false }, // Must not have space reference
       archivedBy: { $ne: req.employee._id }, // Exclude archived conversations
+      hiddenBy: { $ne: req.employee._id }, // Exclude hidden conversations
     })
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
       .sort({ updatedAt: -1 });
+
+    console.log(
+      `📨 Found ${conversations.length} direct messages for user ${req.employee._id}`
+    );
+
+    // Debug: Log conversation types to verify filtering
+    conversations.forEach((conv) => {
+      console.log(
+        `🔍 Conversation ${conv._id}: isGroup=${
+          conv.isGroup
+        }, hasSpace=${!!conv.space}, participants=${conv.participants.length}`
+      );
+    });
 
     // Separate pinned and unpinned conversations
     const pinnedConversations = [];
@@ -367,7 +382,6 @@ exports.getDirectMessages = async (req, res) => {
       .json({ success: false, error: "Failed to fetch direct messages" });
   }
 };
-
 // ✅ GET SPACE CONVERSATIONS ONLY
 exports.getSpaceConversations = async (req, res) => {
   try {
@@ -1357,10 +1371,10 @@ exports.spaceMarkAsUnread = async (req, res) => {
       await Message.updateOne(
         { _id: lastMessage._id },
         {
-          $pull: { 
-            readBy: { 
-              employee: req.employee._id 
-            } 
+          $pull: {
+            readBy: {
+              employee: req.employee._id,
+            },
           },
         }
       );
@@ -1369,7 +1383,9 @@ exports.spaceMarkAsUnread = async (req, res) => {
       conversation.unreadCount.set(req.employee._id.toString(), 1);
       await conversation.save();
 
-      console.log(`✅ Space ${spaceId} marked as unread for user ${req.employee._id}`);
+      console.log(
+        `✅ Space ${spaceId} marked as unread for user ${req.employee._id}`
+      );
     } else {
       // If no messages, still set unread count to indicate unread status
       conversation.unreadCount.set(req.employee._id.toString(), 1);
@@ -1379,25 +1395,19 @@ exports.spaceMarkAsUnread = async (req, res) => {
     // Emit socket event for space
     const io = req.app.get("io");
     if (io) {
-      io.to(`space_${spaceId}`).emit(
-        "space_marked_unread",
-        {
-          spaceId: spaceId,
-          userId: req.employee._id,
-          unreadCount: 1,
-          conversationId: conversation._id,
-        }
-      );
+      io.to(`space_${spaceId}`).emit("space_marked_unread", {
+        spaceId: spaceId,
+        userId: req.employee._id,
+        unreadCount: 1,
+        conversationId: conversation._id,
+      });
 
       // Also emit to user's personal room for UI updates
-      io.to(`user_${req.employee._id}`).emit(
-        "conversation_marked_unread",
-        {
-          conversationId: conversation._id,
-          userId: req.employee._id,
-          unreadCount: 1,
-        }
-      );
+      io.to(`user_${req.employee._id}`).emit("conversation_marked_unread", {
+        conversationId: conversation._id,
+        userId: req.employee._id,
+        unreadCount: 1,
+      });
     }
 
     res.json({
@@ -1455,14 +1465,14 @@ exports.spaceMarkAsRead = async (req, res) => {
     // Mark all unread messages as read for this user
     const unreadMessages = await Message.find({
       conversation: conversation._id,
-      "readBy.employee": { $ne: req.employee._id }
+      "readBy.employee": { $ne: req.employee._id },
     });
 
     if (unreadMessages.length > 0) {
       // Add user to readBy array for all unread messages
       await Message.updateMany(
         {
-          _id: { $in: unreadMessages.map(m => m._id) },
+          _id: { $in: unreadMessages.map((m) => m._id) },
           conversation: conversation._id,
         },
         {
@@ -1483,24 +1493,18 @@ exports.spaceMarkAsRead = async (req, res) => {
     // Emit socket events
     const io = req.app.get("io");
     if (io) {
-      io.to(`space_${spaceId}`).emit(
-        "space_marked_read",
-        {
-          spaceId: spaceId,
-          userId: req.employee._id,
-          unreadCount: 0,
-          conversationId: conversation._id,
-        }
-      );
+      io.to(`space_${spaceId}`).emit("space_marked_read", {
+        spaceId: spaceId,
+        userId: req.employee._id,
+        unreadCount: 0,
+        conversationId: conversation._id,
+      });
 
-      io.to(`user_${req.employee._id}`).emit(
-        "conversation_marked_read",
-        {
-          conversationId: conversation._id,
-          userId: req.employee._id,
-          unreadCount: 0,
-        }
-      );
+      io.to(`user_${req.employee._id}`).emit("conversation_marked_read", {
+        conversationId: conversation._id,
+        userId: req.employee._id,
+        unreadCount: 0,
+      });
     }
 
     res.json({
@@ -1520,7 +1524,6 @@ exports.spaceMarkAsRead = async (req, res) => {
     });
   }
 };
-
 
 // Get conversation by participant - UPDATED WITH SOCKET
 exports.getConversationByParticipant = async (req, res) => {
@@ -2478,6 +2481,8 @@ exports.updateSpaceDetails = async (req, res) => {
     });
   }
 };
+
+// In your chat controller file, make sure this is exported:
 exports.leaveSpace = async (req, res) => {
   try {
     const { spaceId } = req.params;
@@ -2518,8 +2523,7 @@ exports.leaveSpace = async (req, res) => {
     if (space.createdBy._id.toString() === req.employee._id.toString()) {
       return res.status(400).json({
         success: false,
-        error:
-          "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
+        error: "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
       });
     }
 
@@ -2598,6 +2602,7 @@ exports.leaveSpace = async (req, res) => {
     });
   }
 };
+
 exports.transferSpaceOwnership = async (req, res) => {
   try {
     const { spaceId } = req.params;
@@ -4362,7 +4367,10 @@ exports.getConversationMembersSimple = async (req, res) => {
       _id: conversationId,
       participants: req.employee._id,
     })
-      .populate("participants", "name companyEmail avatar photographUrl isOnline")
+      .populate(
+        "participants",
+        "name companyEmail avatar photographUrl isOnline"
+      )
       .lean();
 
     if (!conversation) {
@@ -4374,22 +4382,24 @@ exports.getConversationMembersSimple = async (req, res) => {
 
     // Simple member list without additional statistics
     const members = conversation.participants
-      .filter(participant => participant._id.toString() !== req.employee._id.toString())
-      .map(participant => ({
+      .filter(
+        (participant) =>
+          participant._id.toString() !== req.employee._id.toString()
+      )
+      .map((participant) => ({
         _id: participant._id,
         name: participant.name,
         email: participant.companyEmail,
         avatar: participant.photographUrl || participant.avatar,
         isOnline: participant.isOnline || false,
-        status: participant.isOnline ? "online" : "offline"
+        status: participant.isOnline ? "online" : "offline",
       }));
 
     res.json({
       success: true,
       members: members,
-      total: members.length
+      total: members.length,
     });
-
   } catch (error) {
     console.error("Get simple conversation members error:", error);
     res.status(500).json({
@@ -4521,7 +4531,9 @@ exports.getSpaceSharedContent = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(200); // Limit to prevent overload
 
-    console.log(`📦 Found ${messages.length} messages with shared content in space ${spaceId}`);
+    console.log(
+      `📦 Found ${messages.length} messages with shared content in space ${spaceId}`
+    );
 
     // Process and categorize shared content
     const sharedContent = {

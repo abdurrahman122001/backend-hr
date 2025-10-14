@@ -5,9 +5,13 @@ const empAuth = require("../middleware/empAuth");
 
 // Get all conversations for current user
 router.get("/conversations", empAuth, chatController.getConversations);
-router.get('/direct-messages', empAuth, chatController.getDirectMessages);
-router.get('/space-conversations', empAuth, chatController.getSpaceConversations);
-router.get('/spaces', empAuth, chatController.getSpaces);
+router.get("/direct-messages", empAuth, chatController.getDirectMessages);
+router.get(
+  "/space-conversations",
+  empAuth,
+  chatController.getSpaceConversations
+);
+router.get("/spaces", empAuth, chatController.getSpaces);
 // Get messages for a specific conversation
 router.get(
   "/conversations/:conversationId/messages",
