@@ -159,40 +159,53 @@ exports.uploadFiles = async (req, res) => {
   }
 };
 
-// ✅ UPDATE THIS: getConversations function to include photographUrl
+// ✅ UPDATE THIS: getConversations function to include pinned conversations
 exports.getConversations = async (req, res) => {
   try {
-    // Get direct conversations - UPDATED to include photographUrl
-    const conversations = await Conversation.find({
-      participants: req.employee._id,
-      isGroup: false,
-    })
-      .populate("participants", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+    // Get direct conversations - UPDATED to include pinned status
+const conversations = await Conversation.find({
+  participants: req.employee._id,
+  isGroup: false,
+  space: { $exists: false }, // This should exclude spaces, but might not be working
+  archivedBy: { $ne: req.employee._id },
+})
+      .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
+      .populate("pinnedBy.employee", "name companyEmail")
       .sort({ updatedAt: -1 });
 
-    // Get group conversations - UPDATED to include photographUrl
+    // Get group conversations (spaces) - EXCLUDE HIDDEN CONVERSATIONS
     const groupConversations = await Conversation.find({
       participants: req.employee._id,
       isGroup: true,
+      archivedBy: { $ne: req.employee._id },
+      hiddenBy: { $ne: req.employee._id }, // ✅ EXCLUDE HIDDEN CONVERSATIONS
+      space: { $exists: true },
     })
-      .populate("participants", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+      .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
-      .populate("admins", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail")
+      .populate("space", "name description avatar")
       .sort({ updatedAt: -1 });
 
-    // Get spaces - UPDATED to include photographUrl
+    // Get spaces for the spaces section
     const spaces = await Space.find({
       members: req.employee._id,
     })
-      .populate("createdBy", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
-      .populate("admins", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
-      .populate("members", "name companyEmail avatar photographUrl") // ✅ Added photographUrl
+      .populate("createdBy", "name companyEmail avatar photographUrl")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .populate("members", "name companyEmail avatar photographUrl")
       .sort({ updatedAt: -1 });
 
-    res.json({
-      success: true,
-      conversations: conversations.map((conv) => ({
+    // Separate pinned and unpinned conversations
+    const pinnedConversations = [];
+    const unpinnedConversations = [];
+
+    // Process direct messages
+    conversations.forEach((conv) => {
+      const isPinned = conv.isPinnedBy(req.employee._id);
+      const conversationData = {
         _id: conv._id,
         participants: conv.participants.filter(
           (p) => p._id.toString() !== req.employee._id.toString()
@@ -200,9 +213,26 @@ exports.getConversations = async (req, res) => {
         lastMessage: conv.lastMessage,
         unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
         updatedAt: conv.updatedAt,
+        isPinned: isPinned,
+        pinnedAt: isPinned
+          ? conv.pinnedBy.find(
+              (pin) => pin.employee.toString() === req.employee._id.toString()
+            )?.pinnedAt
+          : null,
         type: "dm",
-      })),
-      groups: groupConversations.map((conv) => ({
+      };
+
+      if (isPinned) {
+        pinnedConversations.push(conversationData);
+      } else {
+        unpinnedConversations.push(conversationData);
+      }
+    });
+
+    // Process group conversations (spaces)
+    groupConversations.forEach((conv) => {
+      const isPinned = conv.isPinnedBy(req.employee._id);
+      const conversationData = {
         _id: conv._id,
         participants: conv.participants,
         lastMessage: conv.lastMessage,
@@ -212,8 +242,39 @@ exports.getConversations = async (req, res) => {
         groupDescription: conv.groupDescription,
         groupAvatar: conv.groupAvatar,
         admins: conv.admins,
+        space: conv.space, // ✅ Include space reference
+        isPinned: isPinned,
+        pinnedAt: isPinned
+          ? conv.pinnedBy.find(
+              (pin) => pin.employee.toString() === req.employee._id.toString()
+            )?.pinnedAt
+          : null,
         type: "group",
-      })),
+      };
+
+      if (isPinned) {
+        pinnedConversations.push(conversationData);
+      } else {
+        unpinnedConversations.push(conversationData);
+      }
+    });
+
+    // Sort pinned conversations by pinnedAt (newest first)
+    pinnedConversations.sort(
+      (a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)
+    );
+
+    // Sort unpinned conversations by updatedAt (newest first)
+    unpinnedConversations.sort(
+      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+    );
+
+    // Combine pinned (first) and unpinned (after)
+    const allConversations = [...pinnedConversations, ...unpinnedConversations];
+
+    res.json({
+      success: true,
+      conversations: allConversations,
       spaces: spaces.map((space) => ({
         _id: space._id,
         name: space.name,
@@ -224,8 +285,10 @@ exports.getConversations = async (req, res) => {
         members: space.members,
         isPrivate: space.isPrivate,
         memberCount: space.members.length,
+        unreadCount: 0, // You might want to calculate this
         type: "space",
       })),
+      pinnedCount: pinnedConversations.length,
     });
   } catch (error) {
     console.error("Get conversations error:", error);
@@ -234,6 +297,211 @@ exports.getConversations = async (req, res) => {
       .json({ success: false, error: "Failed to fetch conversations" });
   }
 };
+exports.getDirectMessages = async (req, res) => {
+  try {
+    // Get only direct conversations (non-group, non-space)
+    const conversations = await Conversation.find({
+      participants: req.employee._id,
+      isGroup: false,
+      space: { $exists: false }, // Ensure no space reference
+      archivedBy: { $ne: req.employee._id }, // Exclude archived conversations
+    })
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage")
+      .populate("pinnedBy.employee", "name companyEmail")
+      .sort({ updatedAt: -1 });
+
+    // Separate pinned and unpinned conversations
+    const pinnedConversations = [];
+    const unpinnedConversations = [];
+
+    conversations.forEach((conv) => {
+      const isPinned = conv.isPinnedBy(req.employee._id);
+      const conversationData = {
+        _id: conv._id,
+        participants: conv.participants.filter(
+          (p) => p._id.toString() !== req.employee._id.toString()
+        ),
+        lastMessage: conv.lastMessage,
+        unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+        updatedAt: conv.updatedAt,
+        isPinned: isPinned,
+        pinnedAt: isPinned
+          ? conv.pinnedBy.find(
+              (pin) => pin.employee.toString() === req.employee._id.toString()
+            )?.pinnedAt
+          : null,
+        type: "dm",
+      };
+
+      if (isPinned) {
+        pinnedConversations.push(conversationData);
+      } else {
+        unpinnedConversations.push(conversationData);
+      }
+    });
+
+    // Sort pinned conversations by pinnedAt (newest first)
+    pinnedConversations.sort(
+      (a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)
+    );
+
+    // Sort unpinned conversations by updatedAt (newest first)
+    unpinnedConversations.sort(
+      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+    );
+
+    // Combine pinned (first) and unpinned (after)
+    const allConversations = [...pinnedConversations, ...unpinnedConversations];
+
+    res.json({
+      success: true,
+      conversations: allConversations,
+      pinnedCount: pinnedConversations.length,
+      totalCount: allConversations.length,
+    });
+  } catch (error) {
+    console.error("Get direct messages error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch direct messages" });
+  }
+};
+
+// ✅ GET SPACE CONVERSATIONS ONLY
+exports.getSpaceConversations = async (req, res) => {
+  try {
+    // Get only space conversations
+    const spaceConversations = await Conversation.find({
+      participants: req.employee._id,
+      isGroup: true,
+      space: { $exists: true }, // Only conversations with space reference
+      archivedBy: { $ne: req.employee._id },
+    })
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail")
+      .populate("space", "name description avatar") // Populate space details
+      .sort({ updatedAt: -1 });
+
+    // Separate pinned and unpinned space conversations
+    const pinnedConversations = [];
+    const unpinnedConversations = [];
+
+    spaceConversations.forEach((conv) => {
+      const isPinned = conv.isPinnedBy(req.employee._id);
+      const conversationData = {
+        _id: conv._id,
+        participants: conv.participants,
+        lastMessage: conv.lastMessage,
+        unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+        updatedAt: conv.updatedAt,
+        groupName: conv.groupName,
+        groupDescription: conv.groupDescription,
+        groupAvatar: conv.groupAvatar,
+        admins: conv.admins,
+        space: conv.space,
+        isPinned: isPinned,
+        pinnedAt: isPinned
+          ? conv.pinnedBy.find(
+              (pin) => pin.employee.toString() === req.employee._id.toString()
+            )?.pinnedAt
+          : null,
+        type: "group",
+      };
+
+      if (isPinned) {
+        pinnedConversations.push(conversationData);
+      } else {
+        unpinnedConversations.push(conversationData);
+      }
+    });
+
+    // Sort pinned conversations by pinnedAt (newest first)
+    pinnedConversations.sort(
+      (a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)
+    );
+
+    // Sort unpinned conversations by updatedAt (newest first)
+    unpinnedConversations.sort(
+      (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
+    );
+
+    // Combine pinned (first) and unpinned (after)
+    const allConversations = [...pinnedConversations, ...unpinnedConversations];
+
+    res.json({
+      success: true,
+      conversations: allConversations,
+      pinnedCount: pinnedConversations.length,
+      totalCount: allConversations.length,
+    });
+  } catch (error) {
+    console.error("Get space conversations error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch space conversations" });
+  }
+};
+
+// ✅ GET ALL SPACES (for Spaces section)
+exports.getSpaces = async (req, res) => {
+  try {
+    const spaces = await Space.find({
+      members: req.employee._id,
+    })
+      .populate("createdBy", "name companyEmail avatar photographUrl")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .populate("members", "name companyEmail avatar photographUrl")
+      .sort({ updatedAt: -1 });
+
+    // Calculate unread counts for spaces
+    const spacesWithUnreadCount = await Promise.all(
+      spaces.map(async (space) => {
+        // Find conversation for this space
+        const conversation = await Conversation.findOne({
+          space: space._id,
+          participants: req.employee._id,
+        });
+
+        const unreadCount = conversation
+          ? conversation.unreadCount.get(req.employee._id.toString()) || 0
+          : 0;
+
+        return {
+          _id: space._id,
+          name: space.name,
+          description: space.description,
+          avatar: space.avatar,
+          createdBy: space.createdBy,
+          admins: space.admins,
+          members: space.members,
+          isPrivate: space.isPrivate,
+          memberCount: space.members.length,
+          unreadCount: unreadCount,
+          type: "space",
+          isPinned: space.isPinnedBy(req.employee._id),
+          pinnedAt: space.isPinnedBy(req.employee._id)
+            ? space.pinnedBy.find(
+                (pin) => pin.employee.toString() === req.employee._id.toString()
+              )?.pinnedAt
+            : null,
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      spaces: spacesWithUnreadCount,
+      totalCount: spacesWithUnreadCount.length,
+    });
+  } catch (error) {
+    console.error("Get spaces error:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch spaces" });
+  }
+};
+
 exports.getMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -380,14 +648,17 @@ exports.startConversation = async (req, res) => {
     // Check if conversation already exists
     let conversation = await Conversation.findOne({
       participants: { $all: [req.employee._id, participantId] },
+      isGroup: false, // ✅ Ensure we only look for direct messages
+      space: { $exists: false }, // ✅ Ensure no space reference
     })
-      .populate("participants", "name companyEmail avatar")
+      .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage");
 
     if (!conversation) {
-      // Create new conversation with unreadCount map
+      // Create new conversation with unreadCount map - FIXED: isGroup should be false
       conversation = new Conversation({
         participants: [req.employee._id, participantId],
+        isGroup: false, // ✅ This should be false for direct messages
         unreadCount: new Map([
           [req.employee._id.toString(), 0],
           [participantId, 0],
@@ -397,7 +668,7 @@ exports.startConversation = async (req, res) => {
 
       // Populate after save
       conversation = await Conversation.findById(conversation._id)
-        .populate("participants", "name companyEmail avatar")
+        .populate("participants", "name companyEmail avatar photographUrl")
         .populate("lastMessage");
 
       // ✅ UPDATED: Use consistent socket events
@@ -408,6 +679,7 @@ exports.startConversation = async (req, res) => {
             conversation: {
               _id: conversation._id,
               participants: conversation.participants,
+              isGroup: conversation.isGroup, // ✅ Include isGroup in response
               unreadCount: conversation.unreadCount.get(userId) || 0,
               updatedAt: conversation.updatedAt,
               lastMessage: conversation.lastMessage,
@@ -428,6 +700,8 @@ exports.startConversation = async (req, res) => {
         unreadCount:
           conversation.unreadCount.get(req.employee._id.toString()) || 0,
         updatedAt: conversation.updatedAt,
+        type: "dm", // ✅ Explicitly set type
+        isGroup: false, // ✅ Ensure isGroup is false
       },
     });
   } catch (error) {
@@ -441,7 +715,7 @@ exports.startConversation = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { content, messageType = "text" } = req.body; // Remove attachments from body
+    const { content, messageType = "text" } = req.body;
 
     console.log("📨 Send message request:", {
       conversationId,
@@ -494,6 +768,51 @@ exports.sendMessage = async (req, res) => {
 
     // Check if this is a group conversation
     const isGroup = conversation.isGroup || conversation.space;
+
+    // ✅ ADDED: BLOCK STATUS CHECK FOR DIRECT MESSAGES
+    if (!isGroup) {
+      const otherParticipant = conversation.participants.find(
+        (p) => p._id.toString() !== req.employee._id.toString()
+      );
+
+      if (otherParticipant) {
+        // Check if either user has blocked the other
+        const blockStatus = await Employee.getBlockStatus(
+          req.employee._id,
+          otherParticipant._id
+        );
+
+        console.log("🔒 Block status check:", {
+          sender: req.employee._id,
+          receiver: otherParticipant._id,
+          blockStatus,
+        });
+
+        if (!blockStatus.canCommunicate) {
+          let errorMessage = "Cannot send message";
+
+          if (blockStatus.user1BlockedUser2 && blockStatus.user2BlockedUser1) {
+            errorMessage = "You have blocked each other. Cannot send messages.";
+          } else if (blockStatus.user1BlockedUser2) {
+            errorMessage =
+              "You have blocked this user. Unblock them to send messages.";
+          } else if (blockStatus.user2BlockedUser1) {
+            errorMessage =
+              "This user has blocked you. You cannot send messages to them.";
+          }
+
+          return res.status(403).json({
+            success: false,
+            error: errorMessage,
+            blockDetails: {
+              youBlockedThem: blockStatus.user1BlockedUser2,
+              theyBlockedYou: blockStatus.user2BlockedUser1,
+              mutualBlock: blockStatus.isMutualBlock,
+            },
+          });
+        }
+      }
+    }
 
     // ✅ FIXED: Enhanced message type detection for images, GIFs, and files
     let finalMessageType = messageType;
@@ -678,6 +997,42 @@ exports.sendDirectMessage = async (req, res) => {
       return res.status(400).json({
         success: false,
         error: "Message content or attachments are required",
+      });
+    }
+
+    // ✅ ADDED: BLOCK STATUS CHECK FOR DIRECT MESSAGES
+    const blockStatus = await Employee.getBlockStatus(
+      req.employee._id,
+      participantId
+    );
+
+    console.log("🔒 Direct message block status check:", {
+      sender: req.employee._id,
+      receiver: participantId,
+      blockStatus,
+    });
+
+    if (!blockStatus.canCommunicate) {
+      let errorMessage = "Cannot send message";
+
+      if (blockStatus.user1BlockedUser2 && blockStatus.user2BlockedUser1) {
+        errorMessage = "You have blocked each other. Cannot send messages.";
+      } else if (blockStatus.user1BlockedUser2) {
+        errorMessage =
+          "You have blocked this user. Unblock them to send messages.";
+      } else if (blockStatus.user2BlockedUser1) {
+        errorMessage =
+          "This user has blocked you. You cannot send messages to them.";
+      }
+
+      return res.status(403).json({
+        success: false,
+        error: errorMessage,
+        blockDetails: {
+          youBlockedThem: blockStatus.user1BlockedUser2,
+          theyBlockedYou: blockStatus.user2BlockedUser1,
+          mutualBlock: blockStatus.isMutualBlock,
+        },
       });
     }
 
@@ -958,6 +1313,215 @@ exports.markAsUnread = async (req, res) => {
   }
 };
 
+exports.spaceMarkAsUnread = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    // First, find the space and verify the user is a member
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Space not found or access denied" });
+    }
+
+    // Find the conversation associated with this space
+    const conversation = await Conversation.findOne({
+      space: spaceId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Space conversation not found" });
+    }
+
+    // Get the last message in the space conversation
+    const lastMessage = await Message.findOne({
+      conversation: conversation._id,
+    }).sort({ createdAt: -1 });
+
+    if (lastMessage) {
+      // For space messages, remove the user from readBy array
+      await Message.updateOne(
+        { _id: lastMessage._id },
+        {
+          $pull: { 
+            readBy: { 
+              employee: req.employee._id 
+            } 
+          },
+        }
+      );
+
+      // Set unread count to 1 for this user
+      conversation.unreadCount.set(req.employee._id.toString(), 1);
+      await conversation.save();
+
+      console.log(`✅ Space ${spaceId} marked as unread for user ${req.employee._id}`);
+    } else {
+      // If no messages, still set unread count to indicate unread status
+      conversation.unreadCount.set(req.employee._id.toString(), 1);
+      await conversation.save();
+    }
+
+    // Emit socket event for space
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit(
+        "space_marked_unread",
+        {
+          spaceId: spaceId,
+          userId: req.employee._id,
+          unreadCount: 1,
+          conversationId: conversation._id,
+        }
+      );
+
+      // Also emit to user's personal room for UI updates
+      io.to(`user_${req.employee._id}`).emit(
+        "conversation_marked_unread",
+        {
+          conversationId: conversation._id,
+          userId: req.employee._id,
+          unreadCount: 1,
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Space marked as unread",
+      unreadCount: 1,
+      spaceId: spaceId,
+      conversationId: conversation._id,
+    });
+  } catch (error) {
+    console.error("Space mark as unread error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to mark space as unread",
+      details: error.message,
+    });
+  }
+};
+
+// Also create a corresponding mark as read function for spaces
+exports.spaceMarkAsRead = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    // Find the space and verify membership
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Space not found or access denied" });
+    }
+
+    // Find the conversation associated with this space
+    const conversation = await Conversation.findOne({
+      space: spaceId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Space conversation not found" });
+    }
+
+    // Mark all unread messages as read for this user
+    const unreadMessages = await Message.find({
+      conversation: conversation._id,
+      "readBy.employee": { $ne: req.employee._id }
+    });
+
+    if (unreadMessages.length > 0) {
+      // Add user to readBy array for all unread messages
+      await Message.updateMany(
+        {
+          _id: { $in: unreadMessages.map(m => m._id) },
+          conversation: conversation._id,
+        },
+        {
+          $addToSet: {
+            readBy: {
+              employee: req.employee._id,
+              readAt: new Date(),
+            },
+          },
+        }
+      );
+    }
+
+    // Reset unread count for this user
+    conversation.unreadCount.set(req.employee._id.toString(), 0);
+    await conversation.save();
+
+    // Emit socket events
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit(
+        "space_marked_read",
+        {
+          spaceId: spaceId,
+          userId: req.employee._id,
+          unreadCount: 0,
+          conversationId: conversation._id,
+        }
+      );
+
+      io.to(`user_${req.employee._id}`).emit(
+        "conversation_marked_read",
+        {
+          conversationId: conversation._id,
+          userId: req.employee._id,
+          unreadCount: 0,
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Space marked as read",
+      unreadCount: 0,
+      spaceId: spaceId,
+      conversationId: conversation._id,
+      markedReadCount: unreadMessages.length,
+    });
+  } catch (error) {
+    console.error("Space mark as read error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to mark space as read",
+      details: error.message,
+    });
+  }
+};
+
+
 // Get conversation by participant - UPDATED WITH SOCKET
 exports.getConversationByParticipant = async (req, res) => {
   try {
@@ -1012,7 +1576,6 @@ exports.getConversationByParticipant = async (req, res) => {
   }
 };
 
-// Create new space/group - UPDATED WITH SOCKET
 exports.createSpace = async (req, res) => {
   try {
     const { name, description, avatar, memberIds, isPrivate, settings } =
@@ -1088,7 +1651,6 @@ exports.createSpace = async (req, res) => {
     res.status(500).json({ success: false, error: "Failed to create space" });
   }
 };
-
 // ✅ GET SPACE MEMBERS (optimized + schema-aligned)
 exports.getSpaceMembers = async (req, res) => {
   try {
@@ -1780,11 +2342,16 @@ exports.getSpaceDetails = async (req, res) => {
   }
 };
 
-// ✅ UPDATE SPACE DETAILS
 exports.updateSpaceDetails = async (req, res) => {
   try {
-    const { spaceId } = req.params;
-    const { groupName, groupDescription, groupAvatar } = req.body;
+    const { spaceId } = req.params; // Make sure this is spaceId, not conversationId
+    const { groupName, groupDescription, guidelines } = req.body;
+
+    console.log("🔄 Updating space details for:", {
+      spaceId,
+      groupName,
+      groupDescription,
+    });
 
     if (!mongoose.Types.ObjectId.isValid(spaceId)) {
       return res.status(400).json({
@@ -1793,7 +2360,7 @@ exports.updateSpaceDetails = async (req, res) => {
       });
     }
 
-    // Check if user has permission to update (admin or owner)
+    // ✅ CRITICAL FIX: Only query Space collection, not Conversation
     const space = await Space.findOne({
       _id: spaceId,
       $or: [{ createdBy: req.employee._id }, { admins: req.employee._id }],
@@ -1806,48 +2373,59 @@ exports.updateSpaceDetails = async (req, res) => {
       });
     }
 
-    // Find and update the conversation
-    const conversation = await Conversation.findOneAndUpdate(
+    // ✅ Update only Space document
+    const updateData = {
+      name: groupName?.trim() || space.name,
+      description: groupDescription?.trim() || space.description,
+      updatedAt: new Date(),
+    };
+
+    // Add guidelines to settings if provided
+    if (guidelines !== undefined) {
+      updateData.settings = {
+        ...space.settings,
+        guidelines: guidelines?.trim() || "",
+      };
+    }
+
+    // ✅ Update only the Space
+    const updatedSpace = await Space.findByIdAndUpdate(
+      spaceId,
       {
-        space: spaceId,
-        isGroup: true,
-      },
-      {
-        $set: {
-          groupName: groupName?.trim(),
-          groupDescription: groupDescription?.trim(),
-          groupAvatar: groupAvatar?.trim(),
-          updatedAt: new Date(),
-        },
+        $set: updateData,
       },
       {
         new: true,
         runValidators: true,
       }
-    );
+    )
+      .populate("createdBy", "name companyEmail avatar")
+      .populate("admins", "name companyEmail avatar")
+      .populate("members", "name companyEmail avatar");
 
-    if (!conversation) {
+    if (!updatedSpace) {
       return res.status(404).json({
         success: false,
-        error: "Conversation not found for this space",
+        error: "Space not found after update",
       });
     }
 
-    // Also update the space name and description if they're different
-    if (groupName && groupName !== space.name) {
-      space.name = groupName.trim();
-      await space.save();
-    }
+    // ✅ OPTIONAL: Update related conversation if it exists (but don't create one)
+    const conversation = await Conversation.findOne({
+      space: spaceId,
+      isGroup: true,
+    });
 
-    if (groupDescription && groupDescription !== space.description) {
-      space.description = groupDescription.trim();
-      await space.save();
+    if (conversation) {
+      // Only update conversation if it's specifically a space conversation
+      await Conversation.findByIdAndUpdate(conversation._id, {
+        $set: {
+          groupName: updatedSpace.name,
+          groupDescription: updatedSpace.description,
+          updatedAt: new Date(),
+        },
+      });
     }
-
-    // Populate the updated conversation
-    const updatedConversation = await Conversation.findById(conversation._id)
-      .populate("participants", "name companyEmail avatar")
-      .populate("admins", "name companyEmail avatar");
 
     // ✅ EMIT SOCKET EVENT FOR SPACE UPDATE
     const io = req.app.get("io");
@@ -1855,9 +2433,9 @@ exports.updateSpaceDetails = async (req, res) => {
       io.to(`space_${spaceId}`).emit("space_updated", {
         spaceId,
         updatedFields: {
-          groupName: updatedConversation.groupName,
-          groupDescription: updatedConversation.groupDescription,
-          groupAvatar: updatedConversation.groupAvatar,
+          name: updatedSpace.name,
+          description: updatedSpace.description,
+          guidelines: updatedSpace.settings?.guidelines,
         },
         updatedBy: {
           _id: req.employee._id,
@@ -1873,12 +2451,22 @@ exports.updateSpaceDetails = async (req, res) => {
       success: true,
       message: "Space details updated successfully",
       space: {
-        _id: space._id,
-        name: space.name,
-        description: space.description,
-        groupName: updatedConversation.groupName,
-        groupDescription: updatedConversation.groupDescription,
-        groupAvatar: updatedConversation.groupAvatar,
+        _id: updatedSpace._id,
+        name: updatedSpace.name,
+        description: updatedSpace.description,
+        avatar: updatedSpace.avatar,
+        groupName: updatedSpace.name, // For compatibility
+        groupDescription: updatedSpace.description, // For compatibility
+        groupAvatar: updatedSpace.avatar, // For compatibility
+        guidelines: updatedSpace.settings?.guidelines,
+        createdBy: updatedSpace.createdBy,
+        admins: updatedSpace.admins,
+        members: updatedSpace.members,
+        totalMembers: updatedSpace.members?.length || 0,
+        isPrivate: updatedSpace.isPrivate,
+        settings: updatedSpace.settings,
+        createdAt: updatedSpace.createdAt,
+        updatedAt: updatedSpace.updatedAt,
       },
     });
   } catch (error) {
@@ -2976,3 +3564,1144 @@ exports.deleteSpace = async (req, res) => {
     });
   }
 };
+exports.addReaction = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { emoji } = req.body;
+
+    if (!messageId || !emoji) {
+      return res.status(400).json({
+        success: false,
+        error: "Message ID and emoji are required",
+      });
+    }
+
+    // Validate message ID
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find the message
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user has access to this message
+    const conversation = await Conversation.findOne({
+      _id: message.conversation,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this message",
+      });
+    }
+
+    // Find existing reaction for this emoji
+    const existingReaction = message.reactions.find(
+      (reaction) => reaction.emoji === emoji
+    );
+
+    if (existingReaction) {
+      // Check if user already reacted with this emoji
+      const userAlreadyReacted = existingReaction.users.some(
+        (userId) => userId.toString() === req.employee._id.toString()
+      );
+
+      if (userAlreadyReacted) {
+        // Remove user's reaction
+        existingReaction.users = existingReaction.users.filter(
+          (userId) => userId.toString() !== req.employee._id.toString()
+        );
+        existingReaction.count = Math.max(0, existingReaction.count - 1);
+
+        // Remove reaction if no users left
+        if (existingReaction.count === 0) {
+          message.reactions = message.reactions.filter(
+            (reaction) => reaction.emoji !== emoji
+          );
+        }
+      } else {
+        // Add user to existing reaction
+        existingReaction.users.push(req.employee._id);
+        existingReaction.count += 1;
+      }
+    } else {
+      // Create new reaction
+      message.reactions.push({
+        emoji,
+        users: [req.employee._id],
+        count: 1,
+      });
+    }
+
+    await message.save();
+
+    // Populate the updated message
+    const updatedMessage = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar")
+      .populate("reactions.users", "name companyEmail avatar")
+      .populate("receivers", "name companyEmail avatar")
+      .populate("space")
+      .populate("conversation");
+
+    // ✅ EMIT SOCKET EVENT FOR REACTION UPDATE
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.space
+        ? `space_${message.space}`
+        : `conversation_${message.conversation}`;
+
+      io.to(room).emit("message_reaction_updated", {
+        messageId,
+        reactions: updatedMessage.reactions,
+        updatedBy: req.employee._id,
+        updatedAt: new Date(),
+      });
+
+      console.log(`✅ Reaction updated for message: ${messageId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Reaction updated successfully",
+      reactions: updatedMessage.reactions,
+    });
+  } catch (error) {
+    console.error("Add reaction error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to add reaction",
+      details: error.message,
+    });
+  }
+};
+// Helper function to remove users from conversations when blocking
+async function removeFromConversations(blockerId, blockedId) {
+  try {
+    // Find all direct conversations between these users
+    const conversations = await Conversation.find({
+      participants: { $all: [blockerId, blockedId] },
+      isGroup: false,
+    });
+
+    for (const conversation of conversations) {
+      // Archive or delete the conversation
+      await Conversation.findByIdAndUpdate(conversation._id, {
+        $set: { archived: true, archivedAt: new Date() },
+      });
+
+      // Notify via socket
+      const io = require("socket.io")(); // You might need to get this differently
+      if (io) {
+        io.to(`conversation_${conversation._id}`).emit(
+          "conversation_archived_due_to_block",
+          {
+            conversationId: conversation._id,
+            archivedBy: blockerId,
+            archivedAt: new Date(),
+          }
+        );
+      }
+    }
+
+    console.log(
+      `✅ Removed conversations between ${blockerId} and ${blockedId}`
+    );
+  } catch (error) {
+    console.error("Error removing from conversations:", error);
+  }
+}
+
+// ✅ GET MESSAGE REACTIONS
+exports.getMessageReactions = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    const message = await Message.findById(messageId)
+      .populate("reactions.users", "name companyEmail avatar")
+      .select("reactions");
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    res.json({
+      success: true,
+      reactions: message.reactions || [],
+    });
+  } catch (error) {
+    console.error("Get message reactions error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to get message reactions",
+      details: error.message,
+    });
+  }
+};
+exports.blockUser = async (req, res) => {
+  try {
+    const { userId, reason } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "User ID is required",
+      });
+    }
+
+    // Validate user ID
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user ID",
+      });
+    }
+
+    // Prevent self-blocking
+    if (userId === req.employee._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        error: "Cannot block yourself",
+      });
+    }
+
+    // Check if user exists
+    const userToBlock = await Employee.findById(userId);
+    if (!userToBlock) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found",
+      });
+    }
+
+    // Check if already blocked
+    const currentEmployee = await Employee.findById(req.employee._id);
+    if (currentEmployee.hasBlocked(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "User is already blocked",
+      });
+    }
+
+    // Add to blocked users
+    await Employee.findByIdAndUpdate(req.employee._id, {
+      $push: {
+        blockedUsers: {
+          user: userId,
+          reason: reason || "",
+          blockedAt: new Date(),
+        },
+      },
+    });
+
+    // Remove from any existing conversations
+    await removeFromConversations(req.employee._id, userId);
+
+    // ✅ EMIT SOCKET EVENT FOR BLOCK
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${userId}`).emit("user_blocked_you", {
+        blockedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        blockedAt: new Date(),
+      });
+
+      io.to(`user_${req.employee._id}`).emit("user_blocked", {
+        blockedUser: {
+          _id: userToBlock._id,
+          name: userToBlock.name,
+        },
+        blockedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "User blocked successfully",
+      blockedUser: {
+        _id: userToBlock._id,
+        name: userToBlock.name,
+        companyEmail: userToBlock.companyEmail,
+      },
+    });
+  } catch (error) {
+    console.error("Block user error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to block user",
+      details: error.message,
+    });
+  }
+};
+
+// Unblock a user
+exports.unblockUser = async (req, res) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "User ID is required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user ID",
+      });
+    }
+
+    // Check if user is actually blocked
+    const currentEmployee = await Employee.findById(req.employee._id);
+    if (!currentEmployee.hasBlocked(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "User is not blocked",
+      });
+    }
+
+    // Remove from blocked users
+    await Employee.findByIdAndUpdate(req.employee._id, {
+      $pull: {
+        blockedUsers: { user: userId },
+      },
+    });
+
+    const unblockedUser = await Employee.findById(userId).select(
+      "name companyEmail"
+    );
+
+    // ✅ EMIT SOCKET EVENT FOR UNBLOCK
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${userId}`).emit("user_unblocked_you", {
+        unblockedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+        },
+        unblockedAt: new Date(),
+      });
+
+      io.to(`user_${req.employee._id}`).emit("user_unblocked", {
+        unblockedUser: {
+          _id: unblockedUser._id,
+          name: unblockedUser.name,
+        },
+        unblockedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "User unblocked successfully",
+      unblockedUser: {
+        _id: unblockedUser._id,
+        name: unblockedUser.name,
+        companyEmail: unblockedUser.companyEmail,
+      },
+    });
+  } catch (error) {
+    console.error("Unblock user error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unblock user",
+      details: error.message,
+    });
+  }
+};
+
+// Get blocked users list
+exports.getBlockedUsers = async (req, res) => {
+  try {
+    const employee = await Employee.findById(req.employee._id)
+      .populate("blockedUsers.user", "name companyEmail avatar photographUrl")
+      .select("blockedUsers");
+
+    const blockedUsers = employee.blockedUsers.map((block) => ({
+      _id: block.user._id,
+      name: block.user.name,
+      companyEmail: block.user.companyEmail,
+      avatar: block.user.avatar,
+      photographUrl: block.user.photographUrl,
+      blockedAt: block.blockedAt,
+      reason: block.reason,
+    }));
+
+    res.json({
+      success: true,
+      blockedUsers,
+      total: blockedUsers.length,
+    });
+  } catch (error) {
+    console.error("Get blocked users error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch blocked users",
+      details: error.message,
+    });
+  }
+};
+
+// Check block status between users
+exports.checkBlockStatus = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user ID",
+      });
+    }
+
+    const blockStatus = await Employee.getBlockStatus(req.employee._id, userId);
+
+    res.json({
+      success: true,
+      ...blockStatus,
+    });
+  } catch (error) {
+    console.error("Check block status error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to check block status",
+      details: error.message,
+    });
+  }
+};
+// Pin conversation
+exports.pinConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Check if already pinned
+    if (conversation.isPinnedBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Conversation is already pinned",
+      });
+    }
+
+    // Add to pinnedBy array
+    conversation.pinnedBy.push({
+      employee: req.employee._id,
+      pinnedAt: new Date(),
+    });
+
+    await conversation.save();
+
+    // Populate the updated conversation
+    const updatedConversation = await Conversation.findById(conversationId)
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage")
+      .populate("pinnedBy.employee", "name companyEmail");
+
+    // ✅ EMIT SOCKET EVENT FOR PIN
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${req.employee._id}`).emit("conversation_pinned", {
+        conversationId,
+        pinnedBy: req.employee._id,
+        pinnedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation pinned successfully",
+      conversation: {
+        _id: updatedConversation._id,
+        participants: updatedConversation.participants.filter(
+          (p) => p._id.toString() !== req.employee._id.toString()
+        ),
+        lastMessage: updatedConversation.lastMessage,
+        unreadCount:
+          updatedConversation.unreadCount.get(req.employee._id.toString()) || 0,
+        updatedAt: updatedConversation.updatedAt,
+        isPinned: true,
+        pinnedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    console.error("Pin conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to pin conversation",
+      details: error.message,
+    });
+  }
+};
+
+// Unpin conversation
+exports.unpinConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Check if actually pinned
+    if (!conversation.isPinnedBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Conversation is not pinned",
+      });
+    }
+
+    // Remove from pinnedBy array
+    conversation.pinnedBy = conversation.pinnedBy.filter(
+      (pin) => pin.employee.toString() !== req.employee._id.toString()
+    );
+
+    await conversation.save();
+
+    // Populate the updated conversation
+    const updatedConversation = await Conversation.findById(conversationId)
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage");
+
+    // ✅ EMIT SOCKET EVENT FOR UNPIN
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${req.employee._id}`).emit("conversation_unpinned", {
+        conversationId,
+        unpinnedBy: req.employee._id,
+        unpinnedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation unpinned successfully",
+      conversation: {
+        _id: updatedConversation._id,
+        participants: updatedConversation.participants.filter(
+          (p) => p._id.toString() !== req.employee._id.toString()
+        ),
+        lastMessage: updatedConversation.lastMessage,
+        unreadCount:
+          updatedConversation.unreadCount.get(req.employee._id.toString()) || 0,
+        updatedAt: updatedConversation.updatedAt,
+        isPinned: false,
+      },
+    });
+  } catch (error) {
+    console.error("Unpin conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unpin conversation",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET PINNED CONVERSATIONS ONLY
+exports.getPinnedConversations = async (req, res) => {
+  try {
+    const pinnedConversations = await Conversation.find({
+      participants: req.employee._id,
+      "pinnedBy.employee": req.employee._id, // only pinned by current user
+      archivedBy: { $ne: req.employee._id },
+    })
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail")
+      .sort({ "pinnedBy.pinnedAt": -1 });
+
+    const formatted = pinnedConversations.map((conv) => ({
+      _id: conv._id,
+      participants: conv.participants.filter(
+        (p) => p._id.toString() !== req.employee._id.toString()
+      ),
+      lastMessage: conv.lastMessage,
+      unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+      updatedAt: conv.updatedAt,
+      isPinned: true,
+      pinnedAt:
+        conv.pinnedBy.find(
+          (pin) => pin.employee.toString() === req.employee._id.toString()
+        )?.pinnedAt || null,
+      type: conv.isGroup ? "group" : "dm",
+      groupName: conv.groupName,
+      groupAvatar: conv.groupAvatar,
+      admins: conv.admins,
+    }));
+
+    res.json({
+      success: true,
+      pinnedConversations: formatted,
+      count: formatted.length,
+    });
+  } catch (error) {
+    console.error("Get pinned conversations error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch pinned conversations" });
+  }
+};
+// ✅ HIDE CONVERSATION
+exports.hideConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Add user to hiddenBy array
+    if (!conversation.hiddenBy.includes(req.employee._id)) {
+      conversation.hiddenBy.push(req.employee._id);
+      await conversation.save();
+    }
+
+    // ✅ EMIT SOCKET EVENT FOR CONVERSATION HIDDEN
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${req.employee._id}`).emit("conversation_hidden", {
+        conversationId,
+        hiddenBy: req.employee._id,
+        hiddenAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation hidden successfully",
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Hide conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to hide conversation",
+      details: error.message,
+    });
+  }
+};
+// ✅ UNHIDE CONVERSATION
+exports.unhideConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Remove user from hiddenBy array
+    conversation.hiddenBy = conversation.hiddenBy.filter(
+      (userId) => userId.toString() !== req.employee._id.toString()
+    );
+    await conversation.save();
+
+    // ✅ EMIT SOCKET EVENT FOR CONVERSATION UNHIDDEN
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`user_${req.employee._id}`).emit("conversation_unhidden", {
+        conversationId,
+        unhiddenBy: req.employee._id,
+        unhiddenAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation unhidden successfully",
+      conversationId,
+    });
+  } catch (error) {
+    console.error("Unhide conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unhide conversation",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET HIDDEN CONVERSATIONS
+exports.getHiddenConversations = async (req, res) => {
+  try {
+    const hiddenConversations = await Conversation.find({
+      participants: req.employee._id,
+      hiddenBy: req.employee._id, // Only conversations hidden by current user
+    })
+      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("lastMessage")
+      .sort({ updatedAt: -1 });
+
+    const formatted = hiddenConversations.map((conv) => ({
+      _id: conv._id,
+      participants: conv.participants.filter(
+        (p) => p._id.toString() !== req.employee._id.toString()
+      ),
+      lastMessage: conv.lastMessage,
+      unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+      updatedAt: conv.updatedAt,
+      isHidden: true,
+      type: conv.isGroup ? "group" : "dm",
+      groupName: conv.groupName,
+      groupAvatar: conv.groupAvatar,
+    }));
+
+    res.json({
+      success: true,
+      hiddenConversations: formatted,
+      count: formatted.length,
+    });
+  } catch (error) {
+    console.error("Get hidden conversations error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch hidden conversations",
+    });
+  }
+};
+// ✅ GET SIMPLE CONVERSATION MEMBERS (minimal data)
+exports.getConversationMembersSimple = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    })
+      .populate("participants", "name companyEmail avatar photographUrl isOnline")
+      .lean();
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found or access denied",
+      });
+    }
+
+    // Simple member list without additional statistics
+    const members = conversation.participants
+      .filter(participant => participant._id.toString() !== req.employee._id.toString())
+      .map(participant => ({
+        _id: participant._id,
+        name: participant.name,
+        email: participant.companyEmail,
+        avatar: participant.photographUrl || participant.avatar,
+        isOnline: participant.isOnline || false,
+        status: participant.isOnline ? "online" : "offline"
+      }));
+
+    res.json({
+      success: true,
+      members: members,
+      total: members.length
+    });
+
+  } catch (error) {
+    console.error("Get simple conversation members error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch conversation members",
+      details: error.message,
+    });
+  }
+};
+exports.getSpaceSharedContent = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
+
+    console.log("🔍 Fetching shared content for space:", spaceId);
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid space ID",
+      });
+    }
+
+    // Check if user has access to this space
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res.status(404).json({
+        success: false,
+        error: "Space not found or access denied",
+      });
+    }
+
+    // Find the conversation for this space
+    const conversation = await Conversation.findOne({
+      space: spaceId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.json({
+        success: true,
+        data: {
+          files: [],
+          links: [],
+          media: [],
+        },
+        summary: {
+          totalFiles: 0,
+          totalLinks: 0,
+          totalMedia: 0,
+        },
+      });
+    }
+
+    // Build query based on content type
+    let messageQuery = {
+      conversation: conversation._id,
+      $or: [],
+    };
+
+    // Files query (non-image documents)
+    const filesQuery = {
+      $and: [
+        { "attachments.0": { $exists: true } },
+        {
+          $or: [
+            {
+              "attachments.mimetype": {
+                $regex: /^application\/(pdf|msword|vnd\.|json|xml)/,
+              },
+            },
+            { "attachments.mimetype": { $regex: /^text\// } },
+            {
+              "attachments.originalName": {
+                $regex: /\.(pdf|doc|docx|xls|xlsx|csv|txt|json|xml)$/i,
+              },
+            },
+          ],
+        },
+      ],
+    };
+
+    // Links query (messages with URLs)
+    const linksQuery = {
+      content: { $regex: /https?:\/\/[^\s]+/ },
+      messageType: { $ne: "gif" }, // Exclude GIF URLs
+    };
+
+    // Media query (images, videos, GIFs)
+    const mediaQuery = {
+      $or: [
+        {
+          "attachments.mimetype": {
+            $regex: /^(image\/|video\/)/,
+          },
+        },
+        { messageType: "gif" },
+        {
+          "attachments.originalName": {
+            $regex: /\.(jpg|jpeg|png|gif|webp|svg|mp4|avi|mov|mkv)$/i,
+          },
+        },
+      ],
+    };
+
+    // Add queries based on requested type
+    switch (type) {
+      case "files":
+        messageQuery.$or.push(filesQuery);
+        break;
+      case "links":
+        messageQuery.$or.push(linksQuery);
+        break;
+      case "media":
+        messageQuery.$or.push(mediaQuery);
+        break;
+      default: // 'all'
+        messageQuery.$or.push(filesQuery, linksQuery, mediaQuery);
+    }
+
+    // Fetch messages with shared content
+    const messages = await Message.find(messageQuery)
+      .populate("sender", "name companyEmail avatar")
+      .populate("attachments")
+      .sort({ createdAt: -1 })
+      .limit(200); // Limit to prevent overload
+
+    console.log(`📦 Found ${messages.length} messages with shared content in space ${spaceId}`);
+
+    // Process and categorize shared content
+    const sharedContent = {
+      files: [],
+      links: [],
+      media: [],
+    };
+
+    const processedUrls = new Set(); // To avoid duplicates
+
+    messages.forEach((message) => {
+      const {
+        sender,
+        content,
+        messageType,
+        attachments = [],
+        createdAt,
+        _id,
+      } = message;
+
+      // Extract links from text content
+      if (content && messageType !== "gif") {
+        const urlRegex = /(https?:\/\/[^\s]+)/g;
+        const urls = content.match(urlRegex);
+
+        if (urls) {
+          urls.forEach((url, index) => {
+            // Skip if URL is already processed or is a file attachment
+            if (processedUrls.has(url)) return;
+
+            const isAttachmentUrl = attachments.some(
+              (att) => att.url === url || content.includes(att.url)
+            );
+
+            if (!isAttachmentUrl) {
+              processedUrls.add(url);
+
+              try {
+                const urlObj = new URL(url);
+                const domain = urlObj.hostname.replace("www.", "");
+
+                sharedContent.links.push({
+                  id: `link-${_id}-${index}`,
+                  title: domain.charAt(0).toUpperCase() + domain.slice(1),
+                  url: url,
+                  sharedBy: sender?.name || "Unknown",
+                  sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+                  dateShared: formatSharedDate(createdAt),
+                  messageId: _id,
+                });
+              } catch (error) {
+                console.log("Invalid URL:", url);
+              }
+            }
+          });
+        }
+      }
+
+      // Process attachments
+      if (attachments && attachments.length > 0) {
+        attachments.forEach((attachment, index) => {
+          const { filename, url, mimetype, size, originalName } = attachment;
+
+          // Skip if this URL was already processed as a link
+          if (processedUrls.has(url)) return;
+          processedUrls.add(url);
+
+          const attachmentData = {
+            id: `attachment-${_id}-${index}`,
+            name: filename || originalName || "Unnamed file",
+            url: url,
+            sharedBy: sender?.name || "Unknown",
+            sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+            dateShared: formatSharedDate(createdAt),
+            messageId: _id,
+            size: size || 0,
+          };
+
+          // Categorize by file type
+          if (mimetype.startsWith("image/") || mimetype === "image/gif") {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "image",
+              thumbnail: url,
+            });
+          } else if (mimetype.startsWith("video/")) {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "video",
+              thumbnail: null,
+            });
+          } else if (messageType === "gif") {
+            sharedContent.media.push({
+              ...attachmentData,
+              type: "image",
+              thumbnail: url,
+              name: "GIF",
+            });
+          } else {
+            // It's a file
+            const fileExtension =
+              (filename || originalName || "")
+                .split(".")
+                .pop()
+                ?.toLowerCase() || "file";
+
+            sharedContent.files.push({
+              ...attachmentData,
+              type: fileExtension,
+            });
+          }
+        });
+      }
+
+      // Handle GIF messages (content is GIF URL)
+      if (messageType === "gif" && content && !processedUrls.has(content)) {
+        processedUrls.add(content);
+        sharedContent.media.push({
+          id: `gif-${_id}`,
+          type: "image",
+          name: "GIF",
+          url: content,
+          thumbnail: content,
+          sharedBy: sender?.name || "Unknown",
+          sharedByAvatar: sender?.name?.charAt(0).toUpperCase() || "U",
+          dateShared: formatSharedDate(createdAt),
+          messageId: _id,
+          size: 0,
+        });
+      }
+    });
+
+    // Sort by date (newest first)
+    sharedContent.files.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+    sharedContent.links.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+    sharedContent.media.sort(
+      (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
+    );
+
+    console.log(`📊 Space shared content summary:`, {
+      files: sharedContent.files.length,
+      links: sharedContent.links.length,
+      media: sharedContent.media.length,
+    });
+
+    res.json({
+      success: true,
+      data: sharedContent,
+      summary: {
+        totalFiles: sharedContent.files.length,
+        totalLinks: sharedContent.links.length,
+        totalMedia: sharedContent.media.length,
+      },
+      space: {
+        _id: space._id,
+        name: space.name,
+        description: space.description,
+      },
+    });
+  } catch (error) {
+    console.error("Get space shared content error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch space shared content",
+      details: error.message,
+    });
+  }
+};
+
+// Helper function to format date
+function formatSharedDate(dateString) {
+  const date = new Date(dateString);
+  return date.toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}

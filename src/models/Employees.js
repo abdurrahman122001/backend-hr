@@ -84,7 +84,19 @@ const EmployeeSchema = new Schema(
     },
     // Optional fixed Team Lead who must approve (used when needs_approval)
     supervisor: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
-
+    blockedUsers: [
+      {
+        user: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+        },
+        blockedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        reason: String,
+      },
+    ],
     // LEAVE ENTITLEMENT
     leaveEntitlement: {
       total: { type: Number, default: 22 },
@@ -176,5 +188,37 @@ EmployeeSchema.index(
 
 EmployeeSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
+};
+EmployeeSchema.index({ blockedUsers: 1 });
+
+// Method to check if user is blocked
+EmployeeSchema.methods.hasBlocked = function (userId) {
+  return this.blockedUsers.some(
+    (blocked) => blocked.user.toString() === userId.toString()
+  );
+};
+
+// Method to check if user is blocked by someone
+EmployeeSchema.statics.isBlockedBy = async function (userId, blockerId) {
+  const blocker = await this.findById(blockerId).select("blockedUsers");
+  return blocker ? blocker.hasBlocked(userId) : false;
+};
+
+// Method to get mutual block status
+EmployeeSchema.statics.getBlockStatus = async function (user1Id, user2Id) {
+  const user1 = await this.findById(user1Id).select("blockedUsers");
+  const user2 = await this.findById(user2Id).select("blockedUsers");
+
+  return {
+    user1BlockedUser2: user1 ? user1.hasBlocked(user2Id) : false,
+    user2BlockedUser1: user2 ? user2.hasBlocked(user1Id) : false,
+    isMutualBlock:
+      (user1 ? user1.hasBlocked(user2Id) : false) &&
+      (user2 ? user2.hasBlocked(user1Id) : false),
+    canCommunicate: !(
+      (user1 ? user1.hasBlocked(user2Id) : false) ||
+      (user2 ? user2.hasBlocked(user1Id) : false)
+    ),
+  };
 };
 module.exports = model("Employee", EmployeeSchema);

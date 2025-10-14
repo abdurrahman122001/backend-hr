@@ -5,7 +5,9 @@ const empAuth = require("../middleware/empAuth");
 
 // Get all conversations for current user
 router.get("/conversations", empAuth, chatController.getConversations);
-
+router.get('/direct-messages', empAuth, chatController.getDirectMessages);
+router.get('/space-conversations', empAuth, chatController.getSpaceConversations);
+router.get('/spaces', empAuth, chatController.getSpaces);
 // Get messages for a specific conversation
 router.get(
   "/conversations/:conversationId/messages",
@@ -28,6 +30,22 @@ router.post(
   empAuth,
   chatController.upload.array("attachments", 10),
   chatController.sendMessage
+);
+// Add these routes to your chat routes
+router.post(
+  "/conversations/:conversationId/hide",
+  empAuth,
+  chatController.hideConversation
+);
+router.post(
+  "/conversations/:conversationId/unhide",
+  empAuth,
+  chatController.unhideConversation
+);
+router.get(
+  "/conversations/hidden",
+  empAuth,
+  chatController.getHiddenConversations
 );
 
 // Send direct message (creates conversation if needed)
@@ -54,7 +72,11 @@ router.get(
   empAuth,
   chatController.getConversationByParticipant
 );
-
+router.get(
+  "/conversations/:conversationId/members/simple",
+  empAuth,
+  chatController.getConversationMembersSimple
+);
 // Create new space
 router.post("/spaces", empAuth, chatController.createSpace);
 router.delete("/spaces/:spaceId", empAuth, chatController.deleteSpace);
@@ -65,6 +87,12 @@ router.get(
   empAuth,
   chatController.getSharedContent
 );
+router.get(
+  "/spaces/:spaceId/shared-content",
+  empAuth,
+  chatController.getSpaceSharedContent
+);
+
 // Add members to space
 router.post(
   "/spaces/:spaceId/members",
@@ -95,11 +123,6 @@ router.get(
 );
 // Space details routes
 router.get("/spaces/:spaceId/details", empAuth, chatController.getSpaceDetails);
-router.put(
-  "/spaces/:spaceId/details",
-  empAuth,
-  chatController.updateSpaceDetails
-);
 router.post("/spaces/:spaceId/leave", empAuth, chatController.leaveSpace);
 router.post(
   "/spaces/:spaceId/transfer-ownership",
@@ -120,7 +143,11 @@ router.get(
   empAuth,
   chatController.getSpaceMessages
 );
-
+router.put(
+  "/spaces/:spaceId/details",
+  empAuth,
+  chatController.updateSpaceDetails
+);
 // Typing indicators
 router.post("/typing", empAuth, chatController.typing);
 
@@ -130,8 +157,45 @@ router.put(
   empAuth,
   chatController.markAsUnread
 );
-
+// Change to:
+router.put(
+  "/spaces/:spaceId/unread",
+  empAuth,
+  chatController.spaceMarkAsUnread
+);
+router.put("/spaces/:spaceId/read", empAuth, chatController.spaceMarkAsRead);
+// Block routes
+router.post("/block", empAuth, chatController.blockUser);
+router.post("/unblock", empAuth, chatController.unblockUser);
+router.get("/blocked-users", empAuth, chatController.getBlockedUsers);
+router.get("/block-status/:userId", empAuth, chatController.checkBlockStatus);
 // Delete message
 router.delete("/messages/:messageId", empAuth, chatController.deleteMessage);
+router.post(
+  "/messages/:messageId/reactions",
+  empAuth,
+  chatController.addReaction
+);
+router.get(
+  "/messages/:messageId/reactions",
+  empAuth,
+  chatController.getMessageReactions
+);
 
+// Add these routes to your chat routes
+router.post(
+  "/conversations/:conversationId/pin",
+  empAuth,
+  chatController.pinConversation
+);
+router.delete(
+  "/conversations/:conversationId/pin",
+  empAuth,
+  chatController.unpinConversation
+);
+router.get(
+  "/conversations/pinned",
+  empAuth,
+  chatController.getPinnedConversations
+);
 module.exports = router;
