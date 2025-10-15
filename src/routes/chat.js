@@ -3,7 +3,7 @@ const router = express.Router();
 const chatController = require("../controllers/chatController");
 const empAuth = require("../middleware/empAuth");
 
-// Get all conversations for current user
+router.get("/search", empAuth, chatController.searchMessages);
 router.get("/conversations", empAuth, chatController.getConversations);
 router.get("/direct-messages", empAuth, chatController.getDirectMessages);
 router.get(

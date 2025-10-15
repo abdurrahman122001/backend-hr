@@ -4717,3 +4717,134 @@ function formatSharedDate(dateString) {
     day: "numeric",
   });
 }
+// ✅ SIMPLE SEARCH MESSAGES API - WORKS FOR ALL
+exports.searchMessages = async (req, res) => {
+  try {
+    const { q: query, conversationId, limit = 50 } = req.query;
+
+    if (!query || query.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: "Search query must be at least 2 characters long"
+      });
+    }
+
+    const searchTerm = query.trim();
+    console.log("🔍 Searching for:", searchTerm);
+
+    // Build search query
+    let searchQuery = {
+      $or: [
+        { content: { $regex: searchTerm, $options: 'i' } },
+        { "attachments.originalName": { $regex: searchTerm, $options: 'i' } },
+        { "attachments.filename": { $regex: searchTerm, $options: 'i' } }
+      ]
+    };
+
+    // If specific conversation, verify access
+    if (conversationId) {
+      if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid conversation ID"
+        });
+      }
+
+      const conversation = await Conversation.findOne({
+        _id: conversationId,
+        participants: req.employee._id
+      });
+
+      if (!conversation) {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied to this conversation"
+        });
+      }
+
+      searchQuery.conversation = conversationId;
+    } else {
+      // Search across all user's conversations
+      const userConversations = await Conversation.find({
+        participants: req.employee._id,
+        archivedBy: { $ne: req.employee._id },
+        hiddenBy: { $ne: req.employee._id }
+      }).select('_id');
+
+      const conversationIds = userConversations.map(conv => conv._id);
+      
+      if (conversationIds.length === 0) {
+        return res.json({
+          success: true,
+          messages: [],
+          total: 0
+        });
+      }
+
+      searchQuery.conversation = { $in: conversationIds };
+    }
+
+    // Execute search
+    const messages = await Message.find(searchQuery)
+      .populate('sender', 'name companyEmail avatar photographUrl')
+      .populate('conversation', 'isGroup groupName space')
+      .populate('space', 'name description avatar')
+      .populate('attachments')
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .lean();
+
+    console.log(`✅ Found ${messages.length} messages matching "${searchTerm}"`);
+
+    // Format results
+    const results = messages.map(message => {
+      const isSpace = message.conversation?.space || message.space;
+      
+      return {
+        _id: message._id,
+        content: message.content,
+        messageType: message.messageType,
+        attachments: message.attachments || [],
+        sender: {
+          _id: message.sender._id,
+          name: message.sender.name,
+          email: message.sender.companyEmail,
+          avatar: message.sender.photographUrl || message.sender.avatar
+        },
+        conversation: {
+          _id: message.conversation._id,
+          name: message.conversation.isGroup ? 
+                message.conversation.groupName : 
+                'Direct Message',
+          isGroup: message.conversation.isGroup,
+          isSpace: !!isSpace
+        },
+        space: message.space ? {
+          _id: message.space._id,
+          name: message.space.name
+        } : null,
+        createdAt: message.createdAt,
+        // Simple highlight - frontend can handle proper highlighting
+        hasMatchInContent: message.content?.toLowerCase().includes(searchTerm.toLowerCase()),
+        hasMatchInFiles: message.attachments?.some(att => 
+          att.originalName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+          att.filename?.toLowerCase().includes(searchTerm.toLowerCase())
+        )
+      };
+    });
+
+    res.json({
+      success: true,
+      query: searchTerm,
+      messages: results,
+      total: results.length
+    });
+
+  } catch (error) {
+    console.error("Search messages error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to search messages"
+    });
+  }
+};

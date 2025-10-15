@@ -72,6 +72,7 @@ const assignmentMessageController = require("./controllers/assignmentMessageCont
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
+const offerEmail = require("./routes/offerEmail");
 
 const app = express();
 
@@ -197,6 +198,7 @@ app.use("/api/generate", requireAuth, generateRouter);
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/offer-email" , requireAuth, offerEmail)
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
