@@ -2,11 +2,15 @@ const express = require("express");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const Employee = require("../models/Employees");
+const EmployeeSession = require("../models/EmployeeSession"); // ✅ New model for login/logout tracking
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 
 const router = express.Router();
 
+// ---------------------
+// Environment Config
+// ---------------------
 const {
   JWT_SECRET,
   MAIL_HOST,
@@ -15,11 +19,11 @@ const {
   MAIL_PASSWORD,
   MAIL_FROM_ADDRESS,
   MAIL_FROM_NAME,
-  MAIL_ENCRYPTION, // "ssl" for 465 in your env
+  MAIL_ENCRYPTION, // "ssl" for 465 in env
 } = process.env;
 
 // ---------------------
-// Email Transport
+// Email Transport Setup
 // ---------------------
 const secure =
   String(MAIL_ENCRYPTION).toLowerCase() === "ssl" || Number(MAIL_PORT) === 465;
@@ -28,38 +32,27 @@ const transporter = nodemailer.createTransport({
   host: MAIL_HOST,
   port: Number(MAIL_PORT),
   secure,
-  auth: {
-    user: MAIL_USERNAME,
-    pass: MAIL_PASSWORD,
-  },
-  tls: {
-    rejectUnauthorized: false, // Titan SMTP fix
-  },
+  auth: { user: MAIL_USERNAME, pass: MAIL_PASSWORD },
+  tls: { rejectUnauthorized: false }, // Fix for Titan/Hostinger SSL
 });
 
-// Helper: send email
+// Helper to send email
 async function sendMail({ to, subject, text, html }) {
   const from =
     MAIL_FROM_NAME && MAIL_FROM_ADDRESS
       ? `"${MAIL_FROM_NAME}" <${MAIL_FROM_ADDRESS}>`
       : MAIL_FROM_ADDRESS || MAIL_USERNAME;
 
-  return transporter.sendMail({
-    from,
-    to,
-    subject,
-    text,
-    html,
-  });
+  return transporter.sendMail({ from, to, subject, text, html });
 }
 
 // ---------------------
-// Temporary code store
+// Temporary Code Store (for 2FA)
 // ---------------------
 const codes = new Map(); // codes.set(empId, { code, expires, deviceFingerprint })
 
 // ---------------------
-// LOGIN — verify password, check trusted device
+// 1️⃣ LOGIN — password check + trusted device + session logging
 // ---------------------
 router.post("/login", async (req, res) => {
   const { companyEmail, password, deviceFingerprint } = req.body;
@@ -70,11 +63,7 @@ router.post("/login", async (req, res) => {
     );
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
-    if (
-      !emp.password ||
-      typeof emp.password !== "string" ||
-      emp.password.trim() === ""
-    ) {
+    if (!emp.password?.trim()) {
       return res.status(403).json({
         error: "Account not activated",
         message:
@@ -85,20 +74,26 @@ router.post("/login", async (req, res) => {
     const ok = await emp.comparePassword(password);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    // ---------------------
-    // 1️⃣ Check if device already trusted
-    // ---------------------
+    // Check if device is trusted
     const isTrusted = emp.trustedDevices?.some(
       (d) => d.deviceFingerprint === deviceFingerprint
     );
 
     if (isTrusted) {
-      // Already trusted → skip 2FA
+      // ✅ Trusted device → direct login
       const token = jwt.sign(
         { id: emp._id, role: emp.role, owner: emp.owner },
         JWT_SECRET,
-        { expiresIn: "2h" }
+        { expiresIn: "9h" }
       );
+
+      // ✅ Log check-in session
+      await EmployeeSession.create({
+        employeeId: emp._id,
+        deviceFingerprint,
+        loginTime: new Date(),
+        active: true,
+      });
 
       return res.json({
         message: "Login successful (trusted device).",
@@ -110,15 +105,15 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           name: emp.name || "",
         },
-        expiresIn: 7200,
+        expiresIn: 9 * 60 * 60,
       });
     }
 
     // ---------------------
-    // 2️⃣ Unrecognized device → send code
+    // 2️⃣ Unrecognized device → send 2FA code to admin
     // ---------------------
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 10 * 60 * 1000; // 10 min
+    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
     codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
 
     const tempToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
@@ -131,7 +126,7 @@ router.post("/login", async (req, res) => {
       "unknown";
     const when = new Date().toISOString();
 
-    const adminTo = "abdullahahmedqureshint@gmail.com";
+    const adminTo = "nashfintechnologies@gmail.com";
     const adminSubject = "Employee login verification requested";
     const adminText =
       `A login verification was requested.\n` +
@@ -170,6 +165,9 @@ router.post("/login", async (req, res) => {
   }
 });
 
+// ---------------------
+// 2️⃣ CONFIRM CODE — trust new device + create session
+// ---------------------
 router.post("/confirm-code", async (req, res) => {
   const { code, deviceFingerprint } = req.body;
   const tempToken = req.headers.authorization?.split(" ")[1];
@@ -187,12 +185,10 @@ router.post("/confirm-code", async (req, res) => {
 
     if (rec.expires < Date.now()) {
       codes.delete(decoded.id);
-      return res
-        .status(400)
-        .json({ error: "Code expired. Please login again." });
+      return res.status(400).json({ error: "Code expired. Please login again." });
     }
 
-    // success → delete code
+    // Success → delete code
     codes.delete(decoded.id);
 
     const emp = await Employee.findById(decoded.id).select(
@@ -205,27 +201,28 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
-    // ✅ Replace previous trusted device — only allow ONE trusted device at a time
+    // ✅ Replace all trusted devices with this new one
     emp.trustedDevices = [
-      {
-        deviceFingerprint,
-        userAgent,
-        ip,
-        addedAt: new Date(),
-      },
+      { deviceFingerprint, userAgent, ip, addedAt: new Date() },
     ];
-
     await emp.save();
 
-    // Final login token
+    // ✅ Create final token & session (check-in)
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
-      { expiresIn: "2h" }
+      { expiresIn: "9h" }
     );
 
+    await EmployeeSession.create({
+      employeeId: emp._id,
+      deviceFingerprint,
+      loginTime: new Date(),
+      active: true,
+    });
+
     return res.json({
-      message: "Device verified and trusted (old devices replaced).",
+      message: "Device verified and trusted. Login successful.",
       token,
       user: {
         id: emp._id,
@@ -234,16 +231,56 @@ router.post("/confirm-code", async (req, res) => {
         owner: emp.owner,
         name: emp.name || "",
       },
-      expiresIn: 7200,
+      expiresIn: 9 * 60 * 60,
     });
   } catch (err) {
     console.error("Confirm-code error:", err);
     return res.status(401).json({ error: "Invalid or expired temp token" });
   }
 });
+
 // ---------------------
-// GET current employee (protected)
+// 3️⃣ LOGOUT — mark check-out time
+// ---------------------
+router.post("/logout", requireAuth, async (req, res) => {
+  try {
+    await EmployeeSession.findOneAndUpdate(
+      { employeeId: req.employee._id, active: true },
+      { logoutTime: new Date(), active: false }
+    );
+    return res.json({ status: "success", message: "Logged out successfully" });
+  } catch (err) {
+    console.error("Logout error:", err);
+    return res.status(500).json({ error: "Server error during logout" });
+  }
+});
+
+// ---------------------
+// 4️⃣ AUTO LOGOUT ON TOKEN EXPIRY (handled in middleware)
+// ---------------------
+// You already have this in requireEmployeeAuth.js
+// It updates EmployeeSession logoutTime when token expires.
+
+// ---------------------
+// 5️⃣ Get Current Employee (Protected)
 // ---------------------
 router.get("/me", requireAuth, authCtrl.getMe);
+
+// ---------------------
+// 6️⃣ Get Attendance Logs (Optional Admin Endpoint)
+// ---------------------
+router.get("/sessions", requireAuth, async (req, res) => {
+  try {
+    const sessions = await EmployeeSession.find({
+      employeeId: req.employee._id,
+    })
+      .sort({ loginTime: -1 })
+      .limit(30);
+    res.json({ sessions });
+  } catch (err) {
+    console.error("Fetch sessions error:", err);
+    res.status(500).json({ error: "Unable to fetch sessions" });
+  }
+});
 
 module.exports = router;

@@ -4722,7 +4722,7 @@ exports.searchMessages = async (req, res) => {
   try {
     const { q: query, conversationId, limit = 50 } = req.query;
 
-    if (!query || query.trim().length < 2) {
+    if (!query || query.trim().length < 1) {
       return res.status(400).json({
         success: false,
         error: "Search query must be at least 2 characters long"

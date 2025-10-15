@@ -71,6 +71,7 @@ const AssignmentMessage = require("./models/AssignmentMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const chatRoutes = require("./routes/chat");
+const offerEmail = require("./routes/offerEmail");
 // Get today's date in YYYY-MM-DD format (for cron job)
 const app = express();
 // Wrap express in an HTTP server for Socket-IO
@@ -166,6 +167,7 @@ app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
 app.use("/api/email", emailRoutes);
 app.use("/api/generate", requireAuth, generateRouter);
+app.use("/api/offer-email" , requireAuth, offerEmail)
 app.post("/api/hierarchy/create", requireAuth, hierarchyController.create);
 app.post(
   "/api/hierarchy/bulkCreate",
