@@ -5,19 +5,29 @@ const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
 
 const isManagerLike = (role) => {
-  const r = String(role || "").trim().toLowerCase();
+  const r = String(role || "")
+    .trim()
+    .toLowerCase();
   return (
-    r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead"
+    r === "manager" ||
+    r === "team lead" ||
+    r === "team_lead" ||
+    r === "teamlead"
   );
 };
 
 exports.getRoster = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
     if (!isManagerLike(me.role))
       return res.status(403).json({ error: "Access denied" });
-    if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
+    if (!me.owner)
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const [employees, clients] = await Promise.all([
       Employee.find({
@@ -48,11 +58,15 @@ exports.getRoster = async (req, res) => {
 // GET /manager/roster
 exports.getEmployeeRoster = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
     if (!me.owner)
-      return res.status(400).json({ error: "Your profile is missing owner id" });
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const [employees, clients] = await Promise.all([
       Employee.find({
@@ -82,16 +96,18 @@ exports.getEmployeeRoster = async (req, res) => {
   }
 };
 
-
-
 // PATCH /manager/employee/:id/supervision  { supervisionMode }
 exports.updateEmployeeSupervision = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "" });
-    if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
+    if (!isManagerLike(me.role)) return res.status(403).json({ error: "" });
+    if (!me.owner)
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const { id } = req.params;
     const { supervisionMode } = req.body;
@@ -116,16 +132,22 @@ exports.updateEmployeeSupervision = async (req, res) => {
 // GET /manager/supervision-status
 exports.getEmployeeSupervisionStatus = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "" });
-    if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
+    if (!isManagerLike(me.role)) return res.status(403).json({ error: "" });
+    if (!me.owner)
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const { id } = req.params;
 
     const emp = await Employee.findOne({ _id: id, owner: me.owner })
-      .select("_id name email companyEmail role department designation supervisionMode supervisor")
+      .select(
+        "_id name email companyEmail role department designation supervisionMode supervisor"
+      )
       .populate("supervisor", "_id name companyEmail");
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
@@ -146,10 +168,11 @@ exports.assignClient = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id);
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "" });
+    if (!isManagerLike(me.role)) return res.status(403).json({ error: "" });
     if (!me.owner)
-      return res.status(400).json({ error: "Your profile is missing owner id" });
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     // Fields can come from multipart/form-data or JSON
     const clientId = (req.body.clientId || "").trim();
@@ -157,7 +180,8 @@ exports.assignClient = async (req, res) => {
     const note = (req.body.note || "").trim();
     const subject = (req.body.subject || "").trim();
 
-    if (!clientId) return res.status(400).json({ error: "clientId is required" });
+    if (!clientId)
+      return res.status(400).json({ error: "clientId is required" });
 
     // Update assignment on client (scoped by owner)
     const client = await ClientInfo.findOneAndUpdate(

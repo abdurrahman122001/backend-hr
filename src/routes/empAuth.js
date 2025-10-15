@@ -185,7 +185,9 @@ router.post("/confirm-code", async (req, res) => {
 
     if (rec.expires < Date.now()) {
       codes.delete(decoded.id);
-      return res.status(400).json({ error: "Code expired. Please login again." });
+      return res
+        .status(400)
+        .json({ error: "Code expired. Please login again." });
     }
 
     // Success → delete code
@@ -255,15 +257,6 @@ router.post("/logout", requireAuth, async (req, res) => {
   }
 });
 
-// ---------------------
-// 4️⃣ AUTO LOGOUT ON TOKEN EXPIRY (handled in middleware)
-// ---------------------
-// You already have this in requireEmployeeAuth.js
-// It updates EmployeeSession logoutTime when token expires.
-
-// ---------------------
-// 5️⃣ Get Current Employee (Protected)
-// ---------------------
 router.get("/me", requireAuth, authCtrl.getMe);
 
 // ---------------------
@@ -282,5 +275,30 @@ router.get("/sessions", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Unable to fetch sessions" });
   }
 });
+router.get("/all-sessions", async (req, res) => {
+  try {
+    // Optional: restrict to admin/owner
+    const sessions = await EmployeeSession.find()
+      .populate("employeeId", "name companyEmail role") // fetch name and email from Employee model
+      .sort({ loginTime: -1 })
+      .limit(100); // adjust limit as needed
 
+    // Transform data (optional)
+    const formatted = sessions.map((s) => ({
+      id: s._id,
+      employeeName: s.employeeId?.name || "Unknown",
+      employeeEmail: s.employeeId?.companyEmail || "N/A",
+      role: s.employeeId?.role || "N/A",
+      loginTime: s.loginTime,
+      logoutTime: s.logoutTime,
+      active: s.active,
+      deviceFingerprint: s.deviceFingerprint,
+    }));
+
+    res.json({ sessions: formatted });
+  } catch (err) {
+    console.error("Error fetching sessions:", err);
+    res.status(500).json({ error: "Server error while fetching sessions" });
+  }
+});
 module.exports = router;

@@ -41,6 +41,7 @@ function normalizeRole(role) {
   return r;
 }
 
+/** ---------- APPLY VISIBILITY (FIXED VERSION) ---------- **/
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -50,6 +51,10 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
+  console.log(
+    `🔍 applyVisibility: user=${me}, role=${currentUserRole}, owner=${ownerId}`
+  );
+
   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
   if (
     (currentUserRole === "manager" || currentUserRole === "owner") &&
@@ -58,17 +63,22 @@ async function applyVisibility(q, req) {
     return { ...q, owner: ownerId };
   }
 
-  // 🧑‍🤝‍🧑 TEAM LEAD: can see only messages where they are a receiver
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are receiver OR sender
   if (currentUserRole === "team_lead") {
     return {
       ...q,
-      $or: [{ receiver: me }, { receiver: { $in: [me] } }],
+      $or: [
+        { receiver: me },
+        { receiver: { $in: [me] } },
+        { sender: me }, // CRITICAL FIX: Allow team leads to see their sent messages
+      ],
     };
   }
 
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
-  const now = new Date();
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  const now = new Date();
 
   // PRESERVE THE isTrashed FILTER - don't override it
   const baseQuery = { ...q };
@@ -77,15 +87,23 @@ async function applyVisibility(q, req) {
   const isTrashedFilter = baseQuery.isTrashed;
   delete baseQuery.isTrashed;
 
+  // Handle scheduled messages specifically
   if (q.isScheduled === true && q.status === "scheduled") {
-    const scheduledQuery = { ...baseQuery, $and: [{ $or: visOr }] };
+    const scheduledQuery = {
+      ...baseQuery,
+      $and: [{ $or: visOr }],
+    };
+
     // Add back the isTrashed filter if it was set
     if (isTrashedFilter !== undefined) {
       scheduledQuery.isTrashed = isTrashedFilter;
     }
+
+    console.log("🔍 Scheduled query:", JSON.stringify(scheduledQuery, null, 2));
     return scheduledQuery;
   }
 
+  // Build the main visibility query
   const finalQuery = {
     $or: [
       {
@@ -102,7 +120,7 @@ async function applyVisibility(q, req) {
               },
             ],
           },
-          { $or: visOr },
+          { $or: visOr }, // CRITICAL: This ensures user can see their own messages
         ],
       },
       {
@@ -110,7 +128,7 @@ async function applyVisibility(q, req) {
         isScheduled: true,
         status: "scheduled",
         scheduledFor: { $gt: now },
-        sender: me,
+        sender: me, // CRITICAL: Allow users to see their own scheduled messages
       },
     ],
   };
@@ -120,6 +138,10 @@ async function applyVisibility(q, req) {
     finalQuery.isTrashed = isTrashedFilter;
   }
 
+  console.log(
+    "🔍 Final visibility query:",
+    JSON.stringify(finalQuery, null, 2)
+  );
   return finalQuery;
 }
 
@@ -478,7 +500,7 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // User-based filtering
+    // User-based filtering - FIXED VERSION
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
@@ -487,35 +509,36 @@ exports.listMessages = async function listMessages(req, res) {
       currentUserRole,
       isTeamLead,
       me: req.employee._id,
+      userName: req.employee.name,
     });
 
-    if (isTeamLead && me) {
-      // Team leads can only see messages where they are receivers
-      q.$or = [{ receiver: me }, { receiver: { $in: [me] } }];
-      console.log("👨‍💼 Team lead visibility filter applied");
+    // CRITICAL FIX: Simplified user filtering logic
+    const between = normalizeIds(betweenRaw);
+    if (between.length === 2) {
+      const [a, b] = between;
+      q.$or = [
+        { sender: a, receiver: { $in: [b] } },
+        { sender: b, receiver: { $in: [a] } },
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
+    } else if (isObjId(participant)) {
+      q.$or = [
+        { sender: participant },
+        { receiver: participant },
+        { receiver: { $in: [participant] } },
+      ];
     } else {
-      // Normal user visibility rules
-      const between = normalizeIds(betweenRaw);
-      if (between.length === 2) {
-        const [a, b] = between;
-        q.$or = [
-          { sender: a, receiver: { $in: [b] } },
-          { sender: b, receiver: { $in: [a] } },
-          { sender: a, receiver: b },
-          { sender: b, receiver: a },
-        ];
-      } else if (isObjId(participant)) {
-        q.$or = [
-          { sender: participant },
-          { receiver: participant },
-          { receiver: { $in: [participant] } },
-        ];
-      } else {
-        if (isObjId(sender)) q.sender = sender;
-        if (isObjId(receiver)) {
-          q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
-        }
+      if (isObjId(sender)) q.sender = sender;
+      if (isObjId(receiver)) {
+        q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
       }
+    }
+
+    // CRITICAL FIX: If no specific user filters, ensure basic visibility
+    if (!q.sender && !q.receiver && !q.$or) {
+      console.log("🔍 No user filters applied, ensuring basic visibility");
+      // The applyVisibility function will handle the basic visibility
     }
 
     console.log(
@@ -523,7 +546,7 @@ exports.listMessages = async function listMessages(req, res) {
       JSON.stringify(q, null, 2)
     );
 
-    // Apply visibility rules
+    // Apply visibility rules - THIS IS WHERE THE MAIN FIX HAPPENS
     const qFinal = await applyVisibility(q, req);
 
     console.log(
@@ -577,6 +600,16 @@ exports.listMessages = async function listMessages(req, res) {
 
     console.log(`✅ Found ${items.length} messages out of ${total} total`);
 
+    // Debug: Check if user's own messages are included
+    const userMessages = items.filter((item) => {
+      const senderId =
+        typeof item.sender === "string" ? item.sender : item.sender?._id;
+      return senderId === String(req.employee._id);
+    });
+    console.log(
+      `👤 User ${req.employee._id} has ${userMessages.length} of their own messages in results`
+    );
+
     // Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
@@ -593,12 +626,17 @@ exports.listMessages = async function listMessages(req, res) {
       limit: lim,
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
+      debug: {
+        userMessagesCount: userMessages.length,
+        totalMessages: items.length,
+      },
     });
   } catch (e) {
     console.error("❌ Error in listMessages:", e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
+
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
