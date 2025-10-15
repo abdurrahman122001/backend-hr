@@ -51,11 +51,13 @@ exports.getEmployeeRoster = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
-    if (!me.owner) return res.status(400).json({ error: "Your profile is missing owner id" });
+    if (!me.owner)
+      return res.status(400).json({ error: "Your profile is missing owner id" });
 
     const [employees, clients] = await Promise.all([
       Employee.find({
         owner: me.owner,
+        _id: { $ne: me._id }, // ✅ Exclude currently logged-in user
         $or: [
           { department: "Operations" },
           { role: { $in: ["Employee", "Manager", "Team Lead"] } },
@@ -66,6 +68,7 @@ exports.getEmployeeRoster = async (req, res) => {
         )
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
+
       ClientInfo.find({ owner: me.owner })
         .select("_id clientName industry taxStatus companyLocation assignedTo")
         .populate("assignedTo", "_id name companyEmail")
@@ -78,6 +81,7 @@ exports.getEmployeeRoster = async (req, res) => {
     res.status(500).json({ error: "Failed to load roster" });
   }
 };
+
 
 
 // PATCH /manager/employee/:id/supervision  { supervisionMode }

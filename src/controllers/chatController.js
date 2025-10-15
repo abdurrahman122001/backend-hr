@@ -2523,7 +2523,8 @@ exports.leaveSpace = async (req, res) => {
     if (space.createdBy._id.toString() === req.employee._id.toString()) {
       return res.status(400).json({
         success: false,
-        error: "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
+        error:
+          "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
       });
     }
 
@@ -4717,28 +4718,38 @@ function formatSharedDate(dateString) {
     day: "numeric",
   });
 }
-// ✅ SIMPLE SEARCH MESSAGES API - WORKS FOR ALL
+// ✅ FIXED SEARCH MESSAGES API - PROPERLY ESCAPED REGEX
 exports.searchMessages = async (req, res) => {
   try {
     const { q: query, conversationId, limit = 50 } = req.query;
 
-    if (!query || query.trim().length < 1) {
+    if (!query || query.trim().length < 2) {
       return res.status(400).json({
         success: false,
-        error: "Search query must be at least 2 characters long"
+        error: "Search query must be at least 2 characters long",
       });
     }
 
     const searchTerm = query.trim();
     console.log("🔍 Searching for:", searchTerm);
 
-    // Build search query
+    // ✅ FIX: Properly escape regex special characters
+    const escapedSearchTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // Build search query with escaped term
     let searchQuery = {
       $or: [
-        { content: { $regex: searchTerm, $options: 'i' } },
-        { "attachments.originalName": { $regex: searchTerm, $options: 'i' } },
-        { "attachments.filename": { $regex: searchTerm, $options: 'i' } }
-      ]
+        { content: { $regex: escapedSearchTerm, $options: "i" } },
+        {
+          "attachments.originalName": {
+            $regex: escapedSearchTerm,
+            $options: "i",
+          },
+        },
+        {
+          "attachments.filename": { $regex: escapedSearchTerm, $options: "i" },
+        },
+      ],
     };
 
     // If specific conversation, verify access
@@ -4746,19 +4757,19 @@ exports.searchMessages = async (req, res) => {
       if (!mongoose.Types.ObjectId.isValid(conversationId)) {
         return res.status(400).json({
           success: false,
-          error: "Invalid conversation ID"
+          error: "Invalid conversation ID",
         });
       }
 
       const conversation = await Conversation.findOne({
         _id: conversationId,
-        participants: req.employee._id
+        participants: req.employee._id,
       });
 
       if (!conversation) {
         return res.status(403).json({
           success: false,
-          error: "Access denied to this conversation"
+          error: "Access denied to this conversation",
         });
       }
 
@@ -4768,16 +4779,16 @@ exports.searchMessages = async (req, res) => {
       const userConversations = await Conversation.find({
         participants: req.employee._id,
         archivedBy: { $ne: req.employee._id },
-        hiddenBy: { $ne: req.employee._id }
-      }).select('_id');
+        hiddenBy: { $ne: req.employee._id },
+      }).select("_id");
 
-      const conversationIds = userConversations.map(conv => conv._id);
-      
+      const conversationIds = userConversations.map((conv) => conv._id);
+
       if (conversationIds.length === 0) {
         return res.json({
           success: true,
           messages: [],
-          total: 0
+          total: 0,
         });
       }
 
@@ -4786,20 +4797,22 @@ exports.searchMessages = async (req, res) => {
 
     // Execute search
     const messages = await Message.find(searchQuery)
-      .populate('sender', 'name companyEmail avatar photographUrl')
-      .populate('conversation', 'isGroup groupName space')
-      .populate('space', 'name description avatar')
-      .populate('attachments')
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space")
+      .populate("space", "name description avatar")
+      .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
       .lean();
 
-    console.log(`✅ Found ${messages.length} messages matching "${searchTerm}"`);
+    console.log(
+      `✅ Found ${messages.length} messages matching "${searchTerm}"`
+    );
 
     // Format results
-    const results = messages.map(message => {
+    const results = messages.map((message) => {
       const isSpace = message.conversation?.space || message.space;
-      
+
       return {
         _id: message._id,
         content: message.content,
@@ -4809,27 +4822,34 @@ exports.searchMessages = async (req, res) => {
           _id: message.sender._id,
           name: message.sender.name,
           email: message.sender.companyEmail,
-          avatar: message.sender.photographUrl || message.sender.avatar
+          avatar: message.sender.photographUrl || message.sender.avatar,
         },
         conversation: {
           _id: message.conversation._id,
-          name: message.conversation.isGroup ? 
-                message.conversation.groupName : 
-                'Direct Message',
+          name: message.conversation.isGroup
+            ? message.conversation.groupName
+            : "Direct Message",
           isGroup: message.conversation.isGroup,
-          isSpace: !!isSpace
+          isSpace: !!isSpace,
         },
-        space: message.space ? {
-          _id: message.space._id,
-          name: message.space.name
-        } : null,
+        space: message.space
+          ? {
+              _id: message.space._id,
+              name: message.space.name,
+            }
+          : null,
         createdAt: message.createdAt,
         // Simple highlight - frontend can handle proper highlighting
-        hasMatchInContent: message.content?.toLowerCase().includes(searchTerm.toLowerCase()),
-        hasMatchInFiles: message.attachments?.some(att => 
-          att.originalName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          att.filename?.toLowerCase().includes(searchTerm.toLowerCase())
-        )
+        hasMatchInContent: message.content
+          ?.toLowerCase()
+          .includes(searchTerm.toLowerCase()),
+        hasMatchInFiles: message.attachments?.some(
+          (att) =>
+            att.originalName
+              ?.toLowerCase()
+              .includes(searchTerm.toLowerCase()) ||
+            att.filename?.toLowerCase().includes(searchTerm.toLowerCase())
+        ),
       };
     });
 
@@ -4837,14 +4857,14 @@ exports.searchMessages = async (req, res) => {
       success: true,
       query: searchTerm,
       messages: results,
-      total: results.length
+      total: results.length,
     });
-
   } catch (error) {
     console.error("Search messages error:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to search messages"
+      error: "Failed to search messages",
+      details: error.message,
     });
   }
 };
