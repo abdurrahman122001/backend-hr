@@ -8,7 +8,7 @@ const mongoose = require("mongoose");
 function buildPublicUrl(req, filename) {
   const base =
     process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-  return `${base}/uploads/${filename}`;
+  return `${base}/upload/${filename}`;
 }
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
@@ -41,7 +41,6 @@ function normalizeRole(role) {
   return r;
 }
 
-/** ---------- APPLY VISIBILITY (FIXED VERSION) ---------- **/
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -2982,6 +2981,245 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
       error: "Failed to fetch spam messages",
       details: e.message,
       ...(process.env.NODE_ENV === "development" && { stack: e.stack }),
+    });
+  }
+};
+
+
+exports.searchMessages = async function searchMessages(req, res) {
+  try {
+    const {
+      q: searchQuery, // Main search term
+      client,
+      sender,
+      receiver,
+      owner,
+      status,
+      isScheduled,
+      approvalStatus,
+      isTrashed,
+      isSpam,
+      starred, // Filter starred messages
+      hasAttachments,
+      searchIn = 'all', // subject, note, attachments, all
+      limit = 50,
+      page = 1,
+      dateFrom,
+      dateTo,
+      scheduledFrom,
+      scheduledTo,
+      sortBy = 'newest', // newest, oldest, relevance
+    } = req.query;
+
+    console.log("🔍 searchMessages called with:", {
+      searchQuery,
+      client,
+      sender,
+      receiver,
+      status,
+      isTrashed,
+      isSpam,
+      searchIn,
+      limit,
+      page
+    });
+
+    // Build base query
+    const q = {};
+
+    // ✅ Owner / client scope
+    if (isObjId(owner)) q.owner = owner;
+    else if (req.employee?.owner) q.owner = req.employee.owner;
+    if (isObjId(client)) q.client = client;
+
+    // ✅ Status filter
+    if (status && ['draft', 'scheduled', 'sent', 'cancelled'].includes(status)) {
+      q.status = status;
+      if (status === 'draft') q.isScheduled = false;
+    }
+
+    // ✅ Scheduled filter
+    if (isScheduled === 'true') {
+      q.isScheduled = true;
+    } else if (isScheduled === 'false') {
+      q.isScheduled = false;
+    }
+
+    // ✅ Approval status filter
+    if (approvalStatus && ['pending', 'approved', 'disapproved'].includes(approvalStatus)) {
+      q.approvalStatus = approvalStatus;
+    }
+
+    // ✅ Trash/Spam filters
+    if (isTrashed === 'true' || isTrashed === true) {
+      q.isTrashed = true;
+    } else if (isSpam === 'true' || isSpam === true) {
+      q.isSpam = true;
+    } else if (isTrashed === 'false' && isSpam === 'false') {
+      // Default: exclude both trash and spam from normal searches
+      q.isTrashed = { $ne: true };
+      q.isSpam = { $ne: true };
+    }
+
+    // ✅ Starred filter
+    if (starred === 'true' && req.employee?._id) {
+      q.starredBy = req.employee._id;
+    }
+
+    // ✅ Attachment filter
+    if (hasAttachments === 'true') {
+      q['attachments.0'] = { $exists: true };
+    } else if (hasAttachments === 'false') {
+      q.attachments = { $size: 0 };
+    }
+
+    // ✅ Date range filter
+    const dateFilter = {};
+    if (dateFrom) {
+      const fromDate = new Date(dateFrom);
+      if (!isNaN(fromDate)) dateFilter.$gte = fromDate;
+    }
+    if (dateTo) {
+      const toDate = new Date(dateTo);
+      if (!isNaN(toDate)) dateFilter.$lte = toDate;
+    }
+    if (Object.keys(dateFilter).length) {
+      q.createdAt = dateFilter;
+    }
+
+    // ✅ Scheduled date range filter
+    const scheduledFilter = {};
+    if (scheduledFrom) {
+      const fromDate = new Date(scheduledFrom);
+      if (!isNaN(fromDate)) scheduledFilter.$gte = fromDate;
+    }
+    if (scheduledTo) {
+      const toDate = new Date(scheduledTo);
+      if (!isNaN(toDate)) scheduledFilter.$lte = toDate;
+    }
+    if (Object.keys(scheduledFilter).length) {
+      q.scheduledFor = scheduledFilter;
+    }
+
+    // ✅ User-based filters
+    if (isObjId(sender)) q.sender = sender;
+    if (isObjId(receiver)) {
+      q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
+    }
+
+    // ✅ Apply visibility rules
+    const qFinal = await applyVisibility(q, req);
+
+    // ✅ SEARCH LOGIC - Only add search conditions if searchQuery is provided
+    if (searchQuery && searchQuery.trim().length > 0) {
+      const searchTerm = searchQuery.trim();
+      const searchConditions = [];
+
+      // Determine which fields to search in
+      const searchFields = Array.isArray(searchIn) ? searchIn : [searchIn];
+      
+      // Text search in specified fields
+      if (searchFields.includes('subject') || searchFields.includes('all')) {
+        searchConditions.push({ subject: { $regex: searchTerm, $options: 'i' } });
+      }
+      
+      if (searchFields.includes('note') || searchFields.includes('all')) {
+        searchConditions.push({ note: { $regex: searchTerm, $options: 'i' } });
+      }
+
+      // Search in attachment filenames
+      if (searchFields.includes('attachments') || searchFields.includes('all')) {
+        searchConditions.push({ 
+          'attachments.originalName': { $regex: searchTerm, $options: 'i' } 
+        });
+      }
+
+      // If we have search conditions, add them to the query
+      if (searchConditions.length > 0) {
+        qFinal.$and = qFinal.$and || [];
+        qFinal.$and.push({
+          $or: searchConditions
+        });
+      }
+    }
+
+    console.log("🔍 Final search query:", JSON.stringify(qFinal, null, 2));
+
+    // ✅ Pagination
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    // ✅ Determine sort order
+    let sortCriteria = {};
+    if (searchQuery && sortBy === 'relevance') {
+      // Basic relevance sorting
+      sortCriteria = { 
+        createdAt: -1 
+      };
+    } else if (sortBy === 'oldest') {
+      sortCriteria = { createdAt: 1 };
+    } else {
+      sortCriteria = { createdAt: -1 }; // newest first (default)
+    }
+
+    // ✅ Execute search
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(qFinal)
+        .sort(sortCriteria)
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: 'owner', select: '_id name companyEmail' },
+          { path: 'sender', select: '_id name companyEmail role' },
+          { path: 'receiver', select: '_id name companyEmail role' },
+          { path: 'client', select: '_id clientName' },
+          { path: 'attachments.uploadedBy', select: '_id name companyEmail' },
+          { path: 'scheduledBy', select: '_id name companyEmail' },
+          { path: 'starredBy', select: '_id name companyEmail' },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(qFinal),
+    ]);
+
+    // ✅ Ensure receiver is always treated as array for consistency
+    const normalizedItems = items.map(item => ({
+      ...item,
+      receiver: Array.isArray(item.receiver) ? item.receiver : [item.receiver].filter(Boolean)
+    }));
+
+    console.log(`✅ Search found ${items.length} messages out of ${total} total`);
+
+    res.json({
+      success: true,
+      items: normalizedItems,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / lim),
+      limit: lim,
+      searchQuery: searchQuery || null,
+      filters: {
+        client,
+        sender,
+        receiver,
+        status,
+        isScheduled,
+        approvalStatus,
+        isTrashed,
+        isSpam,
+        starred,
+        hasAttachments,
+        dateFrom,
+        dateTo
+      },
+      hasMore: total > pageNum * lim,
+    });
+
+  } catch (e) {
+    console.error('❌ Error in searchMessages:', e);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to search messages',
+      details: process.env.NODE_ENV === 'development' ? e.message : undefined
     });
   }
 };

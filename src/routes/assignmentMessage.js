@@ -6,6 +6,7 @@ const ctrl = require("../controllers/assignmentMessageController");
 
 // ✅ All routes require employee authentication
 router.use(empAuth);
+router.get("/search", ctrl.searchMessages);
 
 // =============================
 // ✅ SPECIFIC ROUTES FIRST (without parameters)

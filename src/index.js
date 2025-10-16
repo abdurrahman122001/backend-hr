@@ -81,6 +81,11 @@ app.use(
   "/uploads",
   express.static(path.join(__dirname, "./uploads"))
 );
+app.use(
+  "/upload",
+  express.static(path.join(__dirname, "../uploads"))
+);
+
 
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
