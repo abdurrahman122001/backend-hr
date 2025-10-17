@@ -50,10 +50,6 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  console.log(
-    `🔍 applyVisibility: user=${me}, role=${currentUserRole}, owner=${ownerId}`
-  );
-
   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
   if (
     (currentUserRole === "manager" || currentUserRole === "owner") &&
@@ -62,20 +58,55 @@ async function applyVisibility(q, req) {
     return { ...q, owner: ownerId };
   }
 
-  // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are receiver OR sender
-  if (currentUserRole === "team_lead") {
-    return {
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see ALL messages for their owner's organization
+  if (currentUserRole === "team_lead" && ownerId) {
+    // Team leads can see ALL messages within their organization
+    const teamLeadQuery = {
       ...q,
-      $or: [
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        { sender: me }, // CRITICAL FIX: Allow team leads to see their sent messages
-      ],
+      owner: ownerId, // Show all messages for the owner
     };
+
+    // For review filter, team leads should see pending messages
+    if (q.approvalStatus === "pending") {
+      teamLeadQuery.approvalStatus = "pending";
+    }
+
+    // If a specific client is selected, filter by client
+    if (q.client) {
+      teamLeadQuery.client = q.client;
+    }
+
+    return teamLeadQuery;
   }
 
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  // CRITICAL FIX: If we're querying for a specific client thread,
+  // show ALL messages in that thread to all participants (including team leads)
+  if (q.client && isObjId(q.client)) {
+    // For team leads, they can see all messages for the client
+    if (currentUserRole === "team_lead" && ownerId) {
+      return {
+        ...q,
+        client: q.client,
+        owner: ownerId,
+      };
+    }
+
+    // For employees, check if they're part of the thread
+    const userThreadMessages = await AssignmentMessage.find({
+      client: q.client,
+      $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
+    })
+      .select("_id")
+      .lean();
+
+    if (userThreadMessages.length > 0) {
+      // User is part of this client thread - show ALL messages for this client
+      return { ...q, client: q.client };
+    }
+  }
 
   const now = new Date();
 
@@ -97,12 +128,10 @@ async function applyVisibility(q, req) {
     if (isTrashedFilter !== undefined) {
       scheduledQuery.isTrashed = isTrashedFilter;
     }
-
-    console.log("🔍 Scheduled query:", JSON.stringify(scheduledQuery, null, 2));
     return scheduledQuery;
   }
 
-  // Build the main visibility query
+  // Build the main visibility query for employees
   const finalQuery = {
     $or: [
       {
@@ -119,7 +148,7 @@ async function applyVisibility(q, req) {
               },
             ],
           },
-          { $or: visOr }, // CRITICAL: This ensures user can see their own messages
+          { $or: visOr },
         ],
       },
       {
@@ -127,7 +156,7 @@ async function applyVisibility(q, req) {
         isScheduled: true,
         status: "scheduled",
         scheduledFor: { $gt: now },
-        sender: me, // CRITICAL: Allow users to see their own scheduled messages
+        sender: me,
       },
     ],
   };
@@ -137,19 +166,12 @@ async function applyVisibility(q, req) {
     finalQuery.isTrashed = isTrashedFilter;
   }
 
-  console.log(
-    "🔍 Final visibility query:",
-    JSON.stringify(finalQuery, null, 2)
-  );
   return finalQuery;
 }
-
 /** ---------- SOCKET.IO UTILITIES ---------- **/
 function getIO(req) {
   return req.app.get("io");
 }
-/** ---------- TARGETED SOCKET EMISSION ---------- **/
-/** ---------- TARGETED SOCKET EMISSION WITH TEAM LEAD VISIBILITY ---------- **/
 async function emitToSpecificReceivers(
   io,
   message,
@@ -169,7 +191,7 @@ async function emitToSpecificReceivers(
       return;
     }
 
-    // CRITICAL: Extract ONLY the specific receiver IDs from the message
+    // CRITICAL: Extract the specific receiver IDs from the message
     const specificReceiverIds = [];
 
     if (Array.isArray(populatedMessage.receiver)) {
@@ -209,7 +231,7 @@ async function emitToSpecificReceivers(
       ),
     ];
 
-    // CRITICAL: Also send to ALL team leads for the owner (for supervision visibility)
+    // CRITICAL FIX: Also send to ALL team leads for the owner (for complete visibility)
     const ownerId =
       typeof populatedMessage.owner === "string"
         ? populatedMessage.owner
@@ -219,7 +241,7 @@ async function emitToSpecificReceivers(
       const { tls } = await findTLsAndManagersByOwner(ownerId);
       const teamLeadIds = tls.map((id) => id.toString());
 
-      // Add team leads to recipients (they get read-only access to all messages)
+      // Add ALL team leads to recipients (they get complete access to all messages)
       teamLeadIds.forEach((teamLeadId) => {
         if (!allRecipients.includes(teamLeadId)) {
           allRecipients.push(teamLeadId);
@@ -227,12 +249,17 @@ async function emitToSpecificReceivers(
       });
     }
 
-    // Send to ALL recipients (specific receivers + sender + team leads)
+    // Send to ALL recipients (specific receivers + sender + ALL team leads)
     allRecipients.forEach((recipientId) => {
       if (recipientId) {
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
       }
     });
+
+    console.log(
+      `📤 Emitted message to ${allRecipients.length} recipients:`,
+      allRecipients
+    );
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
     throw error;
@@ -424,20 +451,6 @@ exports.listMessages = async function listMessages(req, res) {
       approvalStatus,
     } = req.query;
 
-    console.log("📨 listMessages called with params:", {
-      client,
-      sender,
-      receiver,
-      participant,
-      owner,
-      status,
-      isScheduled,
-      filter,
-      isTrashed,
-      isSpam,
-      approvalStatus,
-    });
-
     const q = {};
 
     // Owner / client scope
@@ -459,24 +472,18 @@ exports.listMessages = async function listMessages(req, res) {
 
     // 🔥 CRITICAL FIX: Simplified trash/spam logic
     if (isTrashed === "true" || isTrashed === true) {
-      console.log("🗑️ Filtering for TRASH messages");
       q.isTrashed = true;
     } else if (isSpam === "true" || isSpam === true) {
-      console.log("🚫 Filtering for SPAM messages");
       q.isSpam = true;
     } else {
-      // Default: exclude both trash and spam from normal views
-      console.log("📬 Normal view - excluding trash and spam");
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
-
-    // Approval status filter
-    if (
-      approvalStatus &&
-      ["pending", "approved", "disapproved"].includes(approvalStatus)
-    ) {
-      q.approvalStatus = approvalStatus;
+    // For normal inbox view, exclude messages pending review
+    if (filter !== "review" && approvalStatus !== "pending") {
+      q.approvalStatus = { $ne: "pending" };
+    } else if (approvalStatus === "pending") {
+      q.approvalStatus = "pending";
     }
 
     // Scheduled filter
@@ -503,15 +510,6 @@ exports.listMessages = async function listMessages(req, res) {
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
-
-    console.log("👤 User info:", {
-      currentUserRole,
-      isTeamLead,
-      me: req.employee._id,
-      userName: req.employee.name,
-    });
-
-    // CRITICAL FIX: Simplified user filtering logic
     const between = normalizeIds(betweenRaw);
     if (between.length === 2) {
       const [a, b] = between;
@@ -534,26 +532,9 @@ exports.listMessages = async function listMessages(req, res) {
       }
     }
 
-    // CRITICAL FIX: If no specific user filters, ensure basic visibility
-    if (!q.sender && !q.receiver && !q.$or) {
-      console.log("🔍 No user filters applied, ensuring basic visibility");
-      // The applyVisibility function will handle the basic visibility
-    }
-
-    console.log(
-      "🔍 Final query before visibility:",
-      JSON.stringify(q, null, 2)
-    );
-
-    // Apply visibility rules - THIS IS WHERE THE MAIN FIX HAPPENS
+    // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
-    console.log(
-      "🔍 Final query after visibility:",
-      JSON.stringify(qFinal, null, 2)
-    );
-
-    // Must have at least one scope
     if (
       !qFinal.owner &&
       !qFinal.client &&
@@ -576,8 +557,6 @@ exports.listMessages = async function listMessages(req, res) {
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
-    console.log("📊 Executing database query...");
-
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
@@ -597,18 +576,6 @@ exports.listMessages = async function listMessages(req, res) {
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    console.log(`✅ Found ${items.length} messages out of ${total} total`);
-
-    // Debug: Check if user's own messages are included
-    const userMessages = items.filter((item) => {
-      const senderId =
-        typeof item.sender === "string" ? item.sender : item.sender?._id;
-      return senderId === String(req.employee._id);
-    });
-    console.log(
-      `👤 User ${req.employee._id} has ${userMessages.length} of their own messages in results`
-    );
-
     // Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
@@ -625,17 +592,12 @@ exports.listMessages = async function listMessages(req, res) {
       limit: lim,
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
-      debug: {
-        userMessagesCount: userMessages.length,
-        totalMessages: items.length,
-      },
     });
   } catch (e) {
     console.error("❌ Error in listMessages:", e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -2375,16 +2337,10 @@ exports.restoreFromTrash = async function (req, res) {
 
 exports.getTrashMessages = async function getTrashMessages(req, res) {
   try {
-    console.log("🔄 getTrashMessages controller called");
-
     const { limit = 50, page = 1, client } = req.query;
     const currentUser = req.employee?._id;
 
-    console.log("👤 Current user:", currentUser);
-    console.log("📋 Query params:", { limit, page, client });
-
     if (!isObjId(currentUser)) {
-      console.log("❌ Unauthorized: Invalid user ID");
       return res.status(401).json({ error: "Unauthorized" });
     }
 
@@ -2401,16 +2357,9 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
     // Add client filter if provided
     if (client && mongoose.isValidObjectId(client)) {
       q.client = client;
-      console.log("🔍 Filtering by client:", client);
     }
-
-    console.log("🔍 Final query:", JSON.stringify(q, null, 2));
-
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
-    console.log(`📊 Pagination: page ${pageNum}, limit ${lim}`);
-
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
       { path: "receiver", select: "_id name companyEmail role" },
@@ -2418,8 +2367,6 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
       { path: "trashedBy", select: "_id name companyEmail" },
     ];
 
-    // Execute query with detailed logging
-    console.log("🔍 Executing database query...");
     const items = await AssignmentMessage.find(q)
       .sort({ trashedAt: -1, updatedAt: -1 })
       .skip((pageNum - 1) * lim)
@@ -2428,11 +2375,6 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
       .lean();
 
     const total = await AssignmentMessage.countDocuments(q);
-
-    console.log(
-      `✅ Found ${items.length} trashed messages out of ${total} total`
-    );
-
     // Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
@@ -2440,10 +2382,6 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
         ? item.receiver
         : [item.receiver].filter(Boolean),
     }));
-
-    console.log(
-      `📦 Sending ${normalizedItems.length} normalized items to frontend`
-    );
 
     res.json({
       items: normalizedItems,
@@ -2985,7 +2923,6 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
   }
 };
 
-
 exports.searchMessages = async function searchMessages(req, res) {
   try {
     const {
@@ -3001,30 +2938,16 @@ exports.searchMessages = async function searchMessages(req, res) {
       isSpam,
       starred, // Filter starred messages
       hasAttachments,
-      searchIn = 'all', // subject, note, attachments, all
+      searchIn = "all", // subject, note, attachments, all
       limit = 50,
       page = 1,
       dateFrom,
       dateTo,
       scheduledFrom,
       scheduledTo,
-      sortBy = 'newest', // newest, oldest, relevance
+      sortBy = "newest", // newest, oldest, relevance
     } = req.query;
 
-    console.log("🔍 searchMessages called with:", {
-      searchQuery,
-      client,
-      sender,
-      receiver,
-      status,
-      isTrashed,
-      isSpam,
-      searchIn,
-      limit,
-      page
-    });
-
-    // Build base query
     const q = {};
 
     // ✅ Owner / client scope
@@ -3033,43 +2956,49 @@ exports.searchMessages = async function searchMessages(req, res) {
     if (isObjId(client)) q.client = client;
 
     // ✅ Status filter
-    if (status && ['draft', 'scheduled', 'sent', 'cancelled'].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
-      if (status === 'draft') q.isScheduled = false;
+      if (status === "draft") q.isScheduled = false;
     }
 
     // ✅ Scheduled filter
-    if (isScheduled === 'true') {
+    if (isScheduled === "true") {
       q.isScheduled = true;
-    } else if (isScheduled === 'false') {
+    } else if (isScheduled === "false") {
       q.isScheduled = false;
     }
 
     // ✅ Approval status filter
-    if (approvalStatus && ['pending', 'approved', 'disapproved'].includes(approvalStatus)) {
+    if (
+      approvalStatus &&
+      ["pending", "approved", "disapproved"].includes(approvalStatus)
+    ) {
       q.approvalStatus = approvalStatus;
     }
 
     // ✅ Trash/Spam filters
-    if (isTrashed === 'true' || isTrashed === true) {
+    if (isTrashed === "true" || isTrashed === true) {
       q.isTrashed = true;
-    } else if (isSpam === 'true' || isSpam === true) {
+    } else if (isSpam === "true" || isSpam === true) {
       q.isSpam = true;
-    } else if (isTrashed === 'false' && isSpam === 'false') {
+    } else if (isTrashed === "false" && isSpam === "false") {
       // Default: exclude both trash and spam from normal searches
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
 
     // ✅ Starred filter
-    if (starred === 'true' && req.employee?._id) {
+    if (starred === "true" && req.employee?._id) {
       q.starredBy = req.employee._id;
     }
 
     // ✅ Attachment filter
-    if (hasAttachments === 'true') {
-      q['attachments.0'] = { $exists: true };
-    } else if (hasAttachments === 'false') {
+    if (hasAttachments === "true") {
+      q["attachments.0"] = { $exists: true };
+    } else if (hasAttachments === "false") {
       q.attachments = { $size: 0 };
     }
 
@@ -3117,20 +3046,25 @@ exports.searchMessages = async function searchMessages(req, res) {
 
       // Determine which fields to search in
       const searchFields = Array.isArray(searchIn) ? searchIn : [searchIn];
-      
+
       // Text search in specified fields
-      if (searchFields.includes('subject') || searchFields.includes('all')) {
-        searchConditions.push({ subject: { $regex: searchTerm, $options: 'i' } });
+      if (searchFields.includes("subject") || searchFields.includes("all")) {
+        searchConditions.push({
+          subject: { $regex: searchTerm, $options: "i" },
+        });
       }
-      
-      if (searchFields.includes('note') || searchFields.includes('all')) {
-        searchConditions.push({ note: { $regex: searchTerm, $options: 'i' } });
+
+      if (searchFields.includes("note") || searchFields.includes("all")) {
+        searchConditions.push({ note: { $regex: searchTerm, $options: "i" } });
       }
 
       // Search in attachment filenames
-      if (searchFields.includes('attachments') || searchFields.includes('all')) {
-        searchConditions.push({ 
-          'attachments.originalName': { $regex: searchTerm, $options: 'i' } 
+      if (
+        searchFields.includes("attachments") ||
+        searchFields.includes("all")
+      ) {
+        searchConditions.push({
+          "attachments.originalName": { $regex: searchTerm, $options: "i" },
         });
       }
 
@@ -3138,12 +3072,10 @@ exports.searchMessages = async function searchMessages(req, res) {
       if (searchConditions.length > 0) {
         qFinal.$and = qFinal.$and || [];
         qFinal.$and.push({
-          $or: searchConditions
+          $or: searchConditions,
         });
       }
     }
-
-    console.log("🔍 Final search query:", JSON.stringify(qFinal, null, 2));
 
     // ✅ Pagination
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
@@ -3151,12 +3083,12 @@ exports.searchMessages = async function searchMessages(req, res) {
 
     // ✅ Determine sort order
     let sortCriteria = {};
-    if (searchQuery && sortBy === 'relevance') {
+    if (searchQuery && sortBy === "relevance") {
       // Basic relevance sorting
-      sortCriteria = { 
-        createdAt: -1 
+      sortCriteria = {
+        createdAt: -1,
       };
-    } else if (sortBy === 'oldest') {
+    } else if (sortBy === "oldest") {
       sortCriteria = { createdAt: 1 };
     } else {
       sortCriteria = { createdAt: -1 }; // newest first (default)
@@ -3169,25 +3101,25 @@ exports.searchMessages = async function searchMessages(req, res) {
         .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
-          { path: 'owner', select: '_id name companyEmail' },
-          { path: 'sender', select: '_id name companyEmail role' },
-          { path: 'receiver', select: '_id name companyEmail role' },
-          { path: 'client', select: '_id clientName' },
-          { path: 'attachments.uploadedBy', select: '_id name companyEmail' },
-          { path: 'scheduledBy', select: '_id name companyEmail' },
-          { path: 'starredBy', select: '_id name companyEmail' },
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+          { path: "scheduledBy", select: "_id name companyEmail" },
+          { path: "starredBy", select: "_id name companyEmail" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
     // ✅ Ensure receiver is always treated as array for consistency
-    const normalizedItems = items.map(item => ({
+    const normalizedItems = items.map((item) => ({
       ...item,
-      receiver: Array.isArray(item.receiver) ? item.receiver : [item.receiver].filter(Boolean)
+      receiver: Array.isArray(item.receiver)
+        ? item.receiver
+        : [item.receiver].filter(Boolean),
     }));
-
-    console.log(`✅ Search found ${items.length} messages out of ${total} total`);
 
     res.json({
       success: true,
@@ -3209,17 +3141,16 @@ exports.searchMessages = async function searchMessages(req, res) {
         starred,
         hasAttachments,
         dateFrom,
-        dateTo
+        dateTo,
       },
       hasMore: total > pageNum * lim,
     });
-
   } catch (e) {
-    console.error('❌ Error in searchMessages:', e);
-    res.status(500).json({ 
+    console.error("❌ Error in searchMessages:", e);
+    res.status(500).json({
       success: false,
-      error: 'Failed to search messages',
-      details: process.env.NODE_ENV === 'development' ? e.message : undefined
+      error: "Failed to search messages",
+      details: process.env.NODE_ENV === "development" ? e.message : undefined,
     });
   }
 };

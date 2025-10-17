@@ -96,3 +96,102 @@ exports.getMyClients = async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 };
+
+/**
+ * PUT /api/client-info/:id
+ * Update a client info record (all fields allowed)
+ */
+exports.updateClientInfo = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Role-based access
+    const role = String(emp.role || "").trim().toLowerCase();
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.assignedTo) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to update this client info" });
+    }
+
+    // Allow all fields from body to be updated
+    const updates = req.body;
+
+    const updated = await ClientInfo.findByIdAndUpdate(id, updates, { new: true })
+      .populate("assignedTo", "_id name companyEmail");
+
+    res.json(updated);
+  } catch (err) {
+    console.error("updateClientInfo error:", err);
+    res.status(500).json({ error: "Failed to update client info" });
+  }
+};
+
+/**
+ * DELETE /api/client-info/:id
+ * Delete a client info record
+ */
+exports.deleteClientInfo = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const role = String(emp.role || "").trim().toLowerCase();
+
+    // Authorization: only Owner, Manager, Team Lead, or creator can delete
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.createdBy) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to delete this client info" });
+    }
+
+    await client.deleteOne();
+
+    res.json({ success: true, message: "Client info deleted successfully" });
+  } catch (err) {
+    console.error("deleteClientInfo error:", err);
+    res.status(500).json({ error: "Failed to delete client info" });
+  }
+};
+
+exports.getClientById = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("role");
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id).populate(
+      "assignedTo",
+      "_id name companyEmail"
+    );
+
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Optional: restrict access (only Owner, Manager/Team Lead, or assigned employee)
+    const role = String(emp.role || "").trim().toLowerCase();
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.assignedTo?._id) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to view this client" });
+    }
+
+    res.json(client);
+  } catch (err) {
+    console.error("getClientById error:", err);
+    res.status(500).json({ error: "Failed to fetch client info" });
+  }
+};
