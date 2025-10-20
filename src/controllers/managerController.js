@@ -1,6 +1,6 @@
 // controllers/managerController.js
 const path = require("path");
-const Employee = require("../models/Employees"); // NOTE: file name is Employee.js in this version
+const Employee = require("../models/Employees");
 const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
 
@@ -55,39 +55,52 @@ exports.getRoster = async (req, res) => {
   }
 };
 
-// GET /manager/roster
+// GET /manager/employee/roster
 exports.getEmployeeRoster = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select(
-      "_id owner role"
-    );
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
     if (!me.owner)
-      return res
-        .status(400)
-        .json({ error: "Your profile is missing owner id" });
+      return res.status(400).json({ error: "Your profile is missing owner id" });
 
-    const [employees, clients] = await Promise.all([
-      Employee.find({
-        owner: me.owner,
-        _id: { $ne: me._id }, // ✅ Exclude currently logged-in user
-        $or: [
-          { department: "Operations" },
-          { role: { $in: ["Employee", "Manager", "Team Lead"] } },
-        ],
-      })
-        .select(
-          "_id name email companyEmail role department designation supervisionMode supervisor photographUrl"
-        )
-        .populate("supervisor", "_id name companyEmail")
-        .sort({ name: 1 }),
+    const { name } = req.query; // optional name search
 
-      ClientInfo.find({ owner: me.owner })
-        .select("_id clientName industry taxStatus companyLocation assignedTo")
-        .populate("assignedTo", "_id name companyEmail")
-        .sort({ createdAt: -1 }),
-    ]);
+    const isManager =
+      me.role?.toLowerCase() === "manager" ||
+      me.role?.toLowerCase() === "team lead" ||
+      me.role?.toLowerCase() === "team_lead" ||
+      me.role?.toLowerCase() === "teamlead";
+
+    // --- Employees Query ---
+    const employees = await Employee.find({
+      owner: me.owner,
+      _id: { $ne: me._id },
+      $or: [
+        { department: "Operations" },
+        { role: { $in: ["Employee", "Manager", "Team Lead"] } },
+      ],
+    })
+      .select(
+        "_id name email companyEmail role department designation supervisionMode supervisor photographUrl"
+      )
+      .populate("supervisor", "_id name companyEmail")
+      .sort({ name: 1 });
+
+    // --- Clients Query ---
+    const clientQuery = { owner: me.owner };
+    if (!isManager) {
+      // only show clients assigned to this employee
+      clientQuery.assignedTo = me._id;
+    }
+    if (name && name.trim()) {
+      clientQuery.clientName = { $regex: name.trim(), $options: "i" };
+    }
+
+    const clients = await ClientInfo.find(clientQuery)
+      .select("_id clientName industry taxStatus companyLocation assignedTo")
+      .populate("assignedTo", "_id name companyEmail")
+      .sort({ clientName: 1 });
 
     res.json({ employees, clients });
   } catch (err) {
@@ -95,6 +108,7 @@ exports.getEmployeeRoster = async (req, res) => {
     res.status(500).json({ error: "Failed to load roster" });
   }
 };
+
 
 // PATCH /manager/employee/:id/supervision  { supervisionMode }
 exports.updateEmployeeSupervision = async (req, res) => {
@@ -183,7 +197,6 @@ exports.assignClient = async (req, res) => {
     if (!clientId)
       return res.status(400).json({ error: "clientId is required" });
 
-    // Update assignment on client (scoped by owner)
     const client = await ClientInfo.findOneAndUpdate(
       { _id: clientId, owner: me.owner },
       { $set: { assignedTo: employeeId || null } },
@@ -194,7 +207,6 @@ exports.assignClient = async (req, res) => {
         .status(404)
         .json({ error: "Client not found or not under your owner" });
 
-    // If there are files or a note/subject, create an AssignmentMessage (audit trail)
     let message = null;
 
     const hasFiles = Array.isArray(req.files) && req.files.length > 0;

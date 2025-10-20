@@ -13,8 +13,8 @@ const ClientInfoSchema = new Schema(
 
     // Core identity
     clientName: { type: String, required: true, trim: true },
-    country: {type: String, required: true},
-    // Fields you requested
+    clientEmail: { type: String, required: true, trim: true, lowercase: true },
+    country: { type: String, required: true },
     companyLocation: { type: String },
     nameInAccountingSoftware: { type: String }, // Xero/QBO
     industry: { type: String },
@@ -26,10 +26,10 @@ const ClientInfoSchema = new Schema(
     naicsOrSic: { type: String },
     incorporationState: { type: String }, // US only
     websites: [{ type: String }],
-    incorporationYear: { type: String },   // keep string for flexibility
-    servicesStartDate: { type: String },   // YYYY-MM-DD
+    incorporationYear: { type: String }, // keep string for flexibility
+    servicesStartDate: { type: String }, // YYYY-MM-DD
     monthlyTransactions: { type: Number },
-    accountingBasis: { type: String },     // Cash / Accrual
+    accountingBasis: { type: String }, // Cash / Accrual
     numberOfBankFeeds: { type: Number },
     taxStatus: { type: String },
 

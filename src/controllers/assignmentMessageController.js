@@ -3404,9 +3404,9 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
     ]);
 
     // Add direct message flag
-    const normalizedItems = items.map(item => ({
+    const normalizedItems = items.map((item) => ({
       ...item,
-      isDirectMessage: !item.client
+      isDirectMessage: !item.client,
     }));
 
     res.json({
@@ -3416,10 +3416,122 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
       pages: Math.ceil(total / lim),
       limit: lim,
       threadId,
-      isDirectMessageThread: items.length > 0 && !items[0].client
+      isDirectMessageThread: items.length > 0 && !items[0].client,
     });
   } catch (e) {
     console.error("Error in getMessagesByThread:", e);
     res.status(500).json({ error: "Failed to fetch thread messages" });
+  }
+};
+exports.getMessageCounts = async function getMessageCounts(req, res) {
+  try {
+    const currentUser = req.employee?._id;
+    const owner = req.employee?.owner;
+
+    console.log('🔍 Counts request - User:', currentUser, 'Owner:', owner);
+
+    if (!isObjId(currentUser) || !isObjId(owner)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Get counts for different categories
+    const [
+      inboxCount,
+      starredCount,
+      sentCount,
+      draftCount,
+      scheduledCount,
+      spamCount,
+      trashCount
+    ] = await Promise.all([
+      // Inbox: messages where user is receiver, not trashed, not spam, status sent
+      AssignmentMessage.countDocuments({
+        $or: [
+          { receiver: currentUser },
+          { receiver: { $in: [currentUser] } }
+        ],
+        status: 'sent',
+        isTrashed: false,
+        isSpam: false
+      }),
+
+      // Starred: messages starred by current user
+      AssignmentMessage.countDocuments({
+        starredBy: currentUser,
+        isTrashed: false
+      }),
+
+      // Sent: messages where user is sender, status sent
+      AssignmentMessage.countDocuments({
+        sender: currentUser,
+        status: 'sent',
+        isTrashed: false
+      }),
+
+      // Drafts: draft messages by current user
+      AssignmentMessage.countDocuments({
+        sender: currentUser,
+        status: 'draft',
+        isTrashed: false
+      }),
+
+      // Scheduled: scheduled messages by current user
+      AssignmentMessage.countDocuments({
+        sender: currentUser,
+        status: 'scheduled',
+        isTrashed: false
+      }),
+
+      // Spam: spam messages where user is receiver
+      AssignmentMessage.countDocuments({
+        $or: [
+          { receiver: currentUser },
+          { receiver: { $in: [currentUser] } }
+        ],
+        isSpam: true,
+        isTrashed: false
+      }),
+
+      // Trash: trashed messages where user is involved
+      AssignmentMessage.countDocuments({
+        $or: [
+          { sender: currentUser },
+          { receiver: currentUser },
+          { receiver: { $in: [currentUser] } }
+        ],
+        isTrashed: true
+      })
+    ]);
+
+    // Debug: Check if there are any starred messages at all
+    const allStarredMessages = await AssignmentMessage.find({
+      starredBy: { $exists: true, $ne: [] }
+    }).select('starredBy').limit(5).lean();
+    
+    console.log('🔍 Starred messages sample:', allStarredMessages);
+    console.log('🔍 Counts result:', {
+      inbox: inboxCount,
+      starred: starredCount,
+      sent: sentCount,
+      draft: draftCount,
+      scheduled: scheduledCount,
+      spam: spamCount,
+      trash: trashCount
+    });
+
+    res.json({
+      inbox: inboxCount,
+      starred: starredCount,
+      sent: sentCount,
+      draft: draftCount,
+      scheduled: scheduledCount,
+      spam: spamCount,
+      trash: trashCount,
+      archive: 0
+    });
+
+  } catch (e) {
+    console.error("Error in getMessageCounts:", e);
+    res.status(500).json({ error: "Failed to fetch message counts" });
   }
 };

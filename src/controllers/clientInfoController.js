@@ -8,10 +8,7 @@ const isManagerLike = (role) => {
   return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
 };
 
-/**
- * POST /api/client-info
- * Manager/Team Lead creates client info
- */
+
 exports.createClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
@@ -37,12 +34,7 @@ exports.createClientInfo = async (req, res) => {
   }
 };
 
-/**
- * GET /api/client-info
- * - Owner: all clients under their linked `owner` id
- * - Manager/Team Lead: all clients under their `owner`
- * - Employee: only clients assigned to them
- */
+
 exports.getClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id).select("_id role owner");
@@ -75,10 +67,7 @@ exports.getClientInfo = async (req, res) => {
   }
 };
 
-/**
- * GET /api/client-info/my
- * Explicit: only my assigned clients (any role)
- */
+
 exports.getMyClients = async (req, res) => {
   try {
     const employeeId = req.employee._id;
