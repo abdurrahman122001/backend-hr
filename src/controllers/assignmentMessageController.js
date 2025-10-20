@@ -142,7 +142,7 @@ async function applyVisibility(q, req) {
     // Remove any approvalStatus filter that might exclude pending messages
     if (teamLeadQuery.approvalStatus === "pending") {
       // Keep the pending filter if explicitly requested
-      console.log('👀 Team lead viewing pending messages');
+      console.log("👀 Team lead viewing pending messages");
     } else if (q.approvalStatus !== "pending") {
       // Don't exclude pending messages for team leads in normal views
       delete teamLeadQuery.approvalStatus;
@@ -154,8 +154,10 @@ async function applyVisibility(q, req) {
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
 
-  // CRITICAL FIX: If we're querying for a specific client thread,
-  // show ALL messages in that thread to all participants (including team leads)
+  // 🔥 UPDATED: Handle both client-based threads AND direct messages
+
+  // For client-based messages: if we're querying for a specific client thread,
+  // show ALL messages in that thread to all participants
   if (q.client && isObjId(q.client)) {
     // For team leads, they can see all messages for the client
     if (currentUserRole === "team_lead" && ownerId) {
@@ -178,6 +180,22 @@ async function applyVisibility(q, req) {
       // User is part of this client thread - show ALL messages for this client
       return { ...q, client: q.client };
     }
+  }
+
+  // 🔥 NEW: For direct messages (no client), always apply participant visibility
+  // If client is explicitly set to $exists: false (direct messages), ensure user is participant
+  if (q.client && q.client.$exists === false) {
+    const directMessageQuery = {
+      ...q,
+      $and: [{ $or: visOr }],
+    };
+
+    // Add back the isTrashed filter if it was set
+    const isTrashedFilter = q.isTrashed;
+    if (isTrashedFilter !== undefined) {
+      directMessageQuery.isTrashed = isTrashedFilter;
+    }
+    return directMessageQuery;
   }
 
   const now = new Date();
@@ -521,14 +539,25 @@ exports.listMessages = async function listMessages(req, res) {
       isTrashed,
       isSpam,
       approvalStatus,
+      includeDirectMessages = "true", // New parameter to include direct messages
     } = req.query;
 
     const q = {};
 
-    // Owner / client scope
+    // Owner scope
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
-    if (isObjId(client)) q.client = client;
+
+    // ✅ UPDATED: Client scope - handle both client-based and direct messages
+    if (isObjId(client)) {
+      q.client = client;
+    } else if (client === "none" || client === "direct") {
+      // Explicitly request direct messages (no client)
+      q.client = { $exists: false };
+    } else if (!client) {
+      // Default behavior: include both client-based and direct messages
+      // No client filter applied - will return all messages user has access to
+    }
 
     // ✅ FIXED: Better status handling
     if (
@@ -613,10 +642,10 @@ exports.listMessages = async function listMessages(req, res) {
     // This ensures the visibility query is built correctly
     const qFinal = await applyVisibility(q, req);
 
-    // ✅ FIXED: Better validation that considers visibility rules
+    // ✅ UPDATED: Better validation that considers both client-based and direct messages
     const hasExplicitFilter =
       q.owner ||
-      q.client ||
+      q.client !== undefined || // Changed to check for undefined (includes $exists: false)
       q.sender ||
       q.receiver ||
       q.$or ||
@@ -662,6 +691,8 @@ exports.listMessages = async function listMessages(req, res) {
       receiver: Array.isArray(item.receiver)
         ? item.receiver
         : [item.receiver].filter(Boolean),
+      // Add a flag to identify direct messages
+      isDirectMessage: !item.client,
     }));
 
     res.json({
@@ -672,12 +703,18 @@ exports.listMessages = async function listMessages(req, res) {
       limit: lim,
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
+      // Add metadata about message types
+      messageTypes: {
+        clientBased: items.filter((item) => item.client).length,
+        directMessages: items.filter((item) => !item.client).length,
+      },
     });
   } catch (e) {
     console.error("❌ Error in listMessages:", e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
+
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -763,7 +800,7 @@ exports.createMessage = async function createMessage(req, res) {
   try {
     const {
       owner: ownerBody,
-      client,
+      client, // This is now optional
       sender: senderBody,
       receiver: receiverBody,
       receivers: receiversBody,
@@ -771,44 +808,57 @@ exports.createMessage = async function createMessage(req, res) {
       note,
       isScheduled: isScheduledBody,
       scheduledFor,
-      replyTo, // ID of message being replied to
-      isForward = false, // Whether this is a forward
-      threadId: providedThreadId, // Allow threadId to be provided
+      replyTo,
+      isForward = false,
+      threadId: providedThreadId,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
     const sender = senderBody || req.employee?._id;
 
-    if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+    // Remove client validation - it's now optional
+    if (!isObjId(owner) || !isObjId(sender)) {
       return res.status(400).json({
-        error: "owner, client, and sender are required (ObjectId strings)",
+        error: "owner and sender are required (ObjectId strings)",
       });
     }
 
-    // Handle thread ID generation
+    // Handle thread ID generation for direct messages (no client)
     let threadId = providedThreadId;
     let originalMessage = null;
 
     if (replyTo) {
-      // This is a reply or forward - find the original message
       originalMessage = await AssignmentMessage.findById(replyTo);
     }
 
     if (originalMessage) {
-      // Use the thread logic for replies/forwards
       threadId = getThreadIdForReply(originalMessage, subject, isForward);
     } else if (!threadId) {
-      // New conversation - generate thread ID based on client and subject
-      threadId = generateThreadId(client, subject);
+      // For direct messages without client, generate a different thread ID
+      if (client) {
+        threadId = generateThreadId(client, subject);
+      } else {
+        // Direct message thread ID based on participants and subject
+        const participants = [
+          sender,
+          ...normalizeIds(receiverBody),
+          ...normalizeIds(receiversBody),
+        ]
+          .filter((id) => id !== String(sender))
+          .sort()
+          .join("_");
+        threadId = `direct_${participants}_${
+          subject ? subject.toLowerCase().replace(/[^a-z0-9]/g, "_") : "message"
+        }_${Date.now()}`;
+      }
     }
 
-    // Start with ONLY the explicitly specified receivers
+    // Rest of your existing receiver logic...
     let receivers = [];
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
     if (receiversBody)
       receivers = receivers.concat(normalizeIds(receiversBody));
 
-    // Remove sender from receivers
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
@@ -823,25 +873,28 @@ exports.createMessage = async function createMessage(req, res) {
     const needsApproval = supervisionMode === "needs_approval";
     const isDirect = supervisionMode === "direct";
 
-    const Client = require("../models/ClientInfo");
-    const clientDoc = await Client.findById(client)
-      .populate("assignedTo", "_id role")
-      .lean();
+    // Only handle client assignment if client is provided
+    if (client && isObjId(client)) {
+      const Client = require("../models/ClientInfo");
+      const clientDoc = await Client.findById(client)
+        .populate("assignedTo", "_id role")
+        .lean();
 
-    const { tls, managers } = await findTLsAndManagersByOwner(owner);
-
-    // ✅ Always include assignedTo employee if present
-    if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-      const assignedEmployeeId = String(clientDoc.assignedTo._id);
-      if (
-        !receivers.includes(assignedEmployeeId) &&
-        assignedEmployeeId !== String(sender)
-      ) {
-        receivers.push(assignedEmployeeId);
+      // Include assignedTo employee if present
+      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+        const assignedEmployeeId = String(clientDoc.assignedTo._id);
+        if (
+          !receivers.includes(assignedEmployeeId) &&
+          assignedEmployeeId !== String(sender)
+        ) {
+          receivers.push(assignedEmployeeId);
+        }
       }
     }
 
-    // 🔑 CORRECTED Approval status logic
+    // Your existing approval logic...
+    const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
     if (senderRole === "manager") {
       approvalStatus = null;
     } else if (senderRole === "team_lead") {
@@ -853,7 +906,7 @@ exports.createMessage = async function createMessage(req, res) {
       approvalStatus = "approved";
     }
 
-    // 🔥 Fallback logic if no receivers are still found
+    // Fallback logic if no receivers
     if (receivers.length === 0) {
       if (senderRole === "employee") {
         if (isDirect) {
@@ -872,7 +925,6 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // ✅ Remove duplicates and exclude sender
     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
       (id) => id !== String(sender)
     );
@@ -881,7 +933,7 @@ exports.createMessage = async function createMessage(req, res) {
       return res.status(400).json({ error: "No valid receivers found" });
     }
 
-    // Handle scheduling logic
+    // Scheduling logic (same as before)
     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
     let status = "sent";
     let scheduledAt = null;
@@ -900,9 +952,9 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt = null;
     }
 
+    // Build message data - client is optional
     const msgData = {
       owner,
-      client,
       sender,
       receiver: receivers,
       subject: subject || "",
@@ -914,9 +966,14 @@ exports.createMessage = async function createMessage(req, res) {
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
-      threadId, // Add the thread ID
-      replyTo: replyTo || undefined, // Track if this is a reply
+      threadId,
+      replyTo: replyTo || undefined,
     };
+
+    // Only include client if provided
+    if (client && isObjId(client)) {
+      msgData.client = client;
+    }
 
     const msg = await AssignmentMessage.create(msgData);
 
@@ -2692,7 +2749,9 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
     });
 
     if (threadMessages.length === 0) {
-      return res.status(404).json({ error: "No active thread found with this thread ID" });
+      return res
+        .status(404)
+        .json({ error: "No active thread found with this thread ID" });
     }
 
     // Move all messages to trash
@@ -2713,12 +2772,18 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
       const allParticipants = new Set();
 
       threadMessages.forEach((message) => {
-        const senderId = typeof message.sender === "string" ? message.sender : message.sender?._id?.toString();
+        const senderId =
+          typeof message.sender === "string"
+            ? message.sender
+            : message.sender?._id?.toString();
         if (senderId) allParticipants.add(senderId);
 
         if (message.receiver && Array.isArray(message.receiver)) {
           message.receiver.forEach((receiver) => {
-            const receiverId = typeof receiver === "string" ? receiver : receiver?._id?.toString();
+            const receiverId =
+              typeof receiver === "string"
+                ? receiver
+                : receiver?._id?.toString();
             if (receiverId) allParticipants.add(receiverId);
           });
         }
@@ -3301,6 +3366,8 @@ exports.getClientThreads = async function getClientThreads(req, res) {
     res.status(500).json({ error: "Failed to fetch client threads" });
   }
 };
+
+// GET /api/assignment-messages/threads/:threadId
 exports.getMessagesByThread = async function getMessagesByThread(req, res) {
   try {
     const { threadId } = req.params;
@@ -3336,13 +3403,20 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
+    // Add direct message flag
+    const normalizedItems = items.map(item => ({
+      ...item,
+      isDirectMessage: !item.client
+    }));
+
     res.json({
-      items,
+      items: normalizedItems,
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
       threadId,
+      isDirectMessageThread: items.length > 0 && !items[0].client
     });
   } catch (e) {
     console.error("Error in getMessagesByThread:", e);

@@ -21,14 +21,17 @@ const AssignmentMessageSchema = new Schema(
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
 
     // Conversation scope
-    client: { type: Schema.Types.ObjectId, ref: "ClientInfo", required: true },
-    
+    client: {
+      type: Schema.Types.ObjectId,
+      ref: "ClientInfo",
+      required: false, // Changed from true to false
+    },
     // Thread identification - FIXED: Make it not required initially
     threadId: {
       type: String,
       index: true,
     },
-    
+
     // Participants
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     receiver: [
@@ -67,17 +70,17 @@ const AssignmentMessageSchema = new Schema(
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
-    
+
     // Spam fields
     isSpam: { type: Boolean, default: false },
     spamReportedAt: { type: Date },
     spamReportedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     spamReportCount: { type: Number, default: 0 },
     spamReporters: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
-    
+
     // Files
     attachments: [AttachmentSchema],
-    
+
     replyTo: {
       type: Schema.Types.ObjectId,
       ref: "AssignmentMessage",
@@ -103,12 +106,14 @@ AssignmentMessageSchema.index({
 });
 
 // Add pre-save middleware to ensure threadId is always set
-AssignmentMessageSchema.pre('save', function(next) {
+AssignmentMessageSchema.pre("save", function (next) {
   if (!this.threadId) {
     // Generate a threadId if not provided
     const clientId = this.client.toString();
-    const subject = this.subject || 'no_subject';
-    this.threadId = `thread_${clientId}_${subject.toLowerCase().replace(/[^a-z0-9]/g, '_')}_${Date.now()}`;
+    const subject = this.subject || "no_subject";
+    this.threadId = `thread_${clientId}_${subject
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "_")}_${Date.now()}`;
   }
   next();
 });
