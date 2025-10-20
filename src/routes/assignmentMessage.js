@@ -32,7 +32,6 @@ router.get("/review", ctrl.getReviewMessages);
 // Manager-Specific Routes
 router.get("/manager/messages", ctrl.listMessagesForManager);
 router.get("/manager/messages/:clientId", ctrl.listMessagesForManager);
-
 // Scheduled Message Routes
 router.get("/scheduled/all", ctrl.getScheduledMessages);
 router.get("/client/:clientId/scheduled", ctrl.getScheduledMessagesForClient);
@@ -40,10 +39,11 @@ router.get("/client/:clientId/scheduled", ctrl.getScheduledMessagesForClient);
 // =============================
 // ✅ THREAD-LEVEL ROUTES (specific patterns - must come before generic :id)
 // =============================
-router.delete("/thread/:clientId", ctrl.deleteThread);
-router.delete("/thread/:clientId/permanent", ctrl.permanentlyDeleteThread);
-router.patch("/thread/:clientId/trash", ctrl.moveThreadToTrash);
-router.patch("/thread/:clientId/restore", ctrl.restoreThreadFromTrash);
+router.delete("/thread/:threadId", ctrl.deleteThread);
+router.delete("/thread/:threadId/permanent", ctrl.permanentlyDeleteThread);
+router.patch("/thread/:threadId/trash", ctrl.moveThreadToTrash);
+router.patch("/thread/:threadId/restore", ctrl.restoreThreadFromTrash);
+router.get("/client/:threadId/threads", ctrl.getClientThreads);
 
 // =============================
 // ✅ GENERIC ROUTES WITH :id PARAMETERS
@@ -79,7 +79,8 @@ router.patch("/:id/unschedule", ctrl.unscheduleMessage);
 router.patch("/:id/reschedule", ctrl.rescheduleMessage);
 router.patch("/:id/send", ctrl.sendDraft);
 router.patch("/:id/edit-disapproved", ctrl.editDisapprovedMessage);
-
+// In your backend routes file
+router.get('/thread/:threadId', ctrl.getMessagesByThread);
 // =============================
 // ✅ ATTACHMENT ROUTES (keep these last)
 // =============================

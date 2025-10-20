@@ -26,6 +26,78 @@ function normalizeIds(val) {
   }
   return [];
 }
+// 🔥 FIXED: Thread ID generation based on subject only
+function generateThreadId(clientId, subject) {
+  if (!clientId) {
+    throw new Error("clientId is required to generate threadId");
+  }
+
+  if (!subject || subject.trim() === "") {
+    return `thread_${clientId}_${Date.now()}`;
+  }
+
+  // 🔥 CRITICAL FIX: Normalize subject for consistent thread grouping
+  // Remove reply/forward prefixes and normalize the subject
+  const normalizedSubject = subject
+    .trim()
+    .toLowerCase()
+    .replace(/^(re:|fwd:|fw:)\s*/i, "") // Remove reply/forward prefixes
+    .replace(/[^a-z0-9]/g, "_") // Replace non-alphanumeric with underscores
+    .replace(/_+/g, "_") // Replace multiple underscores with single
+    .substring(0, 50); // Limit length to avoid issues
+
+  // 🔥 CRITICAL: Use only the normalized subject for thread ID
+  // This ensures same subject = same thread ID across different clients
+  return `thread_${normalizedSubject}_${Date.now()}`;
+}
+
+function getThreadIdForReply(originalMessage, newSubject, isForward = false) {
+  if (!originalMessage) {
+    throw new Error(
+      "originalMessage is required for reply thread ID generation"
+    );
+  }
+
+  // For forwards, always create a new thread
+  if (isForward) {
+    const clientId =
+      typeof originalMessage.client === "string"
+        ? originalMessage.client
+        : originalMessage.client?._id;
+    return generateThreadId(clientId, newSubject);
+  }
+
+  // For replies, check if this should be a new conversation
+  const originalSubject = originalMessage.subject || "";
+  const normalizedNew = newSubject.trim().toLowerCase();
+  const normalizedOriginal = originalSubject.trim().toLowerCase();
+
+  // Remove reply/forward prefixes for comparison
+  const cleanNew = normalizedNew.replace(/^(re:|fwd:|fw:)\s*/i, "");
+  const cleanOriginal = normalizedOriginal.replace(/^(re:|fwd:|fw:)\s*/i, "");
+
+  console.log(`🔍 Thread ID comparison:`, {
+    originalSubject,
+    newSubject,
+    cleanOriginal,
+    cleanNew,
+    isSame: cleanNew === cleanOriginal,
+  });
+
+  // 🔥 CRITICAL FIX: If the core subject is the same, use the same thread
+  if (cleanNew === cleanOriginal) {
+    console.log(`✅ Using same thread for subject: "${cleanOriginal}"`);
+    return originalMessage.threadId;
+  }
+
+  // Otherwise, create new thread
+  console.log(`🆕 Creating new thread for different subject`);
+  const clientId =
+    typeof originalMessage.client === "string"
+      ? originalMessage.client
+      : originalMessage.client?._id;
+  return generateThreadId(clientId, newSubject);
+}
 
 function normalizeRole(role) {
   if (!role) return "";
@@ -66,14 +138,14 @@ async function applyVisibility(q, req) {
       owner: ownerId, // Show all messages for the owner
     };
 
-    // For review filter, team leads should see pending messages
-    if (q.approvalStatus === "pending") {
-      teamLeadQuery.approvalStatus = "pending";
-    }
-
-    // If a specific client is selected, filter by client
-    if (q.client) {
-      teamLeadQuery.client = q.client;
+    // 🔥 CRITICAL FIX: Team leads should ALWAYS see pending approval messages
+    // Remove any approvalStatus filter that might exclude pending messages
+    if (teamLeadQuery.approvalStatus === "pending") {
+      // Keep the pending filter if explicitly requested
+      console.log('👀 Team lead viewing pending messages');
+    } else if (q.approvalStatus !== "pending") {
+      // Don't exclude pending messages for team leads in normal views
+      delete teamLeadQuery.approvalStatus;
     }
 
     return teamLeadQuery;
@@ -458,16 +530,19 @@ exports.listMessages = async function listMessages(req, res) {
     else if (req.employee?.owner) q.owner = req.employee.owner;
     if (isObjId(client)) q.client = client;
 
-    // Status filter
+    // ✅ FIXED: Better status handling
     if (
       status &&
       ["draft", "scheduled", "sent", "cancelled"].includes(status)
     ) {
       q.status = status;
-      if (status === "draft") q.isScheduled = false;
+      // Don't automatically set isScheduled for drafts
+      if (status === "scheduled") {
+        q.isScheduled = true;
+      }
     } else {
-      // Exclude drafts by default
-      q.status = { $ne: "draft" };
+      // ✅ FIXED: Default: exclude drafts but include sent and scheduled
+      q.status = { $in: ["sent", "scheduled"] };
     }
 
     // 🔥 CRITICAL FIX: Simplified trash/spam logic
@@ -479,6 +554,7 @@ exports.listMessages = async function listMessages(req, res) {
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
+
     // For normal inbox view, exclude messages pending review
     if (filter !== "review" && approvalStatus !== "pending") {
       q.approvalStatus = { $ne: "pending" };
@@ -511,6 +587,7 @@ exports.listMessages = async function listMessages(req, res) {
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
     const between = normalizeIds(betweenRaw);
+
     if (between.length === 2) {
       const [a, b] = between;
       q.$or = [
@@ -532,21 +609,24 @@ exports.listMessages = async function listMessages(req, res) {
       }
     }
 
-    // Apply visibility rules
+    // ✅ FIXED: Apply visibility rules BEFORE adding user-based filters
+    // This ensures the visibility query is built correctly
     const qFinal = await applyVisibility(q, req);
 
-    if (
-      !qFinal.owner &&
-      !qFinal.client &&
-      !qFinal.sender &&
-      !qFinal.receiver &&
-      !qFinal.$or &&
-      !qFinal.status &&
-      qFinal.isScheduled === undefined &&
-      !qFinal.approvalStatus &&
-      qFinal.isTrashed === undefined &&
-      qFinal.isSpam === undefined
-    ) {
+    // ✅ FIXED: Better validation that considers visibility rules
+    const hasExplicitFilter =
+      q.owner ||
+      q.client ||
+      q.sender ||
+      q.receiver ||
+      q.$or ||
+      q.status ||
+      q.isScheduled !== undefined ||
+      q.approvalStatus ||
+      q.isTrashed !== undefined ||
+      q.isSpam !== undefined;
+
+    if (!hasExplicitFilter) {
       return res.status(400).json({
         error:
           "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, or isScheduled",
@@ -691,6 +771,9 @@ exports.createMessage = async function createMessage(req, res) {
       note,
       isScheduled: isScheduledBody,
       scheduledFor,
+      replyTo, // ID of message being replied to
+      isForward = false, // Whether this is a forward
+      threadId: providedThreadId, // Allow threadId to be provided
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -700,6 +783,23 @@ exports.createMessage = async function createMessage(req, res) {
       return res.status(400).json({
         error: "owner, client, and sender are required (ObjectId strings)",
       });
+    }
+
+    // Handle thread ID generation
+    let threadId = providedThreadId;
+    let originalMessage = null;
+
+    if (replyTo) {
+      // This is a reply or forward - find the original message
+      originalMessage = await AssignmentMessage.findById(replyTo);
+    }
+
+    if (originalMessage) {
+      // Use the thread logic for replies/forwards
+      threadId = getThreadIdForReply(originalMessage, subject, isForward);
+    } else if (!threadId) {
+      // New conversation - generate thread ID based on client and subject
+      threadId = generateThreadId(client, subject);
     }
 
     // Start with ONLY the explicitly specified receivers
@@ -730,7 +830,7 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // ✅ Always include assignedTo employee if present (but only if not already included)
+    // ✅ Always include assignedTo employee if present
     if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
       const assignedEmployeeId = String(clientDoc.assignedTo._id);
       if (
@@ -744,38 +844,29 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔑 CORRECTED Approval status logic
     if (senderRole === "manager") {
       approvalStatus = null;
-      // Managers don't need approval, but we don't auto-add team leads
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
-      // Team leads don't need approval, but we don't auto-add managers
     } else if (needsApproval) {
-      // Needs approval - add team leads for review
       approvalStatus = "pending";
       receivers = [...receivers, ...tls.map((id) => String(id))];
     } else if (isDirect) {
-      // DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
       approvalStatus = "approved";
-      // Don't add any team leads or managers - message goes directly to intended receivers
     }
 
     // 🔥 Fallback logic if no receivers are still found
     if (receivers.length === 0) {
       if (senderRole === "employee") {
         if (isDirect) {
-          // For direct mode with no receivers, add managers for visibility
           receivers = [...managers];
           approvalStatus = "approved";
         } else {
-          // For needs_approval mode with no receivers, add team leads
           receivers = [...tls];
           approvalStatus = "pending";
         }
       } else if (senderRole === "team_lead") {
-        // Team lead with no receivers - add managers
         receivers = [...managers];
         approvalStatus = null;
       } else if (senderRole === "manager") {
-        // Manager with no receivers - add team leads
         receivers = [...tls];
         approvalStatus = null;
       }
@@ -823,6 +914,8 @@ exports.createMessage = async function createMessage(req, res) {
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
+      threadId, // Add the thread ID
+      replyTo: replyTo || undefined, // Track if this is a reply
     };
 
     const msg = await AssignmentMessage.create(msgData);
@@ -843,10 +936,17 @@ exports.createMessage = async function createMessage(req, res) {
 
     res.status(201).json(populated);
   } catch (e) {
-    console.error(e);
+    console.error("Error in createMessage:", e);
+    if (e.name === "ValidationError") {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: Object.values(e.errors).map((err) => err.message),
+      });
+    }
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
+
 // GET MESSAGE WITH PROPER APPROVAL STATUS
 exports.getMessage = async function getMessage(req, res) {
   try {
@@ -2485,31 +2585,35 @@ exports.deleteThread = async function deleteThread(req, res) {
   }
 };
 
-// DELETE /api/assignment-messages/thread/:clientId/permanent - Permanently delete thread from trash
+// DELETE /api/assignment-messages/thread/:threadId/permanent - Permanently delete thread from trash
 exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
   req,
   res
 ) {
   try {
-    const { clientId } = req.params;
+    const { threadId } = req.params; // Changed from clientId to threadId
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
+    if (!threadId) {
+      return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
     const userId = req.employee._id.toString();
 
-    // Find all trashed messages for this client where user is sender
+    // Find all trashed messages for this thread where user is involved
     const trashedMessages = await AssignmentMessage.find({
-      client: clientId,
-      sender: userId,
+      threadId: threadId, // Changed from client to threadId
+      $or: [
+        { sender: userId },
+        { receiver: userId },
+        { receiver: { $in: [userId] } },
+      ],
       isTrashed: true,
     });
 
     if (trashedMessages.length === 0) {
       return res
         .status(404)
-        .json({ error: "No trashed thread found for this client" });
+        .json({ error: "No trashed thread found with this thread ID" });
     }
 
     const messageIds = trashedMessages.map((msg) => msg._id);
@@ -2546,7 +2650,7 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
         io.to(`employee_${participantId}`).emit(
           "assignment_thread_permanently_deleted",
           {
-            clientId: clientId,
+            threadId: threadId, // Changed from clientId to threadId
             messageIds: messageIds,
             deletedBy: userId,
             timestamp: new Date(),
@@ -2566,21 +2670,19 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
     res.status(500).json({ error: "Failed to permanently delete thread" });
   }
 };
-
-// PATCH /api/assignment-messages/thread/:clientId/trash - Move entire thread to trash
+// PATCH /api/assignment-messages/thread/:threadId/trash - Move entire thread to trash
 exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
   try {
-    const { clientId } = req.params;
-
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
-    }
-
+    const { threadId } = req.params;
     const userId = req.employee._id.toString();
 
-    // Find all messages for this client where user is involved
+    if (!threadId) {
+      return res.status(400).json({ error: "Valid thread ID is required" });
+    }
+
+    // Find all messages for this thread where user is involved
     const threadMessages = await AssignmentMessage.find({
-      client: clientId,
+      threadId: threadId,
       $or: [
         { sender: userId },
         { receiver: userId },
@@ -2590,9 +2692,7 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
     });
 
     if (threadMessages.length === 0) {
-      return res
-        .status(404)
-        .json({ error: "No active thread found for this client" });
+      return res.status(404).json({ error: "No active thread found with this thread ID" });
     }
 
     // Move all messages to trash
@@ -2613,18 +2713,12 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
       const allParticipants = new Set();
 
       threadMessages.forEach((message) => {
-        const senderId =
-          typeof message.sender === "string"
-            ? message.sender
-            : message.sender?._id?.toString();
+        const senderId = typeof message.sender === "string" ? message.sender : message.sender?._id?.toString();
         if (senderId) allParticipants.add(senderId);
 
         if (message.receiver && Array.isArray(message.receiver)) {
           message.receiver.forEach((receiver) => {
-            const receiverId =
-              typeof receiver === "string"
-                ? receiver
-                : receiver?._id?.toString();
+            const receiverId = typeof receiver === "string" ? receiver : receiver?._id?.toString();
             if (receiverId) allParticipants.add(receiverId);
           });
         }
@@ -2632,7 +2726,7 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
 
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_trashed", {
-          clientId: clientId,
+          threadId: threadId,
           messageIds: threadMessages.map((msg) => msg._id),
           trashedBy: userId,
           timestamp: new Date(),
@@ -2650,7 +2744,6 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
     res.status(500).json({ error: "Failed to move thread to trash" });
   }
 };
-
 // PATCH /api/assignment-messages/thread/:clientId/restore - Restore entire thread from trash
 exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
   req,
@@ -3152,5 +3245,107 @@ exports.searchMessages = async function searchMessages(req, res) {
       error: "Failed to search messages",
       details: process.env.NODE_ENV === "development" ? e.message : undefined,
     });
+  }
+};
+// GET /api/assignment-messages/client/:clientId/threads
+exports.getClientThreads = async function getClientThreads(req, res) {
+  try {
+    const { clientId } = req.params;
+    const { limit = 50, page = 1 } = req.query;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID is required" });
+    }
+
+    // Apply visibility rules
+    const qFinal = await applyVisibility({ client: clientId }, req);
+
+    // Group by threadId and get latest message from each thread
+    const threads = await AssignmentMessage.aggregate([
+      { $match: qFinal },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$threadId",
+          latestMessage: { $first: "$$ROOT" },
+          messageCount: { $sum: 1 },
+          unreadCount: {
+            $sum: {
+              $cond: [{ $eq: ["$isRead", false] }, 1, 0],
+            },
+          },
+          lastActivity: { $max: "$createdAt" },
+        },
+      },
+      { $sort: { lastActivity: -1 } },
+      { $skip: (page - 1) * limit },
+      { $limit: parseInt(limit) },
+    ]);
+
+    // Populate the latest messages
+    const populatedThreads = await AssignmentMessage.populate(threads, [
+      { path: "latestMessage.sender", select: "_id name companyEmail" },
+      { path: "latestMessage.receiver", select: "_id name companyEmail" },
+      { path: "latestMessage.client", select: "_id clientName" },
+    ]);
+
+    res.json({
+      items: populatedThreads,
+      total: populatedThreads.length,
+      page: parseInt(page),
+      pages: Math.ceil(populatedThreads.length / limit),
+      limit: parseInt(limit),
+    });
+  } catch (e) {
+    console.error("Error in getClientThreads:", e);
+    res.status(500).json({ error: "Failed to fetch client threads" });
+  }
+};
+exports.getMessagesByThread = async function getMessagesByThread(req, res) {
+  try {
+    const { threadId } = req.params;
+    const { limit = 50, page = 1 } = req.query;
+
+    if (!threadId) {
+      return res.status(400).json({ error: "Thread ID is required" });
+    }
+
+    // Build base query
+    const q = { threadId };
+
+    // Apply visibility rules
+    const qFinal = await applyVisibility(q, req);
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(qFinal)
+        .sort({ createdAt: 1 }) // Oldest first for proper conversation flow
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+          { path: "scheduledBy", select: "_id name companyEmail" },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(qFinal),
+    ]);
+
+    res.json({
+      items,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / lim),
+      limit: lim,
+      threadId,
+    });
+  } catch (e) {
+    console.error("Error in getMessagesByThread:", e);
+    res.status(500).json({ error: "Failed to fetch thread messages" });
   }
 };
