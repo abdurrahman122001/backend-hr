@@ -1,21 +1,16 @@
-require("dotenv").config();
 
-const path = require("path");
-const fs = require("fs");
-const http = require("http");
-const https = require("https");
+// backend/src/index.js
+require("dotenv").config();
+const AttendanceConfig = require("./models/AttendanceConfig");
+
 const express = require("express");
+const http = require("http");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cron = require("node-cron");
-
-// ---------- Models used in cron / elsewhere ----------
-const AttendanceConfig = require("./models/AttendanceConfig");
-const Employee = require("./models/Employees");
-const Attendance = require("./models/Attendance");
-const PayrollPeriod = require("./models/PayrollPeriod");
-
-// ---------- Routers ----------
+const path = require("path");
+const socketIo = require("socket.io");
+// Route imports
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
 const hrAuthRoutes = require("./routes/hrAuth");
@@ -34,7 +29,7 @@ const departmentsRouter = require("./routes/departments");
 const designationsRouter = require("./routes/designations");
 const docsRouter = require("./routes/docs");
 const employeeSalaryRouter = require("./routes/employeeSalary");
-const hierarchyController = require("./controllers/hierarchyController"); // (not mounted here, imported to ensure build)
+const hierarchyController = require("./controllers/hierarchyController");
 const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
 const loansRoutes = require("./routes/loans");
@@ -43,49 +38,83 @@ const requireAuth = require("./middleware/auth");
 const requireEmployeeAuth = require("./middleware/empAuth");
 const empAttendanceRouter = require("./routes/empAttendance");
 const employeeBirthdays = require("./routes/empBirthdayRoutes");
+const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
+const employeeLeavesRouter = require("./routes/employeeLeaves");
+const assignmentMessageController = require("./controllers/assignmentMessageController");
+const employeeDocs = require("./routes/employeeDocs")
+// Model imports
+const Employee = require("./models/Employees");
+const Attendance = require("./models/Attendance");
 const sendSlipEmail = require("./routes/sendSlipEmail");
 const probationPeriodRouter = require("./routes/probationPeriods");
 const leaveRecordsRouter = require("./routes/leaveRecords");
 const certificateRoutes = require("./routes/certificate");
 const ExtraFields = require("./routes/extraFields");
-const usersRoute = require("./routes/users");
-const setDateRoute = require("./routes/setDate"); // ✅ fixed double slash
-const { startWatcher } = require("./watcher"); // IMAP watcher
+const usersRoute = require("./routes/users"); // <-- Correc
+const setDateRoute = require("./routes//setDate");
+// IMAP watcher
+const { startWatcher } = require("./watcher");
 const fontSettingRoute = require("./routes/fontSetting");
-const decryptionKeysRoute = require("./routes/decryptionKeys");
+const descryptionKeys = require("./routes/decryptionKeys");
 const pfRoute = require("./routes/pf");
-const gratuityRoute = require("./routes/gratuitySettings");
-const signatureRoute = require("./routes/signature");
+const GratuityRoute = require("./routes/gratuitySettings");
+const SignaturRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
-const employeeDocsRouter = require("./routes/employeeDocs");
-const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
 const managerRoutes = require("./routes/manager");
 const taskRoutes = require("./routes/tasks");
 const clientInfoRoutes = require("./routes/clientInfo");
 const assignMessageRoutes = require("./routes/assignmentMessage");
-const employeeLeavesRouter = require("./routes/employeeLeaves");
+const emailRoutes = require("./routes/emailRoutes");
 const generateRouter = require("./routes/generate-pdfs");
 const AssignmentMessage = require("./models/AssignmentMessage");
-const assignmentMessageController = require("./controllers/assignmentMessageController");
-const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
+const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const chatRoutes = require("./routes/chat");
 const offerEmail = require("./routes/offerEmail");
+const hrPolicies = require("./routes/hrPolicyRoutes")
 
+// Get today's date in YYYY-MM-DD format (for cron job)
 const app = express();
+// Wrap express in an HTTP server for Socket-IO
+const server = http.createServer(app);
 
-// ---------- Static ----------
+// Initialize Socket-IO
+const { Server } = require("socket.io");
+const io = new Server(server, { cors: { origin: "*" } });
+
+// Make `io` available on `req.app` in case you ever want to emit from inside routes
+app.set("io", io);
+
+// === Middleware ===
+app.use(
+  cors({
+    origin: [
+      "http://admin.virsme.com",
+      "http://admin.innand.com",
+      "http://apis.innand.com",
+      "http://employee.virsme.com",
+      "http://hr.virsme.com",
+      "http://localhost:8080",
+      "http://innand.com",
+      "http://localhost:8081",
+      "http://localhost:8082",
+    ],
+    credentials: true, // if you need cookies/auth
+  })
+);
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "./uploads"))
 );
+
 app.use(
   "/upload",
   express.static(path.join(__dirname, "../uploads"))
 );
-
 
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
@@ -93,62 +122,11 @@ app.use(
   "/uploads/chat-attachments",
   express.static(path.join(__dirname, "../uploads/chat-attachments"))
 );
-// ---------- CORS ----------
-// If you need wildcard subdomains, switch to a regex check.
-// For now, this is a strict allowlist.
-const ALLOWED_ORIGINS = [
-  "http://admin.virsme.com",
-  "https://admin.virsme.com",
-  "http://admin.innand.com",
-  "https://admin.innand.com",
-  "http://apis.innand.com",
-  "https://apis.innand.com",
-  "http://employee.virsme.com",
-  "https://employee.virsme.com",
-  "http://hr.virsme.com",
-  "https://hr.virsme.com",
-  "http://innand.com",
-  "https://innand.com",
-  "http://www.innand.com",
-  "https://complete-profile.virsme.com",
-  "https://www.innand.com",
-  "http://localhost:8080",
-  "http://localhost:8081",
-  "http://localhost:8082",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-];
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      // Allow server-to-server, Postman, curl
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  })
-);
-
-// (Optional) CORS error handler to avoid generic 500s
-app.use((err, _req, res, next) => {
-  if (err && /CORS blocked/.test(String(err.message))) {
-    return res.status(403).json({ error: err.message });
-  }
-  return next(err);
-});
-
-// ---------- Body parsers ----------
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
-
-// ---------- Public routes ----------
 app.use("/api/auth", authRouter);
 app.use("/api/emp-auth", empAuthRouter);
-
-// ---------- Protected routes ----------
-app.use("/api/employees", employeesRouter); // leave public if intentional
+// === Protected routes ===
+app.use("/api/employees", employeesRouter);
 app.use("/api/attendance", requireAuth, attendanceRouter);
 app.use("/api/leaves", requireAuth, leavesRouter);
 app.use("/api/settings", requireAuth, settingsRouter);
@@ -162,131 +140,66 @@ app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", require("./routes/companyProfile"));
 app.use("/api/docs", docsRouter);
-app.use("/api/employee-salary", employeeSalaryRouter);
+app.use("/api/employee-salary", employeeSalaryRouter); // <--- THIS LINE
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
-app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
-// Intentionally expose both /api/loans and /api/loan to the same router?
-// Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
 app.use("/api/loan", loansRoutes);
-
 app.use("/api/probation-periods", probationPeriodRouter);
 app.use("/api/leave-records", requireAuth, leaveRecordsRouter);
 app.use("/api/certificates", certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
-app.use("/api/decryption-keys", requireAuth, decryptionKeysRoute);
+app.use("/api/decryption-keys", requireAuth, descryptionKeys);
 app.use("/api/extra-fields", requireAuth, ExtraFields);
 app.use("/api/pf", pfRoute);
-app.use("/api/gratuity", requireAuth, gratuityRoute);
+app.use("/api/gratuity", requireAuth, GratuityRoute);
 app.use("/api/role", requireAuth, roleRoutes);
 app.use("/api/pages", requireAuth, pageRoute);
 app.use("/api/users", requireAuth, usersRoute);
 app.use("/api/setDate", requireAuth, setDateRoute);
-app.use("/api/signature", requireAuth, signatureRoute);
+app.use("/api/signature", requireAuth, SignaturRoute);
 app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
-app.use("/api/employee-docs", employeeDocsRouter);
+app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
 app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
-
 app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/client-info", clientInfoRoutes);
 app.use("/api/assignment-messages", assignMessageRoutes);
-app.use("/api/generate", requireAuth, generateRouter);
-app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/email", emailRoutes);
+app.use("/api/generate", requireAuth, generateRouter);
 app.use("/api/offer-email" , requireAuth, offerEmail)
-
-// ---------- MongoDB ----------
-const MONGODB_URI = process.env.MONGODB_URI;
-if (!MONGODB_URI) {
-  console.error("❌ Missing MONGODB_URI in environment.");
-  process.exit(1);
-}
-
-mongoose.set("strictQuery", false);
-mongoose
-  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
-  .then(async () => {
-    console.log("▶ MongoDB connected");
-
-    // Start IMAP watcher once DB is up (wrap to avoid crashing if it throws)
-    try {
-      startWatcher();
-    } catch (e) {
-      console.warn("⚠️ IMAP watcher failed to start:", e?.message || e);
-    }
-
-    // Setup change streams safely (replica set required)
-    setupEmployeeChangeStream();
-  })
-  .catch((err) => {
-    console.error("❌ MongoDB connection error:", err);
-    process.exit(1);
-  });
-
-// ---------- Change Streams: Watch Employee inserts/updates ----------
-function setupEmployeeChangeStream() {
-  try {
-    const changeStream = Employee.watch();
-
-    changeStream.on("change", (change) => {
-      if (!app.get("io")) return; // Socket not ready yet
-      const io = app.get("io");
-
-      if (change.operationType === "insert") {
-        const emp = change.fullDocument || {};
-        io.emit("employee_added", {
-          message: `New employee added: ${emp.name || "Unknown"}`,
-          createdAt: emp.createdAt || new Date().toISOString(),
-        });
-      }
-
-      if (change.operationType === "update") {
-        const updatedFields = change.updateDescription?.updatedFields || {};
-        if ("cnic" in updatedFields) {
-          const newCnic = updatedFields.cnic;
-          Employee.findById(change.documentKey?._id)
-            .lean()
-            .then((emp) => {
-              if (!emp) return;
-              io.emit("employee_cnic_updated", {
-                message: `CNIC for ${emp.name} updated to ${newCnic}`,
-                createdAt: new Date().toISOString(),
-              });
-            })
-            .catch((e) => console.error("watch update fetch error:", e));
-        }
-      }
-    });
-
-    changeStream.on("error", (err) => {
-      console.warn(
-        "⚠️ Employee change stream error (likely no replica set). Disabling watcher.",
-        err?.message || err
-      );
-      try {
-        changeStream.close();
-      } catch {}
-    });
-  } catch (e) {
-    console.warn(
-      "⚠️ Change streams not supported (no replica set / permissions?). Skipping.",
-      e?.message || e
-    );
-  }
-}
-
-// ---------- Public: employee count ----------
-app.get("/api/employees/count", async (_req, res) => {
+app.post("/api/hierarchy/create", requireAuth, hierarchyController.create);
+app.use("/api/employee-docs",employeeDocs )
+app.post(
+  "/api/hierarchy/bulkCreate",
+  requireAuth,
+  hierarchyController.bulkCreate
+);
+app.get("/api/hierarchy", requireAuth, hierarchyController.getHierarchy);
+app.get(
+  "/api/hierarchy/directReports/:employeeId",
+  requireAuth,
+  hierarchyController.getDirectReports
+);
+app.get(
+  "/api/hierarchy/managementChain/:employeeId",
+  requireAuth,
+  hierarchyController.getManagementChain
+);
+app.delete(
+  "/api/hierarchy/:id",
+  requireAuth,
+  hierarchyController.deleteHierarchy
+);
+app.get("/api/employees/count", async (req, res) => {
   try {
     const count = await Employee.countDocuments();
     res.json({ count });
@@ -294,222 +207,12 @@ app.get("/api/employees/count", async (_req, res) => {
     res.status(500).json({ error: "Failed to get employee count" });
   }
 });
+app.use("/api/hr-policies", hrPolicies);
 
-// ---------- Cron: auto-fill YESTERDAY’s attendance ----------
-// Runs at 00:00 in configured timezone (default Asia/Karachi)
-const ATTENDANCE_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
-cron.schedule(
-  "0 0 * * *",
-  async () => {
-    try {
-      // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-
-      const y = yesterday.getFullYear();
-      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
-      const d = String(yesterday.getDate()).padStart(2, "0");
-      const date = `${y}-${m}-${d}`;
-
-      const config = await AttendanceConfig.findOne({}).lean();
-      if (config && config.markAbsentManually === true) {
-        console.log(
-          "[cron] markAbsentManually = true; skipping auto-absent marking."
-        );
-        return;
-      }
-
-      // Skip holidays
-      const holiday = await Attendance.findOne({
-        date,
-        isHoliday: true,
-      }).lean();
-      if (holiday) {
-        console.log(
-          `[cron] ${date} is a holiday; skipping auto-absent marking.`
-        );
-        return;
-      }
-
-      console.log(`[cron] Auto-filling 'Absent' for ${date} where needed`);
-
-      // Employees already recorded for that date
-      const done = await Attendance.find({ date }).select("employee").lean();
-      const doneIds = new Set(done.map((r) => String(r.employee)));
-
-      // All employees
-      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
-
-      // Payroll periods
-      const allPayrolls = await PayrollPeriod.find({}).lean();
-
-      // Day name for yesterday (lowercase long weekday)
-      const dayName = yesterday
-        .toLocaleDateString("en-US", { weekday: "long" })
-        .toLowerCase();
-      console.log(`[cron] Yesterday was: ${dayName}`);
-
-      const ops = [];
-
-      for (const e of allEmps) {
-        if (doneIds.has(String(e._id))) continue;
-
-        const payroll = allPayrolls.find(
-          (p) =>
-            Array.isArray(p.shifts) &&
-            Array.isArray(e.shifts) &&
-            e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
-        );
-
-        // If no payroll period or no nonWorkingDays config → mark absent
-        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
-          ops.push({
-            updateOne: {
-              filter: { employee: e._id, date },
-              update: {
-                $setOnInsert: {
-                  employee: e._id,
-                  date,
-                  owner: e.owner || null,
-                  status: "Absent",
-                  checkIn: null,
-                  checkOut: null,
-                  notes: null,
-                  markedByHR: false,
-                },
-              },
-              upsert: true,
-            },
-          });
-          continue;
-        }
-
-        // Respect non-working days
-        const nonWorking = payroll.nonWorkingDays.map((n) =>
-          String(n).toLowerCase().trim()
-        );
-        if (nonWorking.includes(dayName)) {
-          // It's a non-working day for this employee; skip
-          continue;
-        }
-
-        // Otherwise, mark absent
-        ops.push({
-          updateOne: {
-            filter: { employee: e._id, date },
-            update: {
-              $setOnInsert: {
-                employee: e._id,
-                date,
-                owner: e.owner || null,
-                status: "Absent",
-                checkIn: null,
-                checkOut: null,
-                notes: null,
-                markedByHR: false,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
-
-      if (ops.length) {
-        const result = await Attendance.bulkWrite(ops);
-        const upserted = result?.upsertedCount || 0;
-        console.log(`[cron] Upserted ${upserted} records for ${date}`);
-      } else {
-        console.log(
-          `[cron] Nothing to upsert for ${date} (already marked or non-working).`
-        );
-      }
-    } catch (err) {
-      console.error("[cron] Error auto-filling attendance:", err);
-    }
-  },
-  { timezone: ATTENDANCE_CRON_TZ }
-);
-
-// ---------- TLS (Let’s Encrypt) & Server Startup ----------
-const ENABLE_HTTPS =
-  (process.env.ENABLE_HTTPS || "true").toLowerCase() !== "false";
-const DEFAULT_DOMAIN = process.env.DOMAIN || "innand.com";
-
-const CERT_FULLCHAIN =
-  process.env.CERT_FULLCHAIN ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/fullchain.pem`;
-const CERT_PRIVKEY =
-  process.env.CERT_PRIVKEY ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
-
-const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
-
-let primaryServer; // the server we attach socket.io to
-let httpsEnabled = false;
-
-if (
-  ENABLE_HTTPS &&
-  fs.existsSync(CERT_FULLCHAIN) &&
-  fs.existsSync(CERT_PRIVKEY)
-) {
-  // Start HTTPS server
-  const httpsServer = https.createServer(
-    {
-      cert: fs.readFileSync(CERT_FULLCHAIN),
-      key: fs.readFileSync(CERT_PRIVKEY),
-    },
-    app
-  );
-  primaryServer = httpsServer;
-  httpsEnabled = true;
-
-  httpsServer.listen(HTTPS_PORT, () => {
-    console.log(
-      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`
-    );
-  });
-
-  // Lightweight HTTP → HTTPS redirect
-  http
-    .createServer((req, res) => {
-      const host = req.headers.host || DEFAULT_DOMAIN;
-      const location = `https://${host}${req.url}`;
-      res.writeHead(301, { Location: location });
-      res.end();
-    })
-    .listen(HTTP_PORT, () => {
-      console.log(
-        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`
-      );
-    });
-} else {
-  // Fallback to HTTP only (useful for local/dev or when cert files missing)
-  const httpServer = http.createServer(app);
-  primaryServer = httpServer;
-
-  httpServer.listen(HTTP_PORT, () => {
-    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
-    if (ENABLE_HTTPS) {
-      console.warn(
-        "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY."
-      );
-    }
-  });
-}
-
-// ---------- Socket.IO on the primary server ----------
-const { Server } = require("socket.io");
-const io = new Server(primaryServer, {
-  // If you want to restrict, set origin: ALLOWED_ORIGINS instead of "*"
-  cors: { origin: "*", credentials: true },
-});
+// Make io available to routes
 app.set("io", io);
 
 io.on("connection", (socket) => {
-  console.log("🟢 Socket client connected:", socket.id);
-
   // Join employee room
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
@@ -517,9 +220,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`employee_${employeeId}`);
-    console.log(
-      `📍 Employee ${employeeId} joined room: employee_${employeeId}`
-    );
   });
 
   // Join assignment client room
@@ -529,19 +229,16 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`assignment_client_${clientId}`);
-    console.log(`📍 Joined assignment chat for client: ${clientId}`);
   });
 
   // Join manager room
   socket.on("join_assignment_managers", () => {
     socket.join("assignment_managers");
-    console.log(`📍 ${socket.id} joined assignment managers room`);
   });
 
   // Handle assignment message disapproval - UPDATED FOR ARRAY RECEIVER
   socket.on("assignment_message_disapproved", async (data, callback) => {
     try {
-      console.log("📤 Received assignment_message_disapproved event:", data);
 
       const { message } = data;
 
@@ -568,9 +265,6 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
-      console.log("📨 Broadcasting disapproval notification...");
-
       // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
@@ -593,9 +287,6 @@ io.on("connection", (socket) => {
             : populatedMessage.receiver?._id,
         ].filter(Boolean);
       }
-
-      console.log("🔍 Disapproval - Receivers:", actualReceiverIds);
-
       // 1. Broadcast to the assignment client room
       if (clientId) {
         socket
@@ -607,7 +298,6 @@ io.on("connection", (socket) => {
             },
             action: "disapproved",
           });
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
       }
 
       // 2. Notify the sender about disapproval
@@ -627,7 +317,6 @@ io.on("connection", (socket) => {
             action: "disapproved",
             timestamp: new Date(),
           });
-        console.log(`📍 Notified sender: employee_${senderId}`);
       }
 
       // 3. Notify all receivers about disapproval
@@ -643,7 +332,6 @@ io.on("connection", (socket) => {
               action: "disapproved",
               timestamp: new Date(),
             });
-          console.log(`📍 Notified receiver: employee_${receiverId}`);
         }
       });
 
@@ -672,8 +360,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
-      console.log("✅ Disapproval notification successfully broadcasted");
     } catch (error) {
       console.error("❌ Error broadcasting disapproval notification:", error);
       if (callback) {
@@ -689,14 +375,11 @@ io.on("connection", (socket) => {
   // Join team leads room
   socket.on("join_assignment_team_leads", () => {
     socket.join("assignment_team_leads");
-    console.log(`📍 ${socket.id} joined assignment team leads room`);
   });
 
   // Handle assignment message resubmission events - UPDATED FOR ARRAY RECEIVER
   socket.on("assignment_message_resubmitted", async (data, callback) => {
     try {
-      console.log("📤 Received assignment_message_resubmitted event:", data);
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -723,8 +406,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("📨 Broadcasting resubmitted assignment message...");
-
       // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
@@ -747,9 +428,6 @@ io.on("connection", (socket) => {
             : populatedMessage.receiver?._id,
         ].filter(Boolean);
       }
-
-      console.log("🔍 Resubmission - Receivers:", actualReceiverIds);
-
       // 1. Broadcast to the assignment client room
       if (clientId) {
         socket
@@ -761,7 +439,6 @@ io.on("connection", (socket) => {
             },
             action: "resubmitted",
           });
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
       }
 
       // 2. Notify team leads about the resubmission
@@ -804,7 +481,6 @@ io.on("connection", (socket) => {
               },
               action: "resubmitted",
             });
-          console.log(`📍 Notified receiver: employee_${receiverId}`);
         }
       });
 
@@ -822,7 +498,6 @@ io.on("connection", (socket) => {
         });
       }
 
-      console.log("✅ Resubmission notification successfully broadcasted");
     } catch (error) {
       console.error("❌ Error broadcasting resubmission notification:", error);
       if (callback) {
@@ -838,7 +513,6 @@ io.on("connection", (socket) => {
   // Handle assignment message sending - SEND ONLY TO SPECIFIC RECEIVER IDs
   socket.on("send_assignment_message", async (data, callback) => {
     try {
-      console.log("📤 Received send_assignment_message event:", data);
 
       const { message } = data;
 
@@ -864,10 +538,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log(
-        "🎯 Sending assignment message ONLY to specific receivers..."
-      );
-
       // Use the targeted emission function
       await emitToSpecificReceivers(
         io,
@@ -883,8 +553,6 @@ io.on("connection", (socket) => {
           deliveredTo: await getRecipientList(populatedMessage),
         });
       }
-
-      console.log("✅ Assignment message sent ONLY to specified receivers");
     } catch (error) {
       console.error("❌ Error sending assignment message:", error);
       if (callback) {
@@ -929,8 +597,6 @@ io.on("connection", (socket) => {
           ? message.sender
           : message.sender?._id;
 
-      console.log("🔍 Update - Receivers:", receiverIds, "Sender:", senderId);
-
       // Broadcast to client room
       if (clientId) {
         io.to(`assignment_client_${clientId}`).emit(
@@ -970,10 +636,6 @@ io.on("connection", (socket) => {
           action,
         });
       }
-
-      console.log(
-        `✅ Assignment message update broadcasted for action: ${action}`
-      );
     } catch (error) {
       console.error("❌ Error in assignment_message_updated:", error);
     }
@@ -989,32 +651,23 @@ io.on("connection", (socket) => {
 });
 
 io.on("connection", (socket) => {
-  console.log("🟢 Socket client connected:", socket.id);
-
   // Join room based on employee ID
   socket.on("join_employee", (employeeId) => {
     socket.join(`employee_${employeeId}`);
-    console.log(
-      `📍 Employee ${employeeId} joined room: employee_${employeeId}`
-    );
   });
 
   // Join room based on client ID
   socket.on("join_client", (clientId) => {
     socket.join(`client_${clientId}`);
-    console.log(`📍 Client ${clientId} joined room: client_${clientId}`);
   });
 
   // ========== ASSIGNMENT MESSAGES HANDLERS ==========
   socket.on("join_assignment_chat", (clientId) => {
     socket.join(`assignment_client_${clientId}`);
-    console.log(`📍 Joined assignment chat for client: ${clientId}`);
   });
 
   socket.on("send_assignment", async (data, callback) => {
     try {
-      console.log("📤 Received send_assignment_message event:", data);
-
       const { message, client, recipientIds, senderId } = data;
 
       if (!message) {
@@ -1038,8 +691,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("📨 Broadcasting assignment message to recipients...");
-
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1051,7 +702,6 @@ io.on("connection", (socket) => {
           "new_assignment_message",
           populatedMessage
         );
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
       }
 
       // 2. Broadcast to employee recipients from message data
@@ -1067,7 +717,6 @@ io.on("connection", (socket) => {
               "new_assignment_message",
               populatedMessage
             );
-            console.log(`📍 Sent assignment to employee_${receiverId}`);
           }
         });
       }
@@ -1079,9 +728,6 @@ io.on("connection", (socket) => {
             io.to(`employee_${employeeId}`).emit(
               "new_assignment_message",
               populatedMessage
-            );
-            console.log(
-              `📍 Sent assignment to employee_${employeeId} (additional)`
             );
           }
         });
@@ -1096,8 +742,6 @@ io.on("connection", (socket) => {
           message: "Assignment message delivered to all recipients",
         });
       }
-
-      console.log("✅ Assignment message successfully broadcasted");
     } catch (error) {
       console.error("❌ Error broadcasting assignment message:", error);
       if (callback) {
@@ -1118,13 +762,11 @@ io.on("connection", (socket) => {
   // Join manager room for assignments
   socket.on("join_assignment_managers", () => {
     socket.join("assignment_managers");
-    console.log(`📍 ${socket.id} joined assignment managers room`);
   });
 
   // Join team leads room for assignments
   socket.on("join_assignment_team_leads", () => {
     socket.join("assignment_team_leads");
-    console.log(`📍 ${socket.id} joined assignment team leads room`);
   });
 
   socket.on("disconnect", (reason) => {
@@ -1136,7 +778,6 @@ io.on("connection", (socket) => {
   });
 });
 io.on("connection", (socket) => {
-  console.log("🟢 New client connected:", socket.id);
 
   socket.on("join_user", (userId) => {
     if (!userId) {
@@ -1144,7 +785,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`user_${userId}`);
-    console.log(`👤 User ${userId} joined their personal room: user_${userId}`);
   });
 
   /** 🔹 Join conversation room */
@@ -1154,7 +794,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`conversation_${conversationId}`);
-    console.log(`💬 Joined conversation room: conversation_${conversationId}`);
   });
 
   /** 🔹 Join space room */
@@ -1164,13 +803,11 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`space_${spaceId}`);
-    console.log(`🏢 Joined space room: space_${spaceId}`);
   });
 
   /** 🔹 CRITICAL FIX: Use io.to() for broadcasting to ALL users in room */
   socket.on("send_message", async (data) => {
     try {
-      console.log("📨 Frontend send_message event received:", data);
       const { conversationId, message } = data;
 
       if (!conversationId || !message) {
@@ -1185,10 +822,6 @@ io.on("connection", (socket) => {
 
       // Also send to sender for confirmation
       socket.emit("message_sent", { success: true, message });
-
-      console.log(
-        `✅ Message broadcasted to ALL users in conversation: ${conversationId}`
-      );
     } catch (error) {
       console.error("❌ Error in send_message:", error);
       socket.emit("message_error", { error: "Failed to send message" });
@@ -1198,7 +831,6 @@ io.on("connection", (socket) => {
   /** 🔹 CRITICAL FIX: Use io.to() for space messages too */
   socket.on("send_space_message", async (data) => {
     try {
-      console.log("🏢 Frontend send_space_message event received:", data);
       const { spaceId, message } = data;
 
       if (!spaceId || !message) {
@@ -1214,9 +846,6 @@ io.on("connection", (socket) => {
       // Also send to sender for confirmation
       socket.emit("space_message_sent", { success: true, message });
 
-      console.log(
-        `✅ Space message broadcasted to ALL users in space: ${spaceId}`
-      );
     } catch (error) {
       console.error("❌ Error in send_space_message:", error);
       socket.emit("message_error", { error: "Failed to send space message" });
@@ -1235,7 +864,6 @@ io.on("connection", (socket) => {
       ? `space_${conversationId}`
       : `conversation_${conversationId}`;
     socket.to(room).emit("user_typing", { user, conversationId });
-    console.log(`✍️ ${user.name} is typing in ${room}`);
   });
 
   socket.on("user_stopped_typing", (data) => {
@@ -1252,7 +880,6 @@ io.on("connection", (socket) => {
       ? `space_${conversationId}`
       : `conversation_${conversationId}`;
     socket.to(room).emit("user_stopped_typing", { user, conversationId });
-    console.log(`⏹️ ${user.name} stopped typing in ${room}`);
   });
 
   /** 🔹 Read receipts */
@@ -1273,7 +900,6 @@ io.on("connection", (socket) => {
       messageIds,
       readAt: new Date(),
     });
-    console.log(`📖 Messages marked as read in ${room} by user ${userId}`);
   });
 
   /** 🔹 Handle disconnection */
@@ -1285,12 +911,168 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+// === Watch Employee collection for inserts ===
+Employee.watch().on("change", (change) => {
+  // 1) New document inserted
+  if (change.operationType === "insert") {
+    const emp = change.fullDocument;
+    io.emit("employee_added", {
+      message: `New employee added: ${emp.name}`,
+      createdAt: emp.createdAt,
+    });
+  }
 
+  // 2) Existing document updated
+  if (change.operationType === "update") {
+    const updatedFields = change.updateDescription.updatedFields;
+    // a) CNIC field was set or changed
+    if ("cnic" in updatedFields) {
+      const newCnic = updatedFields.cnic;
+      // You can fetch the full doc if you need other fields:
+      Employee.findById(change.documentKey._id)
+        .lean()
+        .then((emp) => {
+          io.emit("employee_cnic_updated", {
+            message: `CNIC for ${emp.name} updated to ${newCnic}`,
+            createdAt: new Date().toISOString(),
+          });
+        })
+        .catch(console.error);
+    }
+  }
+});
+
+// === MongoDB connection ===
+mongoose
+  .connect(process.env.MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => {
+    console.log("▶ MongoDB connected");
+    // Start IMAP watcher once DB is up
+    startWatcher();
+  })
+  .catch((err) => console.error("❌ MongoDB connection error:", err));
+
+// === Cron job: auto-fill yesterday’s attendance ===
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    try {
+      const config = await AttendanceConfig.findOne({}).lean();
+      if (config && config.markAbsentManually === true) {
+        return;
+      }
+      const holiday = await Attendance.findOne({ date, isHoliday: true });
+      if (holiday) {
+        return;
+      }
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const y = yesterday.getFullYear();
+      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
+      const d = String(yesterday.getDate()).padStart(2, "0");
+      const date = `${y}-${m}-${d}`;
+
+      // Identify who already has records
+      const done = await Attendance.find({ date }).select("employee").lean();
+      const doneIds = new Set(done.map((r) => r.employee.toString()));
+
+      // Get all employees, including their shifts
+      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
+
+      // Get all payroll periods
+      const allPayrolls = await PayrollPeriod.find({}).lean();
+
+      // Get day name (e.g., 'sunday') for yesterday
+      const dayName = yesterday
+        .toLocaleDateString("en-US", { weekday: "long" })
+        .toLowerCase();
+      const ops = [];
+
+      for (const e of allEmps) {
+        // Skip employees who already have attendance for the day
+        if (doneIds.has(e._id.toString())) continue;
+
+        // Find payroll period for any of employee's shifts (first match)
+        const payroll = allPayrolls.find(
+          (p) =>
+            Array.isArray(p.shifts) &&
+            e.shifts &&
+            e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
+        );
+
+        // If no payroll period or nonWorkingDays, mark absent as before
+        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
+          ops.push({
+            updateOne: {
+              filter: { employee: e._id, date },
+              update: {
+                $setOnInsert: {
+                  employee: e._id,
+                  date,
+                  owner: e.owner,
+                  status: "Absent",
+                  checkIn: null,
+                  checkOut: null,
+                  notes: null,
+                  markedByHR: false,
+                },
+              },
+              upsert: true,
+            },
+          });
+          continue;
+        }
+
+        // Check if yesterday is a non-working day for this payroll period
+        const nonWorking = payroll.nonWorkingDays.map((n) =>
+          String(n).toLowerCase().trim()
+        );
+        if (nonWorking.includes(dayName)) {
+          // It's a non-working day, skip marking absent
+          continue;
+        }
+
+        // Otherwise, mark absent as usual
+        ops.push({
+          updateOne: {
+            filter: { employee: e._id, date },
+            update: {
+              $setOnInsert: {
+                employee: e._id,
+                date,
+                owner: e.owner,
+                status: "Absent",
+                checkIn: null,
+                checkOut: null,
+                notes: null,
+                markedByHR: false,
+              },
+            },
+            upsert: true,
+          },
+        });
+      }
+
+      if (ops.length) {
+        const res = await Attendance.bulkWrite(ops);
+      } else {
+        console.log(
+          `[cron] All employees have attendance for ${date} or it's a non-working day.`
+        );
+      }
+    } catch (err) {
+      console.error("[cron] Error auto-filling attendance:", err);
+    }
+  },
+  { timezone: "UTC" }
+);
 cron.schedule(
   "* * * * *", // Every minute
   async () => {
     try {
-      console.log("[cron] Checking for scheduled messages to send...");
       const results = await assignmentMessageController.sendScheduledMessages(
         io
       );
@@ -1309,7 +1091,8 @@ cron.schedule(
   },
   { timezone: "UTC" }
 );
-// ---------- Optional root route ----------
-app.get("/", (_req, res) => {
-  res.send("OK");
+// === Start the server (with Socket-IO) ===
+const PORT = process.env.PORT || 4000;
+server.listen(PORT, () => {
+  console.log(`▶ API + Socket.IO listening on port ${PORT}`);
 });
