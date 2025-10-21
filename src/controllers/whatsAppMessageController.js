@@ -40,6 +40,7 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
+
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -164,6 +165,17 @@ function validateScheduleTime(scheduledFor) {
   }
 
   return { valid: true, scheduleTime };
+}
+
+// Add file type detection helper function
+function getFileType(mimetype) {
+  if (mimetype.startsWith("audio/")) return "audio";
+  if (mimetype.startsWith("image/")) return "image";
+  if (mimetype.startsWith("video/")) return "video";
+  if (mimetype === "application/pdf") return "pdf";
+  if (mimetype.includes("spreadsheet") || mimetype.includes("excel"))
+    return "spreadsheet";
+  return "document";
 }
 
 // GET SCHEDULED MESSAGES FOR SPECIFIC CLIENT
@@ -494,6 +506,7 @@ exports.createMessage = async function createMessage(req, res) {
       note,
       isScheduled: isScheduledBody,
       scheduledFor,
+      attachments: existingAttachments = [], // FIXED: Define existingAttachments with default value
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -623,6 +636,7 @@ exports.createMessage = async function createMessage(req, res) {
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
+      attachments: existingAttachments, // FIXED: Use the defined variable
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
@@ -663,6 +677,7 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
+
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {
@@ -1021,6 +1036,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
+
 // PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
@@ -1149,6 +1165,74 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 
+// PATCH /api/assignment-messages/:id/edit
+exports.editMessage = async function editMessage(req, res) {
+  try {
+    const { id } = req.params;
+    const { subject, note, receiver, receivers } = req.body;
+
+    const msg = await WhatsAppMessage.findById(id);
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // Only sender or manager can edit
+    const currentUserId = String(req.employee._id);
+    if (String(msg.sender) !== currentUserId) {
+      return res
+        .status(403)
+        .json({ error: "You can only edit your own messages" });
+    }
+
+    // Update editable fields
+    if (typeof subject === "string") msg.subject = subject;
+    if (typeof note === "string") msg.note = note;
+
+    // Update receivers if provided
+    let newReceivers = [];
+    if (receiver) newReceivers = newReceivers.concat(normalizeIds(receiver));
+    if (receivers) newReceivers = newReceivers.concat(normalizeIds(receivers));
+
+    if (newReceivers.length > 0) {
+      msg.receiver = Array.from(new Set(newReceivers));
+    }
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "scheduledBy", select: "_id name companyEmail" },
+    ]);
+
+    // Notify through Socket.IO if available
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+
+      io.to(`employee_${msg.sender}`).emit("new_message", {
+        message: populated,
+        type: "message_edited",
+      });
+
+      msg.receiver.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: populated,
+          type: "message_edited",
+        });
+      });
+    }
+
+    res.json({
+      message: "Message updated successfully",
+      data: populated,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Failed to edit message" });
+  }
+};
+
 // PATCH /api/assignment-messages/:id
 exports.updateMessage = async function updateMessage(req, res) {
   try {
@@ -1243,6 +1327,7 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
       url: buildPublicUrl(req, f.filename),
       uploadedAt: new Date(),
       uploadedBy: req.employee?._id || undefined,
+      fileType: getFileType(f.mimetype), // Add file type detection
     }));
 
     msg.attachments.push(...files);
@@ -1275,7 +1360,8 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
   } catch (e) {
     console.error(e);
     res.status(500).json({
-      error: "Attachment upload failed (only PDF/XLS/XLSX; up to 20MB each)",
+      error:
+        "Attachment upload failed (only PDF/XLS/XLSX/AUDIO; up to 20MB each)",
     });
   }
 };

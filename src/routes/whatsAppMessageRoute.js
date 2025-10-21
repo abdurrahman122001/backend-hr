@@ -40,6 +40,7 @@ router.post("/:id/reschedule", ctrl.rescheduleMessage);
 // Individual message CRUD
 router.get("/:id", ctrl.getMessage);
 router.patch("/:id", ctrl.updateMessage);
+router.patch("/:id/edit", ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 
 module.exports = router;
