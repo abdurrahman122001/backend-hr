@@ -796,6 +796,214 @@ exports.listMessagesForManager = async function listMessagesForManager(
   }
 };
 
+// exports.createMessage = async function createMessage(req, res) {
+//   try {
+//     const {
+//       owner: ownerBody,
+//       client, // This is now optional
+//       sender: senderBody,
+//       receiver: receiverBody,
+//       receivers: receiversBody,
+//       subject,
+//       note,
+//       isScheduled: isScheduledBody,
+//       scheduledFor,
+//       replyTo,
+//       isForward = false,
+//       threadId: providedThreadId,
+//     } = req.body;
+
+//     const owner = ownerBody || req.employee?.owner;
+//     const sender = senderBody || req.employee?._id;
+
+//     // Remove client validation - it's now optional
+//     if (!isObjId(owner) || !isObjId(sender)) {
+//       return res.status(400).json({
+//         error: "owner and sender are required (ObjectId strings)",
+//       });
+//     }
+
+//     // Handle thread ID generation for direct messages (no client)
+//     let threadId = providedThreadId;
+//     let originalMessage = null;
+
+//     if (replyTo) {
+//       originalMessage = await AssignmentMessage.findById(replyTo);
+//     }
+
+//     if (originalMessage) {
+//       threadId = getThreadIdForReply(originalMessage, subject, isForward);
+//     } else if (!threadId) {
+//       // For direct messages without client, generate a different thread ID
+//       if (client) {
+//         threadId = generateThreadId(client, subject);
+//       } else {
+//         // Direct message thread ID based on participants and subject
+//         const participants = [
+//           sender,
+//           ...normalizeIds(receiverBody),
+//           ...normalizeIds(receiversBody),
+//         ]
+//           .filter((id) => id !== String(sender))
+//           .sort()
+//           .join("_");
+//         threadId = `direct_${participants}_${
+//           subject ? subject.toLowerCase().replace(/[^a-z0-9]/g, "_") : "message"
+//         }_${Date.now()}`;
+//       }
+//     }
+
+//     // Rest of your existing receiver logic...
+//     let receivers = [];
+//     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+//     if (receiversBody)
+//       receivers = receivers.concat(normalizeIds(receiversBody));
+
+//     receivers = receivers.filter((id) => id !== String(sender));
+
+//     const senderDoc = await Employee.findById(sender)
+//       .select("_id role supervisor supervisionMode owner")
+//       .lean();
+//     const senderRole = normalizeRole(senderDoc?.role || "");
+
+//     let approvalStatus;
+//     const supervisionMode = String(
+//       senderDoc?.supervisionMode || ""
+//     ).toLowerCase();
+//     const needsApproval = supervisionMode === "needs_approval";
+//     const isDirect = supervisionMode === "direct";
+
+//     // Only handle client assignment if client is provided
+//     if (client && isObjId(client)) {
+//       const Client = require("../models/ClientInfo");
+//       const clientDoc = await Client.findById(client)
+//         .populate("assignedTo", "_id role")
+//         .lean();
+
+//       // Include assignedTo employee if present
+//       if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+//         const assignedEmployeeId = String(clientDoc.assignedTo._id);
+//         if (
+//           !receivers.includes(assignedEmployeeId) &&
+//           assignedEmployeeId !== String(sender)
+//         ) {
+//           receivers.push(assignedEmployeeId);
+//         }
+//       }
+//     }
+
+//     // Your existing approval logic...
+//     const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+//     if (senderRole === "manager") {
+//       approvalStatus = null;
+//     } else if (senderRole === "team_lead") {
+//       approvalStatus = null;
+//     } else if (needsApproval) {
+//       approvalStatus = "pending";
+//       receivers = [...receivers, ...tls.map((id) => String(id))];
+//     } else if (isDirect) {
+//       approvalStatus = "approved";
+//     }
+
+//     // Fallback logic if no receivers
+//     if (receivers.length === 0) {
+//       if (senderRole === "employee") {
+//         if (isDirect) {
+//           receivers = [...managers];
+//           approvalStatus = "approved";
+//         } else {
+//           receivers = [...tls];
+//           approvalStatus = "pending";
+//         }
+//       } else if (senderRole === "team_lead") {
+//         receivers = [...managers];
+//         approvalStatus = null;
+//       } else if (senderRole === "manager") {
+//         receivers = [...tls];
+//         approvalStatus = null;
+//       }
+//     }
+
+//     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+//       (id) => id !== String(sender)
+//     );
+
+//     if (receivers.length === 0) {
+//       return res.status(400).json({ error: "No valid receivers found" });
+//     }
+
+//     // Scheduling logic (same as before)
+//     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
+//     let status = "sent";
+//     let scheduledAt = null;
+//     let scheduledBy = null;
+//     let sentAt = new Date();
+
+//     if (isScheduled) {
+//       const validation = validateScheduleTime(scheduledFor);
+//       if (!validation.valid) {
+//         return res.status(400).json({ error: validation.error });
+//       }
+
+//       status = "scheduled";
+//       scheduledAt = new Date();
+//       scheduledBy = sender;
+//       sentAt = null;
+//     }
+
+//     // Build message data - client is optional
+//     const msgData = {
+//       owner,
+//       sender,
+//       receiver: receivers,
+//       subject: subject || "",
+//       note: note || "",
+//       approvalStatus: approvalStatus,
+//       isScheduled,
+//       status,
+//       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
+//       scheduledAt,
+//       scheduledBy,
+//       sentAt: !isScheduled ? new Date() : undefined,
+//       threadId,
+//       replyTo: replyTo || undefined,
+//     };
+
+//     // Only include client if provided
+//     if (client && isObjId(client)) {
+//       msgData.client = client;
+//     }
+
+//     const msg = await AssignmentMessage.create(msgData);
+
+//     const populated = await msg.populate([
+//       { path: "owner", select: "_id name companyEmail" },
+//       { path: "sender", select: "_id name companyEmail role" },
+//       { path: "receiver", select: "_id name companyEmail role" },
+//       { path: "client", select: "_id clientName assignedTo" },
+//       { path: "scheduledBy", select: "_id name companyEmail" },
+//     ]);
+
+//     // EMIT REAL-TIME EVENT
+//     const io = getIO(req);
+//     if (io) {
+//       await emitToAssignmentClients(io, msg, "new_assignment_message");
+//     }
+
+//     res.status(201).json(populated);
+//   } catch (e) {
+//     console.error("Error in createMessage:", e);
+//     if (e.name === "ValidationError") {
+//       return res.status(400).json({
+//         error: "Validation failed",
+//         details: Object.values(e.errors).map((err) => err.message),
+//       });
+//     }
+//     res.status(500).json({ error: "Failed to create assignment message" });
+//   }
+// };
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -853,13 +1061,31 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // Rest of your existing receiver logic...
+    // 🔥 SIMPLE FIX: For thread replies, automatically include original receivers
     let receivers = [];
-    if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-    if (receiversBody)
-      receivers = receivers.concat(normalizeIds(receiversBody));
 
-    receivers = receivers.filter((id) => id !== String(sender));
+    if (replyTo && originalMessage) {
+      // For replies in threads, automatically include original receivers
+      if (Array.isArray(originalMessage.receiver)) {
+        receivers = originalMessage.receiver.map(id => 
+          typeof id === 'object' ? String(id._id) : String(id)
+        );
+      } else if (originalMessage.receiver) {
+        receivers = [
+          typeof originalMessage.receiver === 'object' 
+            ? String(originalMessage.receiver._id) 
+            : String(originalMessage.receiver)
+        ];
+      }
+      
+      // Remove sender from receivers if present
+      receivers = receivers.filter((id) => id !== String(sender));
+    } else {
+      // For new messages (not replies), use the provided receivers
+      if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+      if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+      receivers = receivers.filter((id) => id !== String(sender));
+    }
 
     const senderDoc = await Employee.findById(sender)
       .select("_id role supervisor supervisionMode owner")
