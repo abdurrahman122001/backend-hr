@@ -24,9 +24,9 @@ const AssignmentMessageSchema = new Schema(
     client: {
       type: Schema.Types.ObjectId,
       ref: "ClientInfo",
-      required: false, // Changed from true to false
+      required: false,
     },
-    // Thread identification - FIXED: Make it not required initially
+    // Thread identification
     threadId: {
       type: String,
       index: true,
@@ -86,6 +86,10 @@ const AssignmentMessageSchema = new Schema(
       ref: "AssignmentMessage",
       default: null,
     },
+
+    // NEW: Add HR policy flag
+    isHrPolicy: { type: Boolean, default: false },
+    isSystemMessage: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -97,7 +101,7 @@ AssignmentMessageSchema.index({ sender: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ receiver: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ status: 1, scheduledFor: 1 });
 AssignmentMessageSchema.index({ isScheduled: 1, scheduledFor: 1 });
-AssignmentMessageSchema.index({ threadId: 1, createdAt: -1 }); // Add threadId index
+AssignmentMessageSchema.index({ threadId: 1, createdAt: -1 });
 AssignmentMessageSchema.index({
   client: 1,
   sender: 1,
@@ -105,16 +109,57 @@ AssignmentMessageSchema.index({
   createdAt: -1,
 });
 
-// Add pre-save middleware to ensure threadId is always set
+// 🔥 FIXED: Pre-save middleware with proper threadId generation for both client-based and direct messages
 AssignmentMessageSchema.pre("save", function (next) {
+  // Only generate threadId if not already set
   if (!this.threadId) {
-    // Generate a threadId if not provided
-    const clientId = this.client.toString();
-    const subject = this.subject || "no_subject";
-    this.threadId = `thread_${clientId}_${subject
-      .toLowerCase()
-      .replace(/[^a-z0-9]/g, "_")}_${Date.now()}`;
+    let threadId;
+    
+    if (this.client) {
+      // Client-based message: use client + subject
+      const clientId = this.client.toString();
+      const subject = this.subject || "no_subject";
+      const normalizedSubject = subject
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "_")
+        .substring(0, 50);
+      threadId = `thread_${clientId}_${normalizedSubject}_${Date.now()}`;
+    } else {
+      // Direct message (no client): use participants + subject
+      const participants = [
+        this.sender.toString(),
+        ...this.receiver.map(r => r.toString())
+      ]
+        .sort()
+        .join('_')
+        .substring(0, 100); // Limit length
+      
+      const subject = this.subject || "direct_message";
+      const normalizedSubject = subject
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, "_")
+        .substring(0, 50);
+      
+      threadId = `direct_${participants}_${normalizedSubject}_${Date.now()}`;
+    }
+    
+    this.threadId = threadId;
   }
+  next();
+});
+
+// 🔥 NEW: Add validation to ensure receiver is always an array with at least one element
+AssignmentMessageSchema.pre("save", function (next) {
+  if (!this.receiver || this.receiver.length === 0) {
+    const error = new Error("At least one receiver is required");
+    return next(error);
+  }
+  
+  // Ensure receiver is always treated as an array
+  if (!Array.isArray(this.receiver)) {
+    this.receiver = [this.receiver];
+  }
+  
   next();
 });
 

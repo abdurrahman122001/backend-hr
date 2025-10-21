@@ -76,22 +76,12 @@ function getThreadIdForReply(originalMessage, newSubject, isForward = false) {
   const cleanNew = normalizedNew.replace(/^(re:|fwd:|fw:)\s*/i, "");
   const cleanOriginal = normalizedOriginal.replace(/^(re:|fwd:|fw:)\s*/i, "");
 
-  console.log(`🔍 Thread ID comparison:`, {
-    originalSubject,
-    newSubject,
-    cleanOriginal,
-    cleanNew,
-    isSame: cleanNew === cleanOriginal,
-  });
-
   // 🔥 CRITICAL FIX: If the core subject is the same, use the same thread
   if (cleanNew === cleanOriginal) {
-    console.log(`✅ Using same thread for subject: "${cleanOriginal}"`);
     return originalMessage.threadId;
   }
 
   // Otherwise, create new thread
-  console.log(`🆕 Creating new thread for different subject`);
   const clientId =
     typeof originalMessage.client === "string"
       ? originalMessage.client
@@ -142,7 +132,6 @@ async function applyVisibility(q, req) {
     // Remove any approvalStatus filter that might exclude pending messages
     if (teamLeadQuery.approvalStatus === "pending") {
       // Keep the pending filter if explicitly requested
-      console.log("👀 Team lead viewing pending messages");
     } else if (q.approvalStatus !== "pending") {
       // Don't exclude pending messages for team leads in normal views
       delete teamLeadQuery.approvalStatus;
@@ -345,11 +334,6 @@ async function emitToSpecificReceivers(
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
       }
     });
-
-    console.log(
-      `📤 Emitted message to ${allRecipients.length} recipients:`,
-      allRecipients
-    );
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
     throw error;
@@ -520,6 +504,200 @@ exports.getScheduledMessagesForClient =
     }
   };
 
+// exports.listMessages = async function listMessages(req, res) {
+//   try {
+//     const {
+//       client,
+//       sender,
+//       receiver,
+//       participant,
+//       owner,
+//       status,
+//       isScheduled,
+//       scheduledBefore,
+//       scheduledAfter,
+//       limit = 50,
+//       page = 1,
+//       between: betweenRaw,
+//       filter,
+//       isTrashed,
+//       isSpam,
+//       approvalStatus,
+//       includeDirectMessages = "true", // New parameter to include direct messages
+//     } = req.query;
+
+//     const q = {};
+
+//     // Owner scope
+//     if (isObjId(owner)) q.owner = owner;
+//     else if (req.employee?.owner) q.owner = req.employee.owner;
+
+//     // ✅ UPDATED: Client scope - handle both client-based and direct messages
+//     if (isObjId(client)) {
+//       q.client = client;
+//     } else if (client === "none" || client === "direct") {
+//       // Explicitly request direct messages (no client)
+//       q.client = { $exists: false };
+//     } else if (!client) {
+//       // Default behavior: include both client-based and direct messages
+//       // No client filter applied - will return all messages user has access to
+//     }
+
+//     // ✅ FIXED: Better status handling
+//     if (
+//       status &&
+//       ["draft", "scheduled", "sent", "cancelled"].includes(status)
+//     ) {
+//       q.status = status;
+//       // Don't automatically set isScheduled for drafts
+//       if (status === "scheduled") {
+//         q.isScheduled = true;
+//       }
+//     } else {
+//       // ✅ FIXED: Default: exclude drafts but include sent and scheduled
+//       q.status = { $in: ["sent", "scheduled"] };
+//     }
+
+//     // 🔥 CRITICAL FIX: Simplified trash/spam logic
+//     if (isTrashed === "true" || isTrashed === true) {
+//       q.isTrashed = true;
+//     } else if (isSpam === "true" || isSpam === true) {
+//       q.isSpam = true;
+//     } else {
+//       q.isTrashed = { $ne: true };
+//       q.isSpam = { $ne: true };
+//     }
+
+//     // For normal inbox view, exclude messages pending review
+//     if (filter !== "review" && approvalStatus !== "pending") {
+//       q.approvalStatus = { $ne: "pending" };
+//     } else if (approvalStatus === "pending") {
+//       q.approvalStatus = "pending";
+//     }
+
+//     // Scheduled filter
+//     if (filter === "scheduled" || isScheduled === "true") {
+//       q.isScheduled = true;
+//       q.status = "scheduled";
+//     } else if (isScheduled === "false") {
+//       q.isScheduled = false;
+//     }
+
+//     // Time filters
+//     const timeFilters = {};
+//     if (scheduledBefore) {
+//       const d = new Date(scheduledBefore);
+//       if (!isNaN(d)) timeFilters.$lte = d;
+//     }
+//     if (scheduledAfter) {
+//       const d = new Date(scheduledAfter);
+//       if (!isNaN(d)) timeFilters.$gte = d;
+//     }
+//     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
+
+//     // User-based filtering - FIXED VERSION
+//     const currentUserRole = normalizeRole(req.employee?.role || "");
+//     const isTeamLead = currentUserRole === "team_lead";
+//     const me = oid(String(req.employee._id));
+//     const between = normalizeIds(betweenRaw);
+
+//     if (between.length === 2) {
+//       const [a, b] = between;
+//       q.$or = [
+//         { sender: a, receiver: { $in: [b] } },
+//         { sender: b, receiver: { $in: [a] } },
+//         { sender: a, receiver: b },
+//         { sender: b, receiver: a },
+//       ];
+//     } else if (isObjId(participant)) {
+//       q.$or = [
+//         { sender: participant },
+//         { receiver: participant },
+//         { receiver: { $in: [participant] } },
+//       ];
+//     } else {
+//       if (isObjId(sender)) q.sender = sender;
+//       if (isObjId(receiver)) {
+//         q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
+//       }
+//     }
+
+//     // ✅ FIXED: Apply visibility rules BEFORE adding user-based filters
+//     // This ensures the visibility query is built correctly
+//     const qFinal = await applyVisibility(q, req);
+
+//     // ✅ UPDATED: Better validation that considers both client-based and direct messages
+//     const hasExplicitFilter =
+//       q.owner ||
+//       q.client !== undefined || // Changed to check for undefined (includes $exists: false)
+//       q.sender ||
+//       q.receiver ||
+//       q.$or ||
+//       q.status ||
+//       q.isScheduled !== undefined ||
+//       q.approvalStatus ||
+//       q.isTrashed !== undefined ||
+//       q.isSpam !== undefined;
+
+//     if (!hasExplicitFilter) {
+//       return res.status(400).json({
+//         error:
+//           "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, or isScheduled",
+//       });
+//     }
+
+//     // Pagination & fetch
+//     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+//     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
+//     const [items, total] = await Promise.all([
+//       AssignmentMessage.find(qFinal)
+//         .sort({ createdAt: -1 })
+//         .skip((pageNum - 1) * lim)
+//         .limit(lim)
+//         .populate([
+//           { path: "owner", select: "_id name companyEmail" },
+//           { path: "sender", select: "_id name companyEmail role" },
+//           { path: "receiver", select: "_id name companyEmail role" },
+//           { path: "client", select: "_id clientName" },
+//           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+//           { path: "scheduledBy", select: "_id name companyEmail" },
+//           { path: "trashedBy", select: "_id name companyEmail" },
+//           { path: "spamReportedBy", select: "_id name companyEmail" },
+//         ])
+//         .lean(),
+//       AssignmentMessage.countDocuments(qFinal),
+//     ]);
+
+//     // Ensure receiver is always treated as array for consistency
+//     const normalizedItems = items.map((item) => ({
+//       ...item,
+//       receiver: Array.isArray(item.receiver)
+//         ? item.receiver
+//         : [item.receiver].filter(Boolean),
+//       // Add a flag to identify direct messages
+//       isDirectMessage: !item.client,
+//     }));
+
+//     res.json({
+//       items: normalizedItems,
+//       total,
+//       page: pageNum,
+//       pages: Math.ceil(total / lim),
+//       limit: lim,
+//       userRole: currentUserRole,
+//       isTeamLead: isTeamLead,
+//       // Add metadata about message types
+//       messageTypes: {
+//         clientBased: items.filter((item) => item.client).length,
+//         directMessages: items.filter((item) => !item.client).length,
+//       },
+//     });
+//   } catch (e) {
+//     console.error("❌ Error in listMessages:", e);
+//     res.status(500).json({ error: "Failed to fetch assignment messages" });
+//   }
+// };
 exports.listMessages = async function listMessages(req, res) {
   try {
     const {
@@ -539,7 +717,8 @@ exports.listMessages = async function listMessages(req, res) {
       isTrashed,
       isSpam,
       approvalStatus,
-      includeDirectMessages = "true", // New parameter to include direct messages
+      includeDirectMessages = "true",
+      excludeHrPolicy = "false", // NEW: Option to exclude HR policy messages
     } = req.query;
 
     const q = {};
@@ -589,6 +768,13 @@ exports.listMessages = async function listMessages(req, res) {
       q.approvalStatus = { $ne: "pending" };
     } else if (approvalStatus === "pending") {
       q.approvalStatus = "pending";
+    }
+
+    // NEW: HR Policy exclusion - only exclude if explicitly requested
+    const shouldExcludeHrPolicy =
+      excludeHrPolicy === "true" || excludeHrPolicy === true;
+    if (shouldExcludeHrPolicy) {
+      q.isHrPolicy = { $ne: true };
     }
 
     // Scheduled filter
@@ -653,12 +839,13 @@ exports.listMessages = async function listMessages(req, res) {
       q.isScheduled !== undefined ||
       q.approvalStatus ||
       q.isTrashed !== undefined ||
-      q.isSpam !== undefined;
+      q.isSpam !== undefined ||
+      q.isHrPolicy !== undefined; // NEW: Include HR policy filter
 
     if (!hasExplicitFilter) {
       return res.status(400).json({
         error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, or isScheduled",
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, isScheduled, or excludeHrPolicy",
       });
     }
 
@@ -666,6 +853,7 @@ exports.listMessages = async function listMessages(req, res) {
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
+    // Get regular messages first
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
@@ -685,8 +873,80 @@ exports.listMessages = async function listMessages(req, res) {
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
+    // 🔥 NEW: AUTOMATICALLY ADD HR POLICY AS FIRST MESSAGE
+    let finalItems = [...items];
+    let hrPolicyMessage = null;
+
+    // Only add HR policy for first page and if not explicitly excluded
+    if (pageNum === 1 && !shouldExcludeHrPolicy && !isTrashed && !isSpam) {
+      try {
+        const HrPolicy = require("../models/HrPolicy");
+
+        // Get HR policy for current employee's owner
+        const hrPolicy = await HrPolicy.findOne({
+          owner: req.employee?.owner,
+        }).lean();
+
+        if (hrPolicy) {
+          // Check if user has already received HR policy message
+          const existingHrMessage = await AssignmentMessage.findOne({
+            owner: req.employee?.owner,
+            $or: [
+              { receiver: req.employee?._id },
+              { receiver: { $in: [req.employee?._id] } },
+            ],
+            $or: [
+              { isHrPolicy: true },
+              { subject: { $regex: "HR Policy", $options: "i" } },
+            ],
+          }).lean();
+
+          if (!existingHrMessage) {
+            // Create virtual HR policy message (not saved to database)
+            hrPolicyMessage = {
+              _id: `hr_policy_${req.employee?.owner}`,
+              owner: req.employee?.owner,
+              sender: {
+                _id: "system",
+                name: "HR System",
+                companyEmail: "mavensadvisor@virsme.com",
+                role: "system",
+              },
+              receiver: [
+                {
+                  _id: req.employee?._id,
+                  name: req.employee?.name,
+                  companyEmail: req.employee?.companyEmail,
+                  role: req.employee?.role,
+                },
+              ],
+              subject: `HR Policy: ${hrPolicy.title}`,
+              note: hrPolicy.content,
+              status: "sent",
+              isHrPolicy: true,
+              approvalStatus: "approved",
+              isSystemMessage: true, // Flag to identify system-generated messages
+              createdAt: hrPolicy.createdAt || new Date(),
+              updatedAt: hrPolicy.updatedAt || new Date(),
+              // Virtual flags
+              isVirtual: true,
+              isDirectMessage: true,
+            };
+
+            // Add HR policy as first message
+            finalItems = [hrPolicyMessage, ...items];
+          } else {
+          }
+        }
+      } catch (hrError) {
+        console.error("❌ Error processing HR policy:", hrError);
+        // Don't fail the entire request if HR policy fails
+        finalItems = items;
+      }
+    }
+
     // Ensure receiver is always treated as array for consistency
-    const normalizedItems = items.map((item) => ({
+    const normalizedItems = finalItems.map((item) => ({
       ...item,
       receiver: Array.isArray(item.receiver)
         ? item.receiver
@@ -695,9 +955,18 @@ exports.listMessages = async function listMessages(req, res) {
       isDirectMessage: !item.client,
     }));
 
+    // Calculate message types including HR policy
+    const clientBasedCount = finalItems.filter(
+      (item) => item.client && !item.isVirtual
+    ).length;
+    const directMessagesCount = finalItems.filter(
+      (item) => !item.client && !item.isVirtual
+    ).length;
+    const hrPolicyCount = finalItems.filter((item) => item.isHrPolicy).length;
+
     res.json({
       items: normalizedItems,
-      total,
+      total: hrPolicyMessage ? total + 1 : total, // Adjust total if HR policy was added
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
@@ -705,16 +974,24 @@ exports.listMessages = async function listMessages(req, res) {
       isTeamLead: isTeamLead,
       // Add metadata about message types
       messageTypes: {
-        clientBased: items.filter((item) => item.client).length,
-        directMessages: items.filter((item) => !item.client).length,
+        clientBased: clientBasedCount,
+        directMessages: directMessagesCount,
+        hrPolicy: hrPolicyCount,
+        totalMessages: finalItems.length,
       },
+      // Add info about HR policy
+      hrPolicy: hrPolicyMessage
+        ? {
+            included: true,
+            title: hrPolicyMessage.subject.replace("HR Policy: ", ""),
+          }
+        : { included: false },
     });
   } catch (e) {
     console.error("❌ Error in listMessages:", e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -885,7 +1162,6 @@ exports.createMessage = async function createMessage(req, res) {
     } else {
       // Direct messages (no client) - always approved
       approvalStatus = "approved";
-      console.log("💬 Direct message - auto-approved");
     }
 
     // Only handle client assignment if client is provided
@@ -927,20 +1203,10 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔥 CRITICAL FIX: COMPLETELY REMOVED THE AUTO-MANAGER ASSIGNMENT FALLBACK
     // Instead, use intelligent fallback based on context
     if (receivers.length === 0) {
-      console.log("⚠️ No receivers specified, checking context...", {
-        senderRole,
-        hasClient: !!client,
-        isDirectMessage: !client,
-        replyTo: !!replyTo,
-        threadId: !!threadId
-      });
-
       // For replies in existing threads, try to maintain the conversation participants
       if (replyTo || providedThreadId) {
-        console.log("🔄 Reply scenario - finding thread participants");
-        
         let threadParticipants = new Set();
-        
+
         // Try to find participants from the original message if it's a reply
         if (replyTo && originalMessage) {
           // Add original sender (if not current sender)
@@ -948,10 +1214,10 @@ exports.createMessage = async function createMessage(req, res) {
           if (originalSender !== String(sender)) {
             threadParticipants.add(originalSender);
           }
-          
+
           // Add original receivers (if not current sender)
           if (Array.isArray(originalMessage.receiver)) {
-            originalMessage.receiver.forEach(receiverId => {
+            originalMessage.receiver.forEach((receiverId) => {
               const receiverStr = String(receiverId);
               if (receiverStr !== String(sender)) {
                 threadParticipants.add(receiverStr);
@@ -959,23 +1225,23 @@ exports.createMessage = async function createMessage(req, res) {
             });
           }
         }
-        
+
         // If we have a threadId but no replyTo, try to find other messages in the thread
         if (threadParticipants.size === 0 && providedThreadId) {
           const threadMessages = await AssignmentMessage.find({
-            threadId: providedThreadId
+            threadId: providedThreadId,
           }).limit(10);
-          
-          threadMessages.forEach(msg => {
+
+          threadMessages.forEach((msg) => {
             // Add sender if not current user
             const msgSender = String(msg.sender);
             if (msgSender !== String(sender)) {
               threadParticipants.add(msgSender);
             }
-            
+
             // Add receivers if not current user
             if (Array.isArray(msg.receiver)) {
-              msg.receiver.forEach(receiverId => {
+              msg.receiver.forEach((receiverId) => {
                 const receiverStr = String(receiverId);
                 if (receiverStr !== String(sender)) {
                   threadParticipants.add(receiverStr);
@@ -984,96 +1250,74 @@ exports.createMessage = async function createMessage(req, res) {
             }
           });
         }
-        
+
         // If we found participants from the thread, use them
         if (threadParticipants.size > 0) {
           receivers = Array.from(threadParticipants);
-          console.log("✅ Using thread participants:", receivers);
         }
       }
-      
+
       // If STILL no receivers after checking thread context
       if (receivers.length === 0) {
-        console.log("❌ Still no receivers after thread check");
-        
         // 🔥 CRITICAL: For direct messages (no client) - NEVER auto-assign to managers!
         if (!client) {
-          console.log("💬 Direct message - cannot auto-assign receivers");
-          return res.status(400).json({ 
-            error: "For direct messages, you must specify at least one receiver" 
+          return res.status(400).json({
+            error:
+              "For direct messages, you must specify at least one receiver",
           });
         }
-        
+
         // Only for client-based messages with no specified receivers
         if (senderRole === "employee") {
           if (needsApproval) {
             // Send to team leads for approval (this is expected behavior)
             receivers = [...tls];
             approvalStatus = "pending";
-            console.log("👨‍💼 Employee needs approval - sending to team leads for review");
           } else {
-            // For direct-send employees with client, they should specify receivers
-            console.log("❌ Employee with direct send must specify receivers");
-            return res.status(400).json({ 
-              error: "Please specify at least one receiver for your message" 
+            return res.status(400).json({
+              error: "Please specify at least one receiver for your message",
             });
           }
         } else {
-          // Team leads and managers must specify receivers explicitly
-          console.log("❌ Team lead/manager must specify receivers");
-          return res.status(400).json({ 
-            error: "Please specify at least one receiver for your message" 
+          return res.status(400).json({
+            error: "Please specify at least one receiver for your message",
           });
         }
       }
     }
-
-    // Remove duplicates and ensure sender is not in receivers
     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
       (id) => id !== String(sender)
     );
 
     // Final validation
     if (receivers.length === 0) {
-      console.log("❌ CRITICAL: No valid receivers after all processing");
-      return res.status(400).json({ 
-        error: "No valid receivers found. Please specify at least one recipient." 
+      return res.status(400).json({
+        error:
+          "No valid receivers found. Please specify at least one recipient.",
       });
     }
 
     // 🔥 DEBUG: Check if managers are being incorrectly added
-    const { managers: currentManagers } = await findTLsAndManagersByOwner(owner);
-    const managerIds = currentManagers.map(id => String(id));
-    const hasManagers = receivers.some(receiver => managerIds.includes(String(receiver)));
+    const { managers: currentManagers } = await findTLsAndManagersByOwner(
+      owner
+    );
+    const managerIds = currentManagers.map((id) => String(id));
+    const hasManagers = receivers.some((receiver) =>
+      managerIds.includes(String(receiver))
+    );
 
     if (hasManagers && !client) {
-      console.log("🚨 WARNING: Direct message has managers in receivers!", {
-        receivers,
-        managers: managerIds,
-        isDirectMessage: true
-      });
       // Filter out managers from direct messages
-      receivers = receivers.filter(receiver => !managerIds.includes(String(receiver)));
-      console.log("✅ Filtered receivers after removing managers:", receivers);
-      
+      receivers = receivers.filter(
+        (receiver) => !managerIds.includes(String(receiver))
+      );
       if (receivers.length === 0) {
-        return res.status(400).json({ 
-          error: "Cannot send direct message to managers only. Please specify other recipients." 
+        return res.status(400).json({
+          error:
+            "Cannot send direct message to managers only. Please specify other recipients.",
         });
       }
     }
-
-    console.log("🎯 FINAL MESSAGE DETAILS:", {
-      sender: sender,
-      senderRole: senderRole,
-      receivers: receivers,
-      client: client || "DIRECT_MESSAGE",
-      approvalStatus: approvalStatus,
-      threadId: threadId,
-      replyTo: replyTo,
-      isDirectMessage: !client,
-      hasManagersInReceivers: hasManagers
-    });
 
     // Scheduling logic (same as before)
     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
@@ -1699,38 +1943,38 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 
-// PATCH /api/assignment-messages/:id
-exports.updateMessage = async function updateMessage(req, res) {
-  try {
-    const { subject, note } = req.body;
-    const msg = await AssignmentMessage.findById(req.params.id);
-    if (!msg) return res.status(404).json({ error: "Not found" });
+// // PATCH /api/assignment-messages/:id
+// exports.updateMessage = async function updateMessage(req, res) {
+//   try {
+//     const { subject, note } = req.body;
+//     const msg = await AssignmentMessage.findById(req.params.id);
+//     if (!msg) return res.status(404).json({ error: "Not found" });
 
-    if (typeof subject === "string") msg.subject = subject;
-    if (typeof note === "string") msg.note = note;
+//     if (typeof subject === "string") msg.subject = subject;
+//     if (typeof note === "string") msg.note = note;
 
-    await msg.save();
-    const populated = await msg.populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
-      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      { path: "scheduledBy", select: "_id name companyEmail" },
-    ]);
+//     await msg.save();
+//     const populated = await msg.populate([
+//       { path: "owner", select: "_id name companyEmail" },
+//       { path: "sender", select: "_id name companyEmail role" },
+//       { path: "receiver", select: "_id name companyEmail role" },
+//       { path: "client", select: "_id clientName" },
+//       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+//       { path: "scheduledBy", select: "_id name companyEmail" },
+//     ]);
 
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "updated");
-    }
+//     // EMIT REAL-TIME EVENT
+//     const io = getIO(req);
+//     if (io) {
+//       await emitMessageUpdate(io, msg, "updated");
+//     }
 
-    res.json(populated);
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to update message" });
-  }
-};
+//     res.json(populated);
+//   } catch (e) {
+//     console.error(e);
+//     res.status(500).json({ error: "Failed to update message" });
+//   }
+// };
 
 // DELETE /api/assignment-messages/:id
 exports.deleteMessage = async function deleteMessage(req, res) {
@@ -1937,7 +2181,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
     return res.status(500).json({ error: "Failed to load sent messages" });
   }
 };
-// POST /api/assignment-messages/drafts - Create new draft
+// In your createDraft function, add this before saving:
 exports.createDraft = async function createDraft(req, res) {
   try {
     const {
@@ -1953,9 +2197,10 @@ exports.createDraft = async function createDraft(req, res) {
     const owner = ownerBody || req.employee?.owner;
     const sender = senderBody || req.employee?._id;
 
-    if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
+    // Validate required fields
+    if (!isObjId(owner) || !isObjId(sender)) {
       return res.status(400).json({
-        error: "owner, client, and sender are required (ObjectId strings)",
+        error: "owner and sender are required (ObjectId strings)",
       });
     }
 
@@ -1963,24 +2208,55 @@ exports.createDraft = async function createDraft(req, res) {
     if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
     if (receiversBody)
       receivers = receivers.concat(normalizeIds(receiversBody));
-    receivers = receivers.filter((id) => id !== String(sender));
 
-    // Remove duplicates
+    // Remove sender from receivers and remove duplicates
     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
       (id) => id !== String(sender)
     );
 
+    // Ensure at least one receiver
+    if (receivers.length === 0) {
+      return res.status(400).json({
+        error: "At least one receiver is required to save a draft",
+      });
+    }
+
     const draftData = {
       owner,
-      client,
       sender,
       receiver: receivers,
       subject: subject || "Draft",
       note: note || "",
       status: "draft",
       isScheduled: false,
-      // Drafts don't have sentAt
+      // Only include client if provided and valid
+      ...(client && isObjId(client) && { client }),
     };
+
+    // 🔥 FIXED: Generate threadId manually to avoid model middleware issues
+    if (!draftData.threadId) {
+      if (client && isObjId(client)) {
+        // Client-based thread
+        const normalizedSubject = (subject || "draft")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "_")
+          .substring(0, 50);
+        draftData.threadId = `thread_${client}_${normalizedSubject}_${Date.now()}`;
+      } else {
+        // Direct message thread
+        const participants = [String(sender), ...receivers]
+          .sort()
+          .join("_")
+          .substring(0, 100);
+
+        const normalizedSubject = (subject || "direct_draft")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "_")
+          .substring(0, 50);
+
+        draftData.threadId = `direct_${participants}_${normalizedSubject}_${Date.now()}`;
+      }
+    }
 
     const draft = await AssignmentMessage.create(draftData);
 
@@ -1988,13 +2264,105 @@ exports.createDraft = async function createDraft(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      ...(client && isObjId(client)
+        ? [{ path: "client", select: "_id clientName" }]
+        : []),
     ]);
 
-    res.status(201).json(populated);
+    res.status(201).json({
+      success: true,
+      message: "Draft saved successfully",
+      data: populated,
+    });
   } catch (e) {
-    console.error(e);
+    console.error("Error in createDraft:", e);
+    if (e.name === "ValidationError") {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: Object.values(e.errors).map((err) => err.message),
+      });
+    }
     res.status(500).json({ error: "Failed to create draft" });
+  }
+};
+
+// PATCH /api/assignment-messages/:id - Update draft (FIXED VERSION)
+exports.updateMessage = async function updateMessage(req, res) {
+  try {
+    const {
+      subject,
+      note,
+      receiver: receiverBody,
+      receivers: receiversBody,
+    } = req.body;
+    const msg = await AssignmentMessage.findById(req.params.id);
+
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // Check if user has permission to update this message
+    if (String(msg.sender) !== String(req.employee._id)) {
+      return res.status(403).json({
+        error: "You can only update your own messages",
+      });
+    }
+
+    // Update fields if provided
+    if (typeof subject === "string") msg.subject = subject;
+    if (typeof note === "string") msg.note = note;
+
+    // Handle receiver updates for drafts
+    if (receiverBody || receiversBody) {
+      let receivers = [];
+      if (receiverBody)
+        receivers = receivers.concat(normalizeIds(receiverBody));
+      if (receiversBody)
+        receivers = receivers.concat(normalizeIds(receiversBody));
+
+      receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+        (id) => id !== String(msg.sender)
+      );
+
+      // 🔥 CRITICAL: Validate receivers for drafts
+      if (msg.status === "draft" && receivers.length === 0) {
+        return res.status(400).json({
+          error: "At least one receiver is required to save a draft",
+        });
+      }
+
+      msg.receiver = receivers;
+    }
+
+    await msg.save();
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "scheduledBy", select: "_id name companyEmail" },
+    ]);
+
+    // EMIT REAL-TIME EVENT
+    const io = getIO(req);
+    if (io) {
+      await emitMessageUpdate(io, msg, "updated");
+    }
+
+    res.json({
+      success: true,
+      message: "Draft updated successfully",
+      data: populated,
+    });
+  } catch (e) {
+    console.error("Error in updateMessage:", e);
+    if (e.name === "ValidationError") {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: Object.values(e.errors).map((err) => err.message),
+      });
+    }
+    res.status(500).json({ error: "Failed to update message" });
   }
 };
 
@@ -3566,8 +3934,6 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     const currentUser = req.employee?._id;
     const owner = req.employee?.owner;
 
-    console.log('🔍 Counts request - User:', currentUser, 'Owner:', owner);
-
     if (!isObjId(currentUser) || !isObjId(owner)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -3580,54 +3946,48 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       draftCount,
       scheduledCount,
       spamCount,
-      trashCount
+      trashCount,
     ] = await Promise.all([
       // Inbox: messages where user is receiver, not trashed, not spam, status sent
       AssignmentMessage.countDocuments({
-        $or: [
-          { receiver: currentUser },
-          { receiver: { $in: [currentUser] } }
-        ],
-        status: 'sent',
+        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+        status: "sent",
         isTrashed: false,
-        isSpam: false
+        isSpam: false,
       }),
 
       // Starred: messages starred by current user
       AssignmentMessage.countDocuments({
         starredBy: currentUser,
-        isTrashed: false
+        isTrashed: false,
       }),
 
       // Sent: messages where user is sender, status sent
       AssignmentMessage.countDocuments({
         sender: currentUser,
-        status: 'sent',
-        isTrashed: false
+        status: "sent",
+        isTrashed: false,
       }),
 
       // Drafts: draft messages by current user
       AssignmentMessage.countDocuments({
         sender: currentUser,
-        status: 'draft',
-        isTrashed: false
+        status: "draft",
+        isTrashed: false,
       }),
 
       // Scheduled: scheduled messages by current user
       AssignmentMessage.countDocuments({
         sender: currentUser,
-        status: 'scheduled',
-        isTrashed: false
+        status: "scheduled",
+        isTrashed: false,
       }),
 
       // Spam: spam messages where user is receiver
       AssignmentMessage.countDocuments({
-        $or: [
-          { receiver: currentUser },
-          { receiver: { $in: [currentUser] } }
-        ],
+        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
         isSpam: true,
-        isTrashed: false
+        isTrashed: false,
       }),
 
       // Trash: trashed messages where user is involved
@@ -3635,27 +3995,19 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         $or: [
           { sender: currentUser },
           { receiver: currentUser },
-          { receiver: { $in: [currentUser] } }
+          { receiver: { $in: [currentUser] } },
         ],
-        isTrashed: true
-      })
+        isTrashed: true,
+      }),
     ]);
 
     // Debug: Check if there are any starred messages at all
     const allStarredMessages = await AssignmentMessage.find({
-      starredBy: { $exists: true, $ne: [] }
-    }).select('starredBy').limit(5).lean();
-    
-    console.log('🔍 Starred messages sample:', allStarredMessages);
-    console.log('🔍 Counts result:', {
-      inbox: inboxCount,
-      starred: starredCount,
-      sent: sentCount,
-      draft: draftCount,
-      scheduled: scheduledCount,
-      spam: spamCount,
-      trash: trashCount
-    });
+      starredBy: { $exists: true, $ne: [] },
+    })
+      .select("starredBy")
+      .limit(5)
+      .lean();
 
     res.json({
       inbox: inboxCount,
@@ -3665,9 +4017,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       scheduled: scheduledCount,
       spam: spamCount,
       trash: trashCount,
-      archive: 0
+      archive: 0,
     });
-
   } catch (e) {
     console.error("Error in getMessageCounts:", e);
     res.status(500).json({ error: "Failed to fetch message counts" });

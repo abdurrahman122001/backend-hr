@@ -40,7 +40,6 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
-
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -165,17 +164,6 @@ function validateScheduleTime(scheduledFor) {
   }
 
   return { valid: true, scheduleTime };
-}
-
-// Add file type detection helper function
-function getFileType(mimetype) {
-  if (mimetype.startsWith("audio/")) return "audio";
-  if (mimetype.startsWith("image/")) return "image";
-  if (mimetype.startsWith("video/")) return "video";
-  if (mimetype === "application/pdf") return "pdf";
-  if (mimetype.includes("spreadsheet") || mimetype.includes("excel"))
-    return "spreadsheet";
-  return "document";
 }
 
 // GET SCHEDULED MESSAGES FOR SPECIFIC CLIENT
@@ -506,7 +494,6 @@ exports.createMessage = async function createMessage(req, res) {
       note,
       isScheduled: isScheduledBody,
       scheduledFor,
-      attachments: existingAttachments = [], // FIXED: Define existingAttachments with default value
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -636,7 +623,7 @@ exports.createMessage = async function createMessage(req, res) {
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
-      attachments: existingAttachments, // FIXED: Use the defined variable
+      attachments: [], 
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
@@ -677,7 +664,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {
@@ -1036,7 +1022,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
-
 // PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
@@ -1164,7 +1149,6 @@ exports.getMessage = async function getMessage(req, res) {
     res.status(500).json({ error: "Failed to fetch message" });
   }
 };
-
 // PATCH /api/assignment-messages/:id/edit
 exports.editMessage = async function editMessage(req, res) {
   try {
@@ -1182,9 +1166,40 @@ exports.editMessage = async function editMessage(req, res) {
         .json({ error: "You can only edit your own messages" });
     }
 
+    // Track if message content is actually changing
+    const isMessageChanged = note && note !== msg.note;
+    const isSubjectChanged = subject && subject !== msg.subject;
+
+    // Add to edit history if message content is changing
+    if (isMessageChanged) {
+      // Initialize editHistory array if it doesn't exist
+      if (!msg.editHistory) {
+        msg.editHistory = [];
+      }
+
+      // Add previous version to edit history
+      msg.editHistory.push({
+        previousMessage: msg.note,
+        editedAt: new Date(),
+        editedBy: req.employee._id,
+      });
+
+      // Limit edit history to last 10 edits to prevent excessive growth
+      if (msg.editHistory.length > 10) {
+        msg.editHistory = msg.editHistory.slice(-10);
+      }
+    }
+
     // Update editable fields
     if (typeof subject === "string") msg.subject = subject;
     if (typeof note === "string") msg.note = note;
+
+    // Update edit tracking fields if content changed
+    if (isMessageChanged || isSubjectChanged) {
+      msg.isEdited = true;
+      msg.editedAt = new Date();
+      msg.editedBy = req.employee._id;
+    }
 
     // Update receivers if provided
     let newReceivers = [];
@@ -1204,20 +1219,31 @@ exports.editMessage = async function editMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "scheduledBy", select: "_id name companyEmail" },
+      { path: "editedBy", select: "_id name companyEmail" }, // Add editedBy population
     ]);
+
+    // Prepare response data with edit information
+    const responseData = {
+      ...populated.toObject(),
+      // Ensure edit fields are included in response
+      isEdited: msg.isEdited,
+      editedAt: msg.editedAt,
+      editedBy: populated.editedBy,
+      editHistory: msg.editHistory || [],
+    };
 
     // Notify through Socket.IO if available
     if (req.app.get("io")) {
       const io = req.app.get("io");
 
       io.to(`employee_${msg.sender}`).emit("new_message", {
-        message: populated,
+        message: responseData,
         type: "message_edited",
       });
 
       msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
-          message: populated,
+          message: responseData,
           type: "message_edited",
         });
       });
@@ -1225,14 +1251,13 @@ exports.editMessage = async function editMessage(req, res) {
 
     res.json({
       message: "Message updated successfully",
-      data: populated,
+      data: responseData,
     });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to edit message" });
   }
 };
-
 // PATCH /api/assignment-messages/:id
 exports.updateMessage = async function updateMessage(req, res) {
   try {
@@ -1313,7 +1338,7 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   }
 };
 
-// POST /api/assignment-messages/:id/attachments
+// In uploadAttachments function, update the file validation
 exports.uploadAttachments = async function uploadAttachments(req, res) {
   try {
     const msg = await WhatsAppMessage.findById(req.params.id);
@@ -1366,6 +1391,16 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
   }
 };
 
+// Add file type detection helper function
+function getFileType(mimetype) {
+  if (mimetype.startsWith("audio/")) return "audio";
+  if (mimetype.startsWith("image/")) return "image";
+  if (mimetype.startsWith("video/")) return "video";
+  if (mimetype === "application/pdf") return "pdf";
+  if (mimetype.includes("spreadsheet") || mimetype.includes("excel"))
+    return "spreadsheet";
+  return "document";
+}
 // GET /api/assignment-messages/:id/attachments
 exports.listAttachments = async function listAttachments(req, res) {
   try {

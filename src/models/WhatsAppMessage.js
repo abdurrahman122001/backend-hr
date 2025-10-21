@@ -37,6 +37,16 @@ const WhatsAppMessageSchema = new Schema(
       default: null 
     },
 
+    // Edit tracking fields - ADD THESE
+    isEdited: { type: Boolean, default: false },
+    editedAt: { type: Date },
+    editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    editHistory: [{
+      previousMessage: String,
+      editedAt: { type: Date, default: Date.now },
+      editedBy: { type: Schema.Types.ObjectId, ref: "Employee" }
+    }],
+
     // Scheduling fields
     isScheduled: { type: Boolean, default: false },
     scheduledFor: { type: Date }, // When the message should be sent
