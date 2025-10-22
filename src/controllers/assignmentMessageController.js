@@ -1,4 +1,3 @@
-// controllers/assignmentMessageController.js
 const AssignmentMessage = require("../models/AssignmentMessage");
 const Employee = require("../models/Employees");
 const path = require("path");
@@ -58,7 +57,6 @@ function getThreadIdForReply(originalMessage, newSubject, isForward = false) {
     );
   }
 
-  // For forwards, always create a new thread
   if (isForward) {
     const clientId =
       typeof originalMessage.client === "string"
@@ -76,7 +74,6 @@ function getThreadIdForReply(originalMessage, newSubject, isForward = false) {
   const cleanNew = normalizedNew.replace(/^(re:|fwd:|fw:)\s*/i, "");
   const cleanOriginal = normalizedOriginal.replace(/^(re:|fwd:|fw:)\s*/i, "");
 
-  // 🔥 CRITICAL FIX: If the core subject is the same, use the same thread
   if (cleanNew === cleanOriginal) {
     return originalMessage.threadId;
   }
@@ -103,6 +100,151 @@ function normalizeRole(role) {
   return r;
 }
 
+// async function applyVisibility(q, req) {
+//   if (!req.employee?._id) return q;
+
+//   const me = oid(String(req.employee._id));
+//   if (!me) return q;
+
+//   const currentUserRole = normalizeRole(req.employee?.role || "");
+//   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
+
+//   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+//   if (
+//     (currentUserRole === "manager" || currentUserRole === "owner") &&
+//     ownerId
+//   ) {
+//     return { ...q, owner: ownerId };
+//   }
+
+//   // 🧑‍🤝‍🧑 TEAM LEAD: can see ALL messages for their owner's organization
+//   if (currentUserRole === "team_lead" && ownerId) {
+//     // Team leads can see ALL messages within their organization
+//     const teamLeadQuery = {
+//       ...q,
+//       owner: ownerId, // Show all messages for the owner
+//     };
+
+//     // 🔥 CRITICAL FIX: Team leads should ALWAYS see pending approval messages
+//     // Remove any approvalStatus filter that might exclude pending messages
+//     if (teamLeadQuery.approvalStatus === "pending") {
+//       // Keep the pending filter if explicitly requested
+//     } else if (q.approvalStatus !== "pending") {
+//       // Don't exclude pending messages for team leads in normal views
+//       delete teamLeadQuery.approvalStatus;
+//     }
+
+//     return teamLeadQuery;
+//   }
+
+//   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
+//   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+//   // 🔥 UPDATED: Handle both client-based threads AND direct messages
+
+//   // For client-based messages: if we're querying for a specific client thread,
+//   // show ALL messages in that thread to all participants
+//   if (q.client && isObjId(q.client)) {
+//     // For team leads, they can see all messages for the client
+//     if (currentUserRole === "team_lead" && ownerId) {
+//       return {
+//         ...q,
+//         client: q.client,
+//         owner: ownerId,
+//       };
+//     }
+
+//     // For employees, check if they're part of the thread
+//     const userThreadMessages = await AssignmentMessage.find({
+//       client: q.client,
+//       $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
+//     })
+//       .select("_id")
+//       .lean();
+
+//     if (userThreadMessages.length > 0) {
+//       // User is part of this client thread - show ALL messages for this client
+//       return { ...q, client: q.client };
+//     }
+//   }
+
+//   // 🔥 NEW: For direct messages (no client), always apply participant visibility
+//   // If client is explicitly set to $exists: false (direct messages), ensure user is participant
+//   if (q.client && q.client.$exists === false) {
+//     const directMessageQuery = {
+//       ...q,
+//       $and: [{ $or: visOr }],
+//     };
+
+//     // Add back the isTrashed filter if it was set
+//     const isTrashedFilter = q.isTrashed;
+//     if (isTrashedFilter !== undefined) {
+//       directMessageQuery.isTrashed = isTrashedFilter;
+//     }
+//     return directMessageQuery;
+//   }
+
+//   const now = new Date();
+
+//   // PRESERVE THE isTrashed FILTER - don't override it
+//   const baseQuery = { ...q };
+
+//   // Remove isTrashed from base query if it exists, we'll handle it separately
+//   const isTrashedFilter = baseQuery.isTrashed;
+//   delete baseQuery.isTrashed;
+
+//   // Handle scheduled messages specifically
+//   if (q.isScheduled === true && q.status === "scheduled") {
+//     const scheduledQuery = {
+//       ...baseQuery,
+//       $and: [{ $or: visOr }],
+//     };
+
+//     // Add back the isTrashed filter if it was set
+//     if (isTrashedFilter !== undefined) {
+//       scheduledQuery.isTrashed = isTrashedFilter;
+//     }
+//     return scheduledQuery;
+//   }
+
+//   // Build the main visibility query for employees
+//   const finalQuery = {
+//     $or: [
+//       {
+//         ...baseQuery,
+//         $and: [
+//           {
+//             $or: [
+//               { isScheduled: { $ne: true } },
+//               { isScheduled: true, status: "sent" },
+//               {
+//                 isScheduled: true,
+//                 status: "scheduled",
+//                 scheduledFor: { $lte: now },
+//               },
+//             ],
+//           },
+//           { $or: visOr },
+//         ],
+//       },
+//       {
+//         ...baseQuery,
+//         isScheduled: true,
+//         status: "scheduled",
+//         scheduledFor: { $gt: now },
+//         sender: me,
+//       },
+//     ],
+//   };
+
+//   // Add back the isTrashed filter to the entire query
+//   if (isTrashedFilter !== undefined) {
+//     finalQuery.isTrashed = isTrashedFilter;
+//   }
+
+//   return finalQuery;
+// }
+
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -113,66 +255,77 @@ async function applyVisibility(q, req) {
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
+  if ((currentUserRole === "manager" || currentUserRole === "owner") && ownerId) {
     return { ...q, owner: ownerId };
   }
 
   // 🧑‍🤝‍🧑 TEAM LEAD: can see ALL messages for their owner's organization
   if (currentUserRole === "team_lead" && ownerId) {
-    // Team leads can see ALL messages within their organization
-    const teamLeadQuery = {
+    return {
       ...q,
       owner: ownerId, // Show all messages for the owner
     };
-
-    // 🔥 CRITICAL FIX: Team leads should ALWAYS see pending approval messages
-    // Remove any approvalStatus filter that might exclude pending messages
-    if (teamLeadQuery.approvalStatus === "pending") {
-      // Keep the pending filter if explicitly requested
-    } else if (q.approvalStatus !== "pending") {
-      // Don't exclude pending messages for team leads in normal views
-      delete teamLeadQuery.approvalStatus;
-    }
-
-    return teamLeadQuery;
   }
 
-  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
+  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver OR currently assigned to client
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
 
-  // 🔥 UPDATED: Handle both client-based threads AND direct messages
-
-  // For client-based messages: if we're querying for a specific client thread,
-  // show ALL messages in that thread to all participants
+  // 🔥 NEW: Enhanced client assignment visibility
   if (q.client && isObjId(q.client)) {
-    // For team leads, they can see all messages for the client
-    if (currentUserRole === "team_lead" && ownerId) {
-      return {
-        ...q,
+    const Client = require("../models/ClientInfo");
+    
+    try {
+      // Check if user is currently assigned to this client
+      const clientDoc = await Client.findById(q.client).select("assignedTo").lean();
+      
+      const isCurrentlyAssigned = clientDoc && clientDoc.assignedTo && 
+        String(clientDoc.assignedTo) === String(me);
+
+      if (isCurrentlyAssigned) {
+        // 🔥 CRITICAL FIX: User is currently assigned - show ALL messages for this client
+        // Remove any participant-based filters since assigned employees should see everything
+        const assignedQuery = { ...q };
+        
+        // Remove participant filters if they exist
+        delete assignedQuery.$or;
+        delete assignedQuery.sender;
+        delete assignedQuery.receiver;
+        
+        // Ensure we only show messages for this specific client
+        assignedQuery.client = q.client;
+        
+        console.log(`✅ Employee ${me} is assigned to client ${q.client} - showing ALL messages`);
+        return assignedQuery;
+      }
+
+      // For team leads, they can see all messages for the client
+      if (currentUserRole === "team_lead" && ownerId) {
+        return {
+          ...q,
+          client: q.client,
+          owner: ownerId,
+        };
+      }
+
+      // For employees, check if they're part of the thread (original logic)
+      const userThreadMessages = await AssignmentMessage.find({
         client: q.client,
-        owner: ownerId,
-      };
-    }
+        $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
+      })
+        .select("_id")
+        .lean();
 
-    // For employees, check if they're part of the thread
-    const userThreadMessages = await AssignmentMessage.find({
-      client: q.client,
-      $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
-    })
-      .select("_id")
-      .lean();
-
-    if (userThreadMessages.length > 0) {
-      // User is part of this client thread - show ALL messages for this client
-      return { ...q, client: q.client };
+      if (userThreadMessages.length > 0) {
+        // User is part of this client thread - show ALL messages for this client
+        return { ...q, client: q.client };
+      }
+    } catch (error) {
+      console.error("❌ Error checking client assignment:", error);
+      // Fall back to original visibility logic if there's an error
     }
   }
 
-  // 🔥 NEW: For direct messages (no client), always apply participant visibility
-  // If client is explicitly set to $exists: false (direct messages), ensure user is participant
+  // 🔥 REST OF THE EXISTING LOGIC FOR DIRECT MESSAGES...
   if (q.client && q.client.$exists === false) {
     const directMessageQuery = {
       ...q,
@@ -1345,19 +1498,6 @@ exports.createMessage = async function createMessage(req, res) {
     if (client && isObjId(client)) {
       msgData.client = client;
     }
-    // 🔥 FIXED: If no client, don't include the client field at all
-    // This ensures it's treated as a direct message
-
-    console.log("Creating message with data:", {
-      owner,
-      sender,
-      receivers,
-      client: client || "none (direct message)",
-      subject,
-      threadId,
-      approvalStatus
-    });
-
     const msg = await AssignmentMessage.create(msgData);
 
     const populated = await msg.populate([
@@ -1764,9 +1904,9 @@ exports.approveMessage = async function approveMessage(req, res) {
         await emitMessageUpdate(io, msg, "approved");
       }
 
-      return res.json({ 
-        message: "Message approved successfully", 
-        data: populated 
+      return res.json({
+        message: "Message approved successfully",
+        data: populated,
       });
     }
 
@@ -1809,7 +1949,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     if (io) {
       // Emit update for the original message
       await emitMessageUpdate(io, msg, "approved");
-      
+
       // Emit new message event for the forward (in same thread)
       await emitToAssignmentClients(io, forwardMsg, "new_assignment_message");
     }
@@ -1819,7 +1959,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       data: {
         originalMessage: populatedOriginal,
         forwardMessage: populatedForward,
-      }
+      },
     });
   } catch (e) {
     console.error("Error in approveMessage:", e);
@@ -3279,7 +3419,7 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
 // PATCH /api/assignment-messages/thread/:threadId/trash - Move entire thread to trash
 exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
   try {
-    const { threadId } = req.params;
+    const { threadId } = req.params; // Changed from clientId to threadId
     const userId = req.employee._id.toString();
 
     if (!threadId) {
@@ -3288,7 +3428,7 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
 
     // Find all messages for this thread where user is involved
     const threadMessages = await AssignmentMessage.find({
-      threadId: threadId,
+      threadId: threadId, // Changed from client to threadId
       $or: [
         { sender: userId },
         { receiver: userId },
@@ -3340,7 +3480,7 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
 
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_trashed", {
-          threadId: threadId,
+          threadId: threadId, // Changed from clientId to threadId
           messageIds: threadMessages.map((msg) => msg._id),
           trashedBy: userId,
           timestamp: new Date(),
@@ -3358,23 +3498,23 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
     res.status(500).json({ error: "Failed to move thread to trash" });
   }
 };
-// PATCH /api/assignment-messages/thread/:clientId/restore - Restore entire thread from trash
+
 exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
   req,
   res
 ) {
   try {
-    const { clientId } = req.params;
+    const { threadId } = req.params; // Changed from clientId to threadId
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
+    if (!threadId) {
+      return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
     const userId = req.employee._id.toString();
 
-    // Find all trashed messages for this client where user is involved
+    // Find all trashed messages for this thread where user is involved
     const trashedMessages = await AssignmentMessage.find({
-      client: clientId,
+      threadId: threadId, // Changed from client to threadId
       isTrashed: true,
       $or: [
         { sender: userId },
@@ -3386,7 +3526,7 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
     if (trashedMessages.length === 0) {
       return res
         .status(404)
-        .json({ error: "No trashed thread found for this client" });
+        .json({ error: "No trashed thread found with this thread ID" });
     }
 
     // Restore all messages from trash
@@ -3426,7 +3566,7 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
 
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_restored", {
-          clientId: clientId,
+          threadId: threadId, // Changed from clientId to threadId
           messageIds: trashedMessages.map((msg) => msg._id),
           restoredBy: userId,
           timestamp: new Date(),
