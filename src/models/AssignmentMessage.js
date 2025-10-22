@@ -78,6 +78,13 @@ const AssignmentMessageSchema = new Schema(
     spamReportCount: { type: Number, default: 0 },
     spamReporters: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
 
+        approvedAt: { type: Date },
+    approvedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    disapprovalNote: { type: String }, // For disapproved messages
+    disapprovedAt: { type: Date },
+    disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    resubmittedAt: { type: Date }, // For when disapproved messages are resubmitted
+
     // Files
     attachments: [AttachmentSchema],
 

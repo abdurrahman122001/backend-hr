@@ -1072,7 +1072,6 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -1112,10 +1111,10 @@ exports.createMessage = async function createMessage(req, res) {
       threadId = getThreadIdForReply(originalMessage, subject, isForward);
     } else if (!threadId) {
       // For direct messages without client, generate a different thread ID
-      if (client) {
+      if (client && isObjId(client)) {
         threadId = generateThreadId(client, subject);
       } else {
-        // Direct message thread ID based on participants and subject
+        // 🔥 FIXED: Direct message thread ID - simplified to avoid errors
         const participants = [
           sender,
           ...normalizeIds(receiverBody),
@@ -1123,10 +1122,15 @@ exports.createMessage = async function createMessage(req, res) {
         ]
           .filter((id) => id !== String(sender))
           .sort()
-          .join("_");
-        threadId = `direct_${participants}_${
-          subject ? subject.toLowerCase().replace(/[^a-z0-9]/g, "_") : "message"
-        }_${Date.now()}`;
+          .join("_")
+          .substring(0, 100);
+
+        const normalizedSubject = (subject || "direct_message")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "_")
+          .substring(0, 50);
+
+        threadId = `direct_${participants}_${normalizedSubject}_${Date.now()}`;
       }
     }
 
@@ -1297,27 +1301,8 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
-    // 🔥 DEBUG: Check if managers are being incorrectly added
-    const { managers: currentManagers } = await findTLsAndManagersByOwner(
-      owner
-    );
-    const managerIds = currentManagers.map((id) => String(id));
-    const hasManagers = receivers.some((receiver) =>
-      managerIds.includes(String(receiver))
-    );
-
-    if (hasManagers && !client) {
-      // Filter out managers from direct messages
-      receivers = receivers.filter(
-        (receiver) => !managerIds.includes(String(receiver))
-      );
-      if (receivers.length === 0) {
-        return res.status(400).json({
-          error:
-            "Cannot send direct message to managers only. Please specify other recipients.",
-        });
-      }
-    }
+    // 🔥 REMOVED: The validation that prevents sending to managers only for direct messages
+    // Users can now send direct messages to managers only if they want to
 
     // Scheduling logic (same as before)
     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
@@ -1360,6 +1345,18 @@ exports.createMessage = async function createMessage(req, res) {
     if (client && isObjId(client)) {
       msgData.client = client;
     }
+    // 🔥 FIXED: If no client, don't include the client field at all
+    // This ensures it's treated as a direct message
+
+    console.log("Creating message with data:", {
+      owner,
+      sender,
+      receivers,
+      client: client || "none (direct message)",
+      subject,
+      threadId,
+      approvalStatus
+    });
 
     const msg = await AssignmentMessage.create(msgData);
 
@@ -1389,7 +1386,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-// GET MESSAGE WITH PROPER APPROVAL STATUS
 exports.getMessage = async function getMessage(req, res) {
   try {
     const messageId = req.params.id;
@@ -1730,6 +1726,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
+
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1743,46 +1740,92 @@ exports.approveMessage = async function approveMessage(req, res) {
         .json({ error: "Only Team Leads can approve messages" });
     }
 
+    // ✅ FIXED: Update the original message status to approved
     msg.approvalStatus = "approved";
+    msg.approvedAt = new Date();
+    msg.approvedBy = req.employee._id;
     await msg.save();
 
-    // Forward to managers
+    // ✅ FIXED: Forward to managers IN THE SAME THREAD
     const { managers } = await findTLsAndManagersByOwner(msg.owner);
     if (managers.length === 0) {
-      return res.json({ message: "Approved but no managers found" });
+      // Just update the original message and return
+      const populated = await msg.populate([
+        { path: "owner", select: "_id name companyEmail" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "approvedBy", select: "_id name companyEmail" },
+      ]);
+
+      // EMIT REAL-TIME EVENT
+      const io = getIO(req);
+      if (io) {
+        await emitMessageUpdate(io, msg, "approved");
+      }
+
+      return res.json({ 
+        message: "Message approved successfully", 
+        data: populated 
+      });
     }
 
+    // ✅ FIXED: Create forward message IN THE SAME THREAD
     const forwardMsg = await AssignmentMessage.create({
       owner: msg.owner,
       client: msg.client,
-      sender: msg.sender,
+      sender: msg.sender, // Keep original sender
       receiver: managers,
-      subject: `Approved: ${msg.subject || "No Subject"}`,
+      subject: msg.subject, // Keep original subject
       note: msg.note || "",
       attachments: msg.attachments,
+      // 🔥 CRITICAL: Use the same thread ID to keep messages in same thread
+      threadId: msg.threadId,
+      // Mark this as an approval forward
+      isApprovalForward: true,
+      approvalStatus: "approved", // Already approved since it's coming from TL
+      // Reference the original message
+      replyTo: msg._id,
     });
 
-    const populated = await forwardMsg.populate([
+    const populatedForward = await forwardMsg.populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
     ]);
 
+    // Also populate the original updated message
+    const populatedOriginal = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "approvedBy", select: "_id name companyEmail" },
+    ]);
+
     // EMIT REAL-TIME EVENTS FOR BOTH MESSAGES
     const io = getIO(req);
     if (io) {
+      // Emit update for the original message
       await emitMessageUpdate(io, msg, "approved");
+      
+      // Emit new message event for the forward (in same thread)
       await emitToAssignmentClients(io, forwardMsg, "new_assignment_message");
     }
 
-    res.json(populated);
+    res.json({
+      message: "Message approved and forwarded to managers",
+      data: {
+        originalMessage: populatedOriginal,
+        forwardMessage: populatedForward,
+      }
+    });
   } catch (e) {
-    console.error(e);
+    console.error("Error in approveMessage:", e);
     res.status(500).json({ error: "Failed to approve message" });
   }
 };
-
 // PATCH /api/assignment-messages/:id/disapprove
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
