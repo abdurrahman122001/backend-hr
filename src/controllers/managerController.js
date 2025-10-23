@@ -43,7 +43,7 @@ exports.getRoster = async (req, res) => {
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
       ClientInfo.find({ owner: me.owner })
-        .select("_id clientName industry taxStatus companyLocation assignedTo")
+        .select("_id clientName legalBusinessName industry taxStatus companyLocation assignedTo")
         .populate("assignedTo", "_id name companyEmail")
         .sort({ createdAt: -1 }),
     ]);
@@ -66,7 +66,7 @@ exports.getEmployeeRoster = async (req, res) => {
 
     const { name } = req.query; // optional name search
 
-    const isManager =
+    const isManagerLike =
       me.role?.toLowerCase() === "manager" ||
       me.role?.toLowerCase() === "team lead" ||
       me.role?.toLowerCase() === "team_lead" ||
@@ -89,16 +89,19 @@ exports.getEmployeeRoster = async (req, res) => {
 
     // --- Clients Query ---
     const clientQuery = { owner: me.owner };
-    if (!isManager) {
-      // only show clients assigned to this employee
+
+    // For non-managers, show only clients assigned to them
+    if (!isManagerLike) {
       clientQuery.assignedTo = me._id;
     }
+
+    // Optional name filter
     if (name && name.trim()) {
       clientQuery.clientName = { $regex: name.trim(), $options: "i" };
     }
 
     const clients = await ClientInfo.find(clientQuery)
-      .select("_id clientName industry taxStatus companyLocation assignedTo")
+      .select("_id clientName legalBusinessName industry taxStatus companyLocation assignedTo")
       .populate("assignedTo", "_id name companyEmail")
       .sort({ clientName: 1 });
 
