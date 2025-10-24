@@ -39,12 +39,15 @@ const ClientInfoSchema = new Schema(
     websites: [{ type: String }],
 
     // 🔹 UK-specific fields
-    region: { type: String },           // England / Scotland / Wales / N. Ireland
+    region: { type: String },  
     postcode: { type: String },
     companyNumber: { type: String },
     sicCode: { type: String },
     vatNumber: { type: String },
     utrNumber: { type: String },
+    // 🔹 US-specific fields
+    state: { type: String },  
+    ein: { type: String },
 
     // 🔹 Assignment
     assignedTo: {
