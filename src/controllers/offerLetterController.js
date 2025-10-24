@@ -194,6 +194,7 @@ function probationDaysToMonths(probationDays) {
     : `${days} days`;
 }
 
+/* ------------------------ Build render context --------------------------- */
 async function buildContext({
   ownerId,
   candidateName,
@@ -240,10 +241,9 @@ async function buildContext({
     : "";
 
   const probationDaysNum = Number(probationDays) || 0;
-  const probationPeriodText = probationDaysToMonths(probationDaysNum);
 
   console.log("🔍 DEBUG probationDays:", probationDays); // Should be raw number like "90"
-  console.log("🔍 DEBUG probationPeriodText:", probationPeriodText); // Should be "3 months"
+  console.log("🔍 DEBUG probationDaysNum:", probationDaysNum); // Should be 90
 
   const ctx = {
     candidateName: safeCandidateName,
@@ -255,14 +255,14 @@ async function buildContext({
     formattedTime,
     grossSalary,
 
-    // 🔑 CRITICAL FIX: probationDays should be the FORMATTED text
-    probationDays: probationPeriodText, // This replaces {{probationDays}} with "3 months"
+    // 🔑 CRITICAL FIX: Use raw probation days
+    probationDays: probationDaysNum.toString(), // This keeps it as "90" instead of "3 months"
 
     signatureHtml: signatureBlock,
     signatureBlock: signatureBlock,
   };
 
-  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays); // Should be "3 months"
+  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays); // Should be "90"
 
   return {
     ctx,
