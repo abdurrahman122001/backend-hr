@@ -117,25 +117,7 @@ function calculateLeaveUsed(records, currentBalance = null, entitled = null) {
             }
         }
     }
-    let fromPaidAbsent = paidAbsents;
-
-    // ✅ Add +2 leaves for September payroll (for all employees)
-    try {
-        if (records.length > 0) {
-            const sampleDate = new Date(records[0].date);
-            const payrollKey = getPayrollPeriodKey(sampleDate);
-            const [yr, mon] = payrollKey.split("-");
-            const payrollMonthNum = Number(mon);
-            const employeeId = records[0]?.employee?.toString?.() || records[0]?.employee?._id?.toString?.();
-
-            if (payrollMonthNum === 9 && employeeId === "68adcffb5751cbec4e63c939") {
-                fromPaidAbsent += 2;
-                console.log(`✅ Added +2 extra leaves for September payroll (${payrollKey})`);
-            }
-        }
-    } catch (err) {
-        console.warn("Error applying September +2 leaves adjustment:", err);
-    }
+    const fromPaidAbsent = paidAbsents;
 
     // Calculate lates (unchanged)
     const fromLates = countLeavesFromLates(records);
@@ -207,7 +189,7 @@ async function calculateYTDLeaveWithRunningBalance(employeeId, entitled, year, m
         if (
             employee &&
             (payrollPeriodEnd < joiningDate ||
-                (payrollPeriodEnd < probationEnd && leaveDuringProbation === false))
+            (payrollPeriodEnd < probationEnd && leaveDuringProbation === false))
         ) {
             continue; // skip this month!
         }
