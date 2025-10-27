@@ -126,7 +126,7 @@ router.post("/login", async (req, res) => {
       "unknown";
     const when = new Date().toISOString();
 
-    const adminTo = "nashfintechnologies@gmail.com";
+    const adminTo = "qaziabdurrahman12@gmail.com";
     const adminSubject = "Employee login verification requested";
     const adminText =
       `A login verification was requested.\n` +
@@ -205,7 +205,7 @@ router.post("/confirm-code", async (req, res) => {
 
     // ✅ Replace all trusted devices with this new one
     emp.trustedDevices = [
-      { deviceFingerprint, userAgent, ip, addedAt: new Date() },
+      { deviceFingerprint, userAgent, addedAt: new Date() },
     ];
     await emp.save();
 
