@@ -2,7 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
-const { PDFDocument } = require('pdf-lib');
+const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
 const DocTemplate = require("../models/DocTemplate");
@@ -158,21 +158,15 @@ const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 /** Extract ALL pages from canvas */
 function extractAllPages(canvas = {}) {
   const pages = [];
-  
-  console.log("Canvas structure:", JSON.stringify(canvas, null, 2));
-  
   // Array form (multi-page)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
-    console.log(`Found ${canvas.pages.length} pages in canvas.pages array`);
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
       const heightPx = num(p?.pageFormat?.height, 1123);
       const header = num(p?.headerHeight ?? 0, 0);
       const footer = num(p?.footerHeight ?? 0, 0);
       const elements = Array.isArray(p?.elements) ? p.elements : [];
-      
-      console.log(`Page ${index + 1}: ${elements.length} elements`);
-      
+
       pages.push({
         widthPx,
         heightPx,
@@ -181,20 +175,18 @@ function extractAllPages(canvas = {}) {
         elements,
         name: canvas?.name || `Document Page ${index + 1}`,
         pageNumber: index + 1,
-        totalPages: canvas.pages.length
+        totalPages: canvas.pages.length,
       });
     });
     return pages;
   }
-  
-  // Flat form (single page)
-  console.log("Using flat canvas structure (single page)");
-  const widthPx = num(canvas?.pageFormat?.width, 794);
+
+  // Flat form (single page)  const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
   const footer = num(canvas?.footerHeight, 0);
   const elements = Array.isArray(canvas?.elements) ? canvas.elements : [];
-  
+
   pages.push({
     widthPx,
     heightPx,
@@ -203,9 +195,9 @@ function extractAllPages(canvas = {}) {
     elements,
     name: canvas?.name || "Document",
     pageNumber: 1,
-    totalPages: 1
+    totalPages: 1,
   });
-  
+
   return pages;
 }
 
@@ -233,11 +225,10 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     })
     .join("");
 
-  // Add page number if multiple pages
-  const pageNumberHTML = totalPages > 1 ? 
-    `<div class="page-number" style="position:absolute;bottom:10px;right:20px;font-family:'Poppins',sans-serif;font-size:12px;color:#666;">
-      Page ${page.pageNumber} of ${totalPages}
-    </div>` : '';
+  const pageNumberHTML =
+    totalPages > 1
+      ? ``
+      : "";
 
   return `<!doctype html>
 <html>
@@ -246,32 +237,51 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <title>${page.name}</title>
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-  body {
+  @page {
+    margin: 0;
+    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+  }
+  html, body {
     margin: 0;
     padding: 0;
+    width: ${page.widthPx}px;
+    height: ${page.heightPx}px;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
-    overflow: hidden;
   }
+
+  /* 🔥 Key fix: translate page content down by header height */
   .page {
     width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
+    height: ${page.heightPx - (page.header + page.footer)}px;
+    position: relative;
     background: #fff;
     color: #000;
     font-family: 'Poppins', sans-serif;
-    padding-top: ${page.header}px;
-    padding-bottom: ${page.footer}px;
-    position: relative;
+    overflow: hidden;
     box-sizing: border-box;
+    transform: translateY(${page.header}px);
   }
-  .el * {
-    margin: 0;
+
+  /* Optional visual testing (remove after confirming)
+  body::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    height: ${page.header}px;
+    left: 0; right: 0;
+    background: rgba(255,0,0,0.1);
   }
-  .page-number { 
-    font-family: 'Poppins', sans-serif; 
-  }
+  body::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    height: ${page.footer}px;
+    left: 0; right: 0;
+    background: rgba(0,0,255,0.1);
+  } */
+
+  .el * { margin: 0; }
 </style>
 </head>
 <body>
@@ -283,78 +293,60 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   GENERATE PDF WITH PROPER PAGE MERGING
-────────────────────────────────────────────────────────────────────────────── */
+
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
 
-  let tpl;
-  if (templateId) {
-    tpl = await DocTemplate.findById(templateId).lean();
-    if (!tpl) throw new Error("Template not found");
-  } else {
-    tpl = await DocTemplate.findOne({ type: normType(docType) }).lean();
-    if (!tpl) throw new Error(`No ${docType} template in DB`);
-  }
+  const tpl = templateId
+    ? await DocTemplate.findById(templateId).lean()
+    : await DocTemplate.findOne({ type: normType(docType) }).lean();
+  if (!tpl) throw new Error("Template not found");
 
-  const defaults = defaultsFromTemplate(tpl);
+  const defaults = tpl.defaultValues || {};
   const tokens = tokenMap(emp, defaults);
   const pages = extractAllPages(tpl.canvas || {});
-  
-  console.log(`Total pages extracted: ${pages.length}`);
-  
-  if (pages.length === 0) {
-    throw new Error("No pages found in template");
-  }
+  if (pages.length === 0) throw new Error("No pages found in template");
 
   const browser = await puppeteer.launch({
     args: ["--no-sandbox", "--disable-setuid-sandbox"],
   });
-  
+
   try {
-    // Create a new PDFDocument to merge all pages
     const mergedPdf = await PDFDocument.create();
-    
-    for (let i = 0; i < pages.length; i++) {
-      const page = pages[i];
+
+    for (const page of pages) {
       const p = await browser.newPage();
-      
-      // Set viewport to exact page size
-      await p.setViewport({
-        width: page.widthPx,
-        height: page.heightPx
-      });
-      
-      // Generate HTML for this single page only
+      await p.setViewport({ width: page.widthPx, height: page.heightPx });
+
       const html = generateSinglePageHTML(page, tokens, pages.length);
-      
       await p.setContent(html, { waitUntil: "networkidle0" });
       await p.emulateMediaType("screen");
 
-      // Generate PDF for this single page
+      // ✅ Convert header/footer px → mm (used as PDF margins)
+      const headerMm = pxToMm(page.header);
+      const footerMm = pxToMm(page.footer);
+
       const pdfBuffer = await p.pdf({
         printBackground: true,
         preferCSSPageSize: true,
         width: `${pxToMm(page.widthPx)}mm`,
         height: `${pxToMm(page.heightPx)}mm`,
+        margin: {
+          top: `${headerMm}mm`,
+          bottom: `${footerMm}mm`,
+          left: "0mm",
+          right: "0mm",
+        },
       });
-      
-      // Load the single page PDF
-      const singlePagePdf = await PDFDocument.load(pdfBuffer);
-      
-      // Copy all pages from the single page PDF to the merged PDF
-      const [copiedPage] = await mergedPdf.copyPages(singlePagePdf, [0]);
+
+      const tempPdf = await PDFDocument.load(pdfBuffer);
+      const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
       mergedPdf.addPage(copiedPage);
-      
       await p.close();
     }
-    
-    // Serialize the merged PDF to bytes
+
     const mergedPdfBytes = await mergedPdf.save();
-    
-    console.log(`Generated PDF with exactly ${pages.length} pages`);
     return Buffer.from(mergedPdfBytes);
   } finally {
     await browser.close();
@@ -371,7 +363,11 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "experience_letter", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "experience_letter",
+      templateId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -382,7 +378,9 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("experience-letter pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -396,15 +394,14 @@ router.get("/nda/:employeeId", async (req, res) => {
     const pdf = await generateDocumentPDF(employeeId, "nda", templateId);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="NDA.pdf"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="NDA.pdf"');
     res.status(200).end(pdf);
   } catch (err) {
     console.error("nda pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -415,7 +412,11 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "salary_certificate", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "salary_certificate",
+      templateId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -426,7 +427,9 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("salary-certificate pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -438,23 +441,17 @@ router.post("/contract/:employeeId", async (req, res) => {
     const { key } = req.body || {};
     const templateId = String(req.query.templateId || "");
 
-    // If you need decryption logic for contracts, add it here
-    if (key) {
-      console.log("Contract decryption key provided:", key);
-    }
-
     const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="Contract.pdf"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
     res.status(200).end(pdf);
   } catch (err) {
     console.error("contract pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -468,15 +465,14 @@ router.get("/contract/:employeeId", async (req, res) => {
     const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="Contract.pdf"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
     res.status(200).end(pdf);
   } catch (err) {
     console.error("contract pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
