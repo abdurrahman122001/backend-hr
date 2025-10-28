@@ -5,7 +5,9 @@ const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
+const Salary = require("../models/Salaries"); // Import the Salary model
 const DocTemplate = require("../models/DocTemplate");
+const { decrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
 
@@ -51,6 +53,7 @@ function fmtDate(d) {
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
+
 // Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
@@ -87,12 +90,79 @@ function defaultsFromTemplate(tpl) {
   return tpl?.defaultValues || {};
 }
 
-function tokenMap(emp, defaults = {}) {
+// Function to fetch and decrypt salary fields from Salary model
+async function fetchAndDecryptSalary(employeeId) {
+  if (!employeeId) return {};
+  
+  try {
+    // Find the active salary record for this employee
+    const salaryRecord = await Salary.findOne({ 
+      employee: employeeId, 
+      isActive: true 
+    }).lean();
+    
+    if (!salaryRecord) {
+      console.log("No active salary record found for employee:", employeeId);
+      return {};
+    }
+    
+    const decryptedSalary = {};
+    
+    // Decrypt all salary fields
+    const salaryFields = [
+      'basic', 'dearnessAllowance', 'houseRentAllowance', 'conveyanceAllowance',
+      'medicalAllowance', 'utilityAllowance', 'overtimeCompensation', 
+      'dislocationAllowance', 'leaveEncashment', 'bonus', 'arrears', 
+      'autoAllowance', 'incentive', 'fuelAllowance', 'othersAllowances', 'grossSalary'
+    ];
+    
+    for (const field of salaryFields) {
+      if (salaryRecord[field]) {
+        try {
+          decryptedSalary[field] = await decrypt(salaryRecord[field]);
+        } catch (error) {
+          console.error(`Error decrypting ${field}:`, error.message);
+          decryptedSalary[field] = "[Decryption Error]";
+        }
+      } else {
+        decryptedSalary[field] = "—";
+      }
+    }
+    
+    // Calculate total if needed (using the decrypted values)
+    if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
+      try {
+        const basic = parseFloat(decryptedSalary.basic) || 0;
+        const houseRent = parseFloat(decryptedSalary.houseRentAllowance) || 0;
+        const utilities = parseFloat(decryptedSalary.utilityAllowance) || 0;
+        const conveyance = parseFloat(decryptedSalary.conveyanceAllowance) || 0;
+        const medical = parseFloat(decryptedSalary.medicalAllowance) || 0;
+        const others = parseFloat(decryptedSalary.othersAllowances) || 0;
+        
+        decryptedSalary.calculatedTotal = (basic + houseRent + utilities + conveyance + medical + others).toFixed(2);
+      } catch (error) {
+        console.error("Error calculating total salary:", error.message);
+        decryptedSalary.calculatedTotal = "[Calculation Error]";
+      }
+    }
+    
+    return decryptedSalary;
+  } catch (error) {
+    console.error("Error fetching salary record:", error.message);
+    return {};
+  }
+}
+
+async function tokenMap(emp, defaults = {}) {
+  // Fetch and decrypt salary fields from Salary model
+  const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
+  
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
 
   const tenureHuman = formatTenure(join, endDate);
   const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
+  
   return {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
@@ -116,6 +186,25 @@ function tokenMap(emp, defaults = {}) {
     "employee.email": emp?.email || "—",
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
+
+    // Salary fields (decrypted from Salary model)
+    "salary.basic": decryptedSalary.basic || "—",
+    "salary.dearness": decryptedSalary.dearnessAllowance || "—",
+    "salary.houseRent": decryptedSalary.houseRentAllowance || "—",
+    "salary.conveyance": decryptedSalary.conveyanceAllowance || "—",
+    "salary.medical": decryptedSalary.medicalAllowance || "—",
+    "salary.utilities": decryptedSalary.utilityAllowance || "—",
+    "salary.overtime": decryptedSalary.overtimeCompensation || "—",
+    "salary.dislocation": decryptedSalary.dislocationAllowance || "—",
+    "salary.leaveEncashment": decryptedSalary.leaveEncashment || "—",
+    "salary.bonus": decryptedSalary.bonus || "—",
+    "salary.arrears": decryptedSalary.arrears || "—",
+    "salary.auto": decryptedSalary.autoAllowance || "—",
+    "salary.incentive": decryptedSalary.incentive || "—",
+    "salary.fuel": decryptedSalary.fuelAllowance || "—",
+    "salary.other": decryptedSalary.othersAllowances || "—",
+    "salary.gross": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
+    "salary.total": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
 
     // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
@@ -181,7 +270,8 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Flat form (single page)  const widthPx = num(canvas?.pageFormat?.width, 794);
+  // Flat form (single page)  
+  const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
   const footer = num(canvas?.footerHeight, 0);
@@ -293,7 +383,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
-
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -304,7 +393,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   if (!tpl) throw new Error("Template not found");
 
   const defaults = tpl.defaultValues || {};
-  const tokens = tokenMap(emp, defaults);
+  const tokens = await tokenMap(emp, defaults);
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
