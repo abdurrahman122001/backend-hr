@@ -112,6 +112,51 @@ exports.getEmployeeRoster = async (req, res) => {
   }
 };
 
+exports.getMentionedEmployees = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+
+    if (!me.owner)
+      return res.status(400).json({ error: "Your profile is missing owner id" });
+
+    const { name } = req.query; // optional name search
+
+    const isManagerLike =
+      me.role?.toLowerCase() === "manager" ||
+      me.role?.toLowerCase() === "team lead" ||
+      me.role?.toLowerCase() === "team_lead" ||
+      me.role?.toLowerCase() === "teamlead";
+
+    // --- Employees Query ---
+    const employeeQuery = {
+      owner: me.owner,
+      _id: { $ne: me._id },
+      $or: [
+        { department: "Operations" },
+        { role: { $in: ["Employee", "Manager", "Team Lead"] } },
+      ],
+    };
+
+    // Optional name filter
+    if (name && name.trim()) {
+      employeeQuery.name = { $regex: name.trim(), $options: "i" };
+    }
+
+    const employees = await Employee.find(employeeQuery)
+      .select(
+        "_id name email companyEmail role department designation supervisionMode supervisor photographUrl"
+      )
+      .populate("supervisor", "_id name companyEmail")
+      .sort({ name: 1 });
+
+    res.json({ employees });
+  } catch (err) {
+    console.error("getEmployeeRoster error:", err);
+    res.status(500).json({ error: "Failed to load roster" });
+  }
+};
+
 
 // PATCH /manager/employee/:id/supervision  { supervisionMode }
 exports.updateEmployeeSupervision = async (req, res) => {

@@ -1,4 +1,4 @@
-// models/Chat.js - Updated with pinned conversations
+// models/Chat.js - Updated with pinned messages functionality
 const mongoose = require("mongoose");
 
 const messageSchema = new mongoose.Schema(
@@ -74,6 +74,28 @@ const messageSchema = new mongoose.Schema(
         },
       },
     ],
+    mentions: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        mentionedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        mentionText: String, // The text that was used to mention (e.g., "@john")
+      },
+    ],
+    hasMentions: {
+      type: Boolean,
+      default: false,
+    },
+    replyTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+    },
     readBy: [
       {
         employee: {
@@ -92,6 +114,52 @@ const messageSchema = new mongoose.Schema(
       default: false,
     },
     readAt: Date,
+    // ✅ ADDED: Starred messages functionality
+    starredBy: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        starredAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    // ✅ ADDED: Pinned messages functionality
+    pinnedBy: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        pinnedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        note: {
+          type: String,
+          trim: true,
+          maxlength: 200,
+        },
+      },
+    ],
+    // For quick checks if message is pinned
+    isPinned: {
+      type: Boolean,
+      default: false,
+    },
+    // ✅ ADDED: Message editing functionality
+    editedAt: {
+      type: Date,
+    },
+    isEdited: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,
@@ -232,22 +300,83 @@ const spaceSchema = new mongoose.Schema(
   }
 );
 
-// Indexes
-conversationSchema.index({ participants: 1 });
-conversationSchema.index({ updatedAt: -1 });
-conversationSchema.index({ isGroup: 1 });
-conversationSchema.index({ space: 1 });
-conversationSchema.index({ "pinnedBy.employee": 1 });
-messageSchema.index({ conversation: 1, createdAt: -1 });
-messageSchema.index({ sender: 1, createdAt: -1 });
-messageSchema.index({ space: 1, createdAt: -1 });
-messageSchema.index({ receivers: 1 });
-spaceSchema.index({ members: 1 });
-spaceSchema.index({ createdBy: 1 });
-spaceSchema.index({ "pinnedBy.employee": 1 });
+// ============ MESSAGE SCHEMA METHODS ============
+
+// ✅ ADDED: Method to check if message is starred by user
+messageSchema.methods.isStarredBy = function (userId) {
+  if (!this.starredBy || !Array.isArray(this.starredBy)) {
+    return false;
+  }
+  return this.starredBy.some(
+    (star) => star.employee.toString() === userId.toString()
+  );
+};
+
+// ✅ ADDED: Method to check if message is pinned by user
+messageSchema.methods.isPinnedBy = function (userId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return false;
+  }
+  return this.pinnedBy.some(
+    (pin) => pin.employee.toString() === userId.toString()
+  );
+};
+
+// ✅ ADDED: Method to get pin details for a user
+messageSchema.methods.getPinDetails = function (userId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return null;
+  }
+  return this.pinnedBy.find(
+    (pin) => pin.employee.toString() === userId.toString()
+  );
+};
+
+// ✅ ADDED: Method to add a pin to message
+messageSchema.methods.addPin = function (employeeId, note = "") {
+  if (!this.pinnedBy) {
+    this.pinnedBy = [];
+  }
+
+  // Check if already pinned by this user
+  if (this.isPinnedBy(employeeId)) {
+    return false; // Already pinned
+  }
+
+  this.pinnedBy.push({
+    employee: employeeId,
+    pinnedAt: new Date(),
+    note: note,
+  });
+
+  this.isPinned = true;
+  return true;
+};
+
+// ✅ ADDED: Method to remove a pin from message
+messageSchema.methods.removePin = function (employeeId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return false;
+  }
+
+  const initialLength = this.pinnedBy.length;
+  this.pinnedBy = this.pinnedBy.filter(
+    (pin) => pin.employee.toString() !== employeeId.toString()
+  );
+
+  // Update isPinned flag
+  this.isPinned = this.pinnedBy.length > 0;
+
+  return this.pinnedBy.length < initialLength;
+};
+
+// ============ CONVERSATION SCHEMA METHODS ============
 
 // Method to check if conversation is pinned by user
 conversationSchema.methods.isPinnedBy = function (userId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return false;
+  }
   return this.pinnedBy.some(
     (pin) => pin.employee.toString() === userId.toString()
   );
@@ -255,17 +384,55 @@ conversationSchema.methods.isPinnedBy = function (userId) {
 
 // Method to check if conversation is archived by user
 conversationSchema.methods.isArchivedBy = function (userId) {
+  if (!this.archivedBy || !Array.isArray(this.archivedBy)) {
+    return false;
+  }
   return this.archivedBy.some(
     (archived) => archived.toString() === userId.toString()
   );
 };
 
+// Method to check if conversation is hidden by user
+conversationSchema.methods.isHiddenBy = function (userId) {
+  if (!this.hiddenBy || !Array.isArray(this.hiddenBy)) {
+    return false;
+  }
+  return this.hiddenBy.some(
+    (hidden) => hidden.toString() === userId.toString()
+  );
+};
+
+// ============ SPACE SCHEMA METHODS ============
+
 // Method to check if space is pinned by user
 spaceSchema.methods.isPinnedBy = function (userId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return false;
+  }
   return this.pinnedBy.some(
     (pin) => pin.employee.toString() === userId.toString()
   );
 };
+
+// ============ INDEXES ============
+
+conversationSchema.index({ participants: 1 });
+conversationSchema.index({ updatedAt: -1 });
+conversationSchema.index({ isGroup: 1 });
+conversationSchema.index({ space: 1 });
+conversationSchema.index({ "pinnedBy.employee": 1 });
+
+messageSchema.index({ conversation: 1, createdAt: -1 });
+messageSchema.index({ sender: 1, createdAt: -1 });
+messageSchema.index({ space: 1, createdAt: -1 });
+messageSchema.index({ receivers: 1 });
+messageSchema.index({ "starredBy.employee": 1 });
+messageSchema.index({ "pinnedBy.employee": 1 }); // ✅ ADDED: Index for pinned messages
+messageSchema.index({ isPinned: 1 }); // ✅ ADDED: Index for pinned status
+
+spaceSchema.index({ members: 1 });
+spaceSchema.index({ createdBy: 1 });
+spaceSchema.index({ "pinnedBy.employee": 1 });
 
 const Message = mongoose.model("Message", messageSchema);
 const Conversation = mongoose.model("Conversation", conversationSchema);

@@ -284,16 +284,48 @@ router.delete("/delete-all", requireAuth, async (req, res) => {
   }
 });
 
-// ——— Delete single employee & related ———
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const eid = req.params.id;
+    
+    if (!mongoose.isValidObjectId(eid)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
+    }
+
+    // Check if employee exists and user has permission
+    const scope = buildEmployeeScope(req.user);
+    const existingEmployee = await Employee.findOne({ _id: eid, ...scope });
+    
+    if (!existingEmployee) {
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
+    }
+
+    // Clean up related records (these should be permanently deleted)
     await SalarySlip.deleteMany({ employee: eid });
     await EmployeeHierarchy.deleteMany({ $or: [{ senior: eid }, { junior: eid }] });
-    await Employee.deleteOne({ _id: eid });
-    res.json({ status: "success", message: "Employee deleted." });
+
+    // Move employee to trash instead of permanent deletion
+    const emp = await Employee.findOneAndUpdate(
+      { _id: eid, ...scope },
+      {
+        isTrashed: true,
+        trashedAt: new Date(),
+        trashedBy: req.user._id
+      },
+      { new: true }
+    );
+
+    res.json({ 
+      status: "success", 
+      message: "Employee moved to trash and related records cleaned up",
+      data: emp 
+    });
   } catch (err) {
-    console.error("❌ staff/:id DELETE error:", err);
+    console.error("❌ employees/:id DELETE error:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });

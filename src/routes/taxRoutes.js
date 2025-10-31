@@ -1,9 +1,22 @@
-const router = require("express").Router();
-const tax = require("../controllers/taxController");
-const auth = require("../middleware/auth");
+const express = require('express');
+const router = express.Router();
+const taxController = require('../controllers/taxController');
+const auth = require('../middleware/auth');
 
-router.post("/enable", auth, tax.enableTaxForOwner);     // legacy
-router.post("/update", auth, tax.updateTaxForOwner);     // NEW (all / selected / disable)
-router.get("/owner-slips", auth, tax.getOwnerSlipSummaries);
+// Auto-tax management routes
+router.post('/auto-tax/enable', auth, taxController.enableAutoTax);
+router.post('/auto-tax/disable', auth, taxController.disableAutoTax);
+
+// FIXED: Use query parameters instead of route parameters for optional fiscalYear
+router.get('/auto-tax/status', auth, taxController.getAutoTaxStatus);
+
+router.post('/manual-apply', auth, taxController.manualApplyTax);
+
+// Existing routes
+router.post('/enable', auth, taxController.enableTaxForOwner);
+router.post('/update', auth, taxController.updateTaxForOwner);
+router.get('/owner-slips', auth, taxController.getOwnerSlipSummaries);
+router.get('/calculation/:slipId', auth, taxController.getTaxCalculationDetails);
+router.post('/test-loan-benefits', auth, taxController.testLoanBenefitsCalculation);
 
 module.exports = router;

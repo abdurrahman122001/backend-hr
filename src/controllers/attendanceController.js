@@ -7,6 +7,8 @@ const Shift = require("../models/Shift");
 const SalarySlip = require("../models/SalarySlip");
 const Attendance = require("../models/Attendance");
 const { decrypt, encrypt } = require("../utils/encryption");
+const taxController = require("./taxController");
+
 const {
   updateLeaveEntitlementForEmployee,
 } = require("../utils/leaveEntitlement");
@@ -15,9 +17,9 @@ const LoanDetail = require("../models/LoanDetail");
 
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
-  const [inH, inM] = checkIn.split(':').map(Number);
-  const [outH, outM] = checkOut.split(':').map(Number);
-  let diff = (outH * 60 + outM) - (inH * 60 + inM);
+  const [inH, inM] = checkIn.split(":").map(Number);
+  const [outH, outM] = checkOut.split(":").map(Number);
+  let diff = outH * 60 + outM - (inH * 60 + inM);
   // handle overnight (e.g. 22:00 to 06:00)
   if (diff < 0) diff += 24 * 60;
   return +(diff / 60).toFixed(2);
@@ -27,7 +29,7 @@ function getHoursDiff(checkIn, checkOut) {
  * @param {String} employeeId
  * @param {String} checkIn
  * @param {String} shiftStart
- * @param {String} date 
+ * @param {String} date
  */
 
 function resolveOwnerId(user) {
@@ -49,7 +51,12 @@ async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
   }).lean();
 }
 
-async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToDeduct, type = "absent", forcePaid = false) {
+async function updateLeaveEntitlementForEmployeeProportional(
+  employeeId,
+  daysToDeduct,
+  type = "absent",
+  forcePaid = false
+) {
   const employee = await Employee.findById(employeeId).lean();
   if (!employee) throw new Error("Employee not found");
 
@@ -59,7 +66,6 @@ async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToD
   const usedPaid = entitlement.usedPaid || 0;
   const usedUnpaid = entitlement.usedUnpaid || 0;
   const availableBalance = total - usedPaid;
-
 
   let paidToUse = 0;
   let unpaidToUse = 0;
@@ -97,7 +103,7 @@ async function updateLeaveEntitlementForEmployeeProportional(employeeId, daysToD
   return {
     paid: paidToUse,
     unpaid: unpaidToUse,
-    isProportionate
+    isProportionate,
   };
 }
 
@@ -137,10 +143,17 @@ async function reverseOldBonus(oldRec) {
     { $set: { bonusApplied: false, bonusType: null, bonusHoursGiven: 0 } }
   );
 
-  console.log(`[BONUS-REVERSAL] Employee=${oldRec.employee} Bonus=${bonus}, Accumulated=${accumulated}`);
+  console.log(
+    `[BONUS-REVERSAL] Employee=${oldRec.employee} Bonus=${bonus}, Accumulated=${accumulated}`
+  );
 }
 
-async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) {
+async function updateBonusForNonWorkingDay(
+  employeeId,
+  checkIn,
+  checkOut,
+  date
+) {
   // 1. Calculate worked hours for this attendance
   const hours = getHoursDiff(checkIn, checkOut);
 
@@ -177,7 +190,7 @@ async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) 
         "leaveEntitlement.bonus": bonus,
         "leaveEntitlement.bonusHoursAccumulated": accumulated,
         "leaveEntitlement.bonusYear": bonusYear,
-      }
+      },
     }
   );
 
@@ -195,9 +208,16 @@ async function updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date) 
   return { bonus, accumulated };
 }
 
-
-async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd, checkOut, date) {
-  if (!checkIn || !shiftStart || !shiftEnd || !checkOut) return { bonus: null, accumulated: null };
+async function updateBonusForEarlyBird(
+  employeeId,
+  checkIn,
+  shiftStart,
+  shiftEnd,
+  checkOut,
+  date
+) {
+  if (!checkIn || !shiftStart || !shiftEnd || !checkOut)
+    return { bonus: null, accumulated: null };
 
   const toMin = (hhmm) => {
     const [hStr, mStr = "0"] = String(hhmm).trim().split(":");
@@ -211,7 +231,12 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd
   const startMin = toMin(shiftStart);
   const outMin = toMin(checkOut);
   const endMinRaw = toMin(shiftEnd);
-  if (inMin == null || startMin == null || outMin == null || endMinRaw == null) {
+  if (
+    inMin == null ||
+    startMin == null ||
+    outMin == null ||
+    endMinRaw == null
+  ) {
     return { bonus: null, accumulated: null };
   }
 
@@ -225,7 +250,7 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd
   let endMin = endMinRaw;
   let outMinNorm = outMin;
   if (endMin <= startMin) {
-    endMin += 1440;                // move end to next day
+    endMin += 1440; // move end to next day
     if (outMin < startMin) outMinNorm += 1440; // move checkout too if after midnight
   }
 
@@ -262,7 +287,7 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd
         "leaveEntitlement.bonus": bonus,
         "leaveEntitlement.bonusHoursAccumulated": accumulated,
         "leaveEntitlement.bonusYear": bonusYear,
-      }
+      },
     }
   );
 
@@ -322,13 +347,24 @@ exports.markAttendance = async (req, res) => {
       return total;
     };
 
-
     // ========= Employee (needed for logs) =========
-    const employee = await ensureEmployeeAccessible(employeeId, ownerId, userId);
+    const employee = await ensureEmployeeAccessible(
+      employeeId,
+      ownerId,
+      userId
+    );
     if (!employee) {
-      return res.status(404).json({ error: "Employee not found for this owner or unauthorized." });
+      return res
+        .status(404)
+        .json({ error: "Employee not found for this owner or unauthorized." });
     }
-    console.log(`[ATTENDANCE] [${employee.name}] Request -> Date=${date}, Status=${status}, LeaveType=${leaveType || "-"}, CheckIn=${checkIn || "-"}, CheckOut=${checkOut || "-"}`);
+    console.log(
+      `[ATTENDANCE] [${
+        employee.name
+      }] Request -> Date=${date}, Status=${status}, LeaveType=${
+        leaveType || "-"
+      }, CheckIn=${checkIn || "-"}, CheckOut=${checkOut || "-"}`
+    );
 
     // ========= Holiday (tenant-scoped, no employee) =========
     if (isHoliday) {
@@ -365,7 +401,11 @@ exports.markAttendance = async (req, res) => {
     }).lean();
     if (oldRec) {
       await reverseOldBonus(oldRec);
-      console.log(`[ATTENDANCE] [${employee.name}] Previous -> Status=${oldRec.status}, LeaveType=${oldRec.leaveType || "-"}`);
+      console.log(
+        `[ATTENDANCE] [${employee.name}] Previous -> Status=${
+          oldRec.status
+        }, LeaveType=${oldRec.leaveType || "-"}`
+      );
     }
 
     // ========= Upsert attendance =========
@@ -393,7 +433,11 @@ exports.markAttendance = async (req, res) => {
       updateDoc,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    console.log(`[ATTENDANCE] [${employee.name}] Upserted -> Status=${rec.status}, LeaveType=${rec.leaveType || "-"} on ${date}`);
+    console.log(
+      `[ATTENDANCE] [${employee.name}] Upserted -> Status=${
+        rec.status
+      }, LeaveType=${rec.leaveType || "-"} on ${date}`
+    );
 
     // ========= Early Bird Bonus =========
     if (status === "Present") {
@@ -421,21 +465,30 @@ exports.markAttendance = async (req, res) => {
           checkOut,
           date
         );
-        console.log(`[BONUS] [${employee.name}] EarlyBird -> Bonus=${bonus}, CarryoverHours=${accumulated}`);
+        console.log(
+          `[BONUS] [${employee.name}] EarlyBird -> Bonus=${bonus}, CarryoverHours=${accumulated}`
+        );
       } else {
-        console.log(`[BONUS] [${employee.name}] No shiftStart found in shifts collection, skipping EarlyBird bonus.`);
+        console.log(
+          `[BONUS] [${employee.name}] No shiftStart found in shifts collection, skipping EarlyBird bonus.`
+        );
       }
     }
-
 
     // ========= Payroll period =========
     const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
     const shiftId = employee.shifts?.[0];
     const payroll = allPayrolls.find(
-      (p) => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+      (p) =>
+        Array.isArray(p.shifts) &&
+        p.shifts.map(String).includes(String(shiftId))
     );
     if (!payroll) {
-      console.log(`[ERROR] [${employee.name}] Payroll period not found for shift=${String(shiftId)}`);
+      console.log(
+        `[ERROR] [${employee.name}] Payroll period not found for shift=${String(
+          shiftId
+        )}`
+      );
       return res.status(404).json({ error: "Payroll period not found." });
     }
 
@@ -446,13 +499,24 @@ exports.markAttendance = async (req, res) => {
     const dateSet = new Set();
     const weekdaySet = new Set();
     const nameToDay = {
-      sun: 0, sunday: 0,
-      mon: 1, monday: 1,
-      tue: 2, tues: 2, tuesday: 2,
-      wed: 3, weds: 3, wednesday: 3,
-      thu: 4, thur: 4, thurs: 4, thursday: 4,
-      fri: 5, friday: 5,
-      sat: 6, saturday: 6,
+      sun: 0,
+      sunday: 0,
+      mon: 1,
+      monday: 1,
+      tue: 2,
+      tues: 2,
+      tuesday: 2,
+      wed: 3,
+      weds: 3,
+      wednesday: 3,
+      thu: 4,
+      thur: 4,
+      thurs: 4,
+      thursday: 4,
+      fri: 5,
+      friday: 5,
+      sat: 6,
+      saturday: 6,
     };
     (payroll.nonWorkingDays || []).forEach((raw) => {
       if (!raw) return;
@@ -464,13 +528,17 @@ exports.markAttendance = async (req, res) => {
       const nd = new Date(s);
       if (!isNaN(nd)) dateSet.add(ymd(nd));
     });
-    const isNonWorkingDay = dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+    const isNonWorkingDay =
+      dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
 
     if (isNonWorkingDay) {
       if (status !== "Present") {
-        console.log(`[BLOCK] [${employee.name}] ${date} is non-working. Only 'Present' allowed. Requested=${status}`);
+        console.log(
+          `[BLOCK] [${employee.name}] ${date} is non-working. Only 'Present' allowed. Requested=${status}`
+        );
         return res.status(400).json({
-          error: "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed.",
+          error:
+            "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed.",
         });
       }
       const recNwd = await Attendance.findOneAndUpdate(
@@ -492,8 +560,15 @@ exports.markAttendance = async (req, res) => {
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
-      const { bonus, accumulated } = await updateBonusForNonWorkingDay(employeeId, checkIn, checkOut, date);
-      console.log(`[BONUS] [${employee.name}] Non-working Present -> Bonus=${bonus}, CarryoverHours=${accumulated}`);
+      const { bonus, accumulated } = await updateBonusForNonWorkingDay(
+        employeeId,
+        checkIn,
+        checkOut,
+        date
+      );
+      console.log(
+        `[BONUS] [${employee.name}] Non-working Present -> Bonus=${bonus}, CarryoverHours=${accumulated}`
+      );
       return res.json(recNwd);
     }
 
@@ -502,20 +577,34 @@ exports.markAttendance = async (req, res) => {
     let periodStart, periodEnd;
     if (payroll.payrollPeriodType === "monthly") {
       const anchorDay = anchor.getDate();
-      const thisMonthStart = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth(), anchorDay);
+      const thisMonthStart = new Date(
+        attendanceDate.getFullYear(),
+        attendanceDate.getMonth(),
+        anchorDay
+      );
       if (attendanceDate >= thisMonthStart) {
         periodStart = thisMonthStart;
       } else {
-        periodStart = new Date(attendanceDate.getFullYear(), attendanceDate.getMonth() - 1, anchorDay);
+        periodStart = new Date(
+          attendanceDate.getFullYear(),
+          attendanceDate.getMonth() - 1,
+          anchorDay
+        );
       }
-      periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, periodStart.getDate());
+      periodEnd = new Date(
+        periodStart.getFullYear(),
+        periodStart.getMonth() + 1,
+        periodStart.getDate()
+      );
       periodEnd.setDate(periodEnd.getDate() - 1);
     } else {
       let length = payroll.payrollPeriodLength;
       if (payroll.payrollPeriodType === "weekly") length = 7;
       if (payroll.payrollPeriodType === "bimonthly") length = 15;
       if (payroll.payrollPeriodType === "10-days") length = 10;
-      const diff = Math.floor((attendanceDate - anchor) / (1000 * 60 * 60 * 24));
+      const diff = Math.floor(
+        (attendanceDate - anchor) / (1000 * 60 * 60 * 24)
+      );
       const cycles = Math.floor(diff / length);
       periodStart = new Date(anchor);
       periodStart.setDate(anchor.getDate() + cycles * length);
@@ -523,15 +612,22 @@ exports.markAttendance = async (req, res) => {
       periodEnd.setDate(periodEnd.getDate() + length - 1);
     }
 
-    const joinDate = employee.joiningDate ? new Date(employee.joiningDate) : null;
-    const effectiveStartDate = joinDate && joinDate > periodStart ? joinDate : periodStart;
+    const joinDate = employee.joiningDate
+      ? new Date(employee.joiningDate)
+      : null;
+    const effectiveStartDate =
+      joinDate && joinDate > periodStart ? joinDate : periodStart;
     const start = effectiveStartDate.toISOString().slice(0, 10);
     const end = periodEnd.toISOString().slice(0, 10);
     const beforeJoin = !!(joinDate && attendanceDate < joinDate);
     const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
     const payrollYear = String(periodEnd.getFullYear());
 
-    console.log(`[PERIOD] [${employee.name}] Start=${start}, End=${end}, BeforeJoin=${beforeJoin ? "YES" : "NO"}`);
+    console.log(
+      `[PERIOD] [${employee.name}] Start=${start}, End=${end}, BeforeJoin=${
+        beforeJoin ? "YES" : "NO"
+      }`
+    );
 
     // ========= SalarySlip (tenant-scoped) =========
     let slip = await SalarySlip.findOne({
@@ -544,10 +640,17 @@ exports.markAttendance = async (req, res) => {
     let grossSalary = 0;
 
     if (!slip) {
-      const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+      const salaryDoc = await Salaries.findOne({
+        employee: employeeId,
+        owner: ownerId,
+      });
       if (!salaryDoc) {
-        console.log(`[ERROR] [${employee.name}] Salary structure not found in Salaries.`);
-        return res.status(404).json({ error: "Salary structure not found for employee." });
+        console.log(
+          `[ERROR] [${employee.name}] Salary structure not found in Salaries.`
+        );
+        return res
+          .status(404)
+          .json({ error: "Salary structure not found for employee." });
       }
       const slipData = {
         owner: ownerId,
@@ -561,17 +664,32 @@ exports.markAttendance = async (req, res) => {
       slip = await SalarySlip.create(slipData);
 
       grossSalary = await sumEncryptedFields(salaryDoc, allowanceFields);
-      console.log(`[GROSS] [${employee.name}] (new slip) Gross from Salaries sum = ${grossSalary}`);
+      console.log(
+        `[GROSS] [${employee.name}] (new slip) Gross from Salaries sum = ${grossSalary}`
+      );
     } else {
       // compute gross from slip fields
       grossSalary = await sumEncryptedFields(slip, allowanceFields);
-      console.log(`[GROSS] [${employee.name}] (existing slip) Gross from Slip sum = ${grossSalary}`);
+      console.log(
+        `[GROSS] [${employee.name}] (existing slip) Gross from Slip sum = ${grossSalary}`
+      );
+      const currentTax = slip.taxDeduction
+        ? Number(await decrypt(slip.taxDeduction)) || 0
+        : 0;
+      if (currentTax === 0) {
+        console.log(
+          `[TAX] [${employee.name}] Existing slip has no tax, checking auto-tax...`
+        );
+        await taxController.autoApplyTaxIfEnabled(slip);
+      }
     }
 
     // ========= Per-day calc =========
     const totalWorkingDays = 22; // keep your assumption
     const perDay = grossSalary / totalWorkingDays;
-    console.log(`[PERDAY] [${employee.name}] Gross=${grossSalary}, WorkingDays=${totalWorkingDays}, PerDay=${perDay}`);
+    console.log(
+      `[PERDAY] [${employee.name}] Gross=${grossSalary}, WorkingDays=${totalWorkingDays}, PerDay=${perDay}`
+    );
 
     // ========= Auto-absent before join (skip non-working days) =========
     if (joinDate && joinDate > periodStart) {
@@ -588,9 +706,24 @@ exports.markAttendance = async (req, res) => {
           if (/^[0-6]$/.test(s)) return ws.add(Number(s));
           const key = s.toLowerCase();
           const nameToDay2 = {
-            sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2,
-            wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
-            fri: 5, friday: 5, sat: 6, saturday: 6,
+            sun: 0,
+            sunday: 0,
+            mon: 1,
+            monday: 1,
+            tue: 2,
+            tues: 2,
+            tuesday: 2,
+            wed: 3,
+            weds: 3,
+            wednesday: 3,
+            thu: 4,
+            thur: 4,
+            thurs: 4,
+            thursday: 4,
+            fri: 5,
+            friday: 5,
+            sat: 6,
+            saturday: 6,
           };
           if (key in nameToDay2) return ws.add(nameToDay2[key]);
           const nd = new Date(s);
@@ -601,12 +734,19 @@ exports.markAttendance = async (req, res) => {
 
       const { ds, ws } = buildNonWorkingSets();
 
-      for (let d = new Date(periodStart); d < joinDate; d = new Date(d.getTime() + dayMs)) {
+      for (
+        let d = new Date(periodStart);
+        d < joinDate;
+        d = new Date(d.getTime() + dayMs)
+      ) {
         const iso = ymd(d);
         const weekday = d.getDay();
         if (ds.has(iso) || ws.has(weekday)) continue;
 
-        const existing = await Attendance.findOne({ owner: ownerId, date: iso }).lean();
+        const existing = await Attendance.findOne({
+          owner: ownerId,
+          date: iso,
+        }).lean();
         if (existing) continue;
 
         await Attendance.findOneAndUpdate(
@@ -629,16 +769,28 @@ exports.markAttendance = async (req, res) => {
       }
 
       if (daysToCharge > 0) {
-        const result = await updateLeaveEntitlementForEmployee(employeeId, daysToCharge);
+        const result = await updateLeaveEntitlementForEmployee(
+          employeeId,
+          daysToCharge
+        );
         if (result.unpaid > 0) {
           let prev = 0;
-          if (slip.leaveDeductions) prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+          if (slip.leaveDeductions)
+            prev = Number(await decrypt(slip.leaveDeductions)) || 0;
           const add = Math.round(perDay * result.unpaid);
           slip.leaveDeductions = await encrypt(String(prev + add));
           await slip.save();
-          console.log(`[PREJOIN] [${employee.name}] Auto Absent Days=${daysToCharge}, Unpaid=${result.unpaid}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+          console.log(
+            `[PREJOIN] [${
+              employee.name
+            }] Auto Absent Days=${daysToCharge}, Unpaid=${
+              result.unpaid
+            }, Deduction=${add}, New leaveDeductions=${prev + add}`
+          );
         } else {
-          console.log(`[PREJOIN] [${employee.name}] Auto Absent Days=${daysToCharge}, Fully covered by paid leaves.`);
+          console.log(
+            `[PREJOIN] [${employee.name}] Auto Absent Days=${daysToCharge}, Fully covered by paid leaves.`
+          );
         }
       }
     }
@@ -659,7 +811,11 @@ exports.markAttendance = async (req, res) => {
 
       // reverse unpaid counter, credit one paid
       const empDoc = await Employee.findById(employeeId).lean();
-      if (empDoc && empDoc.leaveEntitlement && typeof empDoc.leaveEntitlement.usedUnpaid === "number") {
+      if (
+        empDoc &&
+        empDoc.leaveEntitlement &&
+        typeof empDoc.leaveEntitlement.usedUnpaid === "number"
+      ) {
         const oldUsed = empDoc.leaveEntitlement.usedUnpaid || 0;
         const newUsed = Math.max(0, oldUsed - 1);
         await Employee.updateOne(
@@ -671,7 +827,9 @@ exports.markAttendance = async (req, res) => {
         { _id: employeeId },
         { $inc: { "leaveEntitlement.usedPaid": 1 } }
       );
-      console.log(`[DEDUCTION-REVERSAL] [${employee.name}] Reversed=${deductionToReverse}, New leaveDeductions=${newDeduction}, Credited 1 paid leave`);
+      console.log(
+        `[DEDUCTION-REVERSAL] [${employee.name}] Reversed=${deductionToReverse}, New leaveDeductions=${newDeduction}, Credited 1 paid leave`
+      );
     }
 
     // ========= ABSENT =========
@@ -687,13 +845,24 @@ exports.markAttendance = async (req, res) => {
       const usedUnpaid = ent.usedUnpaid || 0;
       const balance = +(totalEnt - usedPaid);
 
-      console.log(`[LEAVE] [${employee.name}] Absent -> Entitled=${totalEnt}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, Balance=${balance}, Requested=${leaveType || "Unpaid"}, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`);
+      console.log(
+        `[LEAVE] [${
+          employee.name
+        }] Absent -> Entitled=${totalEnt}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, Balance=${balance}, Requested=${
+          leaveType || "Unpaid"
+        }, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`
+      );
 
       // --- Friday special handling (3 days) ---
       if (isFriday) {
         if (leaveType === "Paid") {
           // Use proportional helper for 3 days.
-          const result = await updateLeaveEntitlementForEmployeeProportional(employeeId, effectiveDays, "leave", false);
+          const result = await updateLeaveEntitlementForEmployeeProportional(
+            employeeId,
+            effectiveDays,
+            "leave",
+            false
+          );
           const unpaidDays = result.unpaid || 0;
           const paidDays = result.paid || 0;
           await Attendance.findOneAndUpdate(
@@ -702,33 +871,59 @@ exports.markAttendance = async (req, res) => {
           );
 
           if (unpaidDays > 0) {
-            if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+            if (!slip.leaveDeductions)
+              slip.leaveDeductions = await encrypt("0");
             const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
             const add = Math.round(perDay * unpaidDays);
             slip.leaveDeductions = await encrypt(String(prev + add));
             await slip.save();
-            console.log(`[DEDUCTION] [${employee.name}] Friday Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid=${unpaidDays}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+            console.log(
+              `[DEDUCTION] [${
+                employee.name
+              }] Friday Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid=${unpaidDays}, Deduction=${add}, New leaveDeductions=${
+                prev + add
+              }`
+            );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
               { $set: { leaveType: "Paid", proportionate: true } }
             );
           } else {
-            console.log(`[DEDUCTION] [${employee.name}] Friday Absent fully covered by paid -> Paid=${paidDays}, Unpaid=0, NO deduction`);
+            console.log(
+              `[DEDUCTION] [${employee.name}] Friday Absent fully covered by paid -> Paid=${paidDays}, Unpaid=0, NO deduction`
+            );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
-              { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+              {
+                $set: {
+                  status: "Absent",
+                  leaveType: "Paid",
+                  proportionate: false,
+                },
+              }
             );
           }
           return res.json(rec);
         } else {
           // Unpaid for 3 days
-          await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "absent", true);
+          await updateLeaveEntitlementForEmployee(
+            employeeId,
+            effectiveDays,
+            "absent",
+            true
+          );
           if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
           const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
           const add = Math.round(perDay * effectiveDays);
           slip.leaveDeductions = await encrypt(String(prev + add));
           await slip.save();
-          console.log(`[DEDUCTION] [${employee.name}] Friday Absent(Unpaid) -> Days=${effectiveDays}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+          console.log(
+            `[DEDUCTION] [${
+              employee.name
+            }] Friday Absent(Unpaid) -> Days=${effectiveDays}, Deduction=${add}, New leaveDeductions=${
+              prev + add
+            }`
+          );
           await Attendance.findOneAndUpdate(
             { owner: ownerId, employee: employeeId, date },
             { $set: { leaveType: "Unpaid", proportionate: false } }
@@ -754,7 +949,13 @@ exports.markAttendance = async (req, res) => {
         const add = Math.round(perDay * (1 - balance));
         slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
-        console.log(`[DEDUCTION] [${employee.name}] Absent proportionate -> Paid=${balance}, Unpaid=${1 - balance}, Deduction=${add}, New leaveDeductions=${prev + add}`);
+        console.log(
+          `[DEDUCTION] [${
+            employee.name
+          }] Absent proportionate -> Paid=${balance}, Unpaid=${
+            1 - balance
+          }, Deduction=${add}, New leaveDeductions=${prev + add}`
+        );
 
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
@@ -765,12 +966,21 @@ exports.markAttendance = async (req, res) => {
 
       // Full paid absent (no deduction)
       if (leaveType === "Paid" && balance >= 1) {
-        await updateLeaveEntitlementForEmployee(employeeId, 1, "leave", req.body.forcePaid);
+        await updateLeaveEntitlementForEmployee(
+          employeeId,
+          1,
+          "leave",
+          req.body.forcePaid
+        );
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid", proportionate: false } }
+          {
+            $set: { status: "Absent", leaveType: "Paid", proportionate: false },
+          }
         );
-        console.log(`[DEDUCTION] [${employee.name}] Absent fully paid -> NO deduction`);
+        console.log(
+          `[DEDUCTION] [${employee.name}] Absent fully paid -> NO deduction`
+        );
         return res.json(rec);
       }
 
@@ -781,7 +991,11 @@ exports.markAttendance = async (req, res) => {
       const add = Math.round(perDay);
       slip.leaveDeductions = await encrypt(String(prev + add));
       await slip.save();
-      console.log(`[DEDUCTION] [${employee.name}] Absent unpaid -> Deduction=${add}, New leaveDeductions=${prev + add}`);
+      console.log(
+        `[DEDUCTION] [${
+          employee.name
+        }] Absent unpaid -> Deduction=${add}, New leaveDeductions=${prev + add}`
+      );
 
       await Attendance.findOneAndUpdate(
         { owner: ownerId, employee: employeeId, date },
@@ -804,7 +1018,9 @@ exports.markAttendance = async (req, res) => {
 
       console.log(
         `[LEAVE] [${employee.name}] Leave -> Entitled=${totalBal}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, ` +
-        `Balance=${balance}, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`
+          `Balance=${balance}, Friday=${
+            isFriday ? "YES" : "NO"
+          }, DaysToCharge=${effectiveDays}`
       );
 
       // Proportionate case: some paid available but less than needed (e.g., Fri=3 but balance 1 or 2)
@@ -814,7 +1030,7 @@ exports.markAttendance = async (req, res) => {
           {
             $inc: {
               "leaveEntitlement.usedPaid": balance,
-              "leaveEntitlement.usedUnpaid": (effectiveDays - balance),
+              "leaveEntitlement.usedUnpaid": effectiveDays - balance,
             },
           }
         );
@@ -826,23 +1042,45 @@ exports.markAttendance = async (req, res) => {
         await slip.save();
 
         console.log(
-          `[DEDUCTION] [${employee.name}] Leave proportionate -> Paid=${balance}, Unpaid=${effectiveDays - balance}, ` +
-          `Deduction=${add}, New leaveDeductions=${prev + add}`
+          `[DEDUCTION] [${
+            employee.name
+          }] Leave proportionate -> Paid=${balance}, Unpaid=${
+            effectiveDays - balance
+          }, ` + `Deduction=${add}, New leaveDeductions=${prev + add}`
         );
 
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid", effectivePaidDays: balance, proportionate: true } }
+          {
+            $set: {
+              status: "Absent",
+              leaveType: "Paid",
+              effectivePaidDays: balance,
+              proportionate: true,
+            },
+          }
         );
         return res.json(rec);
       }
 
       // Fully covered by paid balance
       if (balance >= effectiveDays) {
-        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", req.body.forcePaid);
+        await updateLeaveEntitlementForEmployee(
+          employeeId,
+          effectiveDays,
+          "leave",
+          req.body.forcePaid
+        );
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid", effectivePaidDays: effectiveDays, proportionate: false } }
+          {
+            $set: {
+              status: "Absent",
+              leaveType: "Paid",
+              effectivePaidDays: effectiveDays,
+              proportionate: false,
+            },
+          }
         );
         console.log(
           `[DEDUCTION] [${employee.name}] Leave fully paid -> Days=${effectiveDays}, NO deduction`
@@ -852,13 +1090,20 @@ exports.markAttendance = async (req, res) => {
 
       // No balance left
       if (typeof req.body.forcePaid === "undefined") {
-        console.log(`[LEAVE] [${employee.name}] No paid leave left -> needs confirmation (Days=${effectiveDays})`);
+        console.log(
+          `[LEAVE] [${employee.name}] No paid leave left -> needs confirmation (Days=${effectiveDays})`
+        );
         return res.status(200).json({
           needsConfirmation: true,
           message: `${employee.name} has no paid leaves available. Do you want to mark as Paid Leave?`,
         });
       } else if (req.body.forcePaid === true) {
-        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "leave", true);
+        await updateLeaveEntitlementForEmployee(
+          employeeId,
+          effectiveDays,
+          "leave",
+          true
+        );
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Paid" } }
@@ -869,7 +1114,12 @@ exports.markAttendance = async (req, res) => {
         return res.json(rec);
       } else {
         // unpaid for all effectiveDays
-        await updateLeaveEntitlementForEmployee(employeeId, effectiveDays, "absent", true);
+        await updateLeaveEntitlementForEmployee(
+          employeeId,
+          effectiveDays,
+          "absent",
+          true
+        );
         if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
         const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
         const add = Math.round(perDay * effectiveDays);
@@ -878,7 +1128,7 @@ exports.markAttendance = async (req, res) => {
 
         console.log(
           `[DEDUCTION] [${employee.name}] Leave unpaid -> Days=${effectiveDays}, Deduction=${add}, ` +
-          `New leaveDeductions=${prev + add}`
+            `New leaveDeductions=${prev + add}`
         );
 
         await Attendance.findOneAndUpdate(
@@ -888,7 +1138,6 @@ exports.markAttendance = async (req, res) => {
         return res.json(rec);
       }
     }
-
 
     // ========= LATE (3 = 1 day) =========
     if (!beforeJoin && status === "Late") {
@@ -903,7 +1152,9 @@ exports.markAttendance = async (req, res) => {
       const lateDeductionDays = Math.floor(lateCount / 3);
       const previouslyCredited = slip.lateDeductionDaysCredited || 0;
       const newLateDeductionDays = lateDeductionDays - previouslyCredited;
-      console.log(`[LATE] [${employee.name}] LatesInPeriod=${lateCount}, DeductionDaysTotal=${lateDeductionDays}, NewToApply=${newLateDeductionDays}`);
+      console.log(
+        `[LATE] [${employee.name}] LatesInPeriod=${lateCount}, DeductionDaysTotal=${lateDeductionDays}, NewToApply=${newLateDeductionDays}`
+      );
 
       if (newLateDeductionDays > 0) {
         if (newLateDeductionDays === 1) {
@@ -925,7 +1176,8 @@ exports.markAttendance = async (req, res) => {
               }
             );
             let prevLate = 0;
-            if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+            if (slip.lateDeductions)
+              prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
             const addLate = Math.round(perDay * (1 - balance));
             slip.lateDeductions = await encrypt(String(prevLate + addLate));
             slip.lateDeductionDaysCredited = lateDeductionDays;
@@ -939,30 +1191,61 @@ exports.markAttendance = async (req, res) => {
               date: { $gte: start, $lte: end },
             }).sort({ date: -1 });
             if (lastLate) {
-              await Attendance.updateOne({ _id: lastLate._id }, { $set: { proportionate: true } });
+              await Attendance.updateOne(
+                { _id: lastLate._id },
+                { $set: { proportionate: true } }
+              );
             }
-            console.log(`[LATE-DEDUCTION] [${employee.name}] Proportionate -> Paid=${balance}, Unpaid=${1 - balance}, Deduction=${addLate}, New lateDeductions=${prevLate + addLate}`);
+            console.log(
+              `[LATE-DEDUCTION] [${
+                employee.name
+              }] Proportionate -> Paid=${balance}, Unpaid=${
+                1 - balance
+              }, Deduction=${addLate}, New lateDeductions=${prevLate + addLate}`
+            );
             // do not run full-late flow
           } else {
-            const result = await updateLeaveEntitlementForEmployee(employeeId, 1, "late");
+            const result = await updateLeaveEntitlementForEmployee(
+              employeeId,
+              1,
+              "late"
+            );
             let prevLate = 0;
-            if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+            if (slip.lateDeductions)
+              prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
             const addLate = Math.round(perDay * (result.unpaid || 0));
             slip.lateDeductions = await encrypt(String(prevLate + addLate));
             slip.lateDeductionDaysCredited = lateDeductionDays;
             await slip.save();
-            console.log(`[LATE-DEDUCTION] [${employee.name}] Full day late deduction -> Days=${result.unpaid || 0}, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`);
+            console.log(
+              `[LATE-DEDUCTION] [${
+                employee.name
+              }] Full day late deduction -> Days=${
+                result.unpaid || 0
+              }, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`
+            );
           }
         } else {
           // apply multiple days
-          const result = await updateLeaveEntitlementForEmployee(employeeId, newLateDeductionDays, "late");
+          const result = await updateLeaveEntitlementForEmployee(
+            employeeId,
+            newLateDeductionDays,
+            "late"
+          );
           let prevLate = 0;
-          if (slip.lateDeductions) prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
+          if (slip.lateDeductions)
+            prevLate = Number(await decrypt(slip.lateDeductions)) || 0;
           const addLate = Math.round(perDay * (result.unpaid || 0));
           slip.lateDeductions = await encrypt(String(prevLate + addLate));
           slip.lateDeductionDaysCredited = lateDeductionDays;
           await slip.save();
-          console.log(`[LATE-DEDUCTION] [${employee.name}] Multi-day late deduction -> Days=${result.unpaid || 0}, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`);
+          console.log(
+            `[LATE-DEDUCTION] [${
+              employee.name
+            }] Multi-day late deduction -> Days=${
+              result.unpaid || 0
+            }, Amount=${addLate}, New lateDeductions=${prevLate + addLate}`
+          );
         }
       }
     }
@@ -974,10 +1257,13 @@ exports.markAttendance = async (req, res) => {
           { _id: employeeId },
           { $inc: { "leaveEntitlement.usedPaid": -0.5 } }
         );
-        console.log(`[HALF-REV] [${employee.name}] Reversed HalfDay Paid -> -0.5 paid`);
+        console.log(
+          `[HALF-REV] [${employee.name}] Reversed HalfDay Paid -> -0.5 paid`
+        );
       } else {
         let prevDed = 0;
-        if (slip.leaveDeductions) prevDed = Number(await decrypt(slip.leaveDeductions)) || 0;
+        if (slip.leaveDeductions)
+          prevDed = Number(await decrypt(slip.leaveDeductions)) || 0;
         const newDed = Math.max(0, prevDed - perDay / 2);
         slip.leaveDeductions = await encrypt(String(newDed));
         await slip.save();
@@ -985,7 +1271,11 @@ exports.markAttendance = async (req, res) => {
           { _id: employeeId },
           { $inc: { "leaveEntitlement.usedUnpaid": -0.5 } }
         );
-        console.log(`[HALF-REV] [${employee.name}] Reversed HalfDay Unpaid -> Refund=${perDay / 2}, New leaveDeductions=${newDed}`);
+        console.log(
+          `[HALF-REV] [${employee.name}] Reversed HalfDay Unpaid -> Refund=${
+            perDay / 2
+          }, New leaveDeductions=${newDed}`
+        );
       }
     }
 
@@ -994,15 +1284,22 @@ exports.markAttendance = async (req, res) => {
       const result = await updateLeaveEntitlementForEmployee(employeeId, 0.5);
       if (result.unpaid > 0) {
         let prev = 0;
-        if (slip.leaveDeductions) prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        if (slip.leaveDeductions)
+          prev = Number(await decrypt(slip.leaveDeductions)) || 0;
         const add = Math.round((perDay / 2) * result.unpaid);
         slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
-        console.log(`[HALF] [${employee.name}] HalfDay Unpaid -> Deduction=${add}, New leaveDeductions=${prev + add}`);
+        console.log(
+          `[HALF] [${
+            employee.name
+          }] HalfDay Unpaid -> Deduction=${add}, New leaveDeductions=${
+            prev + add
+          }`
+        );
       } else {
         console.log(`[HALF] [${employee.name}] HalfDay Paid -> NO deduction`);
       }
-      const leaveTypeToSet = (result.unpaid > 0 ? "Unpaid" : "Paid");
+      const leaveTypeToSet = result.unpaid > 0 ? "Unpaid" : "Paid";
       await Attendance.updateOne(
         { owner: ownerId, employee: employeeId, date },
         { $set: { leaveType: leaveTypeToSet } }
@@ -1019,7 +1316,9 @@ exports.markAttendance = async (req, res) => {
 
     for (const loan of loans) {
       if (!Array.isArray(loan.paymentSchedule)) continue;
-      const row = loan.paymentSchedule.find((ps) => ps?.month === monthName && Number(ps?.year) === yearNum);
+      const row = loan.paymentSchedule.find(
+        (ps) => ps?.month === monthName && Number(ps?.year) === yearNum
+      );
       if (!row) continue;
 
       let installmentAmount = 0;
@@ -1037,20 +1336,30 @@ exports.markAttendance = async (req, res) => {
     }
 
     if (!slip.loanDeductions) slip.loanDeductions = {};
-    slip.loanDeductions.otherLoans = await encrypt(String(totalLoanInstallments || 0));
+    slip.loanDeductions.otherLoans = await encrypt(
+      String(totalLoanInstallments || 0)
+    );
     slip.markModified("loanDeductions");
     if (totalLoanBenefits > 0) {
-      const prev = slip.othersAllowances ? Number(await decrypt(slip.othersAllowances)) || 0 : 0;
+      const prev = slip.othersAllowances
+        ? Number(await decrypt(slip.othersAllowances)) || 0
+        : 0;
       slip.othersAllowances = await encrypt(String(prev + totalLoanBenefits));
     }
-    if (!slip.loanDeductions.vehicleLoan) slip.loanDeductions.vehicleLoan = await encrypt("0");
-    if (!slip.gratuityFundDeduction) slip.gratuityFundDeduction = await encrypt("0");
+    if (!slip.loanDeductions.vehicleLoan)
+      slip.loanDeductions.vehicleLoan = await encrypt("0");
+    if (!slip.gratuityFundDeduction)
+      slip.gratuityFundDeduction = await encrypt("0");
 
     await slip.save();
 
     // ========= Final snapshot =========
-    const leaveDedVal = slip.leaveDeductions ? (Number(await decrypt(slip.leaveDeductions)) || 0) : 0;
-    const lateDedVal = slip.lateDeductions ? (Number(await decrypt(slip.lateDeductions)) || 0) : 0;
+    const leaveDedVal = slip.leaveDeductions
+      ? Number(await decrypt(slip.leaveDeductions)) || 0
+      : 0;
+    const lateDedVal = slip.lateDeductions
+      ? Number(await decrypt(slip.lateDeductions)) || 0
+      : 0;
 
     // Re-fetch current employee leave counters for accurate snapshot
     const empNow = await Employee.findById(employeeId).lean();
@@ -1059,7 +1368,7 @@ exports.markAttendance = async (req, res) => {
 
     console.log(
       `[SNAPSHOT] [${employee.name}] Month=${payrollMonth} ${payrollYear} | Gross=${grossSalary} | PerDay=${perDay} | ` +
-      `LeaveDeductions=${leaveDedVal} | LateDeductions=${lateDedVal} | UsedPaid=${usedPaidNow} | UsedUnpaid=${usedUnpaidNow}`
+        `LeaveDeductions=${leaveDedVal} | LateDeductions=${lateDedVal} | UsedPaid=${usedPaidNow} | UsedUnpaid=${usedUnpaidNow}`
     );
 
     return res.json(rec);

@@ -54,66 +54,61 @@ function calcNet(slip) {
   return totalAllow - totalDed;
 }
 
+// routes/salarySlips.js - GET route
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const { employee, month, year } = req.query;
+    let { month, year, limit = 10, skip = 0 } = req.query;
+    
     let query = {};
-
-    if (employee) query.employee = employee;
-
-    // --- Filtering by month name + year ---
+    
+    // Add month/year filtering if provided
     if (month && year) {
-      query.month = month; // e.g. "July"
-      query.year = year; // e.g. "2024"
+      query.month = month;
+      query.year = year;
     }
-    // --- Backward compatibility: also accept YYYY-MM ---
-    else if (month && month.includes("-")) {
-      const [yearNum, monNum] = month.split("-").map(Number);
-      if (isNaN(yearNum) || isNaN(monNum)) {
-        return res
-          .status(400)
-          .json({
-            status: "error",
-            message: "Invalid month format. Use YYYY-MM.",
-          });
-      }
-      query.createdAt = {
-        $gte: new Date(yearNum, monNum - 1, 1),
-        $lt: new Date(yearNum, monNum, 1),
-      };
+    
+    // Role-based access control
+    if (req.user.role === "super-admin") {
+      // Super admin can see all
+    } else if (req.user.role === "admin" && req.user.createdBy) {
+      // Admin can see slips for employees created by their super admin
+      query.owner = req.user.createdBy;
+    } else {
+      // Regular user can only see their own slips
+      query.owner = req.user._id;
     }
-
-    // --- ✅ Only fetch slips where this login user is the owner ---
-    query.owner = req.user._id;
-    const limit = Math.max(Number(req.query.limit) || 6, 1);
-    let skip = 0;
-    if ("skip" in req.query) {
-      skip = Math.max(Number(req.query.skip) || 0, 0);
-    } else if ("page" in req.query) {
-      const page = Math.max(Number(req.query.page) || 1, 1);
-      skip = (page - 1) * limit;
-    }
-
-    const total = await SalarySlip.countDocuments(query);
-
+    
     const slips = await SalarySlip.find(query)
       .populate("employee")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit);
-    const slipsWithNet = slips.map((slip) => {
+      .limit(parseInt(limit))
+      .skip(parseInt(skip))
+      .sort({ createdAt: -1 });
+    
+    // Convert each slip to ensure manuallyEditedFields is properly formatted
+    const formattedSlips = slips.map(slip => {
       const slipObj = slip.toObject();
-      slipObj.netSalary = calcNet(slipObj);
+      
+      // Ensure manuallyEditedFields is properly converted
+      if (slipObj.manuallyEditedFields && slipObj.manuallyEditedFields instanceof Map) {
+        slipObj.manuallyEditedFields = Object.fromEntries(slipObj.manuallyEditedFields);
+      } else if (!slipObj.manuallyEditedFields) {
+        slipObj.manuallyEditedFields = {};
+      }
+      
       return slipObj;
     });
-
-    res.json({ slips: slipsWithNet, limit, total, totalPages: Math.ceil(total / limit) });
+    
+    res.json({
+      status: "success",
+      slips: formattedSlips,
+      total: await SalarySlip.countDocuments(query)
+    });
+    
   } catch (err) {
     console.error("Error fetching salary slips:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
-
 // ---------- CREATE salary slip ----------
 router.post("/", requireAuth, async (req, res) => {
   try {
@@ -160,8 +155,7 @@ router.post("/", requireAuth, async (req, res) => {
       });
   }
 });
-
-// ---------- PATCH (update) endpoint ----------
+// routes/salarySlips.js - PATCH route
 router.patch("/:id", requireAuth, async (req, res) => {
   try {
     // All allowed top-level fields
@@ -200,9 +194,11 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Not allowed to update this slip." });
     }
 
-    // --- Process updates: handle top-level fields ---
+    // Process updates
     const updates = {};
+    const editedFields = {};
 
+    // Handle top-level fields
     for (let key of Object.keys(req.body)) {
       if (allowedFields.includes(key)) {
         let value = req.body[key];
@@ -218,36 +214,40 @@ router.patch("/:id", requireAuth, async (req, res) => {
           try {
             updates[key] = await encrypt(value, encryptionKey);
           } catch (encryptErr) {
-            return res
-              .status(500)
-              .json({
-                status: "error",
-                message: `Encryption failed for ${key}: ${encryptErr.message}`,
-              });
+            return res.status(500).json({
+              status: "error",
+              message: `Encryption failed for ${key}: ${encryptErr.message}`,
+            });
           }
         }
+        editedFields[key] = true;
       }
     }
 
-    // --- Also allow PATCH of nested deduction objects like: { loanDeductions: { otherLoans: ... } }
-    if (
-      req.body.loanDeductions &&
-      typeof req.body.loanDeductions === "object"
-    ) {
+    // Handle nested deduction objects
+    if (req.body.loanDeductions && typeof req.body.loanDeductions === "object") {
       for (const [subKey, subVal] of Object.entries(req.body.loanDeductions)) {
-        // Encrypt each subfield and use dot notation for $set
         try {
           updates[`loanDeductions.${subKey}`] = await encrypt(
             subVal,
             encryptionKey
           );
         } catch (encryptErr) {
-          return res
-            .status(500)
-            .json({
-              status: "error",
-              message: `Encryption failed for loanDeductions.${subKey}: ${encryptErr.message}`,
-            });
+          return res.status(500).json({
+            status: "error",
+            message: `Encryption failed for loanDeductions.${subKey}: ${encryptErr.message}`,
+          });
+        }
+        editedFields[`loanDeductions.${subKey}`] = true;
+      }
+    }
+
+    // Handle manuallyEditedFields update
+    if (req.body.manuallyEditedFields && typeof req.body.manuallyEditedFields === 'object') {
+      // Update each field in the manuallyEditedFields map
+      for (const [field, isEdited] of Object.entries(req.body.manuallyEditedFields)) {
+        if (isEdited && (allowedFields.includes(field) || field.startsWith('loanDeductions.'))) {
+          updates[`manuallyEditedFields.${field}`] = true;
         }
       }
     }
@@ -258,24 +258,32 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "No valid fields to update." });
     }
 
-    // Log updates for debugging
     console.log("Updating salary slip with:", updates);
 
     // Update the slip
     const updatedSlip = await SalarySlip.findByIdAndUpdate(
       req.params.id,
       { $set: updates },
-      { new: true }
+      { new: true, runValidators: true }
     ).populate("employee");
 
     if (!updatedSlip) {
       return res
         .status(404)
-        .json({ status: "error", message: "Salary slip not found." });
+        .json({ status: "error", message: "Salary slip not found after update." });
     }
 
-    // Net calculation with fresh object
+    // Convert to plain object and ensure manuallyEditedFields is properly formatted
     const slipObj = updatedSlip.toObject();
+    
+    // Ensure manuallyEditedFields is properly converted for frontend
+    if (slipObj.manuallyEditedFields && slipObj.manuallyEditedFields instanceof Map) {
+      slipObj.manuallyEditedFields = Object.fromEntries(slipObj.manuallyEditedFields);
+    } else if (!slipObj.manuallyEditedFields) {
+      slipObj.manuallyEditedFields = {};
+    }
+    
+    // Calculate net salary
     slipObj.netSalary = calcNet(slipObj);
 
     res.json({ status: "success", slip: slipObj });
@@ -284,7 +292,6 @@ router.patch("/:id", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: err.message });
   }
 });
-
 // ---------- GET: Download Salary Slip PDF ----------
 router.get("/:id/download", requireAuth, async (req, res) => {
   try {

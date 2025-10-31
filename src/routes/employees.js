@@ -24,15 +24,29 @@ function getEffectiveOwnerId(user) {
  *  - owner array contains ownerId OR userId
  *  - OR createdBy equals ownerId OR userId
  */
-function buildEmployeeScope(user) {
+function buildEmployeeScope(user, includeTrashed = false) {
   const ownerId = getEffectiveOwnerId(user);
   const userId = user?._id;
-  return {
+  const scope = {
     $or: [
       { owner: { $in: [ownerId, userId] } },
       { createdBy: { $in: [ownerId, userId] } },
     ],
   };
+  
+  // Exclude trashed items by default
+  if (!includeTrashed) {
+    // Handle both cases: isTrashed = false OR isTrashed doesn't exist (for backward compatibility)
+    scope.$or = [
+      { isTrashed: false },
+      { isTrashed: { $exists: false } }
+    ];
+  } else {
+    // When including trashed, only show items where isTrashed is explicitly true
+    scope.isTrashed = true;
+  }
+  
+  return scope;
 }
 
 // ------------------------------
@@ -41,7 +55,10 @@ function buildEmployeeScope(user) {
 // ------------------------------
 router.get("/", requireAuth, async (req, res) => {
   try {
-    const scope = buildEmployeeScope(req.user);
+    const { trashed } = req.query;
+    const includeTrashed = trashed === "true";
+    
+    const scope = buildEmployeeScope(req.user, includeTrashed);
 
     let query = { ...scope };
 
@@ -144,6 +161,7 @@ router.post("/", requireAuth, async (req, res) => {
       leaveEntitlement,
       photographUrl,
       shifts,
+      isTrashed: false,
     });
 
     res.status(201).json({ status: "success", data: emp });
@@ -224,11 +242,170 @@ router.patch("/:id", requireAuth, async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 });
+
+// ------------------------------
+// DELETE /api/employees/:id
+// Move to trash instead of actual deletion
+// ------------------------------
+router.delete("/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
+    }
+
+    const scope = buildEmployeeScope(req.user);
+    const emp = await Employee.findOneAndUpdate(
+      { _id: id, ...scope },
+      {
+        isTrashed: true,
+        trashedAt: new Date(),
+        trashedBy: req.user._id
+      },
+      { new: true }
+    );
+
+    if (!emp) {
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
+    }
+
+    res.json({ 
+      status: "success", 
+      message: "Employee moved to trash",
+      data: emp 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// POST /api/employees/:id/restore
+// Restore from trash
+// ------------------------------
+router.post("/:id/restore", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
+    }
+
+    // For restore, we need to find trashed employees specifically
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+    
+    const emp = await Employee.findOneAndUpdate(
+      { 
+        _id: id,
+        $or: [
+          { owner: { $in: [ownerId, userId] } },
+          { createdBy: { $in: [ownerId, userId] } },
+        ],
+        isTrashed: true 
+      },
+      {
+        isTrashed: false,
+        trashedAt: null,
+        trashedBy: null
+      },
+      { new: true }
+    );
+
+    if (!emp) {
+      return res
+        .status(404)
+        .json({ error: "Trashed employee not found or unauthorized" });
+    }
+
+    res.json({ 
+      status: "success", 
+      message: "Employee restored from trash",
+      data: emp 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// DELETE /api/employees/:id/permanent
+// Permanent deletion (only for trashed items)
+// ------------------------------
+router.delete("/:id/permanent", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
+    }
+
+    // For permanent delete, we need to find trashed employees specifically
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+    
+    const emp = await Employee.findOneAndDelete({ 
+      _id: id,
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ],
+      isTrashed: true 
+    });
+
+    if (!emp) {
+      return res
+        .status(404)
+        .json({ error: "Trashed employee not found or unauthorized" });
+    }
+
+    res.json({ 
+      status: "success", 
+      message: "Employee permanently deleted" 
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// GET /api/employees/trash/count
+// Get count of trashed items
+// ------------------------------
+router.get("/trash/count", requireAuth, async (req, res) => {
+  try {
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+    
+    const count = await Employee.countDocuments({ 
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ],
+      isTrashed: true 
+    });
+    
+    res.json({ status: "success", count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// GET /api/employees/roles
+// Get distinct roles
+// ------------------------------
 router.get("/roles", requireAuth, async (req, res) => {
   try {
     const scope = buildEmployeeScope(req.user);
 
-    // Distinct roles only for employees within user’s scope
+    // Distinct roles only for employees within user's scope
     const roles = await Employee.distinct("role", {
       ...scope,
       role: { $ne: null },
@@ -245,5 +422,11 @@ router.get("/roles", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: error.message });
   }
 });
+
+// ------------------------------
+// PATCH /api/employees/:id/role
+// Update employee role
+// ------------------------------
 router.patch("/:id/role", updateEmployeeRole);
+
 module.exports = router;

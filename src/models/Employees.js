@@ -171,6 +171,9 @@ const EmployeeSchema = new Schema(
         addedAt: { type: Date, default: Date.now },
       },
     ],
+    isTrashed: { type: Boolean, default: false },
+    trashedAt: { type: Date },
+    trashedBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
   {
     timestamps: true,
@@ -185,7 +188,8 @@ EmployeeSchema.index(
     sparse: true,
   }
 );
-
+EmployeeSchema.index({ isTrashed: 1 });
+EmployeeSchema.index({ trashedAt: 1 });
 EmployeeSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
 };

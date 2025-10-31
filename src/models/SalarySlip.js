@@ -8,6 +8,11 @@ const SalarySlipSchema = new Schema(
 
     employee: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     encryptedWithKeyVersion: { type: Number, default: 1 }, // Track which key version was used
+    manuallyEditedFields: {
+      type: Map,
+      of: Boolean,
+      default: () => new Map()
+    },
 
     // All encrypted fields
     basic: { type: String, default: "" },
@@ -58,5 +63,17 @@ const SalarySlipSchema = new Schema(
   },
   { timestamps: true }
 );
+SalarySlipSchema.methods.toJSON = function() {
+  const obj = this.toObject();
+  
+  // Convert manuallyEditedFields Map to plain object
+  if (obj.manuallyEditedFields && obj.manuallyEditedFields instanceof Map) {
+    obj.manuallyEditedFields = Object.fromEntries(obj.manuallyEditedFields);
+  } else if (!obj.manuallyEditedFields) {
+    obj.manuallyEditedFields = {};
+  }
+  
+  return obj;
+};
 
 module.exports = mongoose.model("SalarySlip", SalarySlipSchema);

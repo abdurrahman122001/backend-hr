@@ -8,6 +8,7 @@ const managerCtrl = require("../controllers/managerController");
 // Roster (employees + clients for same owner)
 router.get("/roster", requireAuth, managerCtrl.getRoster);
 router.get("/employee/roster", requireAuth, managerCtrl.getEmployeeRoster);
+router.get("/employee/mentions", requireAuth, managerCtrl.getMentionedEmployees);
 router.patch("/:id/supervision", requireAuth, managerCtrl.updateEmployeeSupervision);
 router.get(
   "/employee/:id/supervision-status",

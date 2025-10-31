@@ -6,7 +6,6 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-// ✅ Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     const uploadDir = "uploads/chat-attachments/";
@@ -25,7 +24,104 @@ const storage = multer.diskStorage({
     );
   },
 });
+// Add this function to your chat controller
+const sendMentionNotifications = async (
+  mentions,
+  message,
+  conversation,
+  req
+) => {
+  try {
+    const io = req.app.get("io");
 
+    for (const mention of mentions) {
+      // Send socket notification to mentioned user
+      io.to(`user_${mention.employee}`).emit("user_mentioned", {
+        messageId: message._id,
+        conversationId: conversation._id,
+        mentionedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+          avatar: req.employee.avatar,
+        },
+        messageContent: message.content,
+        mentionText: mention.mentionText,
+        mentionedAt: new Date(),
+        conversationType: conversation.isGroup ? "group" : "direct",
+        conversationName: conversation.isGroup
+          ? conversation.groupName
+          : "Direct Message",
+        spaceId: conversation.space,
+      });
+
+      // You can also add other notification methods here:
+      // - Push notifications
+      // - Email notifications
+      // - Database notifications
+
+      console.log(`✅ Mention notification sent to user ${mention.employee}`);
+    }
+  } catch (error) {
+    console.error("Error sending mention notifications:", error);
+  }
+};
+
+const processMentions = async (content, senderId) => {
+  if (!content) return [];
+
+  const mentions = [];
+
+  // Handle both formats: @[Name](userId) and simple @username
+  const mentionRegex = /(?:@\[([^\]]+)\]\(([^)]+)\)|@(\w+))/g;
+  let match;
+
+  while ((match = mentionRegex.exec(content)) !== null) {
+    const [, mentionText, userId, simpleMention] = match;
+
+    let finalUserId = userId;
+    let finalMentionText = mentionText;
+
+    // If it's a simple @mention (without brackets), we need to find the user
+    if (simpleMention && !userId) {
+      try {
+        // Search for user by name, email, or username
+        const user = await Employee.findOne({
+          $or: [
+            { name: { $regex: simpleMention, $options: "i" } },
+            { companyEmail: { $regex: simpleMention, $options: "i" } },
+            { username: { $regex: simpleMention, $options: "i" } },
+          ],
+        }).select("_id name companyEmail");
+
+        if (user && user._id.toString() !== senderId.toString()) {
+          finalUserId = user._id;
+          finalMentionText = `@${simpleMention}`;
+        } else {
+          continue; // Skip if user not found or is sender
+        }
+      } catch (error) {
+        console.error("Error finding user for mention:", error);
+        continue;
+      }
+    }
+
+    // Validate user exists and is not the sender
+    if (finalUserId && finalUserId !== senderId.toString()) {
+      const user = await Employee.findById(finalUserId).select(
+        "name companyEmail"
+      );
+      if (user) {
+        mentions.push({
+          employee: finalUserId,
+          mentionedAt: new Date(),
+          mentionText: finalMentionText || `@${user.name}`,
+        });
+      }
+    }
+  }
+
+  return mentions;
+};
 // File filter for allowed types
 const fileFilter = (req, file, cb) => {
   const allowedMimes = [
@@ -42,6 +138,21 @@ const fileFilter = (req, file, cb) => {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "text/csv",
     "text/plain",
+    "video/mp4",
+    "video/mpeg",
+    "video/ogg",
+    "video/webm",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/3gpp",
+    "video/3gpp2",
+    "audio/wav",
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/ogg",
+    "audio/webm",
+    "audio/aac",
+    "audio/flac",
   ];
 
   if (allowedMimes.includes(file.mimetype)) {
@@ -551,6 +662,8 @@ exports.getMessages = async (req, res) => {
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
+      .populate("replyTo") // ✅ ADD: Populate replyTo reference
+
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -576,6 +689,7 @@ exports.getMessages = async (req, res) => {
       console.log(`📖 Marking ${unreadMessages.length} messages as read`);
 
       if (conversation.isGroup || conversation.space) {
+        // Space/Group message
         await Message.updateMany(
           {
             _id: { $in: unreadMessages.map((m) => m._id) },
@@ -590,6 +704,7 @@ exports.getMessages = async (req, res) => {
           }
         );
       } else {
+        // Direct message
         await Message.updateMany(
           {
             _id: { $in: unreadMessages.map((m) => m._id) },
@@ -606,21 +721,41 @@ exports.getMessages = async (req, res) => {
       conversation.unreadCount.set(req.employee._id.toString(), 0);
       await conversation.save();
 
-      // ✅ UPDATED: Use socket event that matches frontend
+      // ✅ CRITICAL FIX: Emit proper socket events
       const io = req.app.get("io");
       if (io) {
-        const otherParticipants = conversation.participants
-          .filter((p) => p._id.toString() !== req.employee._id.toString())
-          .map((p) => p._id.toString());
+        const isSpace = conversation.isGroup || conversation.space;
+        const room = isSpace
+          ? `space_${conversation.space || conversationId}`
+          : `conversation_${conversationId}`;
 
-        otherParticipants.forEach((participantId) => {
-          io.to(`conversation_${conversationId}`).emit("messages_read", {
-            conversationId,
+        // For each marked message, emit individual update
+        unreadMessages.forEach((msg) => {
+          io.to(room).emit("message_read_update", {
+            messageId: msg._id,
+            conversationId: conversationId,
             userId: req.employee._id,
-            messageIds: unreadMessages.map((m) => m._id),
+            read: true,
             readAt: new Date(),
+            isSpace: isSpace,
+            // Include the reader info for space messages
+            reader: isSpace
+              ? {
+                  employee: {
+                    _id: req.employee._id,
+                    name: req.employee.name,
+                    avatar: req.employee.avatar,
+                    photographUrl: req.employee.photographUrl,
+                  },
+                  readAt: new Date(),
+                }
+              : undefined,
           });
         });
+
+        console.log(
+          `✅ Emitted read receipts for ${unreadMessages.length} messages to ${room}`
+        );
       }
     }
 
@@ -729,12 +864,13 @@ exports.startConversation = async (req, res) => {
 exports.sendMessage = async (req, res) => {
   try {
     const { conversationId } = req.params;
-    const { content, messageType = "text" } = req.body;
+    const { content, messageType = "text", replyTo } = req.body; // ✅ ADD replyTo
 
     console.log("📨 Send message request:", {
       conversationId,
       content,
       messageType,
+      replyTo, // ✅ ADD: Log replyTo
       files: req.files ? req.files.length : 0,
     });
 
@@ -778,6 +914,22 @@ exports.sendMessage = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, error: "Conversation not found" });
+    }
+
+    // ✅ VALIDATE REPLYTO MESSAGE
+    let repliedMessage = null;
+    if (replyTo && mongoose.Types.ObjectId.isValid(replyTo)) {
+      repliedMessage = await Message.findOne({
+        _id: replyTo,
+        conversation: conversationId, // Ensure replied message is in same conversation
+      }).populate("sender", "name companyEmail avatar");
+
+      if (!repliedMessage) {
+        return res.status(400).json({
+          success: false,
+          error: "Replied message not found or invalid",
+        });
+      }
     }
 
     // Check if this is a group conversation
@@ -873,13 +1025,14 @@ exports.sendMessage = async (req, res) => {
         url: a.url,
       })),
     });
+    const mentions = await processMentions(content, req.employee._id);
 
     // Prepare message data
     const messageData = {
       conversation: conversationId,
       sender: req.employee._id,
-      content: content?.trim() || "", // ✅ Allow empty content
-      messageType: finalMessageType, // ✅ Use the properly determined type
+      content: content?.trim() || "",
+      messageType: finalMessageType,
       attachments: uploadedAttachments,
       isGroupMessage: isGroup,
       readBy: [
@@ -888,6 +1041,11 @@ exports.sendMessage = async (req, res) => {
           readAt: new Date(),
         },
       ],
+      // ✅ ADD MENTIONS TO MESSAGE
+      mentions: mentions,
+      hasMentions: mentions.length > 0,
+      // ✅ ADD REPLYTO TO MESSAGE
+      replyTo: replyTo || undefined,
     };
 
     // Handle receiver based on conversation type
@@ -920,7 +1078,9 @@ exports.sendMessage = async (req, res) => {
     // Update conversation
     conversation.lastMessage = message._id;
     conversation.updatedAt = new Date();
-
+    if (mentions.length > 0) {
+      await sendMentionNotifications(mentions, message, conversation, req);
+    }
     // Update unread counts
     if (!isGroup) {
       const receiver = conversation.participants.find(
@@ -946,13 +1106,20 @@ exports.sendMessage = async (req, res) => {
 
     await conversation.save();
 
-    // Populate and return
+    // Populate and return - ✅ ADD populate for replyTo
     const populatedMessage = await Message.findById(message._id)
       .populate("sender", "name companyEmail avatar")
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("conversation")
-      .populate("space");
+      .populate("space")
+      .populate({
+        path: "replyTo",
+        populate: {
+          path: "sender",
+          select: "name companyEmail avatar",
+        },
+      });
 
     // ✅ CRITICAL FIX: Use io.to() for broadcasting
     const io = req.app.get("io");
@@ -1108,14 +1275,19 @@ exports.sendDirectMessage = async (req, res) => {
       (p) => p.toString() !== req.employee._id.toString()
     );
 
+    const mentions = await processMentions(content, req.employee._id);
+
+    // Create message with mentions
     const message = new Message({
       conversation: conversation._id,
       sender: req.employee._id,
       receiver: receiver,
       content: content?.trim(),
-      messageType: finalMessageType, // ✅ Use the properly determined type
+      messageType: finalMessageType,
       attachments: uploadedAttachments,
       read: false,
+      mentions: mentions,
+      hasMentions: mentions.length > 0,
     });
 
     await message.save();
@@ -1129,7 +1301,9 @@ exports.sendDirectMessage = async (req, res) => {
     conversation.unreadCount.set(receiver.toString(), currentCount + 1);
 
     await conversation.save();
-
+    if (mentions.length > 0) {
+      await sendMentionNotifications(mentions, message, conversation, req);
+    }
     // Populate message
     const populatedMessage = await Message.findById(message._id)
       .populate("sender", "name companyEmail avatar")
@@ -1172,6 +1346,8 @@ exports.sendDirectMessage = async (req, res) => {
   }
 };
 
+// ✅ FIXED: Replace your markAsRead function with this
+
 exports.markAsRead = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -1193,51 +1369,98 @@ exports.markAsRead = async (req, res) => {
         .json({ success: false, error: "Conversation not found" });
     }
 
-    const otherParticipant = conversation.participants.find(
-      (p) => p.toString() !== req.employee._id.toString()
-    );
+    const isSpace = conversation.isGroup || conversation.space;
 
-    if (!otherParticipant) {
-      return res
-        .status(400)
-        .json({ success: false, error: "Other participant not found" });
-    }
+    // Get all unread messages
+    let unreadMessages;
+    if (isSpace) {
+      unreadMessages = await Message.find({
+        conversation: conversationId,
+        "readBy.employee": { $ne: req.employee._id },
+      });
+    } else {
+      const otherParticipant = conversation.participants.find(
+        (p) => p.toString() !== req.employee._id.toString()
+      );
 
-    // Mark all unread messages from this conversation as read
-    const updateResult = await Message.updateMany(
-      {
+      unreadMessages = await Message.find({
         conversation: conversationId,
         receiver: req.employee._id,
         sender: otherParticipant,
         read: false,
-      },
-      {
-        read: true,
-        readAt: new Date(),
-      }
-    );
+      });
+    }
 
-    // Reset unread count for current user
+    // Mark messages as read
+    if (isSpace) {
+      await Message.updateMany(
+        {
+          _id: { $in: unreadMessages.map((m) => m._id) },
+        },
+        {
+          $addToSet: {
+            readBy: {
+              employee: req.employee._id,
+              readAt: new Date(),
+            },
+          },
+        }
+      );
+    } else {
+      await Message.updateMany(
+        {
+          _id: { $in: unreadMessages.map((m) => m._id) },
+        },
+        {
+          read: true,
+          readAt: new Date(),
+        }
+      );
+    }
+
+    // Reset unread count
     conversation.unreadCount.set(req.employee._id.toString(), 0);
     await conversation.save();
 
-    // ✅ UPDATED: Use socket event that matches frontend
+    // ✅ EMIT SOCKET EVENTS FOR REAL-TIME UPDATE
     const io = req.app.get("io");
     if (io) {
-      io.to(`conversation_${conversationId}`).emit("messages_read", {
-        conversationId,
-        userId: req.employee._id,
-        messageIds: [], // You might want to track specific message IDs
-        readAt: new Date(),
+      const room = isSpace
+        ? `space_${conversation.space || conversationId}`
+        : `conversation_${conversationId}`;
+
+      // Emit for each marked message
+      unreadMessages.forEach((msg) => {
+        io.to(room).emit("message_read_update", {
+          messageId: msg._id,
+          conversationId: conversationId,
+          userId: req.employee._id,
+          read: true,
+          readAt: new Date(),
+          isSpace: isSpace,
+          reader: isSpace
+            ? {
+                employee: {
+                  _id: req.employee._id,
+                  name: req.employee.name,
+                  avatar: req.employee.avatar,
+                  photographUrl: req.employee.photographUrl,
+                },
+                readAt: new Date(),
+              }
+            : undefined,
+        });
       });
 
-      console.log(`✅ Read receipts sent for conversation: ${conversationId}`);
+      console.log(
+        `✅ Read receipts sent for ${unreadMessages.length} messages in ${room}`
+      );
     }
 
     res.json({
       success: true,
       message: "Messages marked as read",
-      updatedCount: updateResult.modifiedCount,
+      updatedCount: unreadMessages.length,
     });
   } catch (error) {
     console.error("Mark as read error:", error);
@@ -1246,7 +1469,6 @@ exports.markAsRead = async (req, res) => {
       .json({ success: false, error: "Failed to mark messages as read" });
   }
 };
-
 // Mark conversation as unread
 exports.markAsUnread = async (req, res) => {
   try {
@@ -1829,11 +2051,10 @@ exports.addSpaceMembers = async (req, res) => {
     res.status(500).json({ success: false, error: "Failed to add members" });
   }
 };
-
 exports.sendSpaceMessage = async (req, res) => {
   try {
     const { spaceId } = req.params;
-    const { content, messageType = "text" } = req.body;
+    const { content, messageType = "text", replyTo } = req.body; // ✅ ADD replyTo
 
     // ✅ Process uploaded files
     const uploadedAttachments = [];
@@ -1906,6 +2127,22 @@ exports.sendSpaceMessage = async (req, res) => {
       );
     }
 
+    // ✅ VALIDATE REPLYTO MESSAGE FOR SPACE
+    let repliedMessage = null;
+    if (replyTo && mongoose.Types.ObjectId.isValid(replyTo)) {
+      repliedMessage = await Message.findOne({
+        _id: replyTo,
+        conversation: conversation._id, // Ensure replied message is in same space conversation
+      }).populate("sender", "name companyEmail avatar");
+
+      if (!repliedMessage) {
+        return res.status(400).json({
+          success: false,
+          error: "Replied message not found or invalid",
+        });
+      }
+    }
+
     // ✅ FIX: Enhanced message type detection for space messages
     let finalMessageType = messageType;
 
@@ -1952,18 +2189,21 @@ exports.sendSpaceMessage = async (req, res) => {
       totalMembers: space.members.length,
       sender: req.employee._id,
       receiversCount: receivers.length,
-      messageType: finalMessageType, // ✅ Log the determined message type
+      messageType: finalMessageType,
+      replyTo, // ✅ ADD: Log replyTo
       attachments: uploadedAttachments.length,
     });
 
-    // Create message with multiple receivers
+    const mentions = await processMentions(content, req.employee._id);
+
+    // Create message with mentions
     const message = new Message({
       conversation: conversation._id,
       sender: req.employee._id,
       receivers: receivers,
       space: spaceId,
       content: content?.trim(),
-      messageType: finalMessageType, // ✅ Use the properly determined type
+      messageType: finalMessageType,
       attachments: uploadedAttachments,
       isGroupMessage: true,
       readBy: [
@@ -1972,6 +2212,11 @@ exports.sendSpaceMessage = async (req, res) => {
           readAt: new Date(),
         },
       ],
+      // ✅ ADD MENTIONS
+      mentions: mentions,
+      hasMentions: mentions.length > 0,
+      // ✅ ADD REPLYTO
+      replyTo: replyTo || undefined,
     });
 
     await message.save();
@@ -1984,7 +2229,9 @@ exports.sendSpaceMessage = async (req, res) => {
     if (!conversation.unreadCount) {
       conversation.unreadCount = new Map();
     }
-
+    if (mentions.length > 0) {
+      await sendMentionNotifications(mentions, message, conversation, req);
+    }
     // Increment unread count for all receivers
     receivers.forEach((receiverId) => {
       const currentCount =
@@ -1994,12 +2241,19 @@ exports.sendSpaceMessage = async (req, res) => {
 
     await conversation.save();
 
-    // Populate message for response
+    // Populate message for response - ✅ ADD populate for replyTo
     const populatedMessage = await Message.findById(message._id)
       .populate("sender", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
-      .populate("conversation");
+      .populate("conversation")
+      .populate({
+        path: "replyTo",
+        populate: {
+          path: "sender",
+          select: "name companyEmail avatar",
+        },
+      });
 
     // ✅ CRITICAL FIX: Use io.to() for broadcasting
     const io = req.app.get("io");
@@ -2268,8 +2522,7 @@ exports.updateMemberRole = async (req, res) => {
     });
   }
 };
-// ✅ GET SPACE DETAILS
-// ✅ GET SPACE DETAILS (from conversation schema)
+
 exports.getSpaceDetails = async (req, res) => {
   try {
     const { spaceId } = req.params;
@@ -2820,6 +3073,7 @@ exports.getSpaceMessages = async (req, res) => {
       .populate("receivers", "name companyEmail avatar")
       .populate("readBy.employee", "name companyEmail avatar")
       .populate("space")
+      .populate("replyTo") // ✅ ADD: Populate replyTo reference
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
@@ -3470,11 +3724,19 @@ exports.deleteConversation = async (req, res) => {
     });
   }
 };
-// ✅ DELETE SPACE (and related conversation + messages)
+
+// ✅ DELETE SPACE (and related conversation + messages) - ADMIN ONLY
 exports.deleteSpace = async (req, res) => {
   try {
     const { spaceId } = req.params;
-    const { permanent = false } = req.query; // optional flag ?permanent=true
+    const { permanent = false } = req.query;
+
+    console.log(`🔍 Delete space request:`, {
+      spaceId,
+      permanent,
+      user: req.employee._id,
+      isAdmin: req.employee.isAdmin,
+    });
 
     // Validate space ID
     if (!mongoose.Types.ObjectId.isValid(spaceId)) {
@@ -3482,6 +3744,12 @@ exports.deleteSpace = async (req, res) => {
         .status(400)
         .json({ success: false, error: "Invalid space ID" });
     }
+
+    // ✅ IMPROVED: Better admin check
+    const isSystemAdmin = req.employee?.isAdmin === true;
+    console.log(
+      `🔍 Admin check - User: ${req.employee._id}, isAdmin: ${isSystemAdmin}`
+    );
 
     // Find space and verify permissions
     const space = await Space.findById(spaceId)
@@ -3492,55 +3760,150 @@ exports.deleteSpace = async (req, res) => {
       return res.status(404).json({ success: false, error: "Space not found" });
     }
 
-    // Ensure requester is admin or creator
-    if (
-      space.createdBy.toString() !== req.employee._id.toString() &&
-      !space.admins.some(
-        (admin) => admin._id.toString() === req.employee._id.toString()
-      )
-    ) {
-      return res.status(403).json({
-        success: false,
-        error: "Only the creator or admins can delete this space",
-      });
-    }
+    console.log(
+      `🔍 Space found: ${space.name}, Members: ${space.members.length}`
+    );
 
     // Find linked conversation
     const conversation = await Conversation.findOne({ space: spaceId });
+    console.log(
+      `🔍 Linked conversation: ${conversation ? conversation._id : "None"}`
+    );
 
-    // ✅ Option 1: Permanent delete (everything)
+    // ✅ Option 1: Permanent delete (everything) - ADMIN ONLY
     if (permanent === "true") {
-      // Delete all messages and conversation
-      if (conversation) {
-        await Message.deleteMany({ conversation: conversation._id });
-        await Conversation.findByIdAndDelete(conversation._id);
-      }
-
-      // Delete the space itself
-      await Space.findByIdAndDelete(spaceId);
-
-      // Emit socket event for all members
-      const io = req.app.get("io");
-      if (io) {
-        space.members.forEach((member) => {
-          io.to(`employee_${member._id}`).emit("space_deleted", {
-            spaceId,
-            deletedBy: req.employee._id,
-            permanent: true,
-            deletedAt: new Date(),
-          });
+      // ✅ CRITICAL: Enhanced admin check
+      if (!isSystemAdmin) {
+        console.log(`🚫 Admin permission denied for user: ${req.employee._id}`);
+        return res.status(403).json({
+          success: false,
+          error:
+            "Only system administrators can permanently delete spaces and all content",
         });
       }
 
-      return res.json({
-        success: true,
-        message: "Space and related data permanently deleted",
-        spaceId,
+      console.log(
+        `🛑 ADMIN: Permanent deletion of space ${spaceId} by admin ${req.employee._id}`
+      );
+
+      // Use transaction for atomic operations
+      const session = await mongoose.startSession();
+      session.startTransaction();
+
+      try {
+        // Store space data for socket emission before deletion
+        const spaceData = {
+          _id: space._id,
+          name: space.name,
+          members: space.members.map((m) => m._id),
+          totalMessages: 0,
+        };
+
+        // Delete all messages in the conversation
+        let deletedMessagesCount = 0;
+        if (conversation) {
+          const deleteResult = await Message.deleteMany({
+            conversation: conversation._id,
+          });
+          deletedMessagesCount = deleteResult.deletedCount;
+          spaceData.totalMessages = deletedMessagesCount;
+
+          // Delete the conversation itself
+          await Conversation.findByIdAndDelete(conversation._id);
+          console.log(
+            `✅ Deleted conversation: ${conversation._id} with ${deletedMessagesCount} messages`
+          );
+        }
+
+        // ✅ FIXED: Delete the space itself with better error handling
+        const deleteResult = await Space.findByIdAndDelete(spaceId);
+        if (!deleteResult) {
+          throw new Error("Failed to delete space - space not found");
+        }
+        console.log(`✅ Deleted space: ${spaceId}`);
+
+        await session.commitTransaction();
+        console.log(`✅ Transaction committed successfully`);
+
+        // Emit socket events
+        const io = req.app.get("io");
+        if (io) {
+          space.members.forEach((member) => {
+            io.to(`employee_${member._id}`).emit("space_permanently_deleted", {
+              spaceId,
+              spaceName: space.name,
+              deletedBy: {
+                _id: req.employee._id,
+                name: req.employee.name,
+                isAdmin: true,
+              },
+              permanent: true,
+              deletedAt: new Date(),
+              stats: {
+                messagesDeleted: deletedMessagesCount,
+                membersNotified: space.members.length,
+              },
+            });
+          });
+
+          // Also broadcast to space room
+          io.to(`space_${spaceId}`).emit("space_destroyed", {
+            spaceId,
+            deletedByAdmin: {
+              _id: req.employee._id,
+              name: req.employee.name,
+            },
+            deletedAt: new Date(),
+          });
+
+          console.log(
+            `✅ Notified ${space.members.length} members about space deletion`
+          );
+        }
+
+        return res.json({
+          success: true,
+          message: "Space and all related content permanently deleted by admin",
+          spaceId,
+          deletionStats: {
+            spaceDeleted: true,
+            conversationDeleted: !!conversation,
+            messagesDeleted: deletedMessagesCount,
+            membersNotified: space.members.length,
+            deletedBy: {
+              _id: req.employee._id,
+              name: req.employee.name,
+              isAdmin: true,
+            },
+          },
+        });
+      } catch (transactionError) {
+        await session.abortTransaction();
+        console.error("❌ Transaction aborted:", transactionError);
+        throw transactionError;
+      } finally {
+        session.endSession();
+      }
+    }
+
+    // ✅ Option 2: Soft delete (hide for current user) - Available for all users
+    // Ensure requester is member of the space
+    const isMember = space.members.some(
+      (member) => member._id.toString() === req.employee._id.toString()
+    );
+
+    if (!isMember) {
+      return res.status(403).json({
+        success: false,
+        error: "You are not a member of this space",
       });
     }
 
-    // ✅ Option 2: Soft delete (hide for current user)
-    space.hiddenBy = space.hiddenBy || [];
+    // Add hiddenBy field if it doesn't exist in your schema
+    if (!space.hiddenBy) {
+      space.hiddenBy = [];
+    }
+
     if (!space.hiddenBy.includes(req.employee._id)) {
       space.hiddenBy.push(req.employee._id);
       await space.save();
@@ -3548,11 +3911,12 @@ exports.deleteSpace = async (req, res) => {
 
     const io = req.app.get("io");
     if (io) {
-      io.to(`employee_${req.employee._id}`).emit("space_deleted", {
+      io.to(`employee_${req.employee._id}`).emit("space_hidden", {
         spaceId,
-        deletedBy: req.employee._id,
+        spaceName: space.name,
+        hiddenBy: req.employee._id,
         permanent: false,
-        deletedAt: new Date(),
+        hiddenAt: new Date(),
       });
     }
 
@@ -3560,9 +3924,10 @@ exports.deleteSpace = async (req, res) => {
       success: true,
       message: "Space hidden for this user",
       spaceId,
+      action: "hidden",
     });
   } catch (error) {
-    console.error("Delete space error:", error);
+    console.error("❌ Delete space error:", error);
     res.status(500).json({
       success: false,
       error: "Failed to delete space",
@@ -3862,6 +4227,247 @@ exports.blockUser = async (req, res) => {
   }
 };
 
+exports.updateMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { content, messageType, removedAttachments } = req.body;
+    const userId = req.employee._id;
+
+    console.log("📝 Update message request:", {
+      messageId,
+      content,
+      messageType,
+      removedAttachments,
+      newFiles: req.files?.length || 0,
+    });
+
+    // Find the message
+    const message = await Message.findById(messageId);
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user is the sender
+    if (message.sender.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: "You can only edit your own messages",
+      });
+    }
+
+    // Update content
+    if (content !== undefined) {
+      message.content = content;
+    }
+
+    // Handle removed attachments
+    if (removedAttachments) {
+      try {
+        const removedIds = JSON.parse(removedAttachments);
+
+        if (Array.isArray(removedIds) && removedIds.length > 0) {
+          console.log("🗑️ Removing attachments:", removedIds);
+
+          // Remove files from storage
+          for (const attachmentId of removedIds) {
+            const attachment = message.attachments.find(
+              (a) => a._id.toString() === attachmentId
+            );
+
+            if (attachment && attachment.url) {
+              const filePath = path.join(
+                __dirname,
+                "../../",
+                attachment.url.replace(
+                  `${req.protocol}://${req.get("host")}/`,
+                  ""
+                )
+              );
+
+              // Delete file if it exists
+              if (fs.existsSync(filePath)) {
+                fs.unlinkSync(filePath);
+                console.log("✅ Deleted file:", filePath);
+              }
+            }
+          }
+
+          // Remove from attachments array
+          message.attachments = message.attachments.filter(
+            (a) => !removedIds.includes(a._id.toString())
+          );
+        }
+      } catch (parseError) {
+        console.error("Error parsing removedAttachments:", parseError);
+      }
+    }
+
+    // Handle new attachments
+    if (req.files && req.files.length > 0) {
+      console.log("📎 Adding new attachments:", req.files.length);
+
+      const newAttachments = req.files.map((file) => ({
+        filename: file.filename,
+        originalName: file.originalname,
+        url: `/uploads/chat-attachments/${file.filename}`,
+        mimetype: file.mimetype,
+        size: file.size,
+      }));
+
+      // Add new attachments
+      message.attachments = [...message.attachments, ...newAttachments];
+    }
+
+    // Determine final message type
+    if (messageType) {
+      message.messageType = messageType;
+    } else if (message.attachments.length > 0) {
+      // Auto-detect message type based on attachments
+      const hasImages = message.attachments.some((a) =>
+        a.mimetype.startsWith("image/")
+      );
+      const hasGifs = message.attachments.some(
+        (a) => a.mimetype === "image/gif"
+      );
+
+      if (hasGifs) {
+        message.messageType = "gif";
+      } else if (hasImages) {
+        message.messageType = "image";
+      } else {
+        message.messageType = "file";
+      }
+    } else if (message.attachments.length === 0 && message.content) {
+      message.messageType = "text";
+    }
+
+    // Mark as edited
+    message.editedAt = new Date();
+
+    // Save the updated message
+    await message.save();
+
+    // Populate sender details for response
+    await message.populate("sender", "name companyEmail avatar photographUrl");
+
+    // Emit socket event for real-time update
+    const io = req.app.get("io");
+    if (io) {
+      // Determine room based on conversation or space
+      let room;
+      if (message.conversation) {
+        room = `conversation_${message.conversation}`;
+      } else if (message.space) {
+        room = `space_${message.space}`;
+      }
+
+      if (room) {
+        io.to(room).emit("message_updated", {
+          messageId: message._id,
+          message: message,
+          updatedBy: userId,
+          updatedAt: new Date(),
+        });
+
+        console.log(`✅ Message update broadcasted to ${room}`);
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: message,
+      msg: "Message updated successfully",
+    });
+  } catch (error) {
+    console.error("❌ Error updating message:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to update message",
+      details: error.message,
+    });
+  }
+};
+exports.deleteSingleMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const userId = req.employee._id;
+
+    // Validate ID
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find message and ensure the current user is the sender
+    const message = await Message.findById(messageId).populate(
+      "conversation space"
+    );
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+    if (message.sender.toString() !== userId.toString()) {
+      return res.status(403).json({
+        success: false,
+        error: "You can only delete your own messages",
+      });
+    }
+
+    // Delete the message document
+    await Message.findByIdAndDelete(messageId);
+
+    // If it was the last message in the conversation, update the conversation.lastMessage
+    if (
+      message.conversation &&
+      message.conversation.lastMessage?.toString() === messageId
+    ) {
+      const prev = await Message.findOne({
+        conversation: message.conversation._id,
+      })
+        .sort({ createdAt: -1 })
+        .select("_id");
+      await Conversation.findByIdAndUpdate(
+        message.conversation._id,
+        { lastMessage: prev ? prev._id : null },
+        { new: true }
+      );
+    }
+
+    // Broadcast deletion event via socket.io
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.space
+        ? `space_${message.space._id}`
+        : `conversation_${message.conversation._id}`;
+      io.to(room).emit("message_deleted", {
+        messageId,
+        deletedBy: userId,
+        deletedAt: new Date(),
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Message deleted successfully",
+      deletedMessageId: messageId,
+    });
+  } catch (error) {
+    console.error("Delete single message error:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to delete message",
+      details: error.message,
+    });
+  }
+};
 // Unblock a user
 exports.unblockUser = async (req, res) => {
   try {
@@ -4864,6 +5470,851 @@ exports.searchMessages = async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to search messages",
+      details: error.message,
+    });
+  }
+};
+// ✅ STAR MESSAGE
+exports.starMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find the message
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user has access to this message
+    const conversation = await Conversation.findOne({
+      _id: message.conversation,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this message",
+      });
+    }
+
+    // Check if already starred
+    if (message.isStarredBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Message is already starred",
+      });
+    }
+
+    // Add to starredBy array
+    message.starredBy.push({
+      employee: req.employee._id,
+      starredAt: new Date(),
+    });
+
+    await message.save();
+
+    // Populate the updated message
+    const updatedMessage = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar")
+      .populate("starredBy.employee", "name companyEmail avatar")
+      .populate("receivers", "name companyEmail avatar")
+      .populate("space")
+      .populate("conversation");
+
+    // ✅ EMIT SOCKET EVENT FOR MESSAGE STARRED
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.space
+        ? `space_${message.space}`
+        : `conversation_${message.conversation}`;
+
+      io.to(room).emit("message_starred", {
+        messageId,
+        starredBy: req.employee._id,
+        starredAt: new Date(),
+        totalStars: updatedMessage.starredBy.length,
+      });
+
+      console.log(`✅ Message starred: ${messageId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Message starred successfully",
+      starredBy: updatedMessage.starredBy,
+      totalStars: updatedMessage.starredBy.length,
+    });
+  } catch (error) {
+    console.error("Star message error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to star message",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ UNSTAR MESSAGE
+exports.unstarMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find the message
+    const message = await Message.findById(messageId);
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user has access to this message
+    const conversation = await Conversation.findOne({
+      _id: message.conversation,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this message",
+      });
+    }
+
+    // Check if actually starred
+    if (!message.isStarredBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Message is not starred",
+      });
+    }
+
+    // Remove from starredBy array
+    message.starredBy = message.starredBy.filter(
+      (star) => star.employee.toString() !== req.employee._id.toString()
+    );
+
+    await message.save();
+
+    // Populate the updated message
+    const updatedMessage = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar")
+      .populate("starredBy.employee", "name companyEmail avatar")
+      .populate("receivers", "name companyEmail avatar")
+      .populate("space")
+      .populate("conversation");
+
+    // ✅ EMIT SOCKET EVENT FOR MESSAGE UNSTARRED
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.space
+        ? `space_${message.space}`
+        : `conversation_${message.conversation}`;
+
+      io.to(room).emit("message_unstarred", {
+        messageId,
+        unstarredBy: req.employee._id,
+        unstarredAt: new Date(),
+        totalStars: updatedMessage.starredBy.length,
+      });
+
+      console.log(`✅ Message unstarred: ${messageId}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Message unstarred successfully",
+      starredBy: updatedMessage.starredBy,
+      totalStars: updatedMessage.starredBy.length,
+    });
+  } catch (error) {
+    console.error("Unstar message error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unstar message",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET STARRED MESSAGES FOR USER
+exports.getStarredMessages = async (req, res) => {
+  try {
+    const { page = 1, limit = 50, conversationId } = req.query;
+
+    // Build query for starred messages
+    let query = {
+      "starredBy.employee": req.employee._id,
+    };
+
+    // If specific conversation, filter by it
+    if (conversationId && mongoose.Types.ObjectId.isValid(conversationId)) {
+      const conversation = await Conversation.findOne({
+        _id: conversationId,
+        participants: req.employee._id,
+      });
+
+      if (!conversation) {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied to this conversation",
+        });
+      }
+
+      query.conversation = conversationId;
+    } else {
+      // Get all conversations user has access to
+      const userConversations = await Conversation.find({
+        participants: req.employee._id,
+        archivedBy: { $ne: req.employee._id },
+        hiddenBy: { $ne: req.employee._id },
+      }).select("_id");
+
+      const conversationIds = userConversations.map((conv) => conv._id);
+
+      if (conversationIds.length === 0) {
+        return res.json({
+          success: true,
+          messages: [],
+          total: 0,
+          hasMore: false,
+        });
+      }
+
+      query.conversation = { $in: conversationIds };
+    }
+
+    // Get starred messages with pagination
+    const messages = await Message.find(query)
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space")
+      .populate("space", "name description avatar")
+      .populate("starredBy.employee", "name companyEmail avatar")
+      .populate("attachments")
+      .sort({ "starredBy.starredAt": -1 })
+      .limit(parseInt(limit))
+      .skip((page - 1) * limit);
+
+    const total = await Message.countDocuments(query);
+
+    // Format response
+    const formattedMessages = messages.map((message) => {
+      const userStar = message.starredBy.find(
+        (star) => star.employee._id.toString() === req.employee._id.toString()
+      );
+
+      return {
+        _id: message._id,
+        content: message.content,
+        messageType: message.messageType,
+        attachments: message.attachments || [],
+        sender: {
+          _id: message.sender._id,
+          name: message.sender.name,
+          email: message.sender.companyEmail,
+          avatar: message.sender.photographUrl || message.sender.avatar,
+        },
+        conversation: {
+          _id: message.conversation._id,
+          name: message.conversation.isGroup
+            ? message.conversation.groupName
+            : "Direct Message",
+          isGroup: message.conversation.isGroup,
+          isSpace: !!message.conversation.space,
+        },
+        space: message.space
+          ? {
+              _id: message.space._id,
+              name: message.space.name,
+            }
+          : null,
+        starredAt: userStar ? userStar.starredAt : null,
+        totalStars: message.starredBy.length,
+        createdAt: message.createdAt,
+        isStarred: true,
+      };
+    });
+
+    res.json({
+      success: true,
+      messages: formattedMessages,
+      total,
+      hasMore: (page - 1) * limit + messages.length < total,
+      page: parseInt(page),
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("Get starred messages error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch starred messages",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ PIN A MESSAGE
+exports.pinMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { note } = req.body || {};
+
+    console.log("📌 Pin message request:", {
+      messageId,
+      note,
+      user: req.employee._id,
+    });
+
+    // Validate message ID
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find the message
+    const message = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar")
+      .populate("conversation", "participants isGroup space");
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user has access to this message's conversation
+    const hasAccess = message.conversation.participants.some(
+      (participant) => participant.toString() === req.employee._id.toString()
+    );
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this message",
+      });
+    }
+
+    // Check if message is already pinned by this user
+    if (message.isPinnedBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Message is already pinned by you",
+      });
+    }
+
+    // Add pin to message
+    message.pinnedBy.push({
+      employee: req.employee._id,
+      pinnedAt: new Date(),
+      note: note || "",
+    });
+
+    // Update isPinned flag
+    message.isPinned = true;
+
+    await message.save();
+
+    // Populate the updated message with pin details
+    const updatedMessage = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space");
+
+    // ✅ EMIT SOCKET EVENT FOR MESSAGE PINNED
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.conversation.space
+        ? `space_${message.conversation.space}`
+        : `conversation_${message.conversation._id}`;
+
+      io.to(room).emit("message_pinned", {
+        messageId,
+        pinnedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+          avatar: req.employee.avatar,
+        },
+        pinnedAt: new Date(),
+        note: note || "",
+        totalPins: updatedMessage.pinnedBy.length,
+        message: {
+          _id: updatedMessage._id,
+          content: updatedMessage.content,
+          messageType: updatedMessage.messageType,
+          sender: updatedMessage.sender,
+        },
+      });
+
+      console.log(`✅ Message pinned: ${messageId} in room: ${room}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Message pinned successfully",
+      pinnedMessage: {
+        _id: updatedMessage._id,
+        content: updatedMessage.content,
+        messageType: updatedMessage.messageType,
+        sender: updatedMessage.sender,
+        pinnedBy: updatedMessage.pinnedBy,
+        isPinned: true,
+        pinnedAt: new Date(),
+        note: note || "",
+        totalPins: updatedMessage.pinnedBy.length,
+      },
+    });
+  } catch (error) {
+    console.error("Pin message error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to pin message",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ UNPIN A MESSAGE
+exports.unpinMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    console.log("📌 Unpin message request:", {
+      messageId,
+      user: req.employee._id,
+    });
+
+    // Validate message ID
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID",
+      });
+    }
+
+    // Find the message
+    const message = await Message.findById(messageId)
+      .populate("sender", "name companyEmail avatar")
+      .populate("conversation", "participants isGroup space");
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if user has access to this message's conversation
+    const hasAccess = message.conversation.participants.some(
+      (participant) => participant.toString() === req.employee._id.toString()
+    );
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this message",
+      });
+    }
+
+    // Check if message is actually pinned by this user
+    if (!message.isPinnedBy(req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error: "Message is not pinned by you",
+      });
+    }
+
+    // Get pin details before removing (for socket event)
+    const pinToRemove = message.pinnedBy.find(
+      (pin) => pin.employee.toString() === req.employee._id.toString()
+    );
+
+    // Remove user's pin from message
+    message.pinnedBy = message.pinnedBy.filter(
+      (pin) => pin.employee.toString() !== req.employee._id.toString()
+    );
+
+    // Update isPinned flag if no pins left
+    message.isPinned = message.pinnedBy.length > 0;
+
+    await message.save();
+
+    // Populate the updated message
+    const updatedMessage = await Message.findById(messageId).populate(
+      "pinnedBy.employee",
+      "name companyEmail avatar photographUrl"
+    );
+
+    // ✅ EMIT SOCKET EVENT FOR MESSAGE UNPINNED
+    const io = req.app.get("io");
+    if (io) {
+      const room = message.conversation.space
+        ? `space_${message.conversation.space}`
+        : `conversation_${message.conversation._id}`;
+
+      io.to(room).emit("message_unpinned", {
+        messageId,
+        unpinnedBy: req.employee._id,
+        unpinnedAt: new Date(),
+        previousPinId: pinToRemove?._id,
+        totalPins: updatedMessage.pinnedBy.length,
+      });
+
+      console.log(`✅ Message unpinned: ${messageId} from room: ${room}`);
+    }
+
+    res.json({
+      success: true,
+      message: "Message unpinned successfully",
+      messageId,
+      totalPins: updatedMessage.pinnedBy.length,
+      isPinned: updatedMessage.isPinned,
+    });
+  } catch (error) {
+    console.error("Unpin message error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unpin message",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET PINNED MESSAGES FOR A CONVERSATION
+exports.getPinnedMessages = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { page = 1, limit = 50 } = req.query;
+
+    console.log("📌 Get pinned messages request:", { conversationId });
+
+    // Validate conversation ID
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    // Verify user has access to this conversation
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found or access denied",
+      });
+    }
+
+    // Get pinned messages for this conversation
+    const pinnedMessages = await Message.find({
+      conversation: conversationId,
+      isPinned: true,
+    })
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space")
+      .sort({ "pinnedBy.pinnedAt": -1 })
+      .limit(parseInt(limit))
+      .skip((page - 1) * limit);
+
+    const total = await Message.countDocuments({
+      conversation: conversationId,
+      isPinned: true,
+    });
+
+    // Format the response
+    const formattedMessages = pinnedMessages.map((message) => {
+      const userPin = message.pinnedBy.find(
+        (pin) => pin.employee._id.toString() === req.employee._id.toString()
+      );
+
+      return {
+        _id: message._id,
+        content: message.content,
+        messageType: message.messageType,
+        attachments: message.attachments || [],
+        sender: {
+          _id: message.sender._id,
+          name: message.sender.name,
+          email: message.sender.companyEmail,
+          avatar: message.sender.photographUrl || message.sender.avatar,
+        },
+        conversation: {
+          _id: message.conversation._id,
+          name: message.conversation.isGroup
+            ? message.conversation.groupName
+            : "Direct Message",
+          isGroup: message.conversation.isGroup,
+          isSpace: !!message.conversation.space,
+        },
+        pinnedBy: message.pinnedBy,
+        pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
+        note: userPin ? userPin.note : message.pinnedBy[0]?.note,
+        totalPins: message.pinnedBy.length,
+        isPinned: true,
+        createdAt: message.createdAt,
+        // Include if user has pinned this message
+        pinnedByCurrentUser: !!userPin,
+      };
+    });
+
+    res.json({
+      success: true,
+      pinnedMessages: formattedMessages,
+      total,
+      hasMore: (page - 1) * limit + pinnedMessages.length < total,
+      page: parseInt(page),
+      totalPages: Math.ceil(total / limit),
+      conversation: {
+        _id: conversation._id,
+        name: conversation.isGroup ? conversation.groupName : "Direct Message",
+        isGroup: conversation.isGroup,
+        isSpace: !!conversation.space,
+      },
+    });
+  } catch (error) {
+    console.error("Get pinned messages error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch pinned messages",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET ALL PINNED MESSAGES FOR USER (across all conversations)
+exports.getAllPinnedMessages = async (req, res) => {
+  try {
+    const { page = 1, limit = 50 } = req.query;
+
+    // Get all conversations user has access to
+    const userConversations = await Conversation.find({
+      participants: req.employee._id,
+      archivedBy: { $ne: req.employee._id },
+      hiddenBy: { $ne: req.employee._id },
+    }).select("_id");
+
+    const conversationIds = userConversations.map((conv) => conv._id);
+
+    if (conversationIds.length === 0) {
+      return res.json({
+        success: true,
+        pinnedMessages: [],
+        total: 0,
+        hasMore: false,
+      });
+    }
+
+    // Get pinned messages from all user's conversations
+    const pinnedMessages = await Message.find({
+      conversation: { $in: conversationIds },
+      isPinned: true,
+    })
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("pinnedBy.employee", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space participants")
+      .sort({ "pinnedBy.pinnedAt": -1 })
+      .limit(parseInt(limit))
+      .skip((page - 1) * limit);
+
+    const total = await Message.countDocuments({
+      conversation: { $in: conversationIds },
+      isPinned: true,
+    });
+
+    // Format response
+    const formattedMessages = pinnedMessages.map((message) => {
+      const userPin = message.pinnedBy.find(
+        (pin) => pin.employee._id.toString() === req.employee._id.toString()
+      );
+
+      // For direct messages, get the other participant
+      let conversationName = "Direct Message";
+      if (message.conversation.isGroup) {
+        conversationName = message.conversation.groupName;
+      } else {
+        const otherParticipant = message.conversation.participants.find(
+          (p) => p.toString() !== req.employee._id.toString()
+        );
+        // You might want to populate this with actual user data
+        conversationName = `Chat with User`;
+      }
+
+      return {
+        _id: message._id,
+        content: message.content,
+        messageType: message.messageType,
+        attachments: message.attachments || [],
+        sender: {
+          _id: message.sender._id,
+          name: message.sender.name,
+          email: message.sender.companyEmail,
+          avatar: message.sender.photographUrl || message.sender.avatar,
+        },
+        conversation: {
+          _id: message.conversation._id,
+          name: conversationName,
+          isGroup: message.conversation.isGroup,
+          isSpace: !!message.conversation.space,
+        },
+        pinnedBy: message.pinnedBy,
+        pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
+        note: userPin ? userPin.note : message.pinnedBy[0]?.note,
+        totalPins: message.pinnedBy.length,
+        isPinned: true,
+        createdAt: message.createdAt,
+        pinnedByCurrentUser: !!userPin,
+      };
+    });
+
+    res.json({
+      success: true,
+      pinnedMessages: formattedMessages,
+      total,
+      hasMore: (page - 1) * limit + pinnedMessages.length < total,
+      page: parseInt(page),
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("Get all pinned messages error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch pinned messages",
+      details: error.message,
+    });
+  }
+};
+// ✅ GET MESSAGES WHERE USER WAS MENTIONED
+exports.getMentionedMessages = async (req, res) => {
+  try {
+    const { page = 1, limit = 50 } = req.query;
+
+    const messages = await Message.find({
+      "mentions.employee": req.employee._id,
+    })
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("mentions.employee", "name companyEmail avatar photographUrl")
+      .populate("conversation", "isGroup groupName space participants")
+      .populate("space", "name description avatar")
+      .sort({ createdAt: -1 })
+      .limit(parseInt(limit))
+      .skip((page - 1) * limit)
+      .lean();
+
+    const total = await Message.countDocuments({
+      "mentions.employee": req.employee._id,
+    });
+
+    // Format response
+    const formattedMessages = messages.map((message) => {
+      const userMention = message.mentions.find(
+        (mention) =>
+          mention.employee._id.toString() === req.employee._id.toString()
+      );
+
+      // Get conversation name
+      let conversationName = "Direct Message";
+      if (message.conversation.isGroup) {
+        conversationName = message.conversation.groupName;
+      } else {
+        const otherParticipant = message.conversation.participants.find(
+          (p) => p.toString() !== req.employee._id.toString()
+        );
+        conversationName = `Chat with User`;
+      }
+
+      return {
+        _id: message._id,
+        content: message.content,
+        messageType: message.messageType,
+        attachments: message.attachments || [],
+        sender: {
+          _id: message.sender._id,
+          name: message.sender.name,
+          email: message.sender.companyEmail,
+          avatar: message.sender.photographUrl || message.sender.avatar,
+        },
+        conversation: {
+          _id: message.conversation._id,
+          name: conversationName,
+          isGroup: message.conversation.isGroup,
+          isSpace: !!message.conversation.space,
+        },
+        space: message.space
+          ? {
+              _id: message.space._id,
+              name: message.space.name,
+            }
+          : null,
+        mentionedAt: userMention ? userMention.mentionedAt : null,
+        mentionText: userMention ? userMention.mentionText : null,
+        createdAt: message.createdAt,
+        hasMentions: message.hasMentions,
+      };
+    });
+
+    res.json({
+      success: true,
+      messages: formattedMessages,
+      total,
+      hasMore: (page - 1) * limit + messages.length < total,
+      page: parseInt(page),
+      totalPages: Math.ceil(total / limit),
+    });
+  } catch (error) {
+    console.error("Get mentioned messages error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch mentioned messages",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET UNREAD MENTIONS COUNT
+exports.getUnreadMentionsCount = async (req, res) => {
+  try {
+    const count = await Message.countDocuments({
+      "mentions.employee": req.employee._id,
+      createdAt: {
+        $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
+      },
+      // You can add read status logic here if you track read mentions
+    });
+
+    res.json({
+      success: true,
+      unreadMentionsCount: count,
+    });
+  } catch (error) {
+    console.error("Get unread mentions count error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to get unread mentions count",
       details: error.message,
     });
   }
