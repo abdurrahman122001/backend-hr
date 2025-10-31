@@ -33,17 +33,17 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     }
 
     // ✅ Refresh token if it's about to expire (less than 30 minutes left)
-    const now = Math.floor(Date.now() / 1000);
-    const remainingTime = payload.exp - now;
+    // const now = Math.floor(Date.now() / 1000);
+    // const remainingTime = payload.exp - now;
 
-    if (remainingTime < 30 * 60) {
-      // Issue a fresh token
-      const newToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
-        expiresIn: TOKEN_LIFETIME,
-      });
-      res.setHeader("x-refreshed-token", newToken);
-      console.log("🔄 [Auth] Token refreshed automatically for", emp.companyEmail);
-    }
+    // if (remainingTime < 30 * 60) {
+    //   // Issue a fresh token
+    //   const newToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
+    //     expiresIn: TOKEN_LIFETIME,
+    //   });
+    //   res.setHeader("x-refreshed-token", newToken);
+    //   console.log("🔄 [Auth] Token refreshed automatically for", emp.companyEmail);
+    // }
 
     // ✅ Attach employee to request
     req.employee = {

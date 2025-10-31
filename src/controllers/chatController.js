@@ -7,21 +7,17 @@ const path = require("path");
 const fs = require("fs");
 
 const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
+  destination(req, file, cb) {
     const uploadDir = "uploads/chat-attachments/";
-    // Create uploads directory if it doesn't exist
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
+    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
     cb(null, uploadDir);
   },
-  filename: function (req, file, cb) {
-    // Generate unique filename with timestamp
-    const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(
-      null,
-      file.fieldname + "-" + uniqueSuffix + path.extname(file.originalname)
-    );
+  filename(req, file, cb) {
+    // keep original name, add 3 random chars to avoid collisions
+    const base  = path.parse(file.originalname).name;        // name without ext
+    const ext   = path.extname(file.originalname);           // includes the dot
+    const uniq  = Math.random().toString(36).slice(-3);      // short random bit
+    cb(null, `${base}-${uniq}${ext}`);
   },
 });
 // Add this function to your chat controller
