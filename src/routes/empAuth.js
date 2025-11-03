@@ -203,13 +203,16 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
-    // ✅ Replace all trusted devices with this new one
-    emp.trustedDevices = [
-      { deviceFingerprint, userAgent, addedAt: new Date() },
-    ];
+    if (
+      !emp.trustedDevices.some((d) => d.deviceFingerprint === deviceFingerprint)
+    ) {
+      emp.trustedDevices.push({
+        deviceFingerprint,
+        userAgent,
+        addedAt: new Date(),
+      });
+    }
     await emp.save();
-
-    // ✅ Create final token & session (check-in)
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
