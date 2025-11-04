@@ -47,6 +47,9 @@ const WhatsAppMessageSchema = new Schema(
       enum: ["pending", "approved", "disapproved"], 
       default: null 
     },
+        isForwarded: { type: Boolean, default: false },
+    originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
+    forwardedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
     // Edit tracking fields
     isEdited: { type: Boolean, default: false },

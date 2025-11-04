@@ -1122,6 +1122,10 @@ exports.approveMessage = async function approveMessage(req, res) {
           note: msg.note || "",
           attachments: msg.attachments,
           approvalStatus: "approved",
+          // Add metadata to identify this as a forwarded message
+          isForwarded: true,
+          originalMessage: msg._id,
+          forwardedBy: req.employee._id
         });
 
         const populatedForward = await forwardMsg.populate([
@@ -1129,25 +1133,35 @@ exports.approveMessage = async function approveMessage(req, res) {
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
           { path: "client", select: "_id clientName" },
+          { path: "forwardedBy", select: "_id name companyEmail" },
         ]);
 
-        // Emit new message event for the forwarded message
+        // 🎯 CRITICAL: Emit new message event for the forwarded message to managers
         if (req.app.get("io")) {
           const io = req.app.get("io");
+
+          console.log("📤 Forwarding approved message to managers:", {
+            managers: managers,
+            messageId: populatedForward._id
+          });
 
           // Notify managers about the new forwarded message
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
               message: populatedForward,
               type: "new_message",
-              action: "forwarded_approved"
+              action: "forwarded_approved",
+              forwardedBy: req.employee._id,
+              originalMessageId: msg._id
             });
+            console.log(`✅ Forwarded to manager: employee_${managerId}`);
           });
         }
 
         return res.json({
           ...populatedMsg.toObject(),
           forwardedToManagers: true,
+          forwardedMessage: populatedForward,
           message: "Message approved and forwarded to managers"
         });
       }

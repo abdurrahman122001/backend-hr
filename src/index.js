@@ -1266,7 +1266,6 @@ io.on("connection", (socket) => {
   });
 });
 
-// Complete Socket.IO server setup
 io.on("connection", (socket) => {
   console.log("🟢 Client connected:", socket.id);
 
@@ -1300,7 +1299,306 @@ io.on("connection", (socket) => {
     console.log(`💬 Conversation ${conversationId} room joined by ${socket.id}`);
   });
 
-  // Handle message sending
+  // 🎯 CRITICAL FIX: Handle WhatsApp message events specifically
+  socket.on("whatsapp_send_message", async (data) => {
+    try {
+      const { message, clientId, senderId, receivers } = data;
+
+      if (!message || !clientId || !senderId) {
+        console.error("❌ whatsapp_send_message: message, clientId, and senderId are required");
+        socket.emit("message_error", { error: "Missing required fields" });
+        return;
+      }
+
+      console.log("📤 WhatsApp message sent:", {
+        clientId,
+        senderId,
+        receivers,
+        messageId: message._id
+      });
+
+      // Notify sender
+      socket.emit("new_message", {
+        message: message,
+        type: "message_sent",
+        action: "sent"
+      });
+
+      // Notify all receivers
+      if (receivers && Array.isArray(receivers)) {
+        receivers.forEach(receiverId => {
+          socket.to(`employee_${receiverId}`).emit("new_message", {
+            message: message,
+            type: "new_assignment",
+            action: "received"
+          });
+          console.log(`✅ Notified receiver: employee_${receiverId}`);
+        });
+      }
+
+      // Also broadcast to client room for real-time chat
+      socket.to(`client_${clientId}`).emit("new_message", {
+        message: message,
+        type: "new_message",
+        action: "client_received"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_send_message:", error);
+      socket.emit("message_error", { error: "Failed to send message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message approval events
+  socket.on("whatsapp_approve_message", async (data) => {
+    try {
+      const { message, approvedBy, receivers, clientId } = data;
+
+      if (!message || !approvedBy) {
+        console.error("❌ whatsapp_approve_message: message and approvedBy are required");
+        return;
+      }
+
+      console.log("✅ WhatsApp message approved:", {
+        messageId: message._id,
+        approvedBy,
+        receivers,
+        clientId
+      });
+
+      // Create the updated message object with approval status
+      const updatedMessage = {
+        ...message,
+        approvalStatus: "approved"
+      };
+
+      // 🎯 Notify ALL involved users about approval
+      const allInvolvedUsers = new Set();
+
+      // Add sender
+      if (message.sender && message.sender._id) {
+        allInvolvedUsers.add(String(message.sender._id));
+      }
+
+      // Add all receivers from original message
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach(receiver => {
+          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+          if (receiverId) {
+            allInvolvedUsers.add(String(receiverId));
+          }
+        });
+      }
+
+      // Add the team lead who approved
+      allInvolvedUsers.add(String(approvedBy));
+
+      // Add any additional receivers from approval
+      if (receivers && Array.isArray(receivers)) {
+        receivers.forEach(receiverId => {
+          allInvolvedUsers.add(String(receiverId));
+        });
+      }
+
+      // Convert to array and emit to each user
+      const involvedUsersArray = Array.from(allInvolvedUsers);
+      
+      involvedUsersArray.forEach(userId => {
+        socket.to(`employee_${userId}`).emit("new_message", {
+          message: updatedMessage,
+          type: "message_updated",
+          action: "approved",
+          approvedBy: approvedBy,
+          timestamp: new Date()
+        });
+        console.log(`✅ Emitted approval to employee_${userId}`);
+      });
+
+      // Also emit to the client room for real-time chat updates
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("new_message", {
+          message: updatedMessage,
+          type: "message_updated",
+          action: "approved"
+        });
+        console.log(`✅ Emitted to client_${clientId}`);
+      }
+
+      // Notify sender specifically
+      socket.emit("new_message", {
+        message: updatedMessage,
+        type: "message_approved",
+        action: "approved"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_approve_message:", error);
+      socket.emit("message_error", { error: "Failed to approve message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle forwarded approved messages to managers
+  socket.on("whatsapp_forward_to_managers", async (data) => {
+    try {
+      const { message, managers, forwardedBy, clientId } = data;
+
+      if (!message || !managers || !Array.isArray(managers)) {
+        console.error("❌ whatsapp_forward_to_managers: message and managers array are required");
+        return;
+      }
+
+      console.log("📤 Forwarding approved message to managers:", {
+        messageId: message._id,
+        managers: managers,
+        forwardedBy: forwardedBy
+      });
+
+      // Mark this as a forwarded message
+      const forwardedMessage = {
+        ...message,
+        isForwarded: true,
+        forwardedBy: forwardedBy,
+        originalMessageId: message._id
+      };
+
+      // Notify each manager about the new forwarded message
+      managers.forEach((managerId) => {
+        socket.to(`employee_${managerId}`).emit("new_message", {
+          message: forwardedMessage,
+          type: "new_approved_message",
+          action: "forwarded_approved",
+          forwardedBy: forwardedBy,
+          originalMessageId: message._id,
+          timestamp: new Date()
+        });
+        console.log(`✅ Forwarded to manager: employee_${managerId}`);
+      });
+
+      // Notify the forwarder that forwarding was successful
+      socket.emit("new_message", {
+        message: forwardedMessage,
+        type: "message_forwarded",
+        action: "forwarded_to_managers"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_forward_to_managers:", error);
+      socket.emit("message_error", { error: "Failed to forward message to managers" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message editing events
+  socket.on("whatsapp_edit_message", async (data) => {
+    try {
+      const { message, editedBy, clientId } = data;
+
+      if (!message || !editedBy) {
+        console.error("❌ whatsapp_edit_message: message and editedBy are required");
+        return;
+      }
+
+      console.log("✏️ WhatsApp message edited:", {
+        messageId: message._id,
+        editedBy,
+        clientId
+      });
+
+      // Notify ALL involved users about edit
+      const allInvolvedUsers = new Set();
+
+      // Add sender
+      if (message.sender && message.sender._id) {
+        allInvolvedUsers.add(String(message.sender._id));
+      }
+
+      // Add all receivers
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach(receiver => {
+          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+          if (receiverId) {
+            allInvolvedUsers.add(String(receiverId));
+          }
+        });
+      }
+
+      // Add the editor
+      allInvolvedUsers.add(String(editedBy));
+
+      // Convert to array and emit to each user
+      const involvedUsersArray = Array.from(allInvolvedUsers);
+      
+      involvedUsersArray.forEach(userId => {
+        socket.to(`employee_${userId}`).emit("new_message", {
+          message: message,
+          type: "message_updated",
+          action: "edited",
+          editedBy: editedBy,
+          timestamp: new Date()
+        });
+        console.log(`✅ Emitted edit to employee_${userId}`);
+      });
+
+      // Also emit to the client room for real-time chat updates
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("new_message", {
+          message: message,
+          type: "message_updated",
+          action: "edited"
+        });
+        console.log(`✅ Emitted to client_${clientId}`);
+      }
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_edit_message:", error);
+      socket.emit("message_error", { error: "Failed to edit message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message status updates (delivered, read, etc.)
+  socket.on("whatsapp_message_status", async (data) => {
+    try {
+      const { messageId, status, userId, clientId } = data;
+
+      if (!messageId || !status) {
+        console.error("❌ whatsapp_message_status: messageId and status are required");
+        return;
+      }
+
+      console.log("📊 WhatsApp message status update:", {
+        messageId,
+        status,
+        userId
+      });
+
+      // Notify relevant users about status change
+      socket.emit("message_status", {
+        messageId: messageId,
+        status: status
+      });
+
+      // If there's a specific user who triggered the status update, notify them
+      if (userId) {
+        socket.to(`employee_${userId}`).emit("message_status", {
+          messageId: messageId,
+          status: status
+        });
+      }
+
+      // Also notify client room if applicable
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("message_status", {
+          messageId: messageId,
+          status: status
+        });
+      }
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_message_status:", error);
+      socket.emit("message_error", { error: "Failed to update message status" });
+    }
+  });
+
+  // Handle generic message sending (keep for backward compatibility)
   socket.on("send_message", async (data) => {
     try {
       const { conversationId, message } = data;
@@ -1359,6 +1657,97 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
+const emitWhatsAppMessage = (io, data) => {
+  const { message, type, action, targetUsers, clientId } = data;
+  
+  if (!message || !type) {
+    console.error("❌ emitWhatsAppMessage: message and type are required");
+    return;
+  }
+
+  console.log("📢 Server emitting WhatsApp message:", {
+    messageId: message._id,
+    type,
+    action,
+    targetUsers: targetUsers?.length || 0,
+    clientId
+  });
+
+  // Emit to specific users if provided
+  if (targetUsers && Array.isArray(targetUsers)) {
+    targetUsers.forEach(userId => {
+      io.to(`employee_${userId}`).emit("new_message", {
+        message: message,
+        type: type,
+        action: action,
+        timestamp: new Date()
+      });
+      console.log(`✅ Emitted to employee_${userId}`);
+    });
+  }
+
+  // Always emit to client room if clientId provided
+  if (clientId) {
+    io.to(`client_${clientId}`).emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log(`✅ Emitted to client_${clientId}`);
+  }
+
+  // If no specific users, emit to all connected clients (broadcast)
+  if (!targetUsers || targetUsers.length === 0) {
+    io.emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log("📢 Broadcasted to all connected clients");
+  }
+};
+
+// 🎯 CRITICAL FIX: Specific function for forwarding to managers
+const emitForwardToManagers = (io, data) => {
+  const { message, managers, forwardedBy, clientId } = data;
+  
+  if (!message || !managers || !Array.isArray(managers)) {
+    console.error("❌ emitForwardToManagers: message and managers array are required");
+    return;
+  }
+
+  console.log("📤 Server forwarding to managers:", {
+    messageId: message._id,
+    managersCount: managers.length,
+    forwardedBy
+  });
+
+  const forwardedMessage = {
+    ...message,
+    isForwarded: true,
+    forwardedBy: forwardedBy,
+    originalMessageId: message._id
+  };
+
+  managers.forEach(managerId => {
+    io.to(`employee_${managerId}`).emit("new_message", {
+      message: forwardedMessage,
+      type: "new_approved_message",
+      action: "forwarded_approved",
+      forwardedBy: forwardedBy,
+      originalMessageId: message._id,
+      timestamp: new Date()
+    });
+    console.log(`✅ Forwarded to manager: employee_${managerId}`);
+  });
+};
+
+// Export the emission functions for use in controllers
+module.exports = {
+  emitWhatsAppMessage,
+  emitForwardToManagers
+};
 
 io.on("connection", (socket) => {
 
@@ -1494,7 +1883,6 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-
 cron.schedule(
   "* * * * *", // Every minute
   async () => {
