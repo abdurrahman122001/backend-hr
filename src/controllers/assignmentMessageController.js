@@ -93,7 +93,7 @@ function normalizeRole(role) {
   if (raw === "Manager") return "manager";
   if (raw === "Employee") return "employee";
   const r = raw.toLowerCase().replace(/\s+/g, "_");
-  if (["teamlead", "team_lead", "team-lead", "lead"].includes(r))
+  if (["teamlead", "team lead", "team_lead", "team-lead", "lead"].includes(r))
     return "team_lead";
   if (r === "manager") return "manager";
   if (["employee", "staff", "associate"].includes(r)) return "employee";
@@ -369,7 +369,6 @@ async function emitToSpecificReceivers(
       return;
     }
 
-    // 🔥 CRITICAL FIX: Only send to ACTUAL receivers, NOT team leads automatically
     const specificReceiverIds = [];
 
     if (Array.isArray(populatedMessage.receiver)) {
@@ -396,34 +395,34 @@ async function emitToSpecificReceivers(
       }
     }
 
-    // Get sender ID
     const senderId =
       typeof populatedMessage.sender === "string"
         ? populatedMessage.sender
         : populatedMessage.sender?._id;
 
-    // 🔥 ONLY send to actual participants (sender + specific receivers)
     const allRecipients = [
       ...new Set(
         [senderId?.toString(), ...specificReceiverIds].filter(Boolean)
       ),
     ];
 
-    // 🔥 REMOVED: Automatic team lead addition for ALL messages
-    // Team leads will only see review messages when they specifically fetch them
-
     console.log(
-      `🔔 Real-time message emitted to ACTUAL recipients: ${allRecipients.join(
+      `🔔 Real-time ${eventName} emitted to recipients: ${allRecipients.join(
         ", "
       )}`
     );
 
-    // Send ONLY to actual recipients
+    // Emit to all recipients
     allRecipients.forEach((recipientId) => {
       if (recipientId) {
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
       }
     });
+
+    // For approval-related events, also notify team leads
+    if (eventName.includes("approved") || eventName.includes("disapproved")) {
+      io.to("assignment_team_leads").emit(eventName, populatedMessage);
+    }
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
     throw error;
@@ -466,12 +465,46 @@ async function emitMessageUpdate(io, message, action) {
 
     if (!populatedMessage) return;
 
-    // Use targeted emission for updates as well
-    await emitToSpecificReceivers(
-      io,
-      populatedMessage,
-      "assignment_message_updated"
-    );
+    // Get all participants in the thread
+    const allParticipants = new Set();
+
+    // Add sender
+    const senderId = String(populatedMessage.sender._id);
+    allParticipants.add(senderId);
+
+    // Add receivers
+    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
+      populatedMessage.receiver.forEach((receiver) => {
+        const receiverId = String(receiver._id);
+        allParticipants.add(receiverId);
+      });
+    }
+
+    // Emit to all participants
+    allParticipants.forEach((participantId) => {
+      io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+        message: populatedMessage,
+        action: action,
+        timestamp: new Date(),
+      });
+    });
+
+    // Special handling for approval actions
+    if (action === "approved") {
+      // Notify team leads about approval
+      io.to("assignment_team_leads").emit("assignment_message_approved", {
+        message: populatedMessage,
+        action: "approved",
+        timestamp: new Date(),
+      });
+    } else if (action === "disapproved") {
+      // Notify team leads about disapproval
+      io.to("assignment_team_leads").emit("assignment_message_disapproved", {
+        message: populatedMessage,
+        action: "disapproved",
+        timestamp: new Date(),
+      });
+    }
   } catch (error) {
     console.error("❌ Error emitting message update:", error);
   }
@@ -1539,7 +1572,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
-
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1553,63 +1585,35 @@ exports.approveMessage = async function approveMessage(req, res) {
         .json({ error: "Only Team Leads can approve messages" });
     }
 
-    // ✅ FIXED: Update the original message status to approved
+    // Prevent double approval
+    if (msg.approvalStatus === "approved") {
+      return res.status(400).json({ error: "Message already approved" });
+    }
+
+    // Get managers for the owner
+    const { managers } = await findTLsAndManagersByOwner(msg.owner);
+    if (managers.length === 0) {
+      return res.status(400).json({ error: "No managers found to assign to" });
+    }
+
+    // Update receiver: Add managers, keep existing receivers, avoid duplicates
+    const currentReceivers = Array.isArray(msg.receiver)
+      ? msg.receiver.map((r) => String(r))
+      : [];
+    const newReceivers = Array.from(
+      new Set([...currentReceivers, ...managers])
+    ).filter((id) => id !== String(msg.sender));
+
+    // Update the ORIGINAL message
+    msg.receiver = newReceivers;
     msg.approvalStatus = "approved";
     msg.approvedAt = new Date();
     msg.approvedBy = req.employee._id;
+
     await msg.save();
 
-    // ✅ FIXED: Forward to managers IN THE SAME THREAD
-    const { managers } = await findTLsAndManagersByOwner(msg.owner);
-    if (managers.length === 0) {
-      // Just update the original message and return
-      const populated = await msg.populate([
-        { path: "owner", select: "_id name companyEmail" },
-        { path: "sender", select: "_id name companyEmail role" },
-        { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
-        { path: "approvedBy", select: "_id name companyEmail" },
-      ]);
-
-      // EMIT REAL-TIME EVENT
-      const io = getIO(req);
-      if (io) {
-        await emitMessageUpdate(io, msg, "approved");
-      }
-
-      return res.json({
-        message: "Message approved successfully",
-        data: populated,
-      });
-    }
-
-    // ✅ FIXED: Create forward message IN THE SAME THREAD
-    const forwardMsg = await AssignmentMessage.create({
-      owner: msg.owner,
-      client: msg.client,
-      sender: msg.sender, // Keep original sender
-      receiver: managers,
-      subject: msg.subject, // Keep original subject
-      note: msg.note || "",
-      attachments: msg.attachments,
-      // 🔥 CRITICAL: Use the same thread ID to keep messages in same thread
-      threadId: msg.threadId,
-      // Mark this as an approval forward
-      isApprovalForward: true,
-      approvalStatus: "approved", // Already approved since it's coming from TL
-      // Reference the original message
-      replyTo: msg._id,
-    });
-
-    const populatedForward = await forwardMsg.populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
-    ]);
-
-    // Also populate the original updated message
-    const populatedOriginal = await msg.populate([
+    // Populate updated message
+    const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
@@ -1617,33 +1621,126 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "approvedBy", select: "_id name companyEmail" },
     ]);
 
-    // EMIT REAL-TIME EVENTS FOR BOTH MESSAGES
+    // 🔥 ENHANCED REAL-TIME EMISSION - FIXED FOR MANAGERS
     const io = getIO(req);
     if (io) {
-      // Emit update for the original message
-      await emitMessageUpdate(io, msg, "approved");
+      console.log("🔔 Broadcasting approval to managers and all participants");
 
-      // Emit new message event for the forward (in same thread)
-      await emitToAssignmentClients(io, forwardMsg, "new_assignment_message");
+      // 1. CRITICAL FIX: Emit to managers room with proper data structure
+      io.to("assignment_managers").emit("assignment_message_approved", {
+        messageId: populated._id,
+        approvalStatus: "approved",
+        message: populated,
+        approvedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+          companyEmail: req.employee.companyEmail,
+        },
+        timestamp: new Date(),
+        action: "approved", // Add this for consistency
+        isNewMessage: true, // Indicate this is a new message for managers
+      });
+
+      // 2. Emit to all individual participants (existing logic)
+      const allParticipants = new Set();
+
+      // Add sender
+      const senderId = String(populated.sender._id);
+      allParticipants.add(senderId);
+
+      // Add original receivers
+      currentReceivers.forEach((receiverId) => {
+        allParticipants.add(String(receiverId));
+      });
+
+      // Add new receivers (managers)
+      managers.forEach((managerId) => {
+        allParticipants.add(String(managerId));
+      });
+
+      // Add current user (team lead)
+      allParticipants.add(String(req.employee._id));
+
+      console.log(
+        `📤 Approval: Notifying ${allParticipants.size} participants including ${managers.length} managers`
+      );
+
+      // Emit to all individual participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_approved", {
+          messageId: populated._id,
+          approvalStatus: "approved",
+          message: populated,
+          approvedBy: {
+            _id: req.employee._id,
+            name: req.employee.name,
+            companyEmail: req.employee.companyEmail,
+          },
+          timestamp: new Date(),
+        });
+      });
+
+      // 3. Emit general update for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populated,
+          action: "approved",
+          timestamp: new Date(),
+        });
+      });
+
+      // 4. Emit to team leads room
+      io.to("assignment_team_leads").emit("assignment_message_approved", {
+        messageId: populated._id,
+        approvalStatus: "approved",
+        message: populated,
+        approvedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+          companyEmail: req.employee.companyEmail,
+        },
+        timestamp: new Date(),
+      });
+
+      // 5. Emit to thread room if exists
+      if (populated.threadId) {
+        io.to(`thread_${populated.threadId}`).emit(
+          "assignment_message_approved",
+          {
+            messageId: populated._id,
+            approvalStatus: "approved",
+            message: populated,
+            approvedBy: {
+              _id: req.employee._id,
+              name: req.employee.name,
+              companyEmail: req.employee.companyEmail,
+            },
+            timestamp: new Date(),
+          }
+        );
+      }
+
+      console.log("✅ Approval broadcast completed successfully");
     }
 
-    res.json({
-      message: "Message approved and forwarded to managers",
-      data: {
-        originalMessage: populatedOriginal,
-        forwardMessage: populatedForward,
-      },
+    return res.json({
+      success: true,
+      message: "Message approved and assigned to manager(s)",
+      data: populated,
+      managersAdded: managers,
     });
   } catch (e) {
     console.error("Error in approveMessage:", e);
     res.status(500).json({ error: "Failed to approve message" });
   }
 };
-// PATCH /api/assignment-messages/:id/disapprove
+
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
     const { id } = req.params;
-    const { disapprovalNote } = req.body;
+
+    // ✅ FIX: Safely handle optional disapprovalNote
+    const disapprovalNote = req.body?.disapprovalNote || null;
 
     const msg = await AssignmentMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1659,8 +1756,11 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     msg.approvalStatus = "disapproved";
 
     // Store disapproval note if provided
-    if (disapprovalNote) {
-      msg.disapprovalNote = disapprovalNote;
+    if (disapprovalNote && disapprovalNote.trim() !== "") {
+      msg.disapprovalNote = disapprovalNote.trim();
+    } else {
+      // Optional: Set a default note or leave it undefined
+      msg.disapprovalNote = "Message requires revisions before resubmission.";
     }
 
     msg.updatedAt = new Date();
@@ -1674,26 +1774,57 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "client", select: "_id clientName" },
     ]);
 
-    // ✅ EMIT REAL-TIME EVENT FOR THE UPDATED MESSAGE ONLY
+    // 🔥 FIXED: Emit specific disapproval event
     const io = getIO(req);
     if (io) {
-      await emitMessageUpdate(io, msg, "disapproved");
+      // Get all participants
+      const allParticipants = new Set();
 
-      // Send specific disapproval notification to the sender
-      await sendDisapprovalNotification(io, msg, req.employee);
+      const senderId = String(populated.sender._id);
+      allParticipants.add(senderId);
+
+      if (populated.receiver && Array.isArray(populated.receiver)) {
+        populated.receiver.forEach((receiver) => {
+          const receiverId = String(receiver._id);
+          allParticipants.add(receiverId);
+        });
+      }
+
+      allParticipants.add(String(req.employee._id));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit(
+          "assignment_message_disapproved",
+          {
+            messageId: populated._id,
+            approvalStatus: "disapproved",
+            message: populated,
+            disapprovedBy: {
+              _id: req.employee._id,
+              name: req.employee.name,
+              companyEmail: req.employee.companyEmail,
+            },
+            timestamp: new Date(),
+            disapprovalNote: msg.disapprovalNote, // Include the note in the emission
+          }
+        );
+      });
+
+      await emitMessageUpdate(io, msg, "disapproved");
     }
 
     res.json({
       success: true,
       message: "Message disapproved successfully",
       data: populated,
+      disapprovalNote: msg.disapprovalNote,
     });
   } catch (e) {
-    console.error(e);
+    console.error("Error in disapproveMessage:", e);
     res.status(500).json({ error: "Failed to disapprove message" });
   }
 };
-
 async function sendDisapprovalNotification(io, message, disapprovedBy) {
   try {
     if (!io || !message || !disapprovedBy) {
@@ -2400,6 +2531,7 @@ exports.getDraftCount = async function getDraftCount(req, res) {
     res.status(500).json({ error: "Failed to get draft count" });
   }
 };
+
 exports.editDisapprovedMessage = async function editDisapprovedMessage(
   req,
   res
@@ -2408,12 +2540,10 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     const { id } = req.params;
     const { subject, note } = req.body;
 
-    // Enhanced validation
     if (!id) {
       return res.status(400).json({ error: "Message ID is required" });
     }
 
-    // Validate MongoDB ObjectId format
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: "Invalid message ID format" });
     }
@@ -2424,23 +2554,19 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         .json({ error: "No changes provided. Please update subject or note." });
     }
 
-    // Validate subject length if provided
     if (subject !== undefined && subject.trim().length === 0) {
       return res.status(400).json({ error: "Subject cannot be empty" });
     }
 
-    // Validate note length if provided
     if (note !== undefined && note.trim().length === 0) {
       return res.status(400).json({ error: "Note cannot be empty" });
     }
 
-    // Find the message with proper error handling
     const msg = await AssignmentMessage.findById(id);
     if (!msg) {
       return res.status(404).json({ error: "Message not found" });
     }
 
-    // Check approval status
     if (msg.approvalStatus !== "disapproved") {
       return res.status(400).json({
         error: "Only disapproved messages can be edited for resubmission",
@@ -2448,17 +2574,21 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       });
     }
 
-    // Check ownership
+    // FIXED: Allow both original sender AND team leads to edit disapproved messages
     const isSender = String(msg.sender) === String(req.employee._id);
-    if (!isSender) {
+    const isTeamLead = req.employee.role?.toLowerCase() === "team lead"; // Fixed: changed "team lead" to "team_lead"
+
+    if (!isSender && !isTeamLead) {
       return res.status(403).json({
-        error: "You can only edit your own messages",
+        error: "You can only edit your own messages or messages as a Team Lead",
         messageOwner: msg.sender,
         currentUser: req.employee._id,
+        userRole: req.employee.role,
+        isSender,
+        isTeamLead,
       });
     }
 
-    // Update message fields
     const updateFields = {};
     if (subject !== undefined) {
       updateFields.subject = subject.trim();
@@ -2469,9 +2599,12 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
 
     updateFields.approvalStatus = "pending";
     updateFields.updatedAt = new Date();
-    updateFields.resubmittedAt = new Date(); // Track resubmission time
+    updateFields.resubmittedAt = new Date();
 
-    // Update the message
+    // FIXED: Store lastEditedBy as a reference to the Employee model instead of embedding
+    updateFields.lastEditedBy = req.employee._id; // Store just the ID for population
+    updateFields.lastEditedAt = new Date();
+
     const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
       id,
       { $set: updateFields },
@@ -2482,32 +2615,89 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       throw new Error("Failed to update message in database");
     }
 
-    // Populate the updated message
-    const populated = await AssignmentMessage.findById(updatedMsg._id).populate(
-      [
+    // FIXED: Enhanced population to ensure lastEditedBy is properly populated
+    const populated = await AssignmentMessage.findById(updatedMsg._id)
+      .populate([
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "receiver", select: "_id name companyEmail role" },
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      ]
-    );
+        { 
+          path: "lastEditedBy", 
+          select: "_id name companyEmail role",
+          model: "Employee" // Explicitly specify the model
+        },
+      ])
+      .lean(); // Use lean() for better performance
 
     if (!populated) {
       throw new Error("Failed to populate updated message data");
     }
 
-    // EMIT REAL-TIME EVENT FOR RESUBMISSION (with error handling)
+    // FIXED: Ensure lastEditedBy has proper structure for frontend
+    if (populated.lastEditedBy && typeof populated.lastEditedBy === 'object') {
+      // If lastEditedBy is populated properly, ensure it has the right structure
+      populated.lastEditedBy = {
+        _id: populated.lastEditedBy._id,
+        name: populated.lastEditedBy.name || "Unknown User",
+        companyEmail: populated.lastEditedBy.companyEmail || "unknown@company.com",
+        role: populated.lastEditedBy.role || "employee"
+      };
+    } else {
+      // Fallback: if population failed, create the structure manually
+      populated.lastEditedBy = {
+        _id: req.employee._id,
+        name: req.employee.name || "Unknown User",
+        companyEmail: req.employee.companyEmail || "unknown@company.com",
+        role: req.employee.role || "employee"
+      };
+    }
+
+    // 🔥 UPDATED: Enhanced real-time emission for resubmission
     try {
       const io = getIO(req);
       if (io) {
-        // Emit message update
+        // Emit message update to all participants
         await emitMessageUpdate(io, populated, "disapproved_message_edited");
 
-        // Send resubmission notification to Team Leads
-        await sendResubmissionNotification(io, populated, req.employee);
+        // Send specific resubmission notification
+        const allParticipants = new Set();
 
-        // Notify all relevant parties about the resubmission
+        // Add sender
+        const senderId = String(populated.sender._id);
+        allParticipants.add(senderId);
+
+        // Add receivers
+        if (populated.receiver && Array.isArray(populated.receiver)) {
+          populated.receiver.forEach((receiver) => {
+            const receiverId = String(receiver._id);
+            allParticipants.add(receiverId);
+          });
+        }
+
+        // Add the editor if not already included
+        allParticipants.add(String(req.employee._id));
+
+        // Emit resubmission event to all participants
+        allParticipants.forEach((participantId) => {
+          io.to(`employee_${participantId}`).emit(
+            "assignment_message_resubmitted",
+            {
+              message: populated,
+              action: "resubmitted",
+              resubmittedBy: {
+                _id: req.employee._id,
+                name: req.employee.name,
+                companyEmail: req.employee.companyEmail,
+                role: req.employee.role,
+              },
+              timestamp: new Date(),
+            }
+          );
+        });
+
+        // Special notification to team leads
         io.to("assignment_team_leads").emit("assignment_message_resubmitted", {
           message: populated,
           action: "resubmitted",
@@ -2515,11 +2705,12 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
             _id: req.employee._id,
             name: req.employee.name,
             companyEmail: req.employee.companyEmail,
+            role: req.employee.role,
           },
           timestamp: new Date(),
         });
 
-        // Notify the sender that their message was resubmitted successfully
+        // Notify the sender
         io.to(`employee_${req.employee._id}`).emit(
           "message_resubmission_success",
           {
@@ -2527,6 +2718,15 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
             timestamp: new Date(),
           }
         );
+
+        console.log("✅ Message resubmitted by:", {
+          editor: req.employee.name,
+          role: req.employee.role,
+          isSender,
+          isTeamLead,
+          messageId: populated._id,
+          lastEditedBy: populated.lastEditedBy
+        });
       } else {
         console.warn(
           "⚠️ Socket.io instance not available for real-time updates"
@@ -2534,8 +2734,8 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       }
     } catch (socketError) {
       console.error("❌ Socket.io event error (non-critical):", socketError);
-      // Don't fail the entire request if socket events fail
     }
+
     res.json({
       success: true,
       message: "Disapproved message edited and submitted for review",
@@ -2545,7 +2745,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
   } catch (e) {
     console.error("❌ Error in editDisapprovedMessage:", e);
 
-    // More specific error responses
     if (e.name === "ValidationError") {
       return res.status(400).json({
         error: "Validation failed",
@@ -3879,5 +4078,233 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
   } catch (e) {
     console.error("Error in getMessageCounts:", e);
     res.status(500).json({ error: "Failed to fetch message counts" });
+  }
+};
+
+
+// PATCH /api/assignment-messages/:id/edit-pending - Edit pending message
+exports.editPendingMessage = async function editPendingMessage(req, res) {
+  try {
+    const { id } = req.params;
+    const { subject, note, receiver: receiverBody, receivers: receiversBody } = req.body;
+
+    // Enhanced validation
+    if (!id) {
+      return res.status(400).json({ error: "Message ID is required" });
+    }
+
+    // Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "Invalid message ID format" });
+    }
+
+    if (subject === undefined && note === undefined && !receiverBody && !receiversBody) {
+      return res.status(400).json({ 
+        error: "No changes provided. Please update subject, note, or receivers." 
+      });
+    }
+
+    // Validate subject length if provided
+    if (subject !== undefined && subject.trim().length === 0) {
+      return res.status(400).json({ error: "Subject cannot be empty" });
+    }
+
+    // Validate note length if provided
+    if (note !== undefined && note.trim().length === 0) {
+      return res.status(400).json({ error: "Note cannot be empty" });
+    }
+
+    // Find the message with proper error handling
+    const msg = await AssignmentMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Check if message is in pending status
+    if (msg.approvalStatus !== "pending") {
+      return res.status(400).json({
+        error: "Only pending messages can be edited",
+        currentStatus: msg.approvalStatus,
+      });
+    }
+
+    const currentUser = req.employee;
+    const currentUserId = String(currentUser._id);
+    const currentUserRole = normalizeRole(currentUser.role || "");
+    const isTeamLead = currentUserRole === "team_lead";
+    
+    // Check permissions: either sender OR team lead can edit pending messages
+    const isSender = String(msg.sender) === currentUserId;
+    
+    if (!isSender && !isTeamLead) {
+      return res.status(403).json({
+        error: "You don't have permission to edit this pending message. Only the sender or team leads can edit pending messages.",
+        messageOwner: msg.sender,
+        currentUser: currentUserId,
+        userRole: currentUserRole
+      });
+    }
+
+    // Team lead validation: ensure team lead belongs to the same owner
+    if (isTeamLead && !isSender) {
+      const messageOwner = String(msg.owner);
+      const teamLeadOwner = String(currentUser.owner);
+      
+      if (messageOwner !== teamLeadOwner) {
+        return res.status(403).json({
+          error: "You can only edit pending messages within your organization",
+          messageOwner: messageOwner,
+          yourOrganization: teamLeadOwner
+        });
+      }
+    }
+
+    // Update message fields
+    const updateFields = {};
+    if (subject !== undefined) {
+      updateFields.subject = subject.trim();
+    }
+    if (note !== undefined) {
+      updateFields.note = note.trim();
+    }
+
+    // Handle receiver updates if provided
+    if (receiverBody || receiversBody) {
+      let receivers = [];
+      if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+      if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+
+      receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+        (id) => id !== String(msg.sender)
+      );
+
+      // Validate receivers
+      if (receivers.length === 0) {
+        return res.status(400).json({
+          error: "At least one receiver is required",
+        });
+      }
+
+      updateFields.receiver = receivers;
+    }
+
+    updateFields.updatedAt = new Date();
+    updateFields.lastEditedBy = currentUser._id;
+    updateFields.lastEditedAt = new Date();
+
+    // Update the message
+    const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
+      id,
+      { $set: updateFields },
+      { new: true, runValidators: true }
+    );
+
+    if (!updatedMsg) {
+      throw new Error("Failed to update message in database");
+    }
+
+    // Populate the updated message
+    const populated = await AssignmentMessage.findById(updatedMsg._id).populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "lastEditedBy", select: "_id name companyEmail role" },
+    ]);
+
+    if (!populated) {
+      throw new Error("Failed to populate updated message data");
+    }
+
+    // EMIT REAL-TIME EVENT FOR PENDING MESSAGE EDIT
+    try {
+      const io = getIO(req);
+      if (io) {
+        // Emit message update
+        await emitMessageUpdate(io, populated, "pending_message_edited");
+
+        // Notify all relevant parties about the edit
+        const notificationData = {
+          message: populated,
+          action: "edited",
+          editedBy: {
+            _id: currentUser._id,
+            name: currentUser.name,
+            companyEmail: currentUser.companyEmail,
+            role: currentUser.role,
+          },
+          timestamp: new Date(),
+          editedByTeamLead: isTeamLead && !isSender,
+        };
+
+        // Notify all participants in the thread
+        const allParticipants = new Set();
+
+        // Add sender
+        const senderId = String(populated.sender._id);
+        allParticipants.add(senderId);
+
+        // Add receivers
+        if (populated.receiver && Array.isArray(populated.receiver)) {
+          populated.receiver.forEach((receiver) => {
+            const receiverId = String(receiver._id);
+            allParticipants.add(receiverId);
+          });
+        }
+
+        // Emit to all participants
+        allParticipants.forEach((participantId) => {
+          io.to(`employee_${participantId}`).emit("assignment_message_updated", notificationData);
+        });
+
+        // Special notification if team lead edited someone else's message
+        if (isTeamLead && !isSender) {
+          io.to(`employee_${senderId}`).emit("team_lead_edited_your_message", {
+            message: populated,
+            editedBy: notificationData.editedBy,
+            timestamp: new Date(),
+          });
+        }
+      } else {
+        console.warn("⚠️ Socket.io instance not available for real-time updates");
+      }
+    } catch (socketError) {
+      console.error("❌ Socket.io event error (non-critical):", socketError);
+      // Don't fail the entire request if socket events fail
+    }
+
+    res.json({
+      success: true,
+      message: isTeamLead && !isSender 
+        ? "Pending message updated by team lead" 
+        : "Pending message updated successfully",
+      data: populated,
+      editedByTeamLead: isTeamLead && !isSender,
+      timestamp: new Date(),
+    });
+  } catch (e) {
+    console.error("❌ Error in editPendingMessage:", e);
+
+    // More specific error responses
+    if (e.name === "ValidationError") {
+      return res.status(400).json({
+        error: "Validation failed",
+        details: Object.values(e.errors).map((err) => err.message),
+      });
+    }
+
+    if (e.name === "CastError") {
+      return res.status(400).json({ error: "Invalid data format" });
+    }
+
+    if (e.code === 11000) {
+      return res.status(400).json({ error: "Duplicate entry found" });
+    }
+
+    res.status(500).json({
+      error: "Failed to edit pending message",
+      ...(process.env.NODE_ENV === "development" && { debug: e.message }),
+    });
   }
 };

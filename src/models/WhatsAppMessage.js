@@ -15,6 +15,17 @@ const AttachmentSchema = new Schema(
   { _id: true }
 );
 
+const EditHistorySchema = new Schema({
+  previousMessage: String,
+  previousSubject: String,
+  previousApprovalStatus: {
+    type: String,
+    enum: ["pending", "approved", "disapproved", null],
+  },
+  editedAt: { type: Date, default: Date.now },
+  editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+}, { _id: true });
+
 const WhatsAppMessageSchema = new Schema(
   {
     // Organization / data ownership scope
@@ -37,15 +48,11 @@ const WhatsAppMessageSchema = new Schema(
       default: null 
     },
 
-    // Edit tracking fields - ADD THESE
+    // Edit tracking fields
     isEdited: { type: Boolean, default: false },
     editedAt: { type: Date },
     editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
-    editHistory: [{
-      previousMessage: String,
-      editedAt: { type: Date, default: Date.now },
-      editedBy: { type: Schema.Types.ObjectId, ref: "Employee" }
-    }],
+    editHistory: [EditHistorySchema],
 
     // Scheduling fields
     isScheduled: { type: Boolean, default: false },
@@ -72,6 +79,7 @@ WhatsAppMessageSchema.index({ sender: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ receiver: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ status: 1, scheduledFor: 1 });
 WhatsAppMessageSchema.index({ isScheduled: 1, scheduledFor: 1 });
+WhatsAppMessageSchema.index({ approvalStatus: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({
   client: 1,
   sender: 1,

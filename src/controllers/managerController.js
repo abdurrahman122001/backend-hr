@@ -311,6 +311,21 @@ exports.assignClient = async (req, res) => {
     if (!clientId)
       return res.status(400).json({ error: "clientId is required" });
 
+    // Get the client before update to know previous assignment
+    const clientBeforeUpdate = await ClientInfo.findOne({ 
+      _id: clientId, 
+      owner: me.owner 
+    }).populate("assignedTo", "_id name companyEmail");
+
+    if (!clientBeforeUpdate)
+      return res
+        .status(404)
+        .json({ error: "Client not found or not under your owner" });
+
+    const previousEmployeeId = clientBeforeUpdate.assignedTo ? 
+      (clientBeforeUpdate.assignedTo._id || clientBeforeUpdate.assignedTo).toString() : null;
+
+    // Update the client assignment
     const client = await ClientInfo.findOneAndUpdate(
       { _id: clientId, owner: me.owner },
       { $set: { assignedTo: employeeId || null } },
@@ -352,10 +367,84 @@ exports.assignClient = async (req, res) => {
       });
     }
 
-    // 🔥 NEW: Emit socket event to notify newly assigned employee
+    // 🔥 NEW: Emit socket events for real-time client assignment updates
+    try {
+      const io = req.app.get("io"); // Get io instance from app
+
+      if (io) {
+        // 1. Notify the newly assigned employee (if any)
+        if (employeeId && employeeId !== String(me._id)) {
+          io.to(`client_updates_${employeeId}`).emit("client_assignment_updated", {
+            type: "CLIENT_ASSIGNED_TO_YOU",
+            clientId,
+            clientName: client.clientName,
+            dba: client.dba || client.clientName,
+            assignedBy: {
+              _id: me._id,
+              name: me.name
+            },
+            assignedAt: new Date().toISOString()
+          });
+
+          console.log(`✅ Notified employee ${employeeId} about new client assignment`);
+        }
+
+        // 2. Notify the previously assigned employee that they lost the client (if any)
+        if (previousEmployeeId && previousEmployeeId !== employeeId) {
+          io.to(`client_updates_${previousEmployeeId}`).emit("client_assignment_updated", {
+            type: "CLIENT_UNASSIGNED_FROM_YOU",
+            clientId,
+            clientName: client.clientName,
+            dba: client.dba || client.clientName,
+            assignedAt: new Date().toISOString()
+          });
+
+          console.log(`✅ Notified previous employee ${previousEmployeeId} about client unassignment`);
+        }
+
+        // 3. Notify all managers/team leads about the assignment change
+        io.to("assignment_managers").emit("client_assignment_updated", {
+          type: "CLIENT_ASSIGNMENT_CHANGED",
+          clientId,
+          employeeId,
+          assignedTo: client.assignedTo,
+          clientName: client.clientName,
+          dba: client.dba || client.clientName,
+          assignedBy: {
+            _id: me._id,
+            name: me.name
+          },
+          assignedAt: new Date().toISOString()
+        });
+
+        console.log(`✅ Notified managers about client assignment change`);
+
+        // 4. Also emit to assignment client room for real-time updates in the chat
+        if (clientId) {
+          io.to(`assignment_client_${clientId}`).emit("client_assignment_updated", {
+            type: "CLIENT_ASSIGNMENT_CHANGED",
+            clientId,
+            employeeId,
+            assignedTo: client.assignedTo,
+            clientName: client.clientName,
+            dba: client.dba || client.clientName,
+            assignedBy: {
+              _id: me._id,
+              name: me.name
+            },
+            assignedAt: new Date().toISOString()
+          });
+        }
+      }
+    } catch (socketError) {
+      console.error("❌ Error emitting assignment notifications:", socketError);
+      // Don't fail the request if socket emission fails
+    }
+
+    // 🔥 NEW: Also send historical messages to newly assigned employee
     if (employeeId && employeeId !== String(me._id)) {
       try {
-        const io = getIO(req);
+        const io = req.app.get("io");
         if (io) {
           // Get all messages for this client to notify the new assignee
           const clientMessages = await AssignmentMessage.find({
@@ -380,7 +469,7 @@ exports.assignClient = async (req, res) => {
           console.log(`✅ Notified employee ${employeeId} about ${clientMessages.length} historical messages for client ${clientId}`);
         }
       } catch (socketError) {
-        console.error("❌ Error emitting assignment notifications:", socketError);
+        console.error("❌ Error emitting historical messages:", socketError);
         // Don't fail the request if socket emission fails
       }
     }

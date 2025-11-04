@@ -517,9 +517,141 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`employee_${employeeId}`);
-    console.log(
-      `📍 Employee ${employeeId} joined room: employee_${employeeId}`
-    );
+    console.log(`👤 Employee ${employeeId} joined their room`);
+  });
+
+  socket.on("join_client_updates", (ownerId) => {
+    if (!ownerId) {
+      console.error("❌ join_client_updates: ownerId is required");
+      return;
+    }
+    socket.join(`client_updates_${ownerId}`);
+    console.log(`✅ User joined client updates for owner: ${ownerId}`);
+  });
+
+  socket.on("client_updated", async (data, callback) => {
+    try {
+      const { action, client, ownerId } = data;
+
+      if (!client || !ownerId) {
+        console.error("❌ client_updated: client and ownerId are required");
+        if (callback) callback({ success: false, error: "Missing required data" });
+        return;
+      }
+
+      console.log(`📢 Client ${action}: ${client.clientName} (${client._id})`);
+
+      // Broadcast to all team members of this owner
+      io.to(`client_updates_${ownerId}`).emit(`client_${action}`, {
+        client,
+        action,
+        timestamp: new Date().toISOString()
+      });
+
+      // Also notify assignment managers
+      io.to("assignment_managers").emit(`client_${action}`, {
+        client,
+        action,
+        timestamp: new Date().toISOString()
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: `Client ${action} broadcasted successfully`,
+          deliveredTo: `client_updates_${ownerId}`
+        });
+      }
+
+    } catch (error) {
+      console.error("❌ Error broadcasting client update:", error);
+      if (callback) {
+        callback({ success: false, error: error.message });
+      }
+    }
+  });
+
+  socket.on("join_manager_updates", (managerId) => {
+    if (!managerId) {
+      console.error("❌ join_manager_updates: managerId is required");
+      return;
+    }
+    socket.join(`manager_updates_${managerId}`);
+    console.log(`✅ Manager ${managerId} joined manager updates room`);
+  });
+
+  // In your backend socket setup
+  socket.on("client_assigned", async (data, callback) => {
+    try {
+      const { clientId, employeeId, assignedTo, clientName, dba, assignedBy, previousAssignee } = data;
+
+      if (!clientId) {
+        console.error("❌ client_assigned: clientId is required");
+        if (callback) callback({ success: false, error: "clientId is required" });
+        return;
+      }
+
+      console.log(`🔔 Client assignment: ${clientName} -> ${employeeId || 'unassigned'}`);
+      console.log(`📍 Emitting to employee_${employeeId}`); // ADD THIS LOG
+
+      if (employeeId) {
+        io.to(`employee_${employeeId}`).emit("client_assignment_updated", {
+          type: "CLIENT_ASSIGNED_TO_YOU",
+          clientId,
+          clientName,
+          dba,
+          assignedBy,
+          assignedAt: new Date().toISOString(),
+          action: "assigned",
+          assignedTo: employeeId // ADD THIS
+        });
+
+        console.log(`✅ Emitted client_assignment_updated to employee_${employeeId}`); // ADD THIS LOG
+      }
+      // ✅ Notify the PREVIOUSLY assigned employee (if any)
+      if (previousAssignee && previousAssignee.toString() !== employeeId) {
+        io.to(`employee_${previousAssignee}`).emit("client_assignment_updated", {
+          type: "CLIENT_UNASSIGNED_FROM_YOU",
+          clientId,
+          clientName,
+          dba,
+          assignedBy,
+          unassignedAt: new Date().toISOString(),
+          action: "unassigned"
+        });
+      }
+
+      // ✅ Notify all managers/team leads
+      io.to("assignment_managers").emit("client_assignment_updated", {
+        type: "CLIENT_ASSIGNMENT_CHANGED",
+        clientId,
+        employeeId,
+        assignedTo,
+        clientName,
+        dba,
+        assignedBy,
+        previousAssignee,
+        assignedAt: new Date().toISOString(),
+        action: employeeId ? "assigned" : "unassigned"
+      });
+
+      // ✅ Broadcast general client update
+      io.to(`client_updates_${assignedBy?.owner || assignedBy}`).emit("client_updated", {
+        client: { _id: clientId, clientName, dba, assignedTo: employeeId },
+        action: "updated",
+        timestamp: new Date().toISOString()
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Client assignment broadcasted successfully",
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error broadcasting client assignment:", error);
+      if (callback) callback({ success: false, error: error.message });
+    }
   });
 
   // Join assignment client room
@@ -529,19 +661,178 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`assignment_client_${clientId}`);
-    console.log(`📍 Joined assignment chat for client: ${clientId}`);
+    console.log(`🏢 Joined assignment client room: ${clientId}`);
   });
 
   // Join manager room
   socket.on("join_assignment_managers", () => {
     socket.join("assignment_managers");
-    console.log(`📍 ${socket.id} joined assignment managers room`);
+    console.log(`👔 Joined assignment managers room`);
   });
 
-  // Handle assignment message disapproval - UPDATED FOR ARRAY RECEIVER
+  // Join team leads room
+  socket.on("join_assignment_team_leads", () => {
+    socket.join("assignment_team_leads");
+    console.log(`🎯 Joined assignment team leads room`);
+  });
+
+  // Join thread room
+  socket.on("join_thread", (threadId) => {
+    if (!threadId) {
+      console.error("❌ join_thread: threadId is required");
+      return;
+    }
+    socket.join(`thread_${threadId}`);
+    console.log(`🧵 Joined thread: ${threadId}`);
+  });
+
+  // Handle assignment message approval - NEW EVENT
+  socket.on("assignment_message_approved", async (data, callback) => {
+    try {
+      console.log("🔔 Processing assignment message approval:", data);
+      
+      const { message } = data;
+
+      if (!message || !message._id) {
+        console.error("❌ Invalid message data in approval");
+        if (callback)
+          callback({ success: false, error: "Invalid message data" });
+        return;
+      }
+
+      // Populate the message with all necessary data
+      const populatedMessage = await AssignmentMessage.findById(message._id)
+        .populate("owner")
+        .populate("sender")
+        .populate("receiver")
+        .populate("client")
+        .populate("attachments.uploadedBy")
+        .populate("approvedBy");
+
+      if (!populatedMessage) {
+        console.error("❌ Approved assignment message not found:", message._id);
+        if (callback) callback({ success: false, error: "Message not found" });
+        return;
+      }
+
+      // Get the client ID
+      const clientId =
+        typeof populatedMessage.client === "string"
+          ? populatedMessage.client
+          : populatedMessage.client?._id;
+
+      // Handle receiver as array consistently
+      let actualReceiverIds = [];
+
+      if (Array.isArray(populatedMessage.receiver)) {
+        actualReceiverIds = populatedMessage.receiver
+          .map((receiver) =>
+            typeof receiver === "string" ? receiver : receiver?._id
+          )
+          .filter(Boolean);
+      } else if (populatedMessage.receiver) {
+        actualReceiverIds = [
+          typeof populatedMessage.receiver === "string"
+            ? populatedMessage.receiver
+            : populatedMessage.receiver?._id,
+        ].filter(Boolean);
+      }
+
+      // Get sender ID
+      const senderId =
+        typeof populatedMessage.sender === "string"
+          ? populatedMessage.sender
+          : populatedMessage.sender?._id;
+
+      console.log(`📤 Broadcasting approval to ${actualReceiverIds.length} receivers`);
+
+      // 1. Emit specific approval event to all participants
+      const allParticipants = new Set([
+        senderId,
+        ...actualReceiverIds
+      ].filter(Boolean));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+        console.log(`📨 Sent approval to employee_${participantId}`);
+      });
+
+      // 2. Also emit general update event for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
+          action: "approved",
+          timestamp: new Date(),
+        });
+      });
+
+      // 3. Notify team leads
+      io.to("assignment_team_leads").emit("assignment_message_approved", {
+        messageId: populatedMessage._id,
+        approvalStatus: "approved",
+        message: populatedMessage,
+        timestamp: new Date(),
+      });
+
+      // 4. Broadcast to client room if applicable
+      if (clientId) {
+        io.to(`assignment_client_${clientId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 5. Broadcast to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // Send success callback
+      if (callback) {
+        callback({
+          success: true,
+          message: "Approval notification delivered",
+          deliveredTo: {
+            client: clientId,
+            sender: senderId,
+            receivers: actualReceiverIds,
+            teamLeads: true,
+            thread: populatedMessage.threadId,
+          },
+        });
+      }
+
+      console.log("✅ Approval broadcast completed successfully");
+
+    } catch (error) {
+      console.error("❌ Error broadcasting approval notification:", error);
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "SOCKET_APPROVAL_ERROR",
+        });
+      }
+    }
+  });
+
+  // Handle assignment message disapproval - UPDATED
   socket.on("assignment_message_disapproved", async (data, callback) => {
     try {
-      console.log("📤 Received assignment_message_disapproved event:", data);
+      console.log("🔔 Processing assignment message disapproval:", data);
 
       const { message } = data;
 
@@ -561,15 +852,10 @@ io.on("connection", (socket) => {
         .populate("attachments.uploadedBy");
 
       if (!populatedMessage) {
-        console.error(
-          "❌ Disapproved assignment message not found:",
-          message._id
-        );
+        console.error("❌ Disapproved assignment message not found:", message._id);
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
-      console.log("📨 Broadcasting disapproval notification...");
 
       // Get the client ID
       const clientId =
@@ -577,7 +863,7 @@ io.on("connection", (socket) => {
           ? populatedMessage.client
           : populatedMessage.client?._id;
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Handle receiver as array consistently
       let actualReceiverIds = [];
 
       if (Array.isArray(populatedMessage.receiver)) {
@@ -594,70 +880,67 @@ io.on("connection", (socket) => {
         ].filter(Boolean);
       }
 
-      console.log("🔍 Disapproval - Receivers:", actualReceiverIds);
-
-      // 1. Broadcast to the assignment client room
-      if (clientId) {
-        socket
-          .to(`assignment_client_${clientId}`)
-          .emit("assignment_message_updated", {
-            message: {
-              ...populatedMessage,
-              receiver: actualReceiverIds,
-            },
-            action: "disapproved",
-          });
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
-      }
-
-      // 2. Notify the sender about disapproval
+      // Get sender ID
       const senderId =
         typeof populatedMessage.sender === "string"
           ? populatedMessage.sender
           : populatedMessage.sender?._id;
 
-      if (senderId) {
-        socket
-          .to(`employee_${senderId}`)
-          .emit("assignment_message_disapproved", {
-            message: {
-              ...populatedMessage,
-              receiver: actualReceiverIds,
-            },
-            action: "disapproved",
-            timestamp: new Date(),
-          });
-        console.log(`📍 Notified sender: employee_${senderId}`);
-      }
+      console.log(`📤 Broadcasting disapproval to ${actualReceiverIds.length} receivers`);
 
-      // 3. Notify all receivers about disapproval
-      actualReceiverIds.forEach((receiverId) => {
-        if (receiverId && receiverId !== senderId) {
-          socket
-            .to(`employee_${receiverId}`)
-            .emit("assignment_message_disapproved", {
-              message: {
-                ...populatedMessage,
-                receiver: actualReceiverIds,
-              },
-              action: "disapproved",
-              timestamp: new Date(),
-            });
-          console.log(`📍 Notified receiver: employee_${receiverId}`);
-        }
+      // 1. Emit specific disapproval event to all participants
+      const allParticipants = new Set([
+        senderId,
+        ...actualReceiverIds
+      ].filter(Boolean));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+        console.log(`📨 Sent disapproval to employee_${participantId}`);
       });
 
-      // 4. Notify team leads
-      socket
-        .to("assignment_team_leads")
-        .emit("assignment_message_disapproved", {
-          message: {
-            ...populatedMessage,
-            receiver: actualReceiverIds,
-          },
+      // 2. Also emit general update event for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
           action: "disapproved",
           timestamp: new Date(),
         });
+      });
+
+      // 3. Notify team leads
+      io.to("assignment_team_leads").emit("assignment_message_disapproved", {
+        messageId: populatedMessage._id,
+        approvalStatus: "disapproved",
+        message: populatedMessage,
+        timestamp: new Date(),
+      });
+
+      // 4. Broadcast to client room if applicable
+      if (clientId) {
+        io.to(`assignment_client_${clientId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 5. Broadcast to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
 
       // Send success callback
       if (callback) {
@@ -669,11 +952,13 @@ io.on("connection", (socket) => {
             sender: senderId,
             receivers: actualReceiverIds,
             teamLeads: true,
+            thread: populatedMessage.threadId,
           },
         });
       }
 
-      console.log("✅ Disapproval notification successfully broadcasted");
+      console.log("✅ Disapproval broadcast completed successfully");
+
     } catch (error) {
       console.error("❌ Error broadcasting disapproval notification:", error);
       if (callback) {
@@ -686,17 +971,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Join team leads room
-  socket.on("join_assignment_team_leads", () => {
-    socket.join("assignment_team_leads");
-    console.log(`📍 ${socket.id} joined assignment team leads room`);
-  });
-
-  // Handle assignment message resubmission events - UPDATED FOR ARRAY RECEIVER
+  // Handle assignment message resubmission events - UPDATED
   socket.on("assignment_message_resubmitted", async (data, callback) => {
     try {
-      console.log("📤 Received assignment_message_resubmitted event:", data);
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -715,15 +992,10 @@ io.on("connection", (socket) => {
         .populate("attachments.uploadedBy");
 
       if (!populatedMessage) {
-        console.error(
-          "❌ Resubmitted assignment message not found:",
-          message._id
-        );
+        console.error("❌ Resubmitted assignment message not found:", message._id);
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
-      console.log("📨 Broadcasting resubmitted assignment message...");
 
       // Get the client ID
       const clientId =
@@ -731,7 +1003,7 @@ io.on("connection", (socket) => {
           ? populatedMessage.client
           : populatedMessage.client?._id;
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Handle receiver as array consistently
       let actualReceiverIds = [];
 
       if (Array.isArray(populatedMessage.receiver)) {
@@ -748,8 +1020,6 @@ io.on("connection", (socket) => {
         ].filter(Boolean);
       }
 
-      console.log("🔍 Resubmission - Receivers:", actualReceiverIds);
-
       // 1. Broadcast to the assignment client room
       if (clientId) {
         socket
@@ -761,7 +1031,6 @@ io.on("connection", (socket) => {
             },
             action: "resubmitted",
           });
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
       }
 
       // 2. Notify team leads about the resubmission
@@ -804,7 +1073,6 @@ io.on("connection", (socket) => {
               },
               action: "resubmitted",
             });
-          console.log(`📍 Notified receiver: employee_${receiverId}`);
         }
       });
 
@@ -822,7 +1090,6 @@ io.on("connection", (socket) => {
         });
       }
 
-      console.log("✅ Resubmission notification successfully broadcasted");
     } catch (error) {
       console.error("❌ Error broadcasting resubmission notification:", error);
       if (callback) {
@@ -835,11 +1102,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Handle assignment message sending - SEND ONLY TO SPECIFIC RECEIVER IDs
+  // Handle assignment message sending
   socket.on("send_assignment_message", async (data, callback) => {
     try {
-      console.log("📤 Received send_assignment_message event:", data);
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -864,10 +1129,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log(
-        "🎯 Sending assignment message ONLY to specific receivers..."
-      );
-
       // Use the targeted emission function
       await emitToSpecificReceivers(
         io,
@@ -883,8 +1144,6 @@ io.on("connection", (socket) => {
           deliveredTo: await getRecipientList(populatedMessage),
         });
       }
-
-      console.log("✅ Assignment message sent ONLY to specified receivers");
     } catch (error) {
       console.error("❌ Error sending assignment message:", error);
       if (callback) {
@@ -896,7 +1155,8 @@ io.on("connection", (socket) => {
       }
     }
   });
-  // Handle assignment message updates - UPDATED FOR ARRAY RECEIVER
+
+  // Handle assignment message updates - UPDATED FOR APPROVAL EVENTS
   socket.on("assignment_message_updated", (data) => {
     try {
       const { message, action, clientId } = data;
@@ -906,7 +1166,7 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Handle receiver as array consistently
       let receiverIds = [];
 
       if (Array.isArray(message.receiver)) {
@@ -929,8 +1189,6 @@ io.on("connection", (socket) => {
           ? message.sender
           : message.sender?._id;
 
-      console.log("🔍 Update - Receivers:", receiverIds, "Sender:", senderId);
-
       // Broadcast to client room
       if (clientId) {
         io.to(`assignment_client_${clientId}`).emit(
@@ -938,7 +1196,7 @@ io.on("connection", (socket) => {
           {
             message: {
               ...message,
-              receiver: receiverIds, // Ensure consistent format
+              receiver: receiverIds,
             },
             action,
           }
@@ -954,7 +1212,7 @@ io.on("connection", (socket) => {
         io.to(`employee_${participantId}`).emit("assignment_message_updated", {
           message: {
             ...message,
-            receiver: receiverIds, // Ensure consistent format
+            receiver: receiverIds,
           },
           action,
         });
@@ -971,162 +1229,34 @@ io.on("connection", (socket) => {
         });
       }
 
-      console.log(
-        `✅ Assignment message update broadcasted for action: ${action}`
-      );
+      // Broadcast to thread room if available
+      if (message.threadId) {
+        io.to(`thread_${message.threadId}`).emit("assignment_message_updated", {
+          message: {
+            ...message,
+            receiver: receiverIds,
+          },
+          action,
+        });
+      }
+
     } catch (error) {
       console.error("❌ Error in assignment_message_updated:", error);
     }
   });
 
-  socket.on("disconnect", (reason) => {
-    console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
-  });
-
-  socket.on("error", (error) => {
-    console.error("🔴 Socket error:", error);
-  });
-});
-
-io.on("connection", (socket) => {
-  console.log("🟢 Socket client connected:", socket.id);
-
-  // Join room based on employee ID
-  socket.on("join_employee", (employeeId) => {
-    socket.join(`employee_${employeeId}`);
-    console.log(
-      `📍 Employee ${employeeId} joined room: employee_${employeeId}`
-    );
-  });
-
-  // Join room based on client ID
-  socket.on("join_client", (clientId) => {
-    socket.join(`client_${clientId}`);
-    console.log(`📍 Client ${clientId} joined room: client_${clientId}`);
-  });
-
-  // ========== ASSIGNMENT MESSAGES HANDLERS ==========
-  socket.on("join_assignment_chat", (clientId) => {
-    socket.join(`assignment_client_${clientId}`);
-    console.log(`📍 Joined assignment chat for client: ${clientId}`);
-  });
-
-  socket.on("send_assignment", async (data, callback) => {
-    try {
-      console.log("📤 Received send_assignment_message event:", data);
-
-      const { message, client, recipientIds, senderId } = data;
-
-      if (!message) {
-        console.error("❌ Invalid assignment message data");
-        if (callback)
-          callback({ success: false, error: "Invalid message data" });
-        return;
-      }
-
-      // Populate the assignment message with all data
-      const populatedMessage = await AssignmentMessage.findById(message._id)
-        .populate("owner")
-        .populate("sender")
-        .populate("receiver")
-        .populate("client")
-        .populate("scheduledBy");
-
-      if (!populatedMessage) {
-        console.error("❌ Assignment message not found:", message._id);
-        if (callback) callback({ success: false, error: "Message not found" });
-        return;
-      }
-
-      console.log("📨 Broadcasting assignment message to recipients...");
-
-      const clientId =
-        typeof populatedMessage.client === "string"
-          ? populatedMessage.client
-          : populatedMessage.client?._id;
-
-      // 1. Broadcast to assignment client room
-      if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit(
-          "new_assignment_message",
-          populatedMessage
-        );
-        console.log(`📍 Broadcasted to assignment_client_${clientId}`);
-      }
-
-      // 2. Broadcast to employee recipients from message data
-      if (
-        populatedMessage.receiver &&
-        Array.isArray(populatedMessage.receiver)
-      ) {
-        populatedMessage.receiver.forEach((receiver) => {
-          const receiverId =
-            typeof receiver === "string" ? receiver : receiver._id;
-          if (receiverId) {
-            io.to(`employee_${receiverId}`).emit(
-              "new_assignment_message",
-              populatedMessage
-            );
-            console.log(`📍 Sent assignment to employee_${receiverId}`);
-          }
-        });
-      }
-
-      // 3. Broadcast to additional recipientIds if provided
-      if (recipientIds && recipientIds.length > 0) {
-        recipientIds.forEach((employeeId) => {
-          if (employeeId !== senderId) {
-            io.to(`employee_${employeeId}`).emit(
-              "new_assignment_message",
-              populatedMessage
-            );
-            console.log(
-              `📍 Sent assignment to employee_${employeeId} (additional)`
-            );
-          }
-        });
-      }
-
-      // 4. Send confirmation to sender
-      socket.emit("new_assignment_message", populatedMessage);
-
-      if (callback) {
-        callback({
-          success: true,
-          message: "Assignment message delivered to all recipients",
-        });
-      }
-
-      console.log("✅ Assignment message successfully broadcasted");
-    } catch (error) {
-      console.error("❌ Error broadcasting assignment message:", error);
-      if (callback) {
-        callback({ success: false, error: error.message });
-      }
-    }
-  });
-
-  // Handle assignment message status updates
-  socket.on("assignment_message_status_update", (data) => {
-    const { messageId, status, clientId } = data;
-    io.to(`assignment_client_${clientId}`).emit("assignment_message_status", {
-      messageId,
-      status,
+  // Test socket events - for debugging
+  socket.on("test_approval_event", (data) => {
+    console.log("🧪 Test approval event received:", data);
+    // Echo back to test socket connection
+    socket.emit("test_approval_response", {
+      success: true,
+      message: "Test event received",
+      data: data,
+      timestamp: new Date()
     });
   });
 
-  // Join manager room for assignments
-  socket.on("join_assignment_managers", () => {
-    socket.join("assignment_managers");
-    console.log(`📍 ${socket.id} joined assignment managers room`);
-  });
-
-  // Join team leads room for assignments
-  socket.on("join_assignment_team_leads", () => {
-    socket.join("assignment_team_leads");
-    console.log(`📍 ${socket.id} joined assignment team leads room`);
-  });
-
   socket.on("disconnect", (reason) => {
     console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
   });
@@ -1135,8 +1265,102 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+
+// Complete Socket.IO server setup
 io.on("connection", (socket) => {
-  console.log("🟢 New client connected:", socket.id);
+  console.log("🟢 Client connected:", socket.id);
+
+  // Employee joins their personal room
+  socket.on("join_employee", (employeeId) => {
+    if (!employeeId) {
+      console.error("❌ join_employee: employeeId is required");
+      return;
+    }
+    socket.join(`employee_${employeeId}`);
+    console.log(`👤 Employee ${employeeId} joined their room`);
+  });
+
+  // Join client room for specific client chats
+  socket.on("join_client", (clientId) => {
+    if (!clientId) {
+      console.error("❌ join_client: clientId is required");
+      return;
+    }
+    socket.join(`client_${clientId}`);
+    console.log(`💬 Client ${clientId} room joined by ${socket.id}`);
+  });
+
+  // Join conversation room (for group chats)
+  socket.on("join_conversation", (conversationId) => {
+    if (!conversationId) {
+      console.error("❌ join_conversation: conversationId is required");
+      return;
+    }
+    socket.join(`conversation_${conversationId}`);
+    console.log(`💬 Conversation ${conversationId} room joined by ${socket.id}`);
+  });
+
+  // Handle message sending
+  socket.on("send_message", async (data) => {
+    try {
+      const { conversationId, message } = data;
+
+      if (!conversationId || !message) {
+        console.error("❌ send_message: conversationId and message are required");
+        return;
+      }
+
+      // Broadcast to ALL clients in the conversation room
+      io.to(`conversation_${conversationId}`).emit("receive_message", message);
+
+      // Also send to sender for confirmation
+      socket.emit("message_sent", { success: true, message });
+    } catch (error) {
+      console.error("❌ Error in send_message:", error);
+      socket.emit("message_error", { error: "Failed to send message" });
+    }
+  });
+
+  // Handle typing indicators
+  socket.on("user_typing", (data) => {
+    const { conversationId, user, isSpace = false } = data;
+
+    if (!conversationId || !user) {
+      console.error("❌ user_typing: conversationId and user are required");
+      return;
+    }
+
+    const room = isSpace
+      ? `space_${conversationId}`
+      : `conversation_${conversationId}`;
+    socket.to(room).emit("user_typing", { user, conversationId });
+  });
+
+  socket.on("user_stopped_typing", (data) => {
+    const { conversationId, user, isSpace = false } = data;
+
+    if (!conversationId || !user) {
+      console.error("❌ user_stopped_typing: conversationId and user are required");
+      return;
+    }
+
+    const room = isSpace
+      ? `space_${conversationId}`
+      : `conversation_${conversationId}`;
+    socket.to(room).emit("user_stopped_typing", { user, conversationId });
+  });
+
+  // Handle disconnection
+  socket.on("disconnect", (reason) => {
+    console.log("🔴 Client disconnected:", socket.id, "Reason:", reason);
+  });
+
+  socket.on("error", (error) => {
+    console.error("🔴 Socket error:", error);
+  });
+});
+
+io.on("connection", (socket) => {
 
   socket.on("join_user", (userId) => {
     if (!userId) {
@@ -1144,7 +1368,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`user_${userId}`);
-    console.log(`👤 User ${userId} joined their personal room: user_${userId}`);
   });
 
   /** 🔹 Join conversation room */
@@ -1154,7 +1377,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`conversation_${conversationId}`);
-    console.log(`💬 Joined conversation room: conversation_${conversationId}`);
   });
 
   /** 🔹 Join space room */
@@ -1164,13 +1386,11 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`space_${spaceId}`);
-    console.log(`🏢 Joined space room: space_${spaceId}`);
   });
 
   /** 🔹 CRITICAL FIX: Use io.to() for broadcasting to ALL users in room */
   socket.on("send_message", async (data) => {
     try {
-      console.log("📨 Frontend send_message event received:", data);
       const { conversationId, message } = data;
 
       if (!conversationId || !message) {
@@ -1185,10 +1405,6 @@ io.on("connection", (socket) => {
 
       // Also send to sender for confirmation
       socket.emit("message_sent", { success: true, message });
-
-      console.log(
-        `✅ Message broadcasted to ALL users in conversation: ${conversationId}`
-      );
     } catch (error) {
       console.error("❌ Error in send_message:", error);
       socket.emit("message_error", { error: "Failed to send message" });
@@ -1198,7 +1414,6 @@ io.on("connection", (socket) => {
   /** 🔹 CRITICAL FIX: Use io.to() for space messages too */
   socket.on("send_space_message", async (data) => {
     try {
-      console.log("🏢 Frontend send_space_message event received:", data);
       const { spaceId, message } = data;
 
       if (!spaceId || !message) {
@@ -1214,9 +1429,6 @@ io.on("connection", (socket) => {
       // Also send to sender for confirmation
       socket.emit("space_message_sent", { success: true, message });
 
-      console.log(
-        `✅ Space message broadcasted to ALL users in space: ${spaceId}`
-      );
     } catch (error) {
       console.error("❌ Error in send_space_message:", error);
       socket.emit("message_error", { error: "Failed to send space message" });
@@ -1235,7 +1447,6 @@ io.on("connection", (socket) => {
       ? `space_${conversationId}`
       : `conversation_${conversationId}`;
     socket.to(room).emit("user_typing", { user, conversationId });
-    console.log(`✍️ ${user.name} is typing in ${room}`);
   });
 
   socket.on("user_stopped_typing", (data) => {
@@ -1252,7 +1463,6 @@ io.on("connection", (socket) => {
       ? `space_${conversationId}`
       : `conversation_${conversationId}`;
     socket.to(room).emit("user_stopped_typing", { user, conversationId });
-    console.log(`⏹️ ${user.name} stopped typing in ${room}`);
   });
 
   /** 🔹 Read receipts */
@@ -1273,7 +1483,6 @@ io.on("connection", (socket) => {
       messageIds,
       readAt: new Date(),
     });
-    console.log(`📖 Messages marked as read in ${room} by user ${userId}`);
   });
 
   /** 🔹 Handle disconnection */

@@ -78,12 +78,14 @@ const AssignmentMessageSchema = new Schema(
     spamReportCount: { type: Number, default: 0 },
     spamReporters: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
 
-        approvedAt: { type: Date },
+    approvedAt: { type: Date },
     approvedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     disapprovalNote: { type: String }, // For disapproved messages
     disapprovedAt: { type: Date },
     disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     resubmittedAt: { type: Date }, // For when disapproved messages are resubmitted
+    lastEditedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    lastEditedAt: { type: Date },
 
     // Files
     attachments: [AttachmentSchema],
@@ -121,7 +123,7 @@ AssignmentMessageSchema.pre("save", function (next) {
   // Only generate threadId if not already set
   if (!this.threadId) {
     let threadId;
-    
+
     if (this.client) {
       // Client-based message: use client + subject
       const clientId = this.client.toString();
@@ -135,21 +137,21 @@ AssignmentMessageSchema.pre("save", function (next) {
       // Direct message (no client): use participants + subject
       const participants = [
         this.sender.toString(),
-        ...this.receiver.map(r => r.toString())
+        ...this.receiver.map((r) => r.toString()),
       ]
         .sort()
-        .join('_')
+        .join("_")
         .substring(0, 100); // Limit length
-      
+
       const subject = this.subject || "direct_message";
       const normalizedSubject = subject
         .toLowerCase()
         .replace(/[^a-z0-9]/g, "_")
         .substring(0, 50);
-      
+
       threadId = `direct_${participants}_${normalizedSubject}_${Date.now()}`;
     }
-    
+
     this.threadId = threadId;
   }
   next();
@@ -161,12 +163,12 @@ AssignmentMessageSchema.pre("save", function (next) {
     const error = new Error("At least one receiver is required");
     return next(error);
   }
-  
+
   // Ensure receiver is always treated as an array
   if (!Array.isArray(this.receiver)) {
     this.receiver = [this.receiver];
   }
-  
+
   next();
 });
 
