@@ -927,7 +927,6 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -1009,8 +1008,19 @@ exports.createMessage = async function createMessage(req, res) {
     ).toLowerCase();
     const needsApproval = supervisionMode === "needs_approval";
     const isDirect = supervisionMode === "direct";
+    const isDisabled = supervisionMode === "disabled" || !supervisionMode || supervisionMode === "";
 
-    // UPDATED APPROVAL LOGIC
+    console.log("🔍 Supervision Check:", {
+      senderId: sender,
+      senderRole,
+      supervisionMode,
+      needsApproval,
+      isDirect,
+      isDisabled,
+      hasClient: !!(client && isObjId(client))
+    });
+
+    // UPDATED APPROVAL LOGIC - FIXED SUPERVISION DISABLED CASE
     if (client && isObjId(client)) {
       // Only apply approval logic for client-based messages
       if (needsApproval) {
@@ -1018,6 +1028,10 @@ exports.createMessage = async function createMessage(req, res) {
         // TLs will be added to receivers below in the existing logic
       } else if (isDirect) {
         approvalStatus = "approved";
+      } else if (isDisabled) {
+        // 🔥 CRITICAL FIX: When supervision is disabled, message should go directly to managers
+        approvalStatus = "approved";
+        console.log("✅ Supervision disabled - message goes directly to managers");
       }
     } else {
       // Direct messages (no client) - always approved
@@ -1046,18 +1060,36 @@ exports.createMessage = async function createMessage(req, res) {
     // Your existing role-based logic (preserved)
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
+    console.log("👥 Available recipients:", {
+      teamLeads: tls.length,
+      managers: managers.length,
+      currentReceivers: receivers.length
+    });
+
     if (senderRole === "manager") {
       approvalStatus = null;
+      console.log("👔 Manager sending - no approval needed");
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
+      console.log("🎯 Team Lead sending - no approval needed");
     } else if (needsApproval) {
       // Only add TLs to receivers if this is a client-based message that needs approval
       if (client && isObjId(client)) {
         receivers = [...receivers, ...tls.map((id) => String(id))];
+        console.log("⏳ Needs approval - added team leads:", tls);
       }
       // approvalStatus already set to "pending" above for client messages
     } else if (isDirect) {
       // approvalStatus already set to "approved" above for client messages
+      console.log("✅ Direct supervision - message approved");
+    } else if (isDisabled) {
+      // 🔥 CRITICAL FIX: When supervision is disabled, add managers instead of team leads
+      if (client && isObjId(client) && managers.length > 0) {
+        receivers = [...receivers, ...managers.map((id) => String(id))];
+        console.log("🚀 Supervision disabled - added managers:", managers);
+      } else if (client && isObjId(client)) {
+        console.warn("⚠️ No managers found for supervision disabled case");
+      }
     }
 
     // 🔥 CRITICAL FIX: Handle thread replies with supervision logic
@@ -1067,31 +1099,61 @@ exports.createMessage = async function createMessage(req, res) {
         senderRole,
         supervisionMode,
         needsApproval,
+        isDisabled,
         currentReceivers: receivers.length
       });
 
       // For employees under supervision, respect the supervision rules
-      if (senderRole === "employee" && needsApproval) {
-        console.log("👤 Employee with supervision replying - applying supervision rules");
-        
-        // Clear any automatically added thread participants
-        receivers = [];
-        
-        // Add only team leads for approval (not the original manager)
-        if (tls.length > 0) {
-          receivers = [...tls];
-          approvalStatus = "pending";
-          console.log("✅ Added team leads for approval:", tls);
-        } else {
-          console.warn("⚠️ No team leads found for approval");
+      if (senderRole === "employee") {
+        if (needsApproval) {
+          console.log("👤 Employee with supervision replying - applying supervision rules");
+          
+          // Clear any automatically added thread participants
+          receivers = [];
+          
+          // Add only team leads for approval (not the original manager)
+          if (tls.length > 0) {
+            receivers = [...tls];
+            approvalStatus = "pending";
+            console.log("✅ Added team leads for approval:", tls);
+          } else {
+            console.warn("⚠️ No team leads found for approval");
+          }
+        } else if (isDisabled) {
+          console.log("👤 Employee with disabled supervision replying");
+          // For disabled supervision, use normal thread behavior but don't auto-add managers
+          // The user should explicitly specify receivers
+          if (receivers.length === 0) {
+            console.log("🔄 No receivers specified for disabled supervision reply");
+            // Try to maintain thread participants but respect that supervision is disabled
+            let threadParticipants = new Set();
+
+            // Add original sender (if not current sender)
+            const originalSender = String(originalMessage.sender);
+            if (originalSender !== String(sender)) {
+              threadParticipants.add(originalSender);
+            }
+
+            // Add original receivers (if not current sender)
+            if (Array.isArray(originalMessage.receiver)) {
+              originalMessage.receiver.forEach((receiverId) => {
+                const receiverStr = String(receiverId);
+                if (receiverStr !== String(sender)) {
+                  threadParticipants.add(receiverStr);
+                }
+              });
+            }
+
+            if (threadParticipants.size > 0) {
+              receivers = Array.from(threadParticipants);
+              console.log("✅ Using thread participants for disabled supervision:", receivers);
+            }
+          }
+        } else if (isDirect) {
+          console.log("👤 Employee with direct supervision replying");
+          // For direct supervision, keep the current receivers but don't auto-add manager
+          // The receivers should be explicitly specified or come from thread context
         }
-        
-        // Don't add the original message sender (manager) to receivers
-        // This prevents the automatic manager inclusion that was causing the issue
-      } else if (senderRole === "employee" && isDirect) {
-        console.log("👤 Employee with direct supervision replying");
-        // For direct supervision, keep the current receivers but don't auto-add manager
-        // The receivers should be explicitly specified or come from thread context
       } else {
         console.log("👨‍💼 Manager/Team Lead replying - normal thread behavior");
         // For managers and team leads, use normal thread behavior
@@ -1110,13 +1172,13 @@ exports.createMessage = async function createMessage(req, res) {
 
         // Try to find participants from the original message if it's a reply
         if (replyTo && originalMessage) {
-          // Add original sender (if not current sender) ONLY if not under supervision
+          // Add original sender (if not current sender) ONLY if not under supervision that requires approval
           const originalSender = String(originalMessage.sender);
           if (originalSender !== String(sender) && !(senderRole === "employee" && needsApproval)) {
             threadParticipants.add(originalSender);
           }
 
-          // Add original receivers (if not current sender) ONLY if not under supervision
+          // Add original receivers (if not current sender) ONLY if not under supervision that requires approval
           if (Array.isArray(originalMessage.receiver)) {
             originalMessage.receiver.forEach((receiverId) => {
               const receiverStr = String(receiverId);
@@ -1178,6 +1240,17 @@ exports.createMessage = async function createMessage(req, res) {
             receivers = [...tls];
             approvalStatus = "pending";
             console.log("✅ Fallback: Added team leads for approval");
+          } else if (isDisabled) {
+            // 🔥 FIXED: When supervision is disabled and no receivers specified, send to managers
+            if (managers.length > 0) {
+              receivers = [...managers];
+              approvalStatus = "approved";
+              console.log("✅ Fallback: Supervision disabled - added managers");
+            } else {
+              return res.status(400).json({
+                error: "No managers available. Please specify at least one receiver for your message.",
+              });
+            }
           } else {
             return res.status(400).json({
               error: "Please specify at least one receiver for your message",
@@ -1209,7 +1282,9 @@ exports.createMessage = async function createMessage(req, res) {
       senderRole,
       supervisionMode,
       approvalStatus,
-      isReply: !!replyTo
+      isReply: !!replyTo,
+      hasTeamLeads: receivers.some(r => tls.includes(r)),
+      hasManagers: receivers.some(r => managers.includes(r))
     });
 
     // Scheduling logic (same as before)
@@ -1282,7 +1357,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 exports.getMessage = async function getMessage(req, res) {
   try {
     const messageId = req.params.id;
