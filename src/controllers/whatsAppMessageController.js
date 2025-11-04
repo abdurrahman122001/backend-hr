@@ -1467,6 +1467,60 @@ exports.editMessage = async function editMessage(req, res) {
       editHistory: msg.editHistory || [],
     };
 
+    // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
+    let forwardedMessage = null;
+    if (hasContentChanges && isTeamLead && !isSender && msg.approvalStatus === "approved") {
+      console.log("👨‍💼 Team Lead editing - auto approving and forwarding to managers");
+      
+      const senderRole = normalizeRole(msg.sender?.role || "");
+      
+      // ✅ Forward only if sender was an Employee under supervision
+      if (senderRole === "employee") {
+        const { managers } = await findTLsAndManagersByOwner(msg.owner);
+        
+        if (managers.length > 0) {
+          try {
+            const forwardMsg = await WhatsAppMessage.create({
+              owner: msg.owner,
+              client: msg.client,
+              sender: msg.sender,
+              receiver: managers,
+              subject: `Approved: ${msg.subject || "No Subject"}`,
+              note: msg.note || "",
+              attachments: msg.attachments,
+              approvalStatus: "approved",
+              // Add metadata to identify this as a forwarded message
+              isForwarded: true,
+              originalMessage: msg._id,
+              forwardedBy: req.employee._id,
+              // Copy scheduling info if applicable
+              isScheduled: msg.isScheduled,
+              status: msg.status,
+              scheduledFor: msg.scheduledFor,
+              scheduledAt: msg.scheduledAt,
+              scheduledBy: msg.scheduledBy
+            });
+
+            forwardedMessage = await forwardMsg.populate([
+              { path: "owner", select: "_id name companyEmail" },
+              { path: "sender", select: "_id name companyEmail role" },
+              { path: "receiver", select: "_id name companyEmail role" },
+              { path: "client", select: "_id clientName" },
+              { path: "forwardedBy", select: "_id name companyEmail" },
+            ]);
+
+            // Add forwarding info to response
+            responseData.forwardedToManagers = true;
+            responseData.forwardedMessage = forwardedMessage;
+            
+          } catch (forwardError) {
+            console.error("❌ Failed to forward message to managers:", forwardError);
+            // Don't fail the whole request if forwarding fails
+          }
+        }
+      }
+    }
+
     // 🔥 ENHANCED REAL-TIME NOTIFICATION SYSTEM FOR EDITS
     if (req.app.get("io")) {
       const io = req.app.get("io");
@@ -1525,6 +1579,30 @@ exports.editMessage = async function editMessage(req, res) {
         console.log(`✅ Emitted to client_${msg.client._id}`);
       }
 
+      // 🔥 NEW: Emit forwarded message to managers
+      if (forwardedMessage) {
+        console.log("📤 Emitting forwarded message to managers:", {
+          managers: forwardedMessage.receiver?.map(r => r._id) || [],
+          messageId: forwardedMessage._id
+        });
+
+        // Notify managers about the new forwarded message
+        forwardedMessage.receiver.forEach((manager) => {
+          const managerId = typeof manager === 'object' ? manager._id : manager;
+          if (managerId) {
+            io.to(`employee_${managerId}`).emit("new_message", {
+              message: forwardedMessage,
+              type: "new_message",
+              action: "forwarded_approved",
+              forwardedBy: req.employee._id,
+              originalMessageId: msg._id,
+              source: "team_lead_edit"
+            });
+            console.log(`✅ Forwarded edited message to manager: employee_${managerId}`);
+          }
+        });
+      }
+
       // Special notifications based on approval status changes
       if (msg.approvalStatus === "approved") {
         console.log("📢 Notifying about auto-approval");
@@ -1539,8 +1617,8 @@ exports.editMessage = async function editMessage(req, res) {
           });
         });
 
-        // If auto-approved by Team Lead, also notify managers
-        if (isTeamLead && !isSender) {
+        // If auto-approved by Team Lead, also notify managers (if not already forwarded)
+        if (isTeamLead && !isSender && !forwardedMessage) {
           const { managers } = await findTLsAndManagersByOwner(msg.owner);
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
@@ -1578,7 +1656,11 @@ exports.editMessage = async function editMessage(req, res) {
     // Response messages based on the workflow
     let responseMessage = "Message updated successfully";
     if (msg.approvalStatus === "approved" && isTeamLead && !isSender) {
-      responseMessage = "Message updated and automatically approved";
+      if (forwardedMessage) {
+        responseMessage = "Message updated, automatically approved, and forwarded to managers";
+      } else {
+        responseMessage = "Message updated and automatically approved";
+      }
     } else if (msg.approvalStatus === "pending") {
       responseMessage = "Message updated and sent for approval";
     } else if (msg.approvalStatus === "approved" && isSender) {
@@ -1587,12 +1669,21 @@ exports.editMessage = async function editMessage(req, res) {
 
     console.log("🎯 Final response:", responseMessage);
 
-    res.json({
+    // Build final response
+    const finalResponse = {
       message: responseMessage,
       data: responseData,
       approvalStatus: msg.approvalStatus,
       editedBy: currentUserRole,
-    });
+    };
+
+    // Add forwarding info to response if applicable
+    if (forwardedMessage) {
+      finalResponse.forwardedToManagers = true;
+      finalResponse.forwardedMessage = forwardedMessage;
+    }
+
+    res.json(finalResponse);
   } catch (e) {
     console.error("❌ Edit message error:", e);
     res.status(500).json({ error: "Failed to edit message" });
