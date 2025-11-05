@@ -101,7 +101,7 @@ exports.getEmployeeRoster = async (req, res) => {
     }
 
     const clients = await ClientInfo.find(clientQuery)
-      .select("_id clientName legalBusinessName industry taxStatus companyLocation assignedTo")
+      .select("_id clientName dba industry taxStatus companyLocation assignedTo")
       .populate("assignedTo", "_id name companyEmail")
       .sort({ clientName: 1 });
 

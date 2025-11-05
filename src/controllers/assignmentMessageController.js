@@ -100,151 +100,6 @@ function normalizeRole(role) {
   return r;
 }
 
-// async function applyVisibility(q, req) {
-//   if (!req.employee?._id) return q;
-
-//   const me = oid(String(req.employee._id));
-//   if (!me) return q;
-
-//   const currentUserRole = normalizeRole(req.employee?.role || "");
-//   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
-
-//   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-//   if (
-//     (currentUserRole === "manager" || currentUserRole === "owner") &&
-//     ownerId
-//   ) {
-//     return { ...q, owner: ownerId };
-//   }
-
-//   // 🧑‍🤝‍🧑 TEAM LEAD: can see ALL messages for their owner's organization
-//   if (currentUserRole === "team_lead" && ownerId) {
-//     // Team leads can see ALL messages within their organization
-//     const teamLeadQuery = {
-//       ...q,
-//       owner: ownerId, // Show all messages for the owner
-//     };
-
-//     // 🔥 CRITICAL FIX: Team leads should ALWAYS see pending approval messages
-//     // Remove any approvalStatus filter that might exclude pending messages
-//     if (teamLeadQuery.approvalStatus === "pending") {
-//       // Keep the pending filter if explicitly requested
-//     } else if (q.approvalStatus !== "pending") {
-//       // Don't exclude pending messages for team leads in normal views
-//       delete teamLeadQuery.approvalStatus;
-//     }
-
-//     return teamLeadQuery;
-//   }
-
-//   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
-//   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
-
-//   // 🔥 UPDATED: Handle both client-based threads AND direct messages
-
-//   // For client-based messages: if we're querying for a specific client thread,
-//   // show ALL messages in that thread to all participants
-//   if (q.client && isObjId(q.client)) {
-//     // For team leads, they can see all messages for the client
-//     if (currentUserRole === "team_lead" && ownerId) {
-//       return {
-//         ...q,
-//         client: q.client,
-//         owner: ownerId,
-//       };
-//     }
-
-//     // For employees, check if they're part of the thread
-//     const userThreadMessages = await AssignmentMessage.find({
-//       client: q.client,
-//       $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
-//     })
-//       .select("_id")
-//       .lean();
-
-//     if (userThreadMessages.length > 0) {
-//       // User is part of this client thread - show ALL messages for this client
-//       return { ...q, client: q.client };
-//     }
-//   }
-
-//   // 🔥 NEW: For direct messages (no client), always apply participant visibility
-//   // If client is explicitly set to $exists: false (direct messages), ensure user is participant
-//   if (q.client && q.client.$exists === false) {
-//     const directMessageQuery = {
-//       ...q,
-//       $and: [{ $or: visOr }],
-//     };
-
-//     // Add back the isTrashed filter if it was set
-//     const isTrashedFilter = q.isTrashed;
-//     if (isTrashedFilter !== undefined) {
-//       directMessageQuery.isTrashed = isTrashedFilter;
-//     }
-//     return directMessageQuery;
-//   }
-
-//   const now = new Date();
-
-//   // PRESERVE THE isTrashed FILTER - don't override it
-//   const baseQuery = { ...q };
-
-//   // Remove isTrashed from base query if it exists, we'll handle it separately
-//   const isTrashedFilter = baseQuery.isTrashed;
-//   delete baseQuery.isTrashed;
-
-//   // Handle scheduled messages specifically
-//   if (q.isScheduled === true && q.status === "scheduled") {
-//     const scheduledQuery = {
-//       ...baseQuery,
-//       $and: [{ $or: visOr }],
-//     };
-
-//     // Add back the isTrashed filter if it was set
-//     if (isTrashedFilter !== undefined) {
-//       scheduledQuery.isTrashed = isTrashedFilter;
-//     }
-//     return scheduledQuery;
-//   }
-
-//   // Build the main visibility query for employees
-//   const finalQuery = {
-//     $or: [
-//       {
-//         ...baseQuery,
-//         $and: [
-//           {
-//             $or: [
-//               { isScheduled: { $ne: true } },
-//               { isScheduled: true, status: "sent" },
-//               {
-//                 isScheduled: true,
-//                 status: "scheduled",
-//                 scheduledFor: { $lte: now },
-//               },
-//             ],
-//           },
-//           { $or: visOr },
-//         ],
-//       },
-//       {
-//         ...baseQuery,
-//         isScheduled: true,
-//         status: "scheduled",
-//         scheduledFor: { $gt: now },
-//         sender: me,
-//       },
-//     ],
-//   };
-
-//   // Add back the isTrashed filter to the entire query
-//   if (isTrashedFilter !== undefined) {
-//     finalQuery.isTrashed = isTrashedFilter;
-//   }
-
-//   return finalQuery;
-// }
-
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -826,7 +681,7 @@ exports.listMessages = async function listMessages(req, res) {
 
     res.json({
       items: normalizedItems,
-      total: normalizedItems.length,
+      total: total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
@@ -2055,40 +1910,6 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 
-// // PATCH /api/assignment-messages/:id
-// exports.updateMessage = async function updateMessage(req, res) {
-//   try {
-//     const { subject, note } = req.body;
-//     const msg = await AssignmentMessage.findById(req.params.id);
-//     if (!msg) return res.status(404).json({ error: "Not found" });
-
-//     if (typeof subject === "string") msg.subject = subject;
-//     if (typeof note === "string") msg.note = note;
-
-//     await msg.save();
-//     const populated = await msg.populate([
-//       { path: "owner", select: "_id name companyEmail" },
-//       { path: "sender", select: "_id name companyEmail role" },
-//       { path: "receiver", select: "_id name companyEmail role" },
-//       { path: "client", select: "_id clientName" },
-//       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-//       { path: "scheduledBy", select: "_id name companyEmail" },
-//     ]);
-
-//     // EMIT REAL-TIME EVENT
-//     const io = getIO(req);
-//     if (io) {
-//       await emitMessageUpdate(io, msg, "updated");
-//     }
-
-//     res.json(populated);
-//   } catch (e) {
-//     console.error(e);
-//     res.status(500).json({ error: "Failed to update message" });
-//   }
-// };
-
-// DELETE /api/assignment-messages/:id
 exports.deleteMessage = async function deleteMessage(req, res) {
   try {
     const msg = await AssignmentMessage.findById(req.params.id);
@@ -2894,25 +2715,37 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
 // GET /api/assignment-messages/review
 exports.getReviewMessages = async function getReviewMessages(req, res) {
   try {
-    // Fetch all messages, populate sender so we can inspect supervisionMode
-    const msgs = await AssignmentMessage.find()
-      .sort({ createdAt: 1 })
-      .populate([
-        { path: "sender", select: "name supervisionMode" },
-        { path: "receiver", select: "name companyEmail role" },
-        { path: "client", select: "_id clientName" },
-        { path: "attachments.uploadedBy", select: "name companyEmail" },
-      ])
-      .lean();
+    const { page = 1, limit = 10 } = req.query;
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 50);
 
-    // Keep only those whose sender.supervisionMode === "direct"
-    const directMsgs = msgs.filter(
+    // Fetch all messages with pagination
+    const [allMsgs, total] = await Promise.all([
+      AssignmentMessage.find()
+        .sort({ createdAt: -1 })  // Changed to -1 for newest first
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: "sender", select: "name supervisionMode" },
+          { path: "receiver", select: "name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "name companyEmail" },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments()  // Get total count for pagination
+    ]);
+
+    // Filter for direct supervision messages
+    const directMsgs = allMsgs.filter(
       (m) => m.sender && m.sender.supervisionMode === "direct"
     );
 
     res.json({
       items: directMsgs,
-      total: directMsgs.length,
+      total: total,  // ✅ Total count from database
+      page: pageNum,
+      pages: Math.ceil(total / lim),  // ✅ Pagination metadata
+      limit: lim,
     });
   } catch (e) {
     console.error("getReviewMessages error:", e);

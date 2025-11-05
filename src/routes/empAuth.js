@@ -1,8 +1,9 @@
 const express = require("express");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
+const crypto = require("crypto");
 const Employee = require("../models/Employees");
-const EmployeeSession = require("../models/EmployeeSession"); // ✅ New model for login/logout tracking
+const EmployeeSession = require("../models/EmployeeSession"); // ✅ Session tracking
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 
@@ -55,7 +56,7 @@ const codes = new Map(); // codes.set(empId, { code, expires, deviceFingerprint 
 // 1️⃣ LOGIN — password check + trusted device + session logging
 // ---------------------
 router.post("/login", async (req, res) => {
-  const { companyEmail, password, deviceFingerprint } = req.body;
+  const { companyEmail, password, deviceFingerprint, deviceToken } = req.body;
 
   try {
     const emp = await Employee.findOne({ companyEmail }).select(
@@ -74,9 +75,12 @@ router.post("/login", async (req, res) => {
     const ok = await emp.comparePassword(password);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    // Check if device is trusted
+    // ---------------------
+    // ✅ Check if device is trusted
+    // ---------------------
     const isTrusted = emp.trustedDevices?.some(
-      (d) => d.deviceFingerprint === deviceFingerprint
+      (d) =>
+        d.deviceFingerprint === deviceFingerprint || d.deviceId === deviceToken
     );
 
     if (isTrusted) {
@@ -105,6 +109,7 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           name: emp.name || "",
         },
+        trusted: true,
         expiresIn: 9 * 60 * 60,
       });
     }
@@ -166,7 +171,7 @@ router.post("/login", async (req, res) => {
 });
 
 // ---------------------
-// 2️⃣ CONFIRM CODE — trust new device + create session
+// 2️⃣ CONFIRM CODE — trust new device + create session + return permanent token
 // ---------------------
 router.post("/confirm-code", async (req, res) => {
   const { code, deviceFingerprint } = req.body;
@@ -190,7 +195,7 @@ router.post("/confirm-code", async (req, res) => {
         .json({ error: "Code expired. Please login again." });
     }
 
-    // Success → delete code
+    // ✅ Success → delete code
     codes.delete(decoded.id);
 
     const emp = await Employee.findById(decoded.id).select(
@@ -203,22 +208,33 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
+    // ✅ Generate permanent device token
+    const deviceId = crypto.randomBytes(32).toString("hex");
+
+    // ✅ Save trusted device if not already stored
     if (
-      !emp.trustedDevices.some((d) => d.deviceFingerprint === deviceFingerprint)
+      !emp.trustedDevices.some(
+        (d) => d.deviceFingerprint === deviceFingerprint
+      )
     ) {
       emp.trustedDevices.push({
+        deviceId,
         deviceFingerprint,
         userAgent,
+        ip,
         addedAt: new Date(),
       });
     }
     await emp.save();
+
+    // ✅ Generate JWT for session
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
       { expiresIn: "9h" }
     );
 
+    // ✅ Log check-in session
     await EmployeeSession.create({
       employeeId: emp._id,
       deviceFingerprint,
@@ -229,6 +245,7 @@ router.post("/confirm-code", async (req, res) => {
     return res.json({
       message: "Device verified and trusted. Login successful.",
       token,
+      deviceToken: deviceId, // ✅ new field for frontend
       user: {
         id: emp._id,
         companyEmail: emp.companyEmail,
@@ -263,7 +280,7 @@ router.post("/logout", requireAuth, async (req, res) => {
 router.get("/me", requireAuth, authCtrl.getMe);
 
 // ---------------------
-// 6️⃣ Get Attendance Logs (Optional Admin Endpoint)
+// 4️⃣ Get Attendance Logs (Optional Admin Endpoint)
 // ---------------------
 router.get("/sessions", requireAuth, async (req, res) => {
   try {
@@ -278,15 +295,14 @@ router.get("/sessions", requireAuth, async (req, res) => {
     res.status(500).json({ error: "Unable to fetch sessions" });
   }
 });
+
 router.get("/all-sessions", async (req, res) => {
   try {
-    // Optional: restrict to admin/owner
     const sessions = await EmployeeSession.find()
-      .populate("employeeId", "name companyEmail role") // fetch name and email from Employee model
+      .populate("employeeId", "name companyEmail role")
       .sort({ loginTime: -1 })
-      .limit(100); // adjust limit as needed
+      .limit(100);
 
-    // Transform data (optional)
     const formatted = sessions.map((s) => ({
       id: s._id,
       employeeName: s.employeeId?.name || "Unknown",
@@ -304,4 +320,5 @@ router.get("/all-sessions", async (req, res) => {
     res.status(500).json({ error: "Server error while fetching sessions" });
   }
 });
+
 module.exports = router;
