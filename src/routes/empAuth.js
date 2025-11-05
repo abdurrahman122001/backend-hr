@@ -131,7 +131,7 @@ router.post("/login", async (req, res) => {
       "unknown";
     const when = new Date().toISOString();
 
-    const adminTo = "qaziabdurrahman12@gmail.com";
+    const adminTo = "nashfintechnologies@gmail.com";
     const adminSubject = "Employee login verification requested";
     const adminText =
       `A login verification was requested.\n` +
