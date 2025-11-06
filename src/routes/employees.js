@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
 const requireAuth = require("../middleware/auth");
-const { getUpcomingBirthdays, updateEmployeeRole } = require("../controllers/employeeController");
+const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries } = require("../controllers/employeeController");
 
 // ------------------------------
 // Helpers
@@ -79,6 +79,8 @@ router.get("/", requireAuth, async (req, res) => {
 // (delegates to controller)
 // ------------------------------
 router.get("/birthdays", requireAuth, getUpcomingBirthdays);
+router.get("/anniversaries", requireAuth, getUpcomingAnniversaries);
+
 
 // ------------------------------
 // GET /api/employees/names

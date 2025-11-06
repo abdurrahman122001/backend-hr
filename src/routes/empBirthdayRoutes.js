@@ -61,10 +61,10 @@ router.get('/birthdays', requireEmployeeAuth, async (req, res) => {
   }
 });
 
-// GET /api/emp-birthdays/anniversaries  ✅ CORRECT PATH
 router.get('/anniversaries', requireAuth, async (req, res) => {
   try {
-    const emp = await Employee.findById(req._id).select('owner');
+    // ✅ FIX: Use req.user._id instead of req._id
+    const emp = await Employee.findById(req.user._id).select('owner');
     if (!emp) return res.status(404).json({ error: 'Employee not found' });
 
     const employees = await Employee.find({
