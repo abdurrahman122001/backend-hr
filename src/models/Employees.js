@@ -165,7 +165,7 @@ const EmployeeSchema = new Schema(
     contractPath: { type: String },
     trustedDevices: [
       {
-        deviceId: { type: String, required: true }, // permanent token
+        deviceId: { type: String, required: false }, // permanent token
         deviceFingerprint: { type: String },
         userAgent: { type: String },
         ip: { type: String },

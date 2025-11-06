@@ -3,7 +3,8 @@ const SalarySlip = require('../models/Salaries');
 const Shift = require('../models/Shift');
 const { encrypt, decrypt } = require('../utils/encryption');
 const { sendCompleteProfileLink } = require('../services/profileEmailService');
-
+const path = require('path');
+const fs = require('fs');
 /** --- helpers --- */
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const CNIC_REGEX = /^\d{5}-\d{7}-\d$/;
@@ -287,6 +288,52 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
   } catch (err) {
     console.error('Error in updateEmployeeAndSalarySlip:', err);
     res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+};
+
+exports.updateEmployeePhoto = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: "No photo uploaded" });
+    }
+
+    // New photo URL
+    const photoUrl = `/uploads/photos/${req.file.filename}`;
+
+    // Fetch employee to delete old photo if it exists
+    const employee = await Employee.findById(id);
+    if (!employee) {
+      return res.status(404).json({ success: false, message: "Employee not found" });
+    }
+
+    // Delete old photo from disk if it exists
+    if (employee.photographUrl) {
+      const oldPath = path.join(__dirname, "..", employee.photographUrl);
+      fs.unlink(oldPath, (err) => {
+        if (err && err.code !== "ENOENT") {
+          console.warn("Failed to delete old photo:", err);
+        }
+      });
+    }
+
+    // Update new photo URL
+    employee.photographUrl = photoUrl;
+    await employee.save();
+
+    res.json({
+      success: true,
+      message: "Employee photo updated successfully",
+      photoUrl,
+    });
+  } catch (err) {
+    console.error("Photo upload error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to upload photo",
+      error: err.message,
+    });
   }
 };
 

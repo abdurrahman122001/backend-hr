@@ -93,29 +93,41 @@ function defaultsFromTemplate(tpl) {
 // Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
-  
+
   try {
     // Find the active salary record for this employee
-    const salaryRecord = await Salary.findOne({ 
-      employee: employeeId, 
-      isActive: true 
+    const salaryRecord = await Salary.findOne({
+      employee: employeeId,
+      isActive: true,
     }).lean();
-    
+
     if (!salaryRecord) {
       console.log("No active salary record found for employee:", employeeId);
       return {};
     }
-    
+
     const decryptedSalary = {};
-    
+
     // Decrypt all salary fields
     const salaryFields = [
-      'basic', 'dearnessAllowance', 'houseRentAllowance', 'conveyanceAllowance',
-      'medicalAllowance', 'utilityAllowance', 'overtimeCompensation', 
-      'dislocationAllowance', 'leaveEncashment', 'bonus', 'arrears', 
-      'autoAllowance', 'incentive', 'fuelAllowance', 'othersAllowances', 'grossSalary'
+      "basic",
+      "dearnessAllowance",
+      "houseRentAllowance",
+      "conveyanceAllowance",
+      "medicalAllowance",
+      "utilityAllowance",
+      "overtimeCompensation",
+      "dislocationAllowance",
+      "leaveEncashment",
+      "bonus",
+      "arrears",
+      "autoAllowance",
+      "incentive",
+      "fuelAllowance",
+      "othersAllowances",
+      "grossSalary",
     ];
-    
+
     for (const field of salaryFields) {
       if (salaryRecord[field]) {
         try {
@@ -128,7 +140,7 @@ async function fetchAndDecryptSalary(employeeId) {
         decryptedSalary[field] = "—";
       }
     }
-    
+
     // Calculate total if needed (using the decrypted values)
     if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
       try {
@@ -138,31 +150,42 @@ async function fetchAndDecryptSalary(employeeId) {
         const conveyance = parseFloat(decryptedSalary.conveyanceAllowance) || 0;
         const medical = parseFloat(decryptedSalary.medicalAllowance) || 0;
         const others = parseFloat(decryptedSalary.othersAllowances) || 0;
-        
-        decryptedSalary.calculatedTotal = (basic + houseRent + utilities + conveyance + medical + others).toFixed(2);
+
+        decryptedSalary.calculatedTotal = (
+          basic +
+          houseRent +
+          utilities +
+          conveyance +
+          medical +
+          others
+        ).toFixed(2);
       } catch (error) {
         console.error("Error calculating total salary:", error.message);
         decryptedSalary.calculatedTotal = "[Calculation Error]";
       }
     }
-    
+
     return decryptedSalary;
   } catch (error) {
     console.error("Error fetching salary record:", error.message);
     return {};
   }
 }
-
+const formatWithCommas = (val) => {
+  const numVal = parseFloat(val);
+  if (isNaN(numVal)) return val || "—";
+  return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
+};
 async function tokenMap(emp, defaults = {}) {
   // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
-  
+
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
 
   const tenureHuman = formatTenure(join, endDate);
   const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
-  
+
   return {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
@@ -188,24 +211,29 @@ async function tokenMap(emp, defaults = {}) {
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
 
     // Salary fields (decrypted from Salary model)
-    "salary.basic": decryptedSalary.basic || "—",
-    "salary.dearness": decryptedSalary.dearnessAllowance || "—",
-    "salary.houseRent": decryptedSalary.houseRentAllowance || "—",
-    "salary.conveyance": decryptedSalary.conveyanceAllowance || "—",
-    "salary.medical": decryptedSalary.medicalAllowance || "—",
-    "salary.utilities": decryptedSalary.utilityAllowance || "—",
-    "salary.overtime": decryptedSalary.overtimeCompensation || "—",
-    "salary.dislocation": decryptedSalary.dislocationAllowance || "—",
-    "salary.leaveEncashment": decryptedSalary.leaveEncashment || "—",
-    "salary.bonus": decryptedSalary.bonus || "—",
-    "salary.arrears": decryptedSalary.arrears || "—",
-    "salary.auto": decryptedSalary.autoAllowance || "—",
-    "salary.incentive": decryptedSalary.incentive || "—",
-    "salary.fuel": decryptedSalary.fuelAllowance || "—",
-    "salary.other": decryptedSalary.othersAllowances || "—",
-    "salary.gross": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
-    "salary.total": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
-
+    "salary.basic": formatWithCommas(decryptedSalary.basic),
+    "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
+    "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
+    "salary.conveyance": formatWithCommas(decryptedSalary.conveyanceAllowance),
+    "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
+    "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
+    "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
+    "salary.dislocation": formatWithCommas(
+      decryptedSalary.dislocationAllowance
+    ),
+    "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
+    "salary.bonus": formatWithCommas(decryptedSalary.bonus),
+    "salary.arrears": formatWithCommas(decryptedSalary.arrears),
+    "salary.auto": formatWithCommas(decryptedSalary.autoAllowance),
+    "salary.incentive": formatWithCommas(decryptedSalary.incentive),
+    "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
+    "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
+    "salary.gross": formatWithCommas(
+      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+    ),
+    "salary.total": formatWithCommas(
+      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+    ),
     // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
@@ -270,7 +298,7 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Flat form (single page)  
+  // Flat form (single page)
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
@@ -315,10 +343,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     })
     .join("");
 
-  const pageNumberHTML =
-    totalPages > 1
-      ? ``
-      : "";
+  const pageNumberHTML = totalPages > 1 ? `` : "";
 
   return `<!doctype html>
 <html>

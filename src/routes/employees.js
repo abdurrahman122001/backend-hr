@@ -6,7 +6,7 @@ const mongoose = require("mongoose");
 const Employee = require("../models/Employees");
 const requireAuth = require("../middleware/auth");
 const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries } = require("../controllers/employeeController");
-
+const upload = require("../middleware/upload");
 // ------------------------------
 // Helpers
 // ------------------------------
@@ -14,6 +14,7 @@ const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries } = r
  * Resolve the effective tenant/owner id for the current user.
  * Priority: explicit user.owner -> user.createdBy -> user._id
  */
+
 function getEffectiveOwnerId(user) {
   return user?.owner || user?.createdBy || user?._id;
 }
@@ -425,7 +426,7 @@ router.get("/roles", requireAuth, async (req, res) => {
   }
 });
 
-// ------------------------------
+
 // PATCH /api/employees/:id/role
 // Update employee role
 // ------------------------------
