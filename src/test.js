@@ -79,12 +79,24 @@ const app = express();
 // ---------- Static ----------
 app.use(
   "/uploads",
-  express.static(path.join(__dirname, "./uploads"))
+  express.static(path.join(__dirname, "./uploads"), {
+    setHeaders: (res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*"); // or restrict to http://localhost:8080
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    },
+  })
 );
 app.use(
   "/upload",
   express.static(path.join(__dirname, "../uploads"))
 );
+
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "../uploads"))
+);
+
 
 
 // If you want a separate mount for chat‐attachments you can,
