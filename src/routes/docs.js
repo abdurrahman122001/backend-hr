@@ -318,7 +318,7 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-
+// routes/docs.js - Updated generateSinglePageHTML function
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -333,13 +333,27 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const deco = el.underline ? "underline" : "none";
       const color = el.color || "#000000";
       const align = el.align || "left";
+      const lineHeight = num(el.lineHeight, 1.2);
+      const columns = num(el.columns, 1);
+      const columnGap = num(el.columnGap, 20);
       const html = applyTokens(el.content || "", tokens);
+
+      // CSS for multi-column layout
+      const columnStyle = columns > 1 
+        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+        : '';
+
+      // FIXED: Proper justify alignment with text-justify
+      const alignStyle = align === "justify" 
+        ? "text-align: justify; text-justify: inter-word;" 
+        : `text-align: ${align};`;
 
       return `<div class="el" style="
         position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
         color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
         font-weight:${bold};font-style:${italic};text-decoration:${deco};
-        text-align:${align};overflow:hidden;">${html}</div>`;
+        ${alignStyle}line-height:${lineHeight};${columnStyle}
+        overflow:hidden;">${html}</div>`;
     })
     .join("");
 
@@ -365,7 +379,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     print-color-adjust: exact;
   }
 
-  /* 🔥 Key fix: translate page content down by header height */
+  /* Key fix: translate page content down by header height */
   .page {
     width: ${page.widthPx}px;
     height: ${page.heightPx - (page.header + page.footer)}px;
@@ -378,23 +392,21 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     transform: translateY(${page.header}px);
   }
 
-  /* Optional visual testing (remove after confirming)
-  body::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    height: ${page.header}px;
-    left: 0; right: 0;
-    background: rgba(255,0,0,0.1);
+  /* Multi-column support */
+  .el {
+    -webkit-column-count: inherit;
+    -moz-column-count: inherit;
+    column-count: inherit;
+    -webkit-column-gap: inherit;
+    -moz-column-gap: inherit;
+    column-gap: inherit;
   }
-  body::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    height: ${page.footer}px;
-    left: 0; right: 0;
-    background: rgba(0,0,255,0.1);
-  } */
+
+  /* Justify alignment support */
+  .el[style*="text-align: justify"] {
+    text-align: justify;
+    text-justify: inter-word;
+  }
 
   .el * { margin: 0; }
 </style>
