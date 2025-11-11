@@ -74,6 +74,33 @@ router.get("/", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: err.message });
   }
 });
+router.get("/attendance", requireAuth, async (req, res) => {
+  try {
+    const { trashed, includeOffboarded } = req.query;
+    const includeTrashed = trashed === "true";
+    const showOffboarded = includeOffboarded === "true";
+
+    const scope = buildEmployeeScope(req.user, includeTrashed);
+    let query = { ...scope };
+
+    // ✅ Default behavior: hide offboarded
+    if (!showOffboarded) {
+      query.status = { $ne: "offboarded" };
+    }
+
+    // ✅ If includeOffboarded=true → remove status filter so offboarded appear
+    if (showOffboarded) {
+      delete query.status;
+    }
+
+    const list = await Employee.find(query).sort({ name: 1 }).lean();
+
+    res.json({ status: "success", data: list });
+
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
 
 // ------------------------------
 // GET /api/employees/birthdays

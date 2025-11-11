@@ -172,6 +172,17 @@ const EmployeeSchema = new Schema(
         addedAt: { type: Date, default: Date.now },
       },
     ],
+    // EMPLOYMENT STATUS FIELDS - UPDATED
+    status: {
+      type: String,
+      enum: ["active", "pending", "resigned", "offboarded", "terminated"],
+      default: "pending",
+    },
+    resignationDate: { type: String }, // Date when employee resigned
+    noticePeriodEndDate: { type: String }, // Calculated date when notice period ends (resignationDate + 30 days)
+
+    terminationDate: { type: String },
+    resignationReason: { type: String },
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "User" },

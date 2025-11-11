@@ -5,7 +5,6 @@ const customParseFormat = require("dayjs/plugin/customParseFormat");
 const utc = require("dayjs/plugin/utc");
 const timezone = require("dayjs/plugin/timezone");
 
-
 dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -132,7 +131,9 @@ exports.getUpcomingBirthdays = async (req, res) => {
     const employees = await Employee.find({
       owner: { $in: [ownerId] },
       dateOfBirth: { $exists: true, $ne: null, $ne: "" },
-    }).select("name dateOfBirth photographUrl email");
+      status: { $ne: "offboarded" }, // Exclude offboarded employees
+      isTrashed: false, // Also exclude trashed employees
+    }).select("name dateOfBirth photographUrl email status");
 
     const now = dayjs();
     const upcoming = employees
@@ -184,7 +185,10 @@ exports.getUpcomingAnniversaries = async (req, res) => {
         if (!join.isValid()) return null;
 
         // Construct this year's anniversary
-        let anniversary = dayjs(`${today.year()}-${join.format("MM-DD")}`, "YYYY-MM-DD");
+        let anniversary = dayjs(
+          `${today.year()}-${join.format("MM-DD")}`,
+          "YYYY-MM-DD"
+        );
 
         // If anniversary passed this year, add 1 year
         if (anniversary.isBefore(today, "day")) {
@@ -212,7 +216,9 @@ exports.getUpcomingAnniversaries = async (req, res) => {
     res.status(200).json(upcoming);
   } catch (err) {
     console.error("Error in getUpcomingAnniversaries:", err);
-    res.status(500).json({ error: "Could not fetch anniversaries: " + err.message });
+    res
+      .status(500)
+      .json({ error: "Could not fetch anniversaries: " + err.message });
   }
 };
 
@@ -225,8 +231,13 @@ exports.updateEmployeeRole = async (req, res) => {
       return res.status(400).json({ message: "Role is required" });
     }
 
-    const employee = await Employee.findByIdAndUpdate(id, { role }, { new: true });
-    if (!employee) return res.status(404).json({ message: "Employee not found" });
+    const employee = await Employee.findByIdAndUpdate(
+      id,
+      { role },
+      { new: true }
+    );
+    if (!employee)
+      return res.status(404).json({ message: "Employee not found" });
 
     res.status(200).json({ message: "Role updated successfully", employee });
   } catch (error) {
