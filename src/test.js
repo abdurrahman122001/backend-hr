@@ -14,6 +14,7 @@ const AttendanceConfig = require("./models/AttendanceConfig");
 const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
+const empAuth = require("./middleware/empAuth");
 
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
