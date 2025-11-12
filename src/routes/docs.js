@@ -21,14 +21,12 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96;
 
-// Enhanced browser launcher for VPS compatibility (Hostinger + Snap Chromium)
 async function launchBrowser() {
   const fs = require("fs");
   const isProduction = process.env.NODE_ENV === "production";
 
-  // Use your actual Snap Chromium path first
   const possibleChromiumPaths = [
-    "/snap/bin/chromium", // 👈 your working path on Hostinger VPS
+    "/snap/bin/chromium", // your VPS Chromium
     "/usr/bin/chromium-browser",
     "/usr/bin/chromium",
     "/usr/bin/google-chrome-stable",
@@ -50,9 +48,7 @@ async function launchBrowser() {
   }
 
   if (!executablePath) {
-    throw new Error(
-      "❌ Chromium not found. Please verify that /snap/bin/chromium is installed and accessible."
-    );
+    throw new Error("❌ Chromium not found. Please verify your installation.");
   }
 
   const launchOptions = {
@@ -67,29 +63,25 @@ async function launchBrowser() {
       "--no-zygote",
       "--disable-web-security",
       "--disable-software-rasterizer",
-      "--font-render-hinting=medium",
-      "--enable-font-antialiasing",
       "--window-size=1280,1024",
     ],
     timeout: 30000,
   };
 
-  console.log("🚀 Launching Chromium from:", executablePath);
-
   try {
     const browser = await puppeteer.launch(launchOptions);
     return browser;
   } catch (error) {
-    console.error("⚠️ Browser launch failed, retrying with fallback args:", error);
-    const fallbackOptions = {
+    console.error("⚠️ Browser launch failed:", error);
+    return await puppeteer.launch({
       executablePath,
       headless: true,
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
       timeout: 30000,
-    };
-    return await puppeteer.launch(fallbackOptions);
+    });
   }
 }
+
 
 function fmtDate(d) {
   if (!d) return "—";
@@ -417,7 +409,9 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
-// Enhanced PDF generation with better error handling
+// ─────────────────────────────────────────────────────────────
+// Enhanced PDF generator — pixel-perfect layout for VPS
+// ─────────────────────────────────────────────────────────────
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -441,61 +435,103 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       let pageInstance;
       try {
         pageInstance = await browser.newPage();
-        
-        await pageInstance.setViewport({ 
-          width: Math.round(page.widthPx), 
-          height: Math.round(page.heightPx)
+
+        // Ensure viewport matches template size
+        await pageInstance.setViewport({
+          width: Math.round(page.widthPx),
+          height: Math.round(page.heightPx),
+          deviceScaleFactor: 1, // prevents DPI scaling differences
         });
 
+        // Generate HTML
         const html = generateSinglePageHTML(page, tokens, pages.length);
-        
-        await pageInstance.setContent(html, { 
+
+        // Load HTML content
+        await pageInstance.setContent(html, {
           waitUntil: "networkidle0",
-          timeout: 30000
+          timeout: 30000,
         });
-        
+
         await pageInstance.emulateMediaType("screen");
 
+        // Force consistent scaling, fonts, and rendering
+        await pageInstance.evaluate(() => {
+          document.body.style.zoom = "1.0";
+          document.body.style.webkitPrintColorAdjust = "exact";
+          document.body.style.printColorAdjust = "exact";
+          document.body.style.background = "#fff";
+          document.body.style.overflow = "hidden";
+          window.scrollTo(0, 0);
+        });
+
+        // Inject CSS normalization and Calibri fallback
+        await pageInstance.addStyleTag({
+          content: `
+            * {
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+              box-sizing: border-box;
+              margin: 0;
+              padding: 0;
+            }
+            body {
+              font-family: 'Calibri', 'Arial', sans-serif !important;
+              transform-origin: top left;
+              transform: scale(1);
+              background: #fff;
+              zoom: 1.0 !important;
+            }
+            .page {
+              transform: none !important;
+            }
+            @media print {
+              body {
+                zoom: 1.0 !important;
+              }
+            }
+          `,
+        });
+
+        // Convert pixel page size to millimeters for precise A4 rendering
+        const widthMm = pxToMm(page.widthPx);
+        const heightMm = pxToMm(page.heightPx);
         const headerMm = pxToMm(page.header);
         const footerMm = pxToMm(page.footer);
 
+        // Generate PDF for this page
         const pdfBuffer = await pageInstance.pdf({
           printBackground: true,
           preferCSSPageSize: true,
-          width: `${pxToMm(page.widthPx)}mm`,
-          height: `${pxToMm(page.heightPx)}mm`,
+          width: `${widthMm}mm`,
+          height: `${heightMm}mm`,
           margin: {
             top: `${headerMm}mm`,
             bottom: `${footerMm}mm`,
             left: "0mm",
             right: "0mm",
           },
-          timeout: 30000
+          scale: 1, // ensures pixel-perfect scaling
         });
 
+        // Merge into main document
         const tempPdf = await PDFDocument.load(pdfBuffer);
         const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
         mergedPdf.addPage(copiedPage);
-        
       } finally {
-        if (pageInstance) {
-          await pageInstance.close().catch(console.error);
-        }
+        if (pageInstance) await pageInstance.close().catch(console.error);
       }
     }
 
     const mergedPdfBytes = await mergedPdf.save();
     return Buffer.from(mergedPdfBytes);
-    
   } catch (error) {
-    console.error('PDF generation error:', error);
+    console.error("PDF generation error:", error);
     throw new Error(`PDF generation failed: ${error.message}`);
   } finally {
-    if (browser) {
-      await browser.close().catch(console.error);
-    }
+    if (browser) await browser.close().catch(console.error);
   }
 }
+
 
 /* ──────────────────────────────────────────────────────────────────────────────
    PDF ENDPOINTS FOR ALL DOCUMENT TYPES
