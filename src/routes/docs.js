@@ -318,7 +318,7 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-// SIMPLIFIED: Use exact canvas layout without transformations
+// routes/docs.js - Updated generateSinglePageHTML function
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -327,67 +327,95 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Calibri, Arial, sans-serif";
-      const bold = el.bold ? "bold" : "normal";
+      const ff = el.fontFamily || "Poppins";
+      const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
       const color = el.color || "#000000";
       const align = el.align || "left";
       const lineHeight = num(el.lineHeight, 1.2);
-      
-      const content = applyTokens(el.content || "", tokens);
+      const columns = num(el.columns, 1);
+      const columnGap = num(el.columnGap, 20);
+      const html = applyTokens(el.content || "", tokens);
 
-      return `<div style="
-        position: absolute;
-        left: ${x}px;
-        top: ${y}px;
-        width: ${w}px;
-        height: ${h}px;
-        color: ${color};
-        font-family: ${ff};
-        font-size: ${fs}px;
-        font-weight: ${bold};
-        font-style: ${italic};
-        text-decoration: ${deco};
-        text-align: ${align};
-        line-height: ${lineHeight};
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        box-sizing: border-box;">
-        ${content}
-      </div>`;
+      // CSS for multi-column layout
+      const columnStyle = columns > 1 
+        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+        : '';
+
+      // FIXED: Proper justify alignment with text-justify
+      const alignStyle = align === "justify" 
+        ? "text-align: justify; text-justify: inter-word;" 
+        : `text-align: ${align};`;
+
+      return `<div class="el" style="
+        position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
+        color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
+        font-weight:${bold};font-style:${italic};text-decoration:${deco};
+        ${alignStyle}line-height:${lineHeight};${columnStyle}
+        overflow:hidden;">${html}</div>`;
     })
     .join("");
 
-  return `<!DOCTYPE html>
+  const pageNumberHTML = totalPages > 1 ? `` : "";
+
+  return `<!doctype html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>${page.name}</title>
-  <style>
-    @page {
-      margin: 0;
-      size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
-    }
-    
-    body {
-      margin: 0;
-      padding: 0;
-      width: ${page.widthPx}px;
-      height: ${page.heightPx}px;
-      background: white;
-      position: relative;
-      overflow: hidden;
-      -webkit-print-color-adjust: exact;
-      print-color-adjust: exact;
-    }
-  </style>
+<meta charset="utf-8" />
+<title>${page.name}</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  @page {
+    margin: 0;
+    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: ${page.widthPx}px;
+    height: ${page.heightPx}px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Key fix: translate page content down by header height */
+  .page {
+    width: ${page.widthPx}px;
+    height: ${page.heightPx - (page.header + page.footer)}px;
+    position: relative;
+    background: #fff;
+    color: #000;
+    font-family: 'Poppins', sans-serif;
+    overflow: hidden;
+    box-sizing: border-box;
+    transform: translateY(${page.header}px);
+  }
+
+  /* Multi-column support */
+  .el {
+    -webkit-column-count: inherit;
+    -moz-column-count: inherit;
+    column-count: inherit;
+    -webkit-column-gap: inherit;
+    -moz-column-gap: inherit;
+    column-gap: inherit;
+  }
+
+  /* Justify alignment support */
+  .el[style*="text-align: justify"] {
+    text-align: justify;
+    text-justify: inter-word;
+  }
+
+  .el * { margin: 0; }
+</style>
 </head>
 <body>
-  ${elsHTML}
+  <div class="page">
+    ${elsHTML}
+    ${pageNumberHTML}
+  </div>
 </body>
 </html>`;
 }
