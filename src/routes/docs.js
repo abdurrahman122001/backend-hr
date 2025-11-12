@@ -2,12 +2,9 @@
 const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
-const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
-const Salary = require("../models/Salaries"); // Import the Salary model
 const DocTemplate = require("../models/DocTemplate");
-const { decrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
 
@@ -53,7 +50,6 @@ function fmtDate(d) {
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
-
 // Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
@@ -90,79 +86,12 @@ function defaultsFromTemplate(tpl) {
   return tpl?.defaultValues || {};
 }
 
-// Function to fetch and decrypt salary fields from Salary model
-async function fetchAndDecryptSalary(employeeId) {
-  if (!employeeId) return {};
-  
-  try {
-    // Find the active salary record for this employee
-    const salaryRecord = await Salary.findOne({ 
-      employee: employeeId, 
-      isActive: true 
-    }).lean();
-    
-    if (!salaryRecord) {
-      console.log("No active salary record found for employee:", employeeId);
-      return {};
-    }
-    
-    const decryptedSalary = {};
-    
-    // Decrypt all salary fields
-    const salaryFields = [
-      'basic', 'dearnessAllowance', 'houseRentAllowance', 'conveyanceAllowance',
-      'medicalAllowance', 'utilityAllowance', 'overtimeCompensation', 
-      'dislocationAllowance', 'leaveEncashment', 'bonus', 'arrears', 
-      'autoAllowance', 'incentive', 'fuelAllowance', 'othersAllowances', 'grossSalary'
-    ];
-    
-    for (const field of salaryFields) {
-      if (salaryRecord[field]) {
-        try {
-          decryptedSalary[field] = await decrypt(salaryRecord[field]);
-        } catch (error) {
-          console.error(`Error decrypting ${field}:`, error.message);
-          decryptedSalary[field] = "[Decryption Error]";
-        }
-      } else {
-        decryptedSalary[field] = "—";
-      }
-    }
-    
-    // Calculate total if needed (using the decrypted values)
-    if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
-      try {
-        const basic = parseFloat(decryptedSalary.basic) || 0;
-        const houseRent = parseFloat(decryptedSalary.houseRentAllowance) || 0;
-        const utilities = parseFloat(decryptedSalary.utilityAllowance) || 0;
-        const conveyance = parseFloat(decryptedSalary.conveyanceAllowance) || 0;
-        const medical = parseFloat(decryptedSalary.medicalAllowance) || 0;
-        const others = parseFloat(decryptedSalary.othersAllowances) || 0;
-        
-        decryptedSalary.calculatedTotal = (basic + houseRent + utilities + conveyance + medical + others).toFixed(2);
-      } catch (error) {
-        console.error("Error calculating total salary:", error.message);
-        decryptedSalary.calculatedTotal = "[Calculation Error]";
-      }
-    }
-    
-    return decryptedSalary;
-  } catch (error) {
-    console.error("Error fetching salary record:", error.message);
-    return {};
-  }
-}
-
-async function tokenMap(emp, defaults = {}) {
-  // Fetch and decrypt salary fields from Salary model
-  const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
-  
+function tokenMap(emp, defaults = {}) {
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
 
   const tenureHuman = formatTenure(join, endDate);
   const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
-  
   return {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
@@ -186,25 +115,6 @@ async function tokenMap(emp, defaults = {}) {
     "employee.email": emp?.email || "—",
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
-
-    // Salary fields (decrypted from Salary model)
-    "salary.basic": decryptedSalary.basic || "—",
-    "salary.dearness": decryptedSalary.dearnessAllowance || "—",
-    "salary.houseRent": decryptedSalary.houseRentAllowance || "—",
-    "salary.conveyance": decryptedSalary.conveyanceAllowance || "—",
-    "salary.medical": decryptedSalary.medicalAllowance || "—",
-    "salary.utilities": decryptedSalary.utilityAllowance || "—",
-    "salary.overtime": decryptedSalary.overtimeCompensation || "—",
-    "salary.dislocation": decryptedSalary.dislocationAllowance || "—",
-    "salary.leaveEncashment": decryptedSalary.leaveEncashment || "—",
-    "salary.bonus": decryptedSalary.bonus || "—",
-    "salary.arrears": decryptedSalary.arrears || "—",
-    "salary.auto": decryptedSalary.autoAllowance || "—",
-    "salary.incentive": decryptedSalary.incentive || "—",
-    "salary.fuel": decryptedSalary.fuelAllowance || "—",
-    "salary.other": decryptedSalary.othersAllowances || "—",
-    "salary.gross": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
-    "salary.total": decryptedSalary.grossSalary || decryptedSalary.calculatedTotal || "—",
 
     // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
@@ -244,54 +154,45 @@ function applyTokens(html, tokens) {
 
 const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 
-/** Extract ALL pages from canvas */
-function extractAllPages(canvas = {}) {
-  const pages = [];
-  // Array form (multi-page)
+/** ALWAYS returns one page. Works with:
+ * - canvas.pages[0]  (preferred)
+ * - flat canvas      (canvas.elements / canvas.pageFormat)
+ */
+function extractSinglePage(canvas = {}) {
+  // Array form
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
-    canvas.pages.forEach((p, index) => {
-      const widthPx = num(p?.pageFormat?.width, 794);
-      const heightPx = num(p?.pageFormat?.height, 1123);
-      const header = num(p?.headerHeight ?? 0, 0);
-      const footer = num(p?.footerHeight ?? 0, 0);
-      const elements = Array.isArray(p?.elements) ? p.elements : [];
-
-      pages.push({
-        widthPx,
-        heightPx,
-        header,
-        footer,
-        elements,
-        name: canvas?.name || `Document Page ${index + 1}`,
-        pageNumber: index + 1,
-        totalPages: canvas.pages.length,
-      });
-    });
-    return pages;
+    const p = canvas.pages[0] || {};
+    const widthPx = num(p?.pageFormat?.width, 794);
+    const heightPx = num(p?.pageFormat?.height, 1123);
+    const header = num(p?.headerHeight ?? 0, 0);
+    const footer = num(p?.footerHeight ?? 0, 0);
+    const elements = Array.isArray(p?.elements) ? p.elements : [];
+    return {
+      widthPx,
+      heightPx,
+      header,
+      footer,
+      elements,
+      name: canvas?.name || "Document",
+    };
   }
-
-  // Flat form (single page)  
+  // Flat form
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
   const footer = num(canvas?.footerHeight, 0);
   const elements = Array.isArray(canvas?.elements) ? canvas.elements : [];
-
-  pages.push({
+  return {
     widthPx,
     heightPx,
     header,
     footer,
     elements,
     name: canvas?.name || "Document",
-    pageNumber: 1,
-    totalPages: 1,
-  });
-
-  return pages;
+  };
 }
 
-function generateSinglePageHTML(page, tokens, totalPages) {
+function pageToHTML(page, tokens) {
   const elsHTML = page.elements
     .map((el) => {
       const x = num(el.x, 0);
@@ -315,11 +216,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     })
     .join("");
 
-  const pageNumberHTML =
-    totalPages > 1
-      ? ``
-      : "";
-
+  // Keep header/footer space + Poppins font
   return `<!doctype html>
 <html>
 <head>
@@ -327,136 +224,74 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <title>${page.name}</title>
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-  @page {
-    margin: 0;
-    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+  @page{
+    size:${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+    margin:${pxToMm(page.header)}mm ${pxToMm(20)}mm ${pxToMm(
+    page.footer
+  )}mm ${pxToMm(20)}mm;
   }
-  html, body {
-    margin: 0;
-    padding: 0;
-    width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
+  html,body{margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  .page{
+    position:relative;
+    width:${page.widthPx}px;height:${page.heightPx}px;
+    background:#fff;color:#000;font-family:'Poppins',sans-serif;
+    padding-top:${page.header}px;padding-bottom:${page.footer}px;
   }
-
-  /* 🔥 Key fix: translate page content down by header height */
-  .page {
-    width: ${page.widthPx}px;
-    height: ${page.heightPx - (page.header + page.footer)}px;
-    position: relative;
-    background: #fff;
-    color: #000;
-    font-family: 'Poppins', sans-serif;
-    overflow: hidden;
-    box-sizing: border-box;
-    transform: translateY(${page.header}px);
-  }
-
-  /* Optional visual testing (remove after confirming)
-  body::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    height: ${page.header}px;
-    left: 0; right: 0;
-    background: rgba(255,0,0,0.1);
-  }
-  body::after {
-    content: '';
-    position: absolute;
-    bottom: 0;
-    height: ${page.footer}px;
-    left: 0; right: 0;
-    background: rgba(0,0,255,0.1);
-  } */
-
-  .el * { margin: 0; }
+  .el *{margin:0}
 </style>
 </head>
 <body>
   <div class="page">
     ${elsHTML}
-    ${pageNumberHTML}
   </div>
 </body>
 </html>`;
 }
 
-async function generateDocumentPDF(employeeId, docType, templateId = "") {
-  const emp = await Employee.findById(employeeId).lean();
-  if (!emp) throw new Error("Employee not found");
-
-  const tpl = templateId
-    ? await DocTemplate.findById(templateId).lean()
-    : await DocTemplate.findOne({ type: normType(docType) }).lean();
-  if (!tpl) throw new Error("Template not found");
-
-  const defaults = tpl.defaultValues || {};
-  const tokens = await tokenMap(emp, defaults);
-  const pages = extractAllPages(tpl.canvas || {});
-  if (pages.length === 0) throw new Error("No pages found in template");
-
-  const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
-  try {
-    const mergedPdf = await PDFDocument.create();
-
-    for (const page of pages) {
-      const p = await browser.newPage();
-      await p.setViewport({ width: page.widthPx, height: page.heightPx });
-
-      const html = generateSinglePageHTML(page, tokens, pages.length);
-      await p.setContent(html, { waitUntil: "networkidle0" });
-      await p.emulateMediaType("screen");
-
-      // ✅ Convert header/footer px → mm (used as PDF margins)
-      const headerMm = pxToMm(page.header);
-      const footerMm = pxToMm(page.footer);
-
-      const pdfBuffer = await p.pdf({
-        printBackground: true,
-        preferCSSPageSize: true,
-        width: `${pxToMm(page.widthPx)}mm`,
-        height: `${pxToMm(page.heightPx)}mm`,
-        margin: {
-          top: `${headerMm}mm`,
-          bottom: `${footerMm}mm`,
-          left: "0mm",
-          right: "0mm",
-        },
-      });
-
-      const tempPdf = await PDFDocument.load(pdfBuffer);
-      const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
-      mergedPdf.addPage(copiedPage);
-      await p.close();
-    }
-
-    const mergedPdfBytes = await mergedPdf.save();
-    return Buffer.from(mergedPdfBytes);
-  } finally {
-    await browser.close();
-  }
-}
-
 /* ──────────────────────────────────────────────────────────────────────────────
-   PDF ENDPOINTS FOR ALL DOCUMENT TYPES
+   PDF (always one page rendered)
 ────────────────────────────────────────────────────────────────────────────── */
-
-// Experience Letter
 router.get("/experience-letter/:employeeId", async (req, res) => {
+  let browser;
   try {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "experience_letter",
-      templateId
-    );
+    const emp = await Employee.findById(employeeId).lean();
+    if (!emp) return res.status(404).json({ message: "Employee not found" });
+
+    let tpl;
+    if (templateId) {
+      tpl = await DocTemplate.findById(templateId).lean();
+      if (!tpl) return res.status(404).json({ message: "Template not found" });
+    } else {
+      tpl = await DocTemplate.findOne({ type: "experience_letter" }).lean();
+      if (!tpl)
+        return res
+          .status(404)
+          .json({ message: "No experience_letter template in DB" });
+    }
+
+    const defaults = defaultsFromTemplate(tpl);
+    const tokens = tokenMap(emp, defaults);
+    const page = extractSinglePage(tpl.canvas || {});
+    const html = pageToHTML(page, tokens);
+
+    browser = await puppeteer.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const p = await browser.newPage();
+    await p.setContent(html, { waitUntil: "networkidle0" });
+    await p.emulateMediaType("screen");
+
+    const pdf = await p.pdf({
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageRanges: "1", // force single page output
+    });
+
+    await p.close();
+    await browser.close();
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
@@ -465,110 +300,21 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
     );
     res.status(200).end(pdf);
   } catch (err) {
+    try {
+      if (browser) await browser.close();
+    } catch {}
     console.error("experience-letter pdf error:", err);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// NDA
-router.get("/nda/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(employeeId, "nda", templateId);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="NDA.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("nda pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Salary Certificate
-router.get("/salary-certificate/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "salary_certificate",
-      templateId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="SalaryCertificate.pdf"'
-    );
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("salary-certificate pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Contract (with optional decryption key support)
-router.post("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const { key } = req.body || {};
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Also support GET for contract without decryption
-router.get("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
+      res.status(500).json({ message: "Failed to generate PDF" });
     }
   }
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GLOBAL TEMPLATES — BY TYPE
-──────────────────────────────────────────────────────────────── */
+   GLOBAL TEMPLATES — BY TYPE (THIS IS THE ONE YOUR FRONTEND NEEDS)
+   GET /api/docs/doc-templates/:type
+   POST /api/docs/doc-templates/:type
+────────────────────────────────────────────────────────────── */
 router.get("/doc-templates/:type", async (req, res) => {
   try {
     const type = normType(req.params.type);
@@ -605,7 +351,12 @@ router.post("/doc-templates/:type", async (req, res) => {
 
 /* ─────────────────────────────────────────────────────────────
    RECENT TEMPLATES — ID-BASED CRUD
-──────────────────────────────────────────────────────────────── */
+   GET /api/docs/templates              -> list all
+   GET /api/docs/templates/:id          -> load by _id
+   POST /api/docs/templates             -> create (optional)
+   PUT /api/docs/templates/:id          -> update
+   DELETE /api/docs/templates/:id       -> delete
+────────────────────────────────────────────────────────────── */
 router.get("/templates", async (req, res) => {
   try {
     const rows = await DocTemplate.find(
