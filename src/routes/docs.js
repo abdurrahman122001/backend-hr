@@ -3,8 +3,6 @@ const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
-const fs = require("fs");
-const path = require("path");
 
 const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries");
@@ -21,36 +19,76 @@ const TYPE_ALIASES = {
 };
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
-const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
+const pxToMm = (px) => (Number(px || 0) * 25.4) / 96;
 
-// Create fonts directory if it doesn't exist
-const fontsDir = path.join(__dirname, '../public/fonts');
-if (!fs.existsSync(fontsDir)) {
-  fs.mkdirSync(fontsDir, { recursive: true });
-}
+// Font configuration with direct CDN links
+const FONT_CONFIG = {
+  calibri: `
+    @font-face {
+      font-family: 'Calibri';
+      font-style: normal;
+      font-weight: 400;
+      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-regular.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Calibri';
+      font-style: normal;
+      font-weight: 600;
+      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-semibold.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Calibri';
+      font-style: normal;
+      font-weight: 700;
+      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-bold.woff2') format('woff2');
+    }
+  `,
+  arial: `
+    @font-face {
+      font-family: 'Arial';
+      font-style: normal;
+      font-weight: 400;
+      src: local('Arial'), local('ArialMT');
+    }
+  `
+};
 
-// Function to download and serve fonts locally
-async function ensureFontsAvailable() {
-  const fontUrl = 'https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap';
+// Enhanced Puppeteer launcher for VPS
+async function launchBrowser() {
+  const options = {
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--disable-web-security',
+      '--disable-features=VizDisplayCompositor',
+      '--font-render-hinting=medium',
+      '--enable-font-antialiasing',
+      '--disable-background-timer-throttling',
+      '--disable-backgrounding-occluded-windows',
+      '--disable-renderer-backgrounding'
+    ]
+  };
+
+  console.log('Launching browser for PDF generation...');
   
   try {
-    // In production, we'll use local font files or system fonts as fallback
-    console.log('Using local font configuration for PDF generation');
+    const browser = await puppeteer.launch(options);
+    return browser;
   } catch (error) {
-    console.warn('Font download failed, using system fonts:', error.message);
+    console.error('Browser launch failed:', error);
+    throw new Error(`Browser launch failed: ${error.message}`);
   }
 }
 
-// Initialize fonts on startup
-ensureFontsAvailable().catch(console.error);
-
-// replaces your current fmtDate()
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "—";
 
-  // Prefer reliable locale formatting
   try {
     return dt.toLocaleDateString("en-US", {
       year: "numeric",
@@ -58,26 +96,14 @@ function fmtDate(d) {
       day: "numeric",
     });
   } catch {
-    // Fallback without Intl
     const months = [
-      "January",
-      "February",
-      "March",
-      "April",
-      "May",
-      "June",
-      "July",
-      "August",
-      "September",
-      "October",
-      "November",
-      "December",
+      "January", "February", "March", "April", "May", "June", "July",
+      "August", "September", "October", "November", "December"
     ];
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
 
-// Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
   const s = new Date(start);
@@ -86,13 +112,8 @@ function diffToYearsMonths(start, end) {
     return { years: 0, months: 0, totalMonths: 0 };
   }
 
-  // total month diff
-  let totalMonths =
-    (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
-
-  // If end's day is before start's day, we haven't completed this month yet
+  let totalMonths = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
   if (e.getDate() < s.getDate()) totalMonths -= 1;
-
   if (totalMonths < 0) totalMonths = 0;
 
   const years = Math.floor(totalMonths / 12);
@@ -109,16 +130,11 @@ function formatTenure(start, end) {
   return parts.join(" ");
 }
 
-function defaultsFromTemplate(tpl) {
-  return tpl?.defaultValues || {};
-}
-
 // Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
 
   try {
-    // Find the active salary record for this employee
     const salaryRecord = await Salary.findOne({
       employee: employeeId,
       isActive: true,
@@ -130,25 +146,11 @@ async function fetchAndDecryptSalary(employeeId) {
     }
 
     const decryptedSalary = {};
-
-    // Decrypt all salary fields
     const salaryFields = [
-      "basic",
-      "dearnessAllowance",
-      "houseRentAllowance",
-      "conveyanceAllowance",
-      "medicalAllowance",
-      "utilityAllowance",
-      "overtimeCompensation",
-      "dislocationAllowance",
-      "leaveEncashment",
-      "bonus",
-      "arrears",
-      "autoAllowance",
-      "incentive",
-      "fuelAllowance",
-      "othersAllowances",
-      "grossSalary",
+      "basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance",
+      "medicalAllowance", "utilityAllowance", "overtimeCompensation", "dislocationAllowance",
+      "leaveEncashment", "bonus", "arrears", "autoAllowance", "incentive", "fuelAllowance",
+      "othersAllowances", "grossSalary"
     ];
 
     for (const field of salaryFields) {
@@ -164,7 +166,6 @@ async function fetchAndDecryptSalary(employeeId) {
       }
     }
 
-    // Calculate total if needed (using the decrypted values)
     if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
       try {
         const basic = parseFloat(decryptedSalary.basic) || 0;
@@ -175,12 +176,7 @@ async function fetchAndDecryptSalary(employeeId) {
         const others = parseFloat(decryptedSalary.othersAllowances) || 0;
 
         decryptedSalary.calculatedTotal = (
-          basic +
-          houseRent +
-          utilities +
-          conveyance +
-          medical +
-          others
+          basic + houseRent + utilities + conveyance + medical + others
         ).toFixed(2);
       } catch (error) {
         console.error("Error calculating total salary:", error.message);
@@ -202,9 +198,7 @@ const formatWithCommas = (val) => {
 };
 
 async function tokenMap(emp, defaults = {}) {
-  // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
-
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
 
@@ -217,8 +211,7 @@ async function tokenMap(emp, defaults = {}) {
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
     "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
-    "doc.qualitiesLine":
-      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+    "doc.qualitiesLine": defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
     "dates.issue": fmtDate(new Date()),
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
@@ -235,7 +228,7 @@ async function tokenMap(emp, defaults = {}) {
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
 
-    // Salary fields (decrypted from Salary model)
+    // Salary fields
     "salary.basic": formatWithCommas(decryptedSalary.basic),
     "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
     "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
@@ -243,9 +236,7 @@ async function tokenMap(emp, defaults = {}) {
     "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
     "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
     "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
-    "salary.dislocation": formatWithCommas(
-      decryptedSalary.dislocationAllowance
-    ),
+    "salary.dislocation": formatWithCommas(decryptedSalary.dislocationAllowance),
     "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
     "salary.bonus": formatWithCommas(decryptedSalary.bonus),
     "salary.arrears": formatWithCommas(decryptedSalary.arrears),
@@ -253,41 +244,25 @@ async function tokenMap(emp, defaults = {}) {
     "salary.incentive": formatWithCommas(decryptedSalary.incentive),
     "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
     "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
-    "salary.gross": formatWithCommas(
-      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
-    ),
-    "salary.total": formatWithCommas(
-      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
-    ),
+    "salary.gross": formatWithCommas(decryptedSalary.grossSalary || decryptedSalary.calculatedTotal),
+    "salary.total": formatWithCommas(decryptedSalary.grossSalary || decryptedSalary.calculatedTotal),
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
-
     "roles.timeline": "",
   };
 }
 
-/** supports {{ key }}, {{ key | upper }}, {{ key | lower }}, {{ key | title }}, {{ key | trim }} */
 function applyTokens(html, tokens) {
   return String(html).replace(
     /\{\{\s*([a-zA-Z0-9_.]+)(?:\s*\|\s*([a-zA-Z]+))?\s*\}\}/g,
     (_, key, filter) => {
       let v = tokens[key] ?? "";
       switch ((filter || "").toLowerCase()) {
-        case "upper":
-          v = String(v).toUpperCase();
-          break;
-        case "lower":
-          v = String(v).toLowerCase();
-          break;
-        case "title":
-          v = String(v)
-            .toLowerCase()
-            .replace(/\b\w/g, (m) => m.toUpperCase());
-          break;
-        case "trim":
-          v = String(v).trim();
-          break;
+        case "upper": v = String(v).toUpperCase(); break;
+        case "lower": v = String(v).toLowerCase(); break;
+        case "title": v = String(v).toLowerCase().replace(/\b\w/g, m => m.toUpperCase()); break;
+        case "trim": v = String(v).trim(); break;
       }
       return v;
     }
@@ -296,10 +271,8 @@ function applyTokens(html, tokens) {
 
 const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 
-/** Extract ALL pages from canvas */
 function extractAllPages(canvas = {}) {
   const pages = [];
-  // Array form (multi-page)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -322,7 +295,6 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Flat form (single page)
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
@@ -343,49 +315,7 @@ function extractAllPages(canvas = {}) {
   return pages;
 }
 
-// Enhanced Puppeteer launch configuration for VPS
-async function launchPuppeteer() {
-  // Check if we're in production (VPS environment)
-  const isProduction = process.env.NODE_ENV === 'production';
-  
-  const launchOptions = {
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--disable-gpu',
-      '--single-process', // This can help in some VPS environments
-      '--font-render-hinting=none' // Better font rendering
-    ],
-    // Important for VPS environments with limited resources
-    executablePath: isProduction ? '/usr/bin/chromium-browser' : undefined,
-  };
-
-  // Additional memory settings for VPS
-  if (isProduction) {
-    launchOptions.args.push('--max-old-space-size=4096');
-    launchOptions.args.push('--memory-pressure-off');
-  }
-
-  try {
-    return await puppeteer.launch(launchOptions);
-  } catch (error) {
-    console.warn('Primary launch failed, trying fallback options:', error.message);
-    
-    // Fallback launch options
-    return await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-      executablePath: isProduction ? '/usr/bin/chromium' : undefined,
-    });
-  }
-}
-
-// Enhanced HTML generation with better font handling
+// Enhanced HTML generation with embedded fonts
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -394,7 +324,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Poppins";
+      const ff = el.fontFamily || "Calibri";
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
@@ -405,12 +335,10 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const columnGap = num(el.columnGap, 20);
       const html = applyTokens(el.content || "", tokens);
 
-      // CSS for multi-column layout
       const columnStyle = columns > 1 
         ? `column-count: ${columns}; column-gap: ${columnGap}px;`
         : '';
 
-      // FIXED: Proper justify alignment with text-justify
       const alignStyle = align === "justify" 
         ? "text-align: justify; text-justify: inter-word;" 
         : `text-align: ${align};`;
@@ -424,16 +352,14 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     })
     .join("");
 
-  const pageNumberHTML = totalPages > 1 ? `` : "";
-
-  // Enhanced CSS with better font fallbacks and print optimization
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <title>${page.name}</title>
 <style>
-  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+  ${FONT_CONFIG.calibri}
+  ${FONT_CONFIG.arial}
   
   @page {
     margin: 0;
@@ -453,23 +379,22 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     height: ${page.heightPx}px;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    font-family: 'Poppins', Arial, Helvetica, sans-serif;
+    font-family: 'Calibri', 'Arial', 'Helvetica', sans-serif;
+    background: white;
   }
 
-  /* Key fix: translate page content down by header height */
   .page {
     width: ${page.widthPx}px;
     height: ${page.heightPx - (page.header + page.footer)}px;
     position: relative;
     background: #fff;
     color: #000;
-    font-family: 'Poppins', Arial, Helvetica, sans-serif;
+    font-family: 'Calibri', 'Arial', 'Helvetica', sans-serif;
     overflow: hidden;
     box-sizing: border-box;
     transform: translateY(${page.header}px);
   }
 
-  /* Multi-column support */
   .el {
     -webkit-column-count: inherit;
     -moz-column-count: inherit;
@@ -480,7 +405,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     box-sizing: border-box;
   }
 
-  /* Justify alignment support */
   .el[style*="text-align: justify"] {
     text-align: justify;
     text-justify: inter-word;
@@ -494,7 +418,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     box-sizing: border-box;
   }
   
-  /* Ensure text rendering is optimized for print */
   .el {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -505,13 +428,12 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <body>
   <div class="page">
     ${elsHTML}
-    ${pageNumberHTML}
   </div>
 </body>
 </html>`;
 }
 
-// Enhanced PDF generation with better error handling and resource management
+// Enhanced PDF generation with font loading
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -528,34 +450,38 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
 
   let browser;
   try {
-    browser = await launchPuppeteer();
+    browser = await launchBrowser();
     const mergedPdf = await PDFDocument.create();
 
     for (const page of pages) {
       const p = await browser.newPage();
       
-      // Set viewport and emulate media for better PDF rendering
+      // Set larger viewport for better quality
       await p.setViewport({ 
         width: Math.round(page.widthPx), 
         height: Math.round(page.heightPx),
-        deviceScaleFactor: 2 // Higher DPI for better quality
+        deviceScaleFactor: 2
       });
 
-      // Set user agent and extra headers for font loading
-      await p.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-      
+      // Set longer timeout for font loading
+      await p.setDefaultNavigationTimeout(60000);
+      await p.setDefaultTimeout(60000);
+
       const html = generateSinglePageHTML(page, tokens, pages.length);
       
-      // Wait for fonts to load
+      // Load HTML with network idle wait
       await p.setContent(html, { 
-        waitUntil: ['networkidle0', 'domcontentloaded'] 
+        waitUntil: ['networkidle0', 'load', 'domcontentloaded'],
+        timeout: 60000
       });
-      
-      // Wait a bit more for fonts to render
-      await p.evaluate(() => document.fonts.ready);
-      await new Promise(resolve => setTimeout(resolve, 500));
 
-      // Convert header/footer px → mm (used as PDF margins)
+      // Wait for fonts to load completely
+      await p.evaluate(async () => {
+        await document.fonts.ready;
+        // Additional wait for font rendering
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      });
+
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
@@ -572,8 +498,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
         },
         scale: 1,
         displayHeaderFooter: false,
-        // Additional PDF options for better font embedding
-        tag: false
+        timeout: 60000
       });
 
       const tempPdf = await PDFDocument.load(pdfBuffer);
@@ -595,7 +520,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-   PDF ENDPOINTS FOR ALL DOCUMENT TYPES
+   PDF ENDPOINTS
 ────────────────────────────────────────────────────────────────────────────── */
 
 // Experience Letter
@@ -604,24 +529,15 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "experience_letter",
-      templateId
-    );
+    const pdf = await generateDocumentPDF(employeeId, "experience_letter", templateId);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="ExperienceLetter.pdf"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="ExperienceLetter.pdf"');
     res.status(200).end(pdf);
   } catch (err) {
     console.error("experience-letter pdf error:", err);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
+      res.status(500).json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -640,9 +556,7 @@ router.get("/nda/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("nda pdf error:", err);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
+      res.status(500).json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -653,51 +567,20 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "salary_certificate",
-      templateId
-    );
+    const pdf = await generateDocumentPDF(employeeId, "salary_certificate", templateId);
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="SalaryCertificate.pdf"'
-    );
+    res.setHeader("Content-Disposition", 'attachment; filename="SalaryCertificate.pdf"');
     res.status(200).end(pdf);
   } catch (err) {
     console.error("salary-certificate pdf error:", err);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
+      res.status(500).json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
 
-// Contract (with optional decryption key support)
-router.post("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const { key } = req.body || {};
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Also support GET for contract without decryption
+// Contract
 router.get("/contract/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -711,15 +594,31 @@ router.get("/contract/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("contract pdf error:", err);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
+      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+    }
+  }
+});
+
+router.post("/contract/:employeeId", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const templateId = String(req.query.templateId || "");
+
+    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
+    res.status(200).end(pdf);
+  } catch (err) {
+    console.error("contract pdf error:", err);
+    if (!res.headersSent) {
+      res.status(500).json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GLOBAL TEMPLATES — BY TYPE
+   TEMPLATE ROUTES
 ──────────────────────────────────────────────────────────────── */
 router.get("/doc-templates/:type", async (req, res) => {
   try {
@@ -755,15 +654,9 @@ router.post("/doc-templates/:type", async (req, res) => {
   }
 });
 
-/* ─────────────────────────────────────────────────────────────
-   RECENT TEMPLATES — ID-BASED CRUD
-──────────────────────────────────────────────────────────────── */
 router.get("/templates", async (req, res) => {
   try {
-    const rows = await DocTemplate.find(
-      {},
-      { canvas: 1, type: 1, updatedAt: 1 }
-    )
+    const rows = await DocTemplate.find({}, { canvas: 1, type: 1, updatedAt: 1 })
       .sort({ updatedAt: -1 })
       .lean();
 
@@ -801,9 +694,7 @@ router.post("/templates", async (req, res) => {
   try {
     const { type, canvas, defaultValues } = req.body || {};
     if (!type || !canvas) {
-      return res
-        .status(400)
-        .json({ message: "`type` and `canvas` are required" });
+      return res.status(400).json({ message: "`type` and `canvas` are required" });
     }
     const doc = await DocTemplate.create({
       type,
@@ -832,8 +723,7 @@ router.put("/templates/:id", async (req, res) => {
     if (!up) return res.status(404).json({ message: "Template not found" });
     res.json({ ok: true });
   } catch {
-    res.status(500)
-      .json({ message: "Failed to update template" });
+    res.status(500).json({ message: "Failed to update template" });
   }
 });
 
