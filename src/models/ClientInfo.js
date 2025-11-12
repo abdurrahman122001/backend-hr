@@ -39,15 +39,20 @@ const ClientInfoSchema = new Schema(
     websites: [{ type: String }],
 
     // 🔹 UK-specific fields
-    region: { type: String },  
+    region: { type: String },
     postcode: { type: String },
     companyNumber: { type: String },
     sicCode: { type: String },
     vatNumber: { type: String },
     utrNumber: { type: String },
     // 🔹 US-specific fields
-    state: { type: String },  
+    state: { type: String },
     ein: { type: String },
+    
+    whatsappPinned: { type: Boolean, default: false },
+    whatsappFavourite: { type: Boolean, default: false },
+    whatsappMuted: { type: Boolean, default: false },
+    whatsappArchived: { type: Boolean, default: false },
 
     // 🔹 Assignment
     assignedTo: {

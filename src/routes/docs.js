@@ -1,11 +1,11 @@
 // routes/docs.js
 const express = require("express");
 const router = express.Router();
-const puppeteer = require("puppeteer-core");
+const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
-const Salary = require("../models/Salaries");
+const Salary = require("../models/Salaries"); // Import the Salary model
 const DocTemplate = require("../models/DocTemplate");
 const { decrypt } = require("../utils/encryption");
 
@@ -19,76 +19,15 @@ const TYPE_ALIASES = {
 };
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
-const pxToMm = (px) => (Number(px || 0) * 25.4) / 96;
+const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
-async function launchBrowser() {
-  const fs = require("fs");
-  const isProduction = process.env.NODE_ENV === "production";
-
-  const possibleChromiumPaths = [
-    "/snap/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/chromium",
-    "/usr/bin/google-chrome-stable",
-    process.env.CHROME_PATH,
-    !isProduction ? require("puppeteer").executablePath() : null,
-  ].filter(Boolean);
-
-  let executablePath;
-  for (const path of possibleChromiumPaths) {
-    try {
-      if (fs.existsSync(path)) {
-        executablePath = path;
-        console.log("✅ Found Chromium at:", path);
-        break;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  if (!executablePath) {
-    throw new Error("❌ Chromium not found. Please verify your installation.");
-  }
-
-  const launchOptions = {
-    executablePath,
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process",
-      "--no-zygote",
-      "--disable-web-security",
-      "--disable-software-rasterizer",
-      "--font-render-hinting=none",
-      "--force-color-profile=srgb",
-      "--window-size=1280,1024",
-    ],
-    timeout: 30000,
-  };
-
-  try {
-    const browser = await puppeteer.launch(launchOptions);
-    return browser;
-  } catch (error) {
-    console.error("⚠️ Browser launch failed:", error);
-    return await puppeteer.launch({
-      executablePath,
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      timeout: 30000,
-    });
-  }
-}
-
+// replaces your current fmtDate()
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "—";
 
+  // Prefer reliable locale formatting
   try {
     return dt.toLocaleDateString("en-US", {
       year: "numeric",
@@ -96,14 +35,26 @@ function fmtDate(d) {
       day: "numeric",
     });
   } catch {
+    // Fallback without Intl
     const months = [
-      "January", "February", "March", "April", "May", "June", "July",
-      "August", "September", "October", "November", "December"
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
     ];
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
 
+// Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
   const s = new Date(start);
@@ -112,8 +63,13 @@ function diffToYearsMonths(start, end) {
     return { years: 0, months: 0, totalMonths: 0 };
   }
 
-  let totalMonths = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+  // total month diff
+  let totalMonths =
+    (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+
+  // If end's day is before start's day, we haven't completed this month yet
   if (e.getDate() < s.getDate()) totalMonths -= 1;
+
   if (totalMonths < 0) totalMonths = 0;
 
   const years = Math.floor(totalMonths / 12);
@@ -130,10 +86,16 @@ function formatTenure(start, end) {
   return parts.join(" ");
 }
 
+function defaultsFromTemplate(tpl) {
+  return tpl?.defaultValues || {};
+}
+
+// Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
 
   try {
+    // Find the active salary record for this employee
     const salaryRecord = await Salary.findOne({
       employee: employeeId,
       isActive: true,
@@ -145,11 +107,25 @@ async function fetchAndDecryptSalary(employeeId) {
     }
 
     const decryptedSalary = {};
+
+    // Decrypt all salary fields
     const salaryFields = [
-      "basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance",
-      "medicalAllowance", "utilityAllowance", "overtimeCompensation", "dislocationAllowance",
-      "leaveEncashment", "bonus", "arrears", "autoAllowance", "incentive", "fuelAllowance",
-      "othersAllowances", "grossSalary"
+      "basic",
+      "dearnessAllowance",
+      "houseRentAllowance",
+      "conveyanceAllowance",
+      "medicalAllowance",
+      "utilityAllowance",
+      "overtimeCompensation",
+      "dislocationAllowance",
+      "leaveEncashment",
+      "bonus",
+      "arrears",
+      "autoAllowance",
+      "incentive",
+      "fuelAllowance",
+      "othersAllowances",
+      "grossSalary",
     ];
 
     for (const field of salaryFields) {
@@ -165,6 +141,7 @@ async function fetchAndDecryptSalary(employeeId) {
       }
     }
 
+    // Calculate total if needed (using the decrypted values)
     if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
       try {
         const basic = parseFloat(decryptedSalary.basic) || 0;
@@ -175,7 +152,12 @@ async function fetchAndDecryptSalary(employeeId) {
         const others = parseFloat(decryptedSalary.othersAllowances) || 0;
 
         decryptedSalary.calculatedTotal = (
-          basic + houseRent + utilities + conveyance + medical + others
+          basic +
+          houseRent +
+          utilities +
+          conveyance +
+          medical +
+          others
         ).toFixed(2);
       } catch (error) {
         console.error("Error calculating total salary:", error.message);
@@ -189,15 +171,15 @@ async function fetchAndDecryptSalary(employeeId) {
     return {};
   }
 }
-
 const formatWithCommas = (val) => {
   const numVal = parseFloat(val);
   if (isNaN(numVal)) return val || "—";
-  return numVal.toLocaleString("en-PK");
+  return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
 };
-
 async function tokenMap(emp, defaults = {}) {
+  // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
+
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
 
@@ -210,12 +192,13 @@ async function tokenMap(emp, defaults = {}) {
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
     "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
-    "doc.qualitiesLine": defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+    "doc.qualitiesLine":
+      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
     "dates.issue": fmtDate(new Date()),
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
-    "tenure.human": tenureHuman,
-    "tenure.monthsTotal": tenureMonthsTotal,
+    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
+    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
 
     "employee.name": emp?.name || "—",
     "employee.cnic": emp?.cnic || "—",
@@ -227,7 +210,7 @@ async function tokenMap(emp, defaults = {}) {
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
 
-    // Salary fields
+    // Salary fields (decrypted from Salary model)
     "salary.basic": formatWithCommas(decryptedSalary.basic),
     "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
     "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
@@ -235,7 +218,9 @@ async function tokenMap(emp, defaults = {}) {
     "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
     "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
     "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
-    "salary.dislocation": formatWithCommas(decryptedSalary.dislocationAllowance),
+    "salary.dislocation": formatWithCommas(
+      decryptedSalary.dislocationAllowance
+    ),
     "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
     "salary.bonus": formatWithCommas(decryptedSalary.bonus),
     "salary.arrears": formatWithCommas(decryptedSalary.arrears),
@@ -243,25 +228,42 @@ async function tokenMap(emp, defaults = {}) {
     "salary.incentive": formatWithCommas(decryptedSalary.incentive),
     "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
     "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
-    "salary.gross": formatWithCommas(decryptedSalary.grossSalary || decryptedSalary.calculatedTotal),
-    "salary.total": formatWithCommas(decryptedSalary.grossSalary || decryptedSalary.calculatedTotal),
+    "salary.gross": formatWithCommas(
+      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+    ),
+    "salary.total": formatWithCommas(
+      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+    ),
+    // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
+
     "roles.timeline": "",
   };
 }
 
+/** supports {{ key }}, {{ key | upper }}, {{ key | lower }}, {{ key | title }}, {{ key | trim }} */
 function applyTokens(html, tokens) {
   return String(html).replace(
     /\{\{\s*([a-zA-Z0-9_.]+)(?:\s*\|\s*([a-zA-Z]+))?\s*\}\}/g,
     (_, key, filter) => {
       let v = tokens[key] ?? "";
       switch ((filter || "").toLowerCase()) {
-        case "upper": v = String(v).toUpperCase(); break;
-        case "lower": v = String(v).toLowerCase(); break;
-        case "title": v = String(v).toLowerCase().replace(/\b\w/g, m => m.toUpperCase()); break;
-        case "trim": v = String(v).trim(); break;
+        case "upper":
+          v = String(v).toUpperCase();
+          break;
+        case "lower":
+          v = String(v).toLowerCase();
+          break;
+        case "title":
+          v = String(v)
+            .toLowerCase()
+            .replace(/\b\w/g, (m) => m.toUpperCase());
+          break;
+        case "trim":
+          v = String(v).trim();
+          break;
       }
       return v;
     }
@@ -270,8 +272,10 @@ function applyTokens(html, tokens) {
 
 const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 
+/** Extract ALL pages from canvas */
 function extractAllPages(canvas = {}) {
   const pages = [];
+  // Array form (multi-page)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -294,6 +298,7 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
+  // Flat form (single page)
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
@@ -313,6 +318,7 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
+// routes/docs.js - Updated generateSinglePageHTML function
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -321,7 +327,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Calibri";
+      const ff = el.fontFamily || "Poppins";
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
@@ -332,164 +338,88 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const columnGap = num(el.columnGap, 20);
       const html = applyTokens(el.content || "", tokens);
 
+      // CSS for multi-column layout
       const columnStyle = columns > 1 
-        ? `column-count: ${columns}; column-gap: ${columnGap}px; -webkit-column-count: ${columns}; -moz-column-count: ${columns}; -webkit-column-gap: ${columnGap}px; -moz-column-gap: ${columnGap}px;`
+        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
         : '';
 
+      // FIXED: Proper justify alignment with text-justify
       const alignStyle = align === "justify" 
-        ? "text-align: justify; text-justify: inter-word; -webkit-text-align: justify; -moz-text-align: justify;" 
+        ? "text-align: justify; text-justify: inter-word;" 
         : `text-align: ${align};`;
 
-      // Enhanced font fallback system
-      const fontFamily = getFontFamilyWithFallbacks(ff);
-
       return `<div class="el" style="
-        position: absolute !important;
-        left: ${x}px !important;
-        top: ${y}px !important;
-        width: ${w}px !important;
-        height: ${h}px !important;
-        color: ${color} !important;
-        font-family: ${fontFamily} !important;
-        font-size: ${fs}px !important;
-        font-weight: ${bold} !important;
-        font-style: ${italic} !important;
-        text-decoration: ${deco} !important;
-        ${alignStyle}
-        line-height: ${lineHeight} !important;
-        ${columnStyle}
-        overflow: hidden !important;
-        margin: 0 !important;
-        padding: 0 !important;
-        box-sizing: border-box !important;
-        -webkit-print-color-adjust: exact !important;
-        print-color-adjust: exact !important;">
-        ${html}
-      </div>`;
+        position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
+        color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
+        font-weight:${bold};font-style:${italic};text-decoration:${deco};
+        ${alignStyle}line-height:${lineHeight};${columnStyle}
+        overflow:hidden;">${html}</div>`;
     })
     .join("");
+
+  const pageNumberHTML = totalPages > 1 ? `` : "";
 
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <title>${page.name}</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
-  /* Import Calibri-like fonts */
-  @import url('https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,600;1,400&family=Open+Sans:ital,wght@0,400;0,600;1,400&family=Lato:ital,wght@0,400;0,600;1,400&display=swap');
-  
-  @font-face {
-    font-family: 'Calibri';
-    font-style: normal;
-    font-weight: 400;
-    src: local('Liberation Sans'), local('DejaVu Sans'), local('Roboto'), local('Open Sans'), local('Arial'), sans-serif;
-  }
-  
-  @font-face {
-    font-family: 'Calibri';
-    font-style: italic;
-    font-weight: 400;
-    src: local('Liberation Sans Italic'), local('DejaVu Sans Oblique'), local('Roboto Italic'), local('Open Sans Italic'), local('Arial Italic'), sans-serif;
-  }
-  
-  @font-face {
-    font-family: 'Calibri';
-    font-style: normal;
-    font-weight: 600;
-    src: local('Liberation Sans Bold'), local('DejaVu Sans Bold'), local('Roboto Bold'), local('Open Sans Bold'), local('Arial Bold'), sans-serif;
-  }
-  
-  @font-face {
-    font-family: 'Calibri';
-    font-style: italic;
-    font-weight: 600;
-    src: local('Liberation Sans Bold Italic'), local('DejaVu Sans Bold Oblique'), local('Roboto Bold Italic'), local('Open Sans Bold Italic'), local('Arial Bold Italic'), sans-serif;
-  }
-
   @page {
-    margin: 0 !important;
+    margin: 0;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
   }
-  
-  * {
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-    box-sizing: border-box !important;
-    margin: 0 !important;
-    padding: 0 !important;
-  }
-  
   html, body {
-    margin: 0 !important;
-    padding: 0 !important;
-    width: ${page.widthPx}px !important;
-    height: ${page.heightPx}px !important;
-    -webkit-print-color-adjust: exact !important;
-    print-color-adjust: exact !important;
-    font-family: 'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif !important;
-    background: #ffffff !important;
-    overflow: hidden !important;
+    margin: 0;
+    padding: 0;
+    width: ${page.widthPx}px;
+    height: ${page.heightPx}px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
   }
 
+  /* Key fix: translate page content down by header height */
   .page {
-    width: ${page.widthPx}px !important;
-    height: ${page.heightPx - (page.header + page.footer)}px !important;
-    position: relative !important;
-    background: #fff !important;
-    color: #000 !important;
-    font-family: 'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif !important;
-    overflow: hidden !important;
-    box-sizing: border-box !important;
-    transform: translateY(${page.header}px) !important;
-    margin: 0 !important;
-    padding: 0 !important;
+    width: ${page.widthPx}px;
+    height: ${page.heightPx - (page.header + page.footer)}px;
+    position: relative;
+    background: #fff;
+    color: #000;
+    font-family: 'Poppins', sans-serif;
+    overflow: hidden;
+    box-sizing: border-box;
+    transform: translateY(${page.header}px);
   }
 
-  .el * {
-    margin: 0 !important;
-    padding: 0 !important;
-    box-sizing: border-box !important;
-    font-family: inherit !important;
-  }
-
-  /* Force text rendering */
+  /* Multi-column support */
   .el {
-    -webkit-font-smoothing: antialiased !important;
-    -moz-osx-font-smoothing: grayscale !important;
-    text-rendering: optimizeLegibility !important;
+    -webkit-column-count: inherit;
+    -moz-column-count: inherit;
+    column-count: inherit;
+    -webkit-column-gap: inherit;
+    -moz-column-gap: inherit;
+    column-gap: inherit;
   }
 
-  /* Ensure all text elements inherit proper fonts */
-  p, div, span, h1, h2, h3, h4, h5, h6 {
-    font-family: inherit !important;
+  /* Justify alignment support */
+  .el[style*="text-align: justify"] {
+    text-align: justify;
+    text-justify: inter-word;
   }
+
+  .el * { margin: 0; }
 </style>
 </head>
 <body>
   <div class="page">
     ${elsHTML}
+    ${pageNumberHTML}
   </div>
 </body>
 </html>`;
 }
 
-// Add this helper function for better font fallbacks
-function getFontFamilyWithFallbacks(fontFamily) {
-  const font = fontFamily || 'Calibri';
-  
-  // Define comprehensive font fallbacks for common fonts
-  const fallbackMap = {
-    'calibri': "'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif",
-    'arial': "'Arial', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Helvetica', sans-serif",
-    'times new roman': "'Times New Roman', 'Liberation Serif', 'DejaVu Serif', 'Times', 'Georgia', serif",
-    'helvetica': "'Helvetica', 'Arial', 'Liberation Sans', 'DejaVu Sans', 'Roboto', sans-serif",
-    'verdana': "'Verdana', 'Geneva', 'Liberation Sans', 'DejaVu Sans', sans-serif",
-    'georgia': "'Georgia', 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif"
-  };
-  
-  const lowerFont = font.toLowerCase();
-  return fallbackMap[lowerFont] || `'${escCss(font)}', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Arial', sans-serif`;
-}
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -504,95 +434,48 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
-  let browser;
+  const browser = await puppeteer.launch({
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+
   try {
-    browser = await launchBrowser();
     const mergedPdf = await PDFDocument.create();
 
     for (const page of pages) {
-      let pageInstance;
-      try {
-        pageInstance = await browser.newPage();
+      const p = await browser.newPage();
+      await p.setViewport({ width: page.widthPx, height: page.heightPx });
 
-        // Set viewport to match template size exactly
-        await pageInstance.setViewport({
-          width: Math.round(page.widthPx),
-          height: Math.round(page.heightPx),
-          deviceScaleFactor: 1,
-        });
+      const html = generateSinglePageHTML(page, tokens, pages.length);
+      await p.setContent(html, { waitUntil: "networkidle0" });
+      await p.emulateMediaType("screen");
 
-        // Generate HTML with proper font handling
-        const html = generateSinglePageHTML(page, tokens, pages.length);
+      // ✅ Convert header/footer px → mm (used as PDF margins)
+      const headerMm = pxToMm(page.header);
+      const footerMm = pxToMm(page.footer);
 
-        // Pre-inject CSS for better font support
-        await pageInstance.addStyleTag({
-          content: `
-            * {
-              -webkit-print-color-adjust: exact !important;
-              print-color-adjust: exact !important;
-              font-family: inherit !important;
-            }
-          `
-        });
+      const pdfBuffer = await p.pdf({
+        printBackground: true,
+        preferCSSPageSize: true,
+        width: `${pxToMm(page.widthPx)}mm`,
+        height: `${pxToMm(page.heightPx)}mm`,
+        margin: {
+          top: `${headerMm}mm`,
+          bottom: `${footerMm}mm`,
+          left: "0mm",
+          right: "0mm",
+        },
+      });
 
-        // Load HTML content
-        await pageInstance.setContent(html, {
-          waitUntil: 'networkidle0',
-          timeout: 30000,
-        });
-
-        await pageInstance.emulateMediaType('screen');
-
-        // Force style application
-        await pageInstance.evaluate(() => {
-          document.body.style.zoom = "1.0";
-          document.body.style.webkitPrintColorAdjust = "exact";
-          document.body.style.printColorAdjust = "exact";
-          document.body.style.background = "#fff";
-          document.body.style.overflow = "hidden";
-          window.scrollTo(0, 0);
-        });
-
-        // Wait for fonts and styles to apply
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        // Convert pixel page size to millimeters
-        const widthMm = pxToMm(page.widthPx);
-        const heightMm = pxToMm(page.heightPx);
-        const headerMm = pxToMm(page.header);
-        const footerMm = pxToMm(page.footer);
-
-        // Generate PDF for this page
-        const pdfBuffer = await pageInstance.pdf({
-          printBackground: true,
-          preferCSSPageSize: true,
-          width: `${widthMm}mm`,
-          height: `${heightMm}mm`,
-          margin: {
-            top: `${headerMm}mm`,
-            bottom: `${footerMm}mm`,
-            left: "0mm",
-            right: "0mm",
-          },
-          scale: 1,
-        });
-
-        // Merge into main document
-        const tempPdf = await PDFDocument.load(pdfBuffer);
-        const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
-        mergedPdf.addPage(copiedPage);
-      } finally {
-        if (pageInstance) await pageInstance.close().catch(console.error);
-      }
+      const tempPdf = await PDFDocument.load(pdfBuffer);
+      const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
+      mergedPdf.addPage(copiedPage);
+      await p.close();
     }
 
     const mergedPdfBytes = await mergedPdf.save();
     return Buffer.from(mergedPdfBytes);
-  } catch (error) {
-    console.error("PDF generation error:", error);
-    throw new Error(`PDF generation failed: ${error.message}`);
   } finally {
-    if (browser) await browser.close().catch(console.error);
+    await browser.close();
   }
 }
 
@@ -606,15 +489,24 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "experience_letter", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "experience_letter",
+      templateId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="ExperienceLetter.pdf"');
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="ExperienceLetter.pdf"'
+    );
     res.status(200).end(pdf);
   } catch (err) {
     console.error("experience-letter pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -633,7 +525,9 @@ router.get("/nda/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("nda pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
@@ -644,20 +538,51 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "salary_certificate", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "salary_certificate",
+      templateId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="SalaryCertificate.pdf"');
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="SalaryCertificate.pdf"'
+    );
     res.status(200).end(pdf);
   } catch (err) {
     console.error("salary-certificate pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
 
-// Contract
+// Contract (with optional decryption key support)
+router.post("/contract/:employeeId", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { key } = req.body || {};
+    const templateId = String(req.query.templateId || "");
+
+    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
+    res.status(200).end(pdf);
+  } catch (err) {
+    console.error("contract pdf error:", err);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
+    }
+  }
+});
+
+// Also support GET for contract without decryption
 router.get("/contract/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -671,38 +596,24 @@ router.get("/contract/:employeeId", async (req, res) => {
   } catch (err) {
     console.error("contract pdf error:", err);
     if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-router.post("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res.status(500).json({ message: err.message || "Failed to generate PDF" });
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
     }
   }
 });
 
 /* ─────────────────────────────────────────────────────────────
-   TEMPLATE ROUTES
+   GLOBAL TEMPLATES — BY TYPE
 ──────────────────────────────────────────────────────────────── */
 router.get("/doc-templates/:type", async (req, res) => {
   try {
     const type = normType(req.params.type);
     const tpl = await DocTemplate.findOne({ type }).lean();
     if (!tpl) return res.status(200).json({ data: null });
-    res.json({ data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} } });
+    res.json({
+      data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} },
+    });
   } catch {
     res.status(500).json({ message: "Failed to load by type" });
   }
@@ -713,21 +624,34 @@ router.post("/doc-templates/:type", async (req, res) => {
     const type = normType(req.params.type);
     const { canvas, defaultValues } = req.body || {};
     if (!canvas) return res.status(400).json({ message: "canvas is required" });
+
     const up = await DocTemplate.findOneAndUpdate(
       { type },
       { $set: { canvas, defaultValues: defaultValues || {} } },
       { upsert: true, new: true }
     ).lean();
-    res.json({ ok: true, data: { canvas: up.canvas, defaultValues: up.defaultValues || {} } });
+
+    res.json({
+      ok: true,
+      data: { canvas: up.canvas, defaultValues: up.defaultValues || {} },
+    });
   } catch {
     res.status(500).json({ message: "Failed to save by type" });
   }
 });
 
+/* ─────────────────────────────────────────────────────────────
+   RECENT TEMPLATES — ID-BASED CRUD
+──────────────────────────────────────────────────────────────── */
 router.get("/templates", async (req, res) => {
   try {
-    const rows = await DocTemplate.find({}, { canvas: 1, type: 1, updatedAt: 1 })
-      .sort({ updatedAt: -1 }).lean();
+    const rows = await DocTemplate.find(
+      {},
+      { canvas: 1, type: 1, updatedAt: 1 }
+    )
+      .sort({ updatedAt: -1 })
+      .lean();
+
     const data = rows.map((r) => ({
       _id: String(r._id),
       type: r.type,
@@ -744,7 +668,15 @@ router.get("/templates/:id", async (req, res) => {
   try {
     const tpl = await DocTemplate.findById(req.params.id).lean();
     if (!tpl) return res.status(404).json({ message: "Template not found" });
-    res.json({ data: { _id: String(tpl._id), type: tpl.type, canvas: tpl.canvas, defaultValues: tpl.defaultValues || {}, updatedAt: tpl.updatedAt } });
+    res.json({
+      data: {
+        _id: String(tpl._id),
+        type: tpl.type,
+        canvas: tpl.canvas,
+        defaultValues: tpl.defaultValues || {},
+        updatedAt: tpl.updatedAt,
+      },
+    });
   } catch {
     res.status(500).json({ message: "Failed to load template" });
   }
@@ -753,8 +685,16 @@ router.get("/templates/:id", async (req, res) => {
 router.post("/templates", async (req, res) => {
   try {
     const { type, canvas, defaultValues } = req.body || {};
-    if (!type || !canvas) return res.status(400).json({ message: "`type` and `canvas` are required" });
-    const doc = await DocTemplate.create({ type, canvas, defaultValues: defaultValues || {} });
+    if (!type || !canvas) {
+      return res
+        .status(400)
+        .json({ message: "`type` and `canvas` are required" });
+    }
+    const doc = await DocTemplate.create({
+      type,
+      canvas,
+      defaultValues: defaultValues || {},
+    });
     res.status(201).json({ ok: true, id: String(doc._id) });
   } catch {
     res.status(500).json({ message: "Failed to create template" });
@@ -768,7 +708,12 @@ router.put("/templates/:id", async (req, res) => {
     if (type) set.type = type;
     if (canvas) set.canvas = canvas;
     if (defaultValues) set.defaultValues = defaultValues;
-    const up = await DocTemplate.findByIdAndUpdate(req.params.id, { $set: set }, { new: true }).lean();
+
+    const up = await DocTemplate.findByIdAndUpdate(
+      req.params.id,
+      { $set: set },
+      { new: true }
+    ).lean();
     if (!up) return res.status(404).json({ message: "Template not found" });
     res.json({ ok: true });
   } catch {

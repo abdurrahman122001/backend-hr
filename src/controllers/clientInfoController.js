@@ -184,3 +184,50 @@ exports.getClientById = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch client info" });
   }
 };
+
+exports.toggleWhatsAppFlag = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id, flag } = req.params;
+    const validFlags = [
+      "whatsappMuted",
+      "whatsappFavourite",
+      "whatsappPinned",
+      "whatsappArchived",
+    ];
+
+    if (!validFlags.includes(flag)) {
+      return res.status(400).json({ error: "Invalid flag type" });
+    }
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Authorization: same rules as view/update
+    const role = String(emp.role || "").trim().toLowerCase();
+    const authorized =
+      role === "owner" ||
+      ["manager", "team lead", "team_lead", "teamlead"].includes(role) ||
+      String(client.assignedTo) === String(emp._id);
+
+    if (!authorized) {
+      return res.status(403).json({ error: "Not authorized to toggle this flag" });
+    }
+
+    // Toggle logic
+    client[flag] = !client[flag];
+    await client.save();
+
+    res.json({
+      success: true,
+      message: `${flag} toggled successfully`,
+      flag,
+      newValue: client[flag],
+    });
+  } catch (err) {
+    console.error("toggleWhatsAppFlag error:", err);
+    res.status(500).json({ error: "Failed to toggle WhatsApp flag" });
+  }
+};

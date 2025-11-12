@@ -19,5 +19,8 @@ router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
 router.delete("/:id", requireAuth, clientInfoCtrl.deleteClientInfo);
 
 router.get("/:id", requireAuth, clientInfoCtrl.getClientById);
+router.patch(
+    "/:id/toggle-whatsapp/:flag", requireAuth, clientInfoCtrl.toggleWhatsAppFlag
+);
 
 module.exports = router;
