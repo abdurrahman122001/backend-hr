@@ -8,6 +8,7 @@ const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries"); // Import the Salary model
 const DocTemplate = require("../models/DocTemplate");
 const { decrypt } = require("../utils/encryption");
+const { launchPuppeteer } = require("../puppeteer");
 
 /* ───────────────── helpers ───────────────── */
 
@@ -339,14 +340,16 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const html = applyTokens(el.content || "", tokens);
 
       // CSS for multi-column layout
-      const columnStyle = columns > 1 
-        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
-        : '';
+      const columnStyle =
+        columns > 1
+          ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+          : "";
 
       // FIXED: Proper justify alignment with text-justify
-      const alignStyle = align === "justify" 
-        ? "text-align: justify; text-justify: inter-word;" 
-        : `text-align: ${align};`;
+      const alignStyle =
+        align === "justify"
+          ? "text-align: justify; text-justify: inter-word;"
+          : `text-align: ${align};`;
 
       return `<div class="el" style="
         position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
@@ -434,9 +437,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
-  const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
+  const browser = await launchPuppeteer();
 
   try {
     const mergedPdf = await PDFDocument.create();
