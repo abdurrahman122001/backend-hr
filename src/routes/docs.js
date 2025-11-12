@@ -3,7 +3,6 @@ const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
-const { launchPuppeteer } = require("./puppeteerHelper"); // adjust path if needed
 
 const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries"); // Import the Salary model
@@ -435,7 +434,9 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
-  const browser = await launchPuppeteer();
+  const browser = await puppeteer.launch({
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
 
   try {
     const mergedPdf = await PDFDocument.create();
@@ -444,120 +445,11 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       const p = await browser.newPage();
       await p.setViewport({ width: page.widthPx, height: page.heightPx });
 
-      // Generate all elements
-      const elsHTML = page.elements
-        .map((el) => {
-          const x = num(el.x, 0);
-          const y = num(el.y, 0);
-          const w = num(el.width, 600);
-          const h = num(el.height, 40);
-          const fs = num(el.fontSize, 14);
-          const ff = el.fontFamily || "Poppins";
-          const bold = el.bold ? "700" : "400";
-          const italic = el.italic ? "italic" : "normal";
-          const deco = el.underline ? "underline" : "none";
-          const color = el.color || "#000000";
-          const align = el.align || "left";
-          const lineHeight = num(el.lineHeight, 1.2);
-          const columns = num(el.columns, 1);
-          const columnGap = num(el.columnGap, 20);
-          const html = applyTokens(el.content || "", tokens);
-
-          const columnStyle =
-            columns > 1
-              ? `column-count:${columns};column-gap:${columnGap}px;`
-              : "";
-
-          const alignStyle =
-            align === "justify"
-              ? "text-align:justify;text-justify:inter-word;"
-              : `text-align:${align};`;
-
-          return `<div class="el" style="
-            position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
-            color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
-            font-weight:${bold};font-style:${italic};text-decoration:${deco};
-            ${alignStyle}line-height:${lineHeight};${columnStyle}overflow:hidden;">${html}</div>`;
-        })
-        .join("");
-
-      // ✅ HTML with locally loaded fonts (stored in /root/backend-hr/public/fonts)
-      const html = `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${page.name}</title>
-
-<style>
-  @page {
-    margin: 0;
-    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
-  }
-
-  /* ✅ Local font loading */
-  @font-face {
-    font-family: 'Poppins';
-    src: url('file:///root/backend-hr/public/fonts/Poppins-Regular.ttf') format('truetype');
-    font-weight: 400;
-  }
-  @font-face {
-    font-family: 'Poppins';
-    src: url('file:///root/backend-hr/public/fonts/Poppins-Bold.ttf') format('truetype');
-    font-weight: 700;
-  }
-  @font-face {
-    font-family: 'Poppins';
-    src: url('file:///root/backend-hr/public/fonts/Poppins-Italic.ttf') format('truetype');
-    font-style: italic;
-  }
-  @font-face {
-    font-family: 'Roboto';
-    src: url('file:///root/backend-hr/public/fonts/Roboto-Regular.ttf') format('truetype');
-    font-weight: 400;
-  }
-  @font-face {
-    font-family: 'Roboto';
-    src: url('file:///root/backend-hr/public/fonts/Roboto-Bold.ttf') format('truetype');
-    font-weight: 700;
-  }
-
-  html, body {
-    margin: 0;
-    padding: 0;
-    width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    font-family: 'Poppins', sans-serif;
-  }
-
-  .page {
-    width: ${page.widthPx}px;
-    height: ${page.heightPx - (page.header + page.footer)}px;
-    position: relative;
-    background: #fff;
-    color: #000;
-    overflow: hidden;
-    transform: translateY(${page.header}px);
-  }
-
-  .el * { margin: 0; padding: 0; }
-</style>
-</head>
-<body>
-  <div class="page">${elsHTML}</div>
-
-  <!-- ✅ Wait for fonts before printing -->
-  <script>
-    document.fonts.ready.then(() => console.log('✅ Fonts loaded'));
-  </script>
-</body>
-</html>`;
-
+      const html = generateSinglePageHTML(page, tokens, pages.length);
       await p.setContent(html, { waitUntil: "networkidle0" });
-      await p.evaluateHandle("document.fonts.ready");
       await p.emulateMediaType("screen");
 
+      // ✅ Convert header/footer px → mm (used as PDF margins)
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
@@ -577,7 +469,6 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       const tempPdf = await PDFDocument.load(pdfBuffer);
       const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
       mergedPdf.addPage(copiedPage);
-
       await p.close();
     }
 
@@ -587,6 +478,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
     await browser.close();
   }
 }
+
 /* ──────────────────────────────────────────────────────────────────────────────
    PDF ENDPOINTS FOR ALL DOCUMENT TYPES
 ────────────────────────────────────────────────────────────────────────────── */
