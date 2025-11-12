@@ -313,7 +313,6 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -322,7 +321,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Calibri"; // Use the font from template, fallback to Calibri
+      const ff = el.fontFamily || "Calibri";
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
@@ -341,6 +340,9 @@ function generateSinglePageHTML(page, tokens, totalPages) {
         ? "text-align: justify; text-justify: inter-word; -webkit-text-align: justify; -moz-text-align: justify;" 
         : `text-align: ${align};`;
 
+      // Enhanced font fallback system
+      const fontFamily = getFontFamilyWithFallbacks(ff);
+
       return `<div class="el" style="
         position: absolute !important;
         left: ${x}px !important;
@@ -348,7 +350,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
         width: ${w}px !important;
         height: ${h}px !important;
         color: ${color} !important;
-        font-family: '${escCss(ff)}', 'Liberation Sans', 'Arial', sans-serif !important;
+        font-family: ${fontFamily} !important;
         font-size: ${fs}px !important;
         font-weight: ${bold} !important;
         font-style: ${italic} !important;
@@ -373,6 +375,37 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <meta charset="utf-8" />
 <title>${page.name}</title>
 <style>
+  /* Import Calibri-like fonts */
+  @import url('https://fonts.googleapis.com/css2?family=Roboto:ital,wght@0,400;0,600;1,400&family=Open+Sans:ital,wght@0,400;0,600;1,400&family=Lato:ital,wght@0,400;0,600;1,400&display=swap');
+  
+  @font-face {
+    font-family: 'Calibri';
+    font-style: normal;
+    font-weight: 400;
+    src: local('Liberation Sans'), local('DejaVu Sans'), local('Roboto'), local('Open Sans'), local('Arial'), sans-serif;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    font-style: italic;
+    font-weight: 400;
+    src: local('Liberation Sans Italic'), local('DejaVu Sans Oblique'), local('Roboto Italic'), local('Open Sans Italic'), local('Arial Italic'), sans-serif;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    font-style: normal;
+    font-weight: 600;
+    src: local('Liberation Sans Bold'), local('DejaVu Sans Bold'), local('Roboto Bold'), local('Open Sans Bold'), local('Arial Bold'), sans-serif;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    font-style: italic;
+    font-weight: 600;
+    src: local('Liberation Sans Bold Italic'), local('DejaVu Sans Bold Oblique'), local('Roboto Bold Italic'), local('Open Sans Bold Italic'), local('Arial Bold Italic'), sans-serif;
+  }
+
   @page {
     margin: 0 !important;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
@@ -393,7 +426,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     height: ${page.heightPx}px !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
-    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+    font-family: 'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif !important;
     background: #ffffff !important;
     overflow: hidden !important;
   }
@@ -404,7 +437,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     position: relative !important;
     background: #fff !important;
     color: #000 !important;
-    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+    font-family: 'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif !important;
     overflow: hidden !important;
     box-sizing: border-box !important;
     transform: translateY(${page.header}px) !important;
@@ -440,6 +473,23 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
+// Add this helper function for better font fallbacks
+function getFontFamilyWithFallbacks(fontFamily) {
+  const font = fontFamily || 'Calibri';
+  
+  // Define comprehensive font fallbacks for common fonts
+  const fallbackMap = {
+    'calibri': "'Calibri', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Lato', 'Arial', sans-serif",
+    'arial': "'Arial', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Helvetica', sans-serif",
+    'times new roman': "'Times New Roman', 'Liberation Serif', 'DejaVu Serif', 'Times', 'Georgia', serif",
+    'helvetica': "'Helvetica', 'Arial', 'Liberation Sans', 'DejaVu Sans', 'Roboto', sans-serif",
+    'verdana': "'Verdana', 'Geneva', 'Liberation Sans', 'DejaVu Sans', sans-serif",
+    'georgia': "'Georgia', 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif"
+  };
+  
+  const lowerFont = font.toLowerCase();
+  return fallbackMap[lowerFont] || `'${escCss(font)}', 'Liberation Sans', 'DejaVu Sans', 'Roboto', 'Open Sans', 'Arial', sans-serif`;
+}
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
