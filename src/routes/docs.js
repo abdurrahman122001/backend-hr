@@ -5,7 +5,7 @@ const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
-const Salary = require("../models/Salaries"); // Import the Salary model
+const Salary = require("../models/Salaries");
 const DocTemplate = require("../models/DocTemplate");
 const { decrypt } = require("../utils/encryption");
 
@@ -19,14 +19,13 @@ const TYPE_ALIASES = {
 };
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
-// replaces your current fmtDate()
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "—";
 
-  // Prefer reliable locale formatting
   try {
     return dt.toLocaleDateString("en-US", {
       year: "numeric",
@@ -34,7 +33,6 @@ function fmtDate(d) {
       day: "numeric",
     });
   } catch {
-    // Fallback without Intl
     const months = [
       "January",
       "February",
@@ -53,7 +51,6 @@ function fmtDate(d) {
   }
 }
 
-// Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
   const s = new Date(start);
@@ -62,11 +59,9 @@ function diffToYearsMonths(start, end) {
     return { years: 0, months: 0, totalMonths: 0 };
   }
 
-  // total month diff
   let totalMonths =
     (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
 
-  // If end's day is before start's day, we haven't completed this month yet
   if (e.getDate() < s.getDate()) totalMonths -= 1;
 
   if (totalMonths < 0) totalMonths = 0;
@@ -89,12 +84,10 @@ function defaultsFromTemplate(tpl) {
   return tpl?.defaultValues || {};
 }
 
-// Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
 
   try {
-    // Find the active salary record for this employee
     const salaryRecord = await Salary.findOne({
       employee: employeeId,
       isActive: true,
@@ -107,7 +100,6 @@ async function fetchAndDecryptSalary(employeeId) {
 
     const decryptedSalary = {};
 
-    // Decrypt all salary fields
     const salaryFields = [
       "basic",
       "dearnessAllowance",
@@ -140,7 +132,6 @@ async function fetchAndDecryptSalary(employeeId) {
       }
     }
 
-    // Calculate total if needed (using the decrypted values)
     if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
       try {
         const basic = parseFloat(decryptedSalary.basic) || 0;
@@ -170,13 +161,14 @@ async function fetchAndDecryptSalary(employeeId) {
     return {};
   }
 }
+
 const formatWithCommas = (val) => {
   const numVal = parseFloat(val);
   if (isNaN(numVal)) return val || "—";
-  return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
+  return numVal.toLocaleString("en-PK");
 };
+
 async function tokenMap(emp, defaults = {}) {
-  // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
 
   const join = emp?.joiningDate;
@@ -196,8 +188,8 @@ async function tokenMap(emp, defaults = {}) {
     "dates.issue": fmtDate(new Date()),
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
-    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
-    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
+    "tenure.human": tenureHuman,
+    "tenure.monthsTotal": tenureMonthsTotal,
 
     "employee.name": emp?.name || "—",
     "employee.cnic": emp?.cnic || "—",
@@ -209,7 +201,6 @@ async function tokenMap(emp, defaults = {}) {
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
 
-    // Salary fields (decrypted from Salary model)
     "salary.basic": formatWithCommas(decryptedSalary.basic),
     "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
     "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
@@ -233,7 +224,6 @@ async function tokenMap(emp, defaults = {}) {
     "salary.total": formatWithCommas(
       decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
     ),
-    // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
@@ -242,7 +232,6 @@ async function tokenMap(emp, defaults = {}) {
   };
 }
 
-/** supports {{ key }}, {{ key | upper }}, {{ key | lower }}, {{ key | title }}, {{ key | trim }} */
 function applyTokens(html, tokens) {
   return String(html).replace(
     /\{\{\s*([a-zA-Z0-9_.]+)(?:\s*\|\s*([a-zA-Z]+))?\s*\}\}/g,
@@ -271,10 +260,8 @@ function applyTokens(html, tokens) {
 
 const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 
-/** Extract ALL pages from canvas */
 function extractAllPages(canvas = {}) {
   const pages = [];
-  // Array form (multi-page)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -297,7 +284,6 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Flat form (single page)
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
@@ -317,105 +303,133 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-function pxToMm(px) {
-  return (px * 25.4) / 96; // 96 DPI to mm conversion
-}
 
-async function generateSinglePageHTML(page, elements) {
-  const pageContent = `
-  <!DOCTYPE html>
-  <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PDF Page</title>
-    <style>
-      @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap');
+function generateSinglePageHTML(page, tokens, totalPages) {
+  const elsHTML = page.elements
+    .map((el) => {
+      const x = num(el.x, 0);
+      const y = num(el.y, 0);
+      const w = num(el.width, 600);
+      const h = num(el.height, 40);
+      const fs = num(el.fontSize, 14);
+      const ff = el.fontFamily || "Poppins";
+      const bold = el.bold ? "600" : "400";
+      const italic = el.italic ? "italic" : "normal";
+      const deco = el.underline ? "underline" : "none";
+      const color = el.color || "#000000";
+      const align = el.align || "left";
+      const lineHeight = num(el.lineHeight, 1.2);
+      const columns = num(el.columns, 1);
+      const columnGap = num(el.columnGap, 20);
+      const html = applyTokens(el.content || "", tokens);
 
-      * , *::before, *::after {
-        box-sizing: border-box;
-      }
+      const columnStyle = columns > 1 
+        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+        : '';
 
-      body {
+      const alignStyle = align === "justify" 
+        ? "text-align: justify; text-justify: inter-word;" 
+        : `text-align: ${align};`;
+
+      return `<div class="el" style="
+        position: absolute;
+        left: ${x}px;
+        top: ${y}px;
+        width: ${w}px;
+        height: ${h}px;
+        color: ${color};
+        font-family: '${escCss(ff)}', sans-serif;
+        font-size: ${fs}px;
+        font-weight: ${bold};
+        font-style: ${italic};
+        text-decoration: ${deco};
+        ${alignStyle}
+        line-height: ${lineHeight};
+        ${columnStyle}
+        overflow: hidden;
         margin: 0;
         padding: 0;
-        background: #f0f0f0;
-        font-family: 'Poppins', sans-serif;
-      }
-
-      .page {
-        width: ${page.widthPx}px;
-        height: ${page.heightPx - (page.header + page.footer)}px;
-        position: relative;
-        background: #fff;
-        color: #000;
-        overflow: hidden;
-      }
-
-      .el {
-        position: absolute;
+        box-sizing: border-box;
         white-space: pre-wrap;
-        word-break: break-word;
-      }
-    </style>
-  </head>
-  <body>
-    <div class="page">
-      ${elements
-        .map(
-          (el) => `
-          <div class="el"
-            style="
-              top: ${el.y}px;
-              left: ${el.x}px;
-              width: ${el.width}px;
-              height: ${el.height}px;
-              font-size: ${el.fontSize}px;
-              font-weight: ${el.fontWeight || 400};
-              text-align: ${el.textAlign || 'left'};
-              color: ${el.color || '#000'};
-            "
-          >
-            ${el.text || ''}
-          </div>
-        `
-        )
-        .join('')}
+        word-wrap: break-word;">
+        ${html}
+      </div>`;
+    })
+    .join("");
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>${page.name}</title>
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    @page {
+      margin: 0;
+      size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      margin: 0;
+      padding: 0;
+      width: ${page.widthPx}px;
+      height: ${page.heightPx}px;
+      background: white;
+      font-family: 'Poppins', sans-serif;
+      position: relative;
+      overflow: hidden;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    
+    .page-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: ${page.widthPx}px;
+      height: ${page.heightPx}px;
+      background: white;
+    }
+    
+    .content-area {
+      position: absolute;
+      top: ${page.header}px;
+      left: 0;
+      width: ${page.widthPx}px;
+      height: ${page.heightPx - page.header - page.footer}px;
+      background: white;
+    }
+    
+    .el {
+      position: absolute;
+      box-sizing: border-box;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow: hidden;
+    }
+    
+    .el[style*="text-align: justify"] {
+      text-align: justify !important;
+      text-justify: inter-word !important;
+    }
+  </style>
+</head>
+<body>
+  <div class="page-container">
+    <div class="content-area">
+      ${elsHTML}
     </div>
-  </body>
-  </html>
-  `;
-  return pageContent;
+  </div>
+</body>
+</html>`;
 }
 
-async function generatePDFBuffer(page, html) {
-  const headerMm = pxToMm(page.header);
-  const footerMm = pxToMm(page.footer);
-
-  const p = await browser.newPage();
-  await p.setContent(html, { waitUntil: 'networkidle0' });
-
-  // ✅ Wait for fonts to finish loading before printing
-  await p.evaluateHandle('document.fonts.ready');
-
-  // ✅ Generate the PDF with consistent scaling and margins
-  const pdfBuffer = await p.pdf({
-    scale: 1,
-    printBackground: true,
-    preferCSSPageSize: true,
-    width: `${pxToMm(page.widthPx)}mm`,
-    height: `${pxToMm(page.heightPx)}mm`,
-    margin: {
-      top: `${headerMm}mm`,
-      bottom: `${footerMm}mm`,
-      left: '0mm',
-      right: '0mm',
-    },
-  });
-
-  await p.close();
-  return pdfBuffer;
-}
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -431,7 +445,16 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   if (pages.length === 0) throw new Error("No pages found in template");
 
   const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    headless: true,
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--no-first-run",
+      "--no-zygote",
+      "--disable-gpu"
+    ],
   });
 
   try {
@@ -439,27 +462,42 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
 
     for (const page of pages) {
       const p = await browser.newPage();
-      await p.setViewport({ width: page.widthPx, height: page.heightPx });
+      
+      // Set viewport to match page dimensions exactly
+      await p.setViewport({ 
+        width: page.widthPx, 
+        height: page.heightPx,
+        deviceScaleFactor: 1
+      });
 
       const html = generateSinglePageHTML(page, tokens, pages.length);
-      await p.setContent(html, { waitUntil: "networkidle0" });
-      await p.emulateMediaType("screen");
+      
+      // Wait for all resources to load
+      await p.setContent(html, { 
+        waitUntil: ["networkidle0", "load", "domcontentloaded"] 
+      });
+      
+      // Wait for fonts to load
+      await p.evaluateHandle('document.fonts.ready');
+      
+      // Wait a bit more to ensure everything is rendered
+      await new Promise(resolve => setTimeout(resolve, 500));
 
-      // ✅ Convert header/footer px → mm (used as PDF margins)
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
       const pdfBuffer = await p.pdf({
-        printBackground: true,
-        preferCSSPageSize: true,
         width: `${pxToMm(page.widthPx)}mm`,
         height: `${pxToMm(page.heightPx)}mm`,
+        printBackground: true,
+        preferCSSPageSize: true,
         margin: {
           top: `${headerMm}mm`,
           bottom: `${footerMm}mm`,
           left: "0mm",
           right: "0mm",
         },
+        scale: 1,
       });
 
       const tempPdf = await PDFDocument.load(pdfBuffer);
