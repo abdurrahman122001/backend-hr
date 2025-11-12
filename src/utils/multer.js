@@ -25,7 +25,14 @@ const ACCEPTED = new Set([
   "application/pdf",
   "application/vnd.ms-excel",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  
+  "application/vnd.ms-excel.sheet.macroEnabled.12", // .xlsm
+  "application/vnd.ms-excel.template.macroEnabled.12", // .xltm
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.template", // .xltx
+  "text/csv", // .csv (common)
+  "application/csv", // alt MIME for CSV
+  "text/x-csv", // alt MIME
+  "application/x-csv", // alt MIME
+  "text/plain", // sometimes CSVs are uploaded as plain text
   // Audio files
   "audio/mpeg", // mp3
   "audio/wav",

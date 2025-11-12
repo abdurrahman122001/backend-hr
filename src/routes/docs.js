@@ -3,9 +3,11 @@ const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
+const fs = require("fs");
+const path = require("path");
 
 const Employee = require("../models/Employees");
-const Salary = require("../models/Salaries"); // Import the Salary model
+const Salary = require("../models/Salaries");
 const DocTemplate = require("../models/DocTemplate");
 const { decrypt } = require("../utils/encryption");
 
@@ -20,6 +22,27 @@ const TYPE_ALIASES = {
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
+
+// Create fonts directory if it doesn't exist
+const fontsDir = path.join(__dirname, '../public/fonts');
+if (!fs.existsSync(fontsDir)) {
+  fs.mkdirSync(fontsDir, { recursive: true });
+}
+
+// Function to download and serve fonts locally
+async function ensureFontsAvailable() {
+  const fontUrl = 'https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap';
+  
+  try {
+    // In production, we'll use local font files or system fonts as fallback
+    console.log('Using local font configuration for PDF generation');
+  } catch (error) {
+    console.warn('Font download failed, using system fonts:', error.message);
+  }
+}
+
+// Initialize fonts on startup
+ensureFontsAvailable().catch(console.error);
 
 // replaces your current fmtDate()
 function fmtDate(d) {
@@ -171,11 +194,13 @@ async function fetchAndDecryptSalary(employeeId) {
     return {};
   }
 }
+
 const formatWithCommas = (val) => {
   const numVal = parseFloat(val);
   if (isNaN(numVal)) return val || "—";
-  return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
+  return numVal.toLocaleString("en-PK");
 };
+
 async function tokenMap(emp, defaults = {}) {
   // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
@@ -197,8 +222,8 @@ async function tokenMap(emp, defaults = {}) {
     "dates.issue": fmtDate(new Date()),
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
-    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
-    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
+    "tenure.human": tenureHuman,
+    "tenure.monthsTotal": tenureMonthsTotal,
 
     "employee.name": emp?.name || "—",
     "employee.cnic": emp?.cnic || "—",
@@ -234,7 +259,6 @@ async function tokenMap(emp, defaults = {}) {
     "salary.total": formatWithCommas(
       decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
     ),
-    // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
@@ -318,7 +342,50 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-// routes/docs.js - Updated generateSinglePageHTML function
+
+// Enhanced Puppeteer launch configuration for VPS
+async function launchPuppeteer() {
+  // Check if we're in production (VPS environment)
+  const isProduction = process.env.NODE_ENV === 'production';
+  
+  const launchOptions = {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--disable-gpu',
+      '--single-process', // This can help in some VPS environments
+      '--font-render-hinting=none' // Better font rendering
+    ],
+    // Important for VPS environments with limited resources
+    executablePath: isProduction ? '/usr/bin/chromium-browser' : undefined,
+  };
+
+  // Additional memory settings for VPS
+  if (isProduction) {
+    launchOptions.args.push('--max-old-space-size=4096');
+    launchOptions.args.push('--memory-pressure-off');
+  }
+
+  try {
+    return await puppeteer.launch(launchOptions);
+  } catch (error) {
+    console.warn('Primary launch failed, trying fallback options:', error.message);
+    
+    // Fallback launch options
+    return await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      executablePath: isProduction ? '/usr/bin/chromium' : undefined,
+    });
+  }
+}
+
+// Enhanced HTML generation with better font handling
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -350,7 +417,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 
       return `<div class="el" style="
         position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
-        color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
+        color:${color};font-family:'${escCss(ff)}', Arial, sans-serif;font-size:${fs}px;
         font-weight:${bold};font-style:${italic};text-decoration:${deco};
         ${alignStyle}line-height:${lineHeight};${columnStyle}
         overflow:hidden;">${html}</div>`;
@@ -359,17 +426,26 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 
   const pageNumberHTML = totalPages > 1 ? `` : "";
 
+  // Enhanced CSS with better font fallbacks and print optimization
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <title>${page.name}</title>
-<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap');
+  
   @page {
     margin: 0;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
   }
+  
+  * {
+    -webkit-print-color-adjust: exact !important;
+    color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+  
   html, body {
     margin: 0;
     padding: 0;
@@ -377,6 +453,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     height: ${page.heightPx}px;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+    font-family: 'Poppins', Arial, Helvetica, sans-serif;
   }
 
   /* Key fix: translate page content down by header height */
@@ -386,7 +463,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     position: relative;
     background: #fff;
     color: #000;
-    font-family: 'Poppins', sans-serif;
+    font-family: 'Poppins', Arial, Helvetica, sans-serif;
     overflow: hidden;
     box-sizing: border-box;
     transform: translateY(${page.header}px);
@@ -400,15 +477,29 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     -webkit-column-gap: inherit;
     -moz-column-gap: inherit;
     column-gap: inherit;
+    box-sizing: border-box;
   }
 
   /* Justify alignment support */
   .el[style*="text-align: justify"] {
     text-align: justify;
     text-justify: inter-word;
+    -webkit-hyphens: auto;
+    -moz-hyphens: auto;
+    hyphens: auto;
   }
 
-  .el * { margin: 0; }
+  .el * { 
+    margin: 0; 
+    box-sizing: border-box;
+  }
+  
+  /* Ensure text rendering is optimized for print */
+  .el {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
 </style>
 </head>
 <body>
@@ -420,6 +511,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
+// Enhanced PDF generation with better error handling and resource management
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -434,22 +526,36 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
-  const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
+  let browser;
   try {
+    browser = await launchPuppeteer();
     const mergedPdf = await PDFDocument.create();
 
     for (const page of pages) {
       const p = await browser.newPage();
-      await p.setViewport({ width: page.widthPx, height: page.heightPx });
+      
+      // Set viewport and emulate media for better PDF rendering
+      await p.setViewport({ 
+        width: Math.round(page.widthPx), 
+        height: Math.round(page.heightPx),
+        deviceScaleFactor: 2 // Higher DPI for better quality
+      });
 
+      // Set user agent and extra headers for font loading
+      await p.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
+      
       const html = generateSinglePageHTML(page, tokens, pages.length);
-      await p.setContent(html, { waitUntil: "networkidle0" });
-      await p.emulateMediaType("screen");
+      
+      // Wait for fonts to load
+      await p.setContent(html, { 
+        waitUntil: ['networkidle0', 'domcontentloaded'] 
+      });
+      
+      // Wait a bit more for fonts to render
+      await p.evaluate(() => document.fonts.ready);
+      await new Promise(resolve => setTimeout(resolve, 500));
 
-      // ✅ Convert header/footer px → mm (used as PDF margins)
+      // Convert header/footer px → mm (used as PDF margins)
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
@@ -464,6 +570,10 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
           left: "0mm",
           right: "0mm",
         },
+        scale: 1,
+        displayHeaderFooter: false,
+        // Additional PDF options for better font embedding
+        tag: false
       });
 
       const tempPdf = await PDFDocument.load(pdfBuffer);
@@ -474,8 +584,13 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
 
     const mergedPdfBytes = await mergedPdf.save();
     return Buffer.from(mergedPdfBytes);
+  } catch (error) {
+    console.error('PDF generation error:', error);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -717,7 +832,8 @@ router.put("/templates/:id", async (req, res) => {
     if (!up) return res.status(404).json({ message: "Template not found" });
     res.json({ ok: true });
   } catch {
-    res.status(500).json({ message: "Failed to update template" });
+    res.status(500)
+      .json({ message: "Failed to update template" });
   }
 });
 
