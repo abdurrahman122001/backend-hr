@@ -322,7 +322,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = "Calibri"; // Force Calibri for all elements
+      const ff = el.fontFamily || "Calibri"; // Use the font from template, fallback to Calibri
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
@@ -348,7 +348,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
         width: ${w}px !important;
         height: ${h}px !important;
         color: ${color} !important;
-        font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+        font-family: '${escCss(ff)}', 'Liberation Sans', 'Arial', sans-serif !important;
         font-size: ${fs}px !important;
         font-weight: ${bold} !important;
         font-style: ${italic} !important;
@@ -426,9 +426,9 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     text-rendering: optimizeLegibility !important;
   }
 
-  /* Ensure all text elements use Calibri */
+  /* Ensure all text elements inherit proper fonts */
   p, div, span, h1, h2, h3, h4, h5, h6 {
-    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+    font-family: inherit !important;
   }
 </style>
 </head>
@@ -471,17 +471,16 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
           deviceScaleFactor: 1,
         });
 
-        // Generate HTML with Calibri font
+        // Generate HTML with proper font handling
         const html = generateSinglePageHTML(page, tokens, pages.length);
 
-        // Pre-inject Calibri CSS
+        // Pre-inject CSS for better font support
         await pageInstance.addStyleTag({
           content: `
-            @import url('https://fonts.googleapis.com/css2?family=Calibri:wght@400;600;700&display=swap');
             * {
-              font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
               -webkit-print-color-adjust: exact !important;
               print-color-adjust: exact !important;
+              font-family: inherit !important;
             }
           `
         });
@@ -502,17 +501,10 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
           document.body.style.background = "#fff";
           document.body.style.overflow = "hidden";
           window.scrollTo(0, 0);
-          
-          // Force font loading
-          if (document.fonts && document.fonts.ready) {
-            document.fonts.ready.then(() => {
-              console.log('Fonts loaded successfully');
-            });
-          }
         });
 
-        // Wait for fonts and styles to apply - FIXED: using page.waitForTimeout alternative
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        // Wait for fonts and styles to apply
+        await new Promise(resolve => setTimeout(resolve, 500));
 
         // Convert pixel page size to millimeters
         const widthMm = pxToMm(page.widthPx);
