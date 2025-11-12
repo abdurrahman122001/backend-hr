@@ -26,7 +26,7 @@ async function launchBrowser() {
   const isProduction = process.env.NODE_ENV === "production";
 
   const possibleChromiumPaths = [
-    "/snap/bin/chromium", // your VPS Chromium
+    "/snap/bin/chromium",
     "/usr/bin/chromium-browser",
     "/usr/bin/chromium",
     "/usr/bin/google-chrome-stable",
@@ -63,6 +63,8 @@ async function launchBrowser() {
       "--no-zygote",
       "--disable-web-security",
       "--disable-software-rasterizer",
+      "--font-render-hinting=none",
+      "--force-color-profile=srgb",
       "--window-size=1280,1024",
     ],
     timeout: 30000,
@@ -81,7 +83,6 @@ async function launchBrowser() {
     });
   }
 }
-
 
 function fmtDate(d) {
   if (!d) return "—";
@@ -321,7 +322,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Calibri";
+      const ff = "Calibri"; // Force Calibri for all elements
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
       const deco = el.underline ? "underline" : "none";
@@ -333,23 +334,38 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const html = applyTokens(el.content || "", tokens);
 
       const columnStyle = columns > 1 
-        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+        ? `column-count: ${columns}; column-gap: ${columnGap}px; -webkit-column-count: ${columns}; -moz-column-count: ${columns}; -webkit-column-gap: ${columnGap}px; -moz-column-gap: ${columnGap}px;`
         : '';
 
       const alignStyle = align === "justify" 
-        ? "text-align: justify; text-justify: inter-word;" 
+        ? "text-align: justify; text-justify: inter-word; -webkit-text-align: justify; -moz-text-align: justify;" 
         : `text-align: ${align};`;
 
       return `<div class="el" style="
-        position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
-        color:${color};font-family:'${escCss(ff)}', Arial, sans-serif;font-size:${fs}px;
-        font-weight:${bold};font-style:${italic};text-decoration:${deco};
-        ${alignStyle}line-height:${lineHeight};${columnStyle}
-        overflow:hidden;">${html}</div>`;
+        position: absolute !important;
+        left: ${x}px !important;
+        top: ${y}px !important;
+        width: ${w}px !important;
+        height: ${h}px !important;
+        color: ${color} !important;
+        font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+        font-size: ${fs}px !important;
+        font-weight: ${bold} !important;
+        font-style: ${italic} !important;
+        text-decoration: ${deco} !important;
+        ${alignStyle}
+        line-height: ${lineHeight} !important;
+        ${columnStyle}
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        box-sizing: border-box !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;">
+        ${html}
+      </div>`;
     })
     .join("");
-
-  const pageNumberHTML = totalPages > 1 ? `` : "";
 
   return `<!doctype html>
 <html>
@@ -358,60 +374,72 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <title>${page.name}</title>
 <style>
   @page {
-    margin: 0;
+    margin: 0 !important;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
   }
+  
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    box-sizing: border-box !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  
   html, body {
-    margin: 0;
-    padding: 0;
-    width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-    font-family: 'Calibri', Arial, sans-serif;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: ${page.widthPx}px !important;
+    height: ${page.heightPx}px !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+    background: #ffffff !important;
+    overflow: hidden !important;
   }
 
   .page {
-    width: ${page.widthPx}px;
-    height: ${page.heightPx - (page.header + page.footer)}px;
-    position: relative;
-    background: #fff;
-    color: #000;
-    font-family: 'Calibri', Arial, sans-serif;
-    overflow: hidden;
-    box-sizing: border-box;
-    transform: translateY(${page.header}px);
+    width: ${page.widthPx}px !important;
+    height: ${page.heightPx - (page.header + page.footer)}px !important;
+    position: relative !important;
+    background: #fff !important;
+    color: #000 !important;
+    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    transform: translateY(${page.header}px) !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
 
+  .el * {
+    margin: 0 !important;
+    padding: 0 !important;
+    box-sizing: border-box !important;
+    font-family: inherit !important;
+  }
+
+  /* Force text rendering */
   .el {
-    -webkit-column-count: inherit;
-    -moz-column-count: inherit;
-    column-count: inherit;
-    -webkit-column-gap: inherit;
-    -moz-column-gap: inherit;
-    column-gap: inherit;
+    -webkit-font-smoothing: antialiased !important;
+    -moz-osx-font-smoothing: grayscale !important;
+    text-rendering: optimizeLegibility !important;
   }
 
-  .el[style*="text-align: justify"] {
-    text-align: justify;
-    text-justify: inter-word;
+  /* Ensure all text elements use Calibri */
+  p, div, span, h1, h2, h3, h4, h5, h6 {
+    font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
   }
-
-  .el * { margin: 0; }
 </style>
 </head>
 <body>
   <div class="page">
     ${elsHTML}
-    ${pageNumberHTML}
   </div>
 </body>
 </html>`;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Enhanced PDF generator — pixel-perfect layout for VPS
-// ─────────────────────────────────────────────────────────────
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -436,25 +464,37 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       try {
         pageInstance = await browser.newPage();
 
-        // Ensure viewport matches template size
+        // Set viewport to match template size exactly
         await pageInstance.setViewport({
           width: Math.round(page.widthPx),
           height: Math.round(page.heightPx),
-          deviceScaleFactor: 1, // prevents DPI scaling differences
+          deviceScaleFactor: 1,
         });
 
-        // Generate HTML
+        // Generate HTML with Calibri font
         const html = generateSinglePageHTML(page, tokens, pages.length);
+
+        // Pre-inject Calibri CSS
+        await pageInstance.addStyleTag({
+          content: `
+            @import url('https://fonts.googleapis.com/css2?family=Calibri:wght@400;600;700&display=swap');
+            * {
+              font-family: 'Calibri', 'Liberation Sans', 'Arial', sans-serif !important;
+              -webkit-print-color-adjust: exact !important;
+              print-color-adjust: exact !important;
+            }
+          `
+        });
 
         // Load HTML content
         await pageInstance.setContent(html, {
-          waitUntil: "networkidle0",
+          waitUntil: 'networkidle0',
           timeout: 30000,
         });
 
-        await pageInstance.emulateMediaType("screen");
+        await pageInstance.emulateMediaType('screen');
 
-        // Force consistent scaling, fonts, and rendering
+        // Force style application
         await pageInstance.evaluate(() => {
           document.body.style.zoom = "1.0";
           document.body.style.webkitPrintColorAdjust = "exact";
@@ -462,37 +502,19 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
           document.body.style.background = "#fff";
           document.body.style.overflow = "hidden";
           window.scrollTo(0, 0);
+          
+          // Force font loading
+          if (document.fonts && document.fonts.ready) {
+            document.fonts.ready.then(() => {
+              console.log('Fonts loaded successfully');
+            });
+          }
         });
 
-        // Inject CSS normalization and Calibri fallback
-        await pageInstance.addStyleTag({
-          content: `
-            * {
-              -webkit-print-color-adjust: exact !important;
-              print-color-adjust: exact !important;
-              box-sizing: border-box;
-              margin: 0;
-              padding: 0;
-            }
-            body {
-              font-family: 'Calibri', 'Arial', sans-serif !important;
-              transform-origin: top left;
-              transform: scale(1);
-              background: #fff;
-              zoom: 1.0 !important;
-            }
-            .page {
-              transform: none !important;
-            }
-            @media print {
-              body {
-                zoom: 1.0 !important;
-              }
-            }
-          `,
-        });
+        // Wait for fonts and styles to apply
+        await pageInstance.waitForTimeout(1000);
 
-        // Convert pixel page size to millimeters for precise A4 rendering
+        // Convert pixel page size to millimeters
         const widthMm = pxToMm(page.widthPx);
         const heightMm = pxToMm(page.heightPx);
         const headerMm = pxToMm(page.header);
@@ -510,7 +532,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
             left: "0mm",
             right: "0mm",
           },
-          scale: 1, // ensures pixel-perfect scaling
+          scale: 1,
         });
 
         // Merge into main document
@@ -531,7 +553,6 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
     if (browser) await browser.close().catch(console.error);
   }
 }
-
 
 /* ──────────────────────────────────────────────────────────────────────────────
    PDF ENDPOINTS FOR ALL DOCUMENT TYPES
