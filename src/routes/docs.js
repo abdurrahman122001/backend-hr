@@ -511,8 +511,8 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
           }
         });
 
-        // Wait for fonts and styles to apply
-        await pageInstance.waitForTimeout(1000);
+        // Wait for fonts and styles to apply - FIXED: using page.waitForTimeout alternative
+        await new Promise(resolve => setTimeout(resolve, 1000));
 
         // Convert pixel page size to millimeters
         const widthMm = pxToMm(page.widthPx);
