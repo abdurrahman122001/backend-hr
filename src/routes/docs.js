@@ -422,7 +422,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </body>
 </html>`;
 }
-
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -446,8 +445,97 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       const p = await browser.newPage();
       await p.setViewport({ width: page.widthPx, height: page.heightPx });
 
-      const html = generateSinglePageHTML(page, tokens, pages.length);
+      // ✅ Build page HTML with reliable Google Font preloads
+      const elsHTML = page.elements
+        .map((el) => {
+          const x = num(el.x, 0);
+          const y = num(el.y, 0);
+          const w = num(el.width, 600);
+          const h = num(el.height, 40);
+          const fs = num(el.fontSize, 14);
+          const ff = el.fontFamily || "Poppins";
+          const bold = el.bold ? "600" : "400";
+          const italic = el.italic ? "italic" : "normal";
+          const deco = el.underline ? "underline" : "none";
+          const color = el.color || "#000000";
+          const align = el.align || "left";
+          const lineHeight = num(el.lineHeight, 1.2);
+          const columns = num(el.columns, 1);
+          const columnGap = num(el.columnGap, 20);
+          const html = applyTokens(el.content || "", tokens);
+
+          const columnStyle =
+            columns > 1
+              ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+              : "";
+
+          const alignStyle =
+            align === "justify"
+              ? "text-align: justify; text-justify: inter-word;"
+              : `text-align: ${align};`;
+
+          return `<div class="el" style="
+            position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
+            color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
+            font-weight:${bold};font-style:${italic};text-decoration:${deco};
+            ${alignStyle}line-height:${lineHeight};${columnStyle}
+            overflow:hidden;">${html}</div>`;
+        })
+        .join("");
+
+      const html = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${page.name}</title>
+
+<!-- ✅ Preload Google Fonts for Puppeteer -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+  @page {
+    margin: 0;
+    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: ${page.widthPx}px;
+    height: ${page.heightPx}px;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    font-family: 'Poppins', sans-serif;
+  }
+  .page {
+    width: ${page.widthPx}px;
+    height: ${page.heightPx - (page.header + page.footer)}px;
+    position: relative;
+    background: #fff;
+    color: #000;
+    overflow: hidden;
+    box-sizing: border-box;
+    transform: translateY(${page.header}px);
+  }
+  .el * { margin: 0; padding: 0; }
+</style>
+</head>
+<body>
+  <div class="page">${elsHTML}</div>
+
+  <!-- ✅ Ensure fonts fully loaded before rendering -->
+  <script>
+    document.fonts.ready.then(() => {
+      console.log('✅ Fonts loaded');
+    });
+  </script>
+</body>
+</html>`;
+
+      // ✅ Set content and wait until all fonts are ready
       await p.setContent(html, { waitUntil: "networkidle0" });
+      await p.evaluateHandle("document.fonts.ready");
       await p.emulateMediaType("screen");
 
       // ✅ Convert header/footer px → mm (used as PDF margins)
@@ -467,9 +555,11 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
         },
       });
 
+      // ✅ Merge each page
       const tempPdf = await PDFDocument.load(pdfBuffer);
       const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
       mergedPdf.addPage(copiedPage);
+
       await p.close();
     }
 
@@ -479,6 +569,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
     await browser.close();
   }
 }
+
 
 /* ──────────────────────────────────────────────────────────────────────────────
    PDF ENDPOINTS FOR ALL DOCUMENT TYPES
