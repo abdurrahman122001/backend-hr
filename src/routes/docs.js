@@ -19,7 +19,6 @@ const TYPE_ALIASES = {
 };
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
-const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
 // replaces your current fmtDate()
 function fmtDate(d) {
@@ -318,108 +317,105 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
-// routes/docs.js - Updated generateSinglePageHTML function
-function generateSinglePageHTML(page, tokens, totalPages) {
-  const elsHTML = page.elements
-    .map((el) => {
-      const x = num(el.x, 0);
-      const y = num(el.y, 0);
-      const w = num(el.width, 600);
-      const h = num(el.height, 40);
-      const fs = num(el.fontSize, 14);
-      const ff = el.fontFamily || "Poppins";
-      const bold = el.bold ? "600" : "400";
-      const italic = el.italic ? "italic" : "normal";
-      const deco = el.underline ? "underline" : "none";
-      const color = el.color || "#000000";
-      const align = el.align || "left";
-      const lineHeight = num(el.lineHeight, 1.2);
-      const columns = num(el.columns, 1);
-      const columnGap = num(el.columnGap, 20);
-      const html = applyTokens(el.content || "", tokens);
-
-      // CSS for multi-column layout
-      const columnStyle = columns > 1 
-        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
-        : '';
-
-      // FIXED: Proper justify alignment with text-justify
-      const alignStyle = align === "justify" 
-        ? "text-align: justify; text-justify: inter-word;" 
-        : `text-align: ${align};`;
-
-      return `<div class="el" style="
-        position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
-        color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;
-        font-weight:${bold};font-style:${italic};text-decoration:${deco};
-        ${alignStyle}line-height:${lineHeight};${columnStyle}
-        overflow:hidden;">${html}</div>`;
-    })
-    .join("");
-
-  const pageNumberHTML = totalPages > 1 ? `` : "";
-
-  return `<!doctype html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${page.name}</title>
-<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap" rel="stylesheet">
-<style>
-  @page {
-    margin: 0;
-    size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
-  }
-  html, body {
-    margin: 0;
-    padding: 0;
-    width: ${page.widthPx}px;
-    height: ${page.heightPx}px;
-    -webkit-print-color-adjust: exact;
-    print-color-adjust: exact;
-  }
-
-  /* Key fix: translate page content down by header height */
-  .page {
-    width: ${page.widthPx}px;
-    height: ${page.heightPx - (page.header + page.footer)}px;
-    position: relative;
-    background: #fff;
-    color: #000;
-    font-family: 'Poppins', sans-serif;
-    overflow: hidden;
-    box-sizing: border-box;
-    transform: translateY(${page.header}px);
-  }
-
-  /* Multi-column support */
-  .el {
-    -webkit-column-count: inherit;
-    -moz-column-count: inherit;
-    column-count: inherit;
-    -webkit-column-gap: inherit;
-    -moz-column-gap: inherit;
-    column-gap: inherit;
-  }
-
-  /* Justify alignment support */
-  .el[style*="text-align: justify"] {
-    text-align: justify;
-    text-justify: inter-word;
-  }
-
-  .el * { margin: 0; }
-</style>
-</head>
-<body>
-  <div class="page">
-    ${elsHTML}
-    ${pageNumberHTML}
-  </div>
-</body>
-</html>`;
+function pxToMm(px) {
+  return (px * 25.4) / 96; // 96 DPI to mm conversion
 }
 
+async function generateSinglePageHTML(page, elements) {
+  const pageContent = `
+  <!DOCTYPE html>
+  <html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF Page</title>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600&display=swap');
+
+      * , *::before, *::after {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        padding: 0;
+        background: #f0f0f0;
+        font-family: 'Poppins', sans-serif;
+      }
+
+      .page {
+        width: ${page.widthPx}px;
+        height: ${page.heightPx - (page.header + page.footer)}px;
+        position: relative;
+        background: #fff;
+        color: #000;
+        overflow: hidden;
+      }
+
+      .el {
+        position: absolute;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      ${elements
+        .map(
+          (el) => `
+          <div class="el"
+            style="
+              top: ${el.y}px;
+              left: ${el.x}px;
+              width: ${el.width}px;
+              height: ${el.height}px;
+              font-size: ${el.fontSize}px;
+              font-weight: ${el.fontWeight || 400};
+              text-align: ${el.textAlign || 'left'};
+              color: ${el.color || '#000'};
+            "
+          >
+            ${el.text || ''}
+          </div>
+        `
+        )
+        .join('')}
+    </div>
+  </body>
+  </html>
+  `;
+  return pageContent;
+}
+
+async function generatePDFBuffer(page, html) {
+  const headerMm = pxToMm(page.header);
+  const footerMm = pxToMm(page.footer);
+
+  const p = await browser.newPage();
+  await p.setContent(html, { waitUntil: 'networkidle0' });
+
+  // ✅ Wait for fonts to finish loading before printing
+  await p.evaluateHandle('document.fonts.ready');
+
+  // ✅ Generate the PDF with consistent scaling and margins
+  const pdfBuffer = await p.pdf({
+    scale: 1,
+    printBackground: true,
+    preferCSSPageSize: true,
+    width: `${pxToMm(page.widthPx)}mm`,
+    height: `${pxToMm(page.heightPx)}mm`,
+    margin: {
+      top: `${headerMm}mm`,
+      bottom: `${footerMm}mm`,
+      left: '0mm',
+      right: '0mm',
+    },
+  });
+
+  await p.close();
+  return pdfBuffer;
+}
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
