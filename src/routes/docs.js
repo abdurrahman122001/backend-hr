@@ -21,9 +21,8 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96;
 
-// Force Calibri font with system fallbacks
-const FORCED_FONT = "Calibri, Arial, Helvetica, sans-serif";
-const MAX_FONT_SIZE = 14;
+// Force Calibri font only
+const FORCED_FONT = "Calibri, Arial, sans-serif";
 
 // Simple Puppeteer launcher
 async function launchBrowser() {
@@ -261,7 +260,7 @@ function extractAllPages(canvas = {}) {
   return pages;
 }
 
-// Simplified HTML generation with forced Calibri and max 14px font
+// HTML generation that uses font from database but forces Calibri
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -270,9 +269,8 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const w = num(el.width, 600);
       const h = num(el.height, 40);
       
-      // Force max 14px font size
-      const originalSize = num(el.fontSize, 14);
-      const fs = Math.min(originalSize, MAX_FONT_SIZE);
+      // Use font size from database (no restrictions)
+      const fs = num(el.fontSize, 14);
       
       const bold = el.bold ? "600" : "400";
       const italic = el.italic ? "italic" : "normal";
@@ -307,6 +305,42 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 <meta charset="utf-8" />
 <title>${page.name}</title>
 <style>
+  @font-face {
+    font-family: 'Calibri';
+    src: local('Calibri'), local('Calibri Regular'), 
+         url('https://fonts.cdnfonts.com/s/14160/calibri.woff') format('woff'),
+         url('https://fonts.cdnfonts.com/s/14160/calibri.ttf') format('truetype');
+    font-weight: normal;
+    font-style: normal;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    src: local('Calibri Bold'), 
+         url('https://fonts.cdnfonts.com/s/14160/calibrib.woff') format('woff'),
+         url('https://fonts.cdnfonts.com/s/14160/calibrib.ttf') format('truetype');
+    font-weight: bold;
+    font-style: normal;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    src: local('Calibri Italic'), 
+         url('https://fonts.cdnfonts.com/s/14160/calibrii.woff') format('woff'),
+         url('https://fonts.cdnfonts.com/s/14160/calibrii.ttf') format('truetype');
+    font-weight: normal;
+    font-style: italic;
+  }
+  
+  @font-face {
+    font-family: 'Calibri';
+    src: local('Calibri Bold Italic'), 
+         url('https://fonts.cdnfonts.com/s/14160/calibriz.woff') format('woff'),
+         url('https://fonts.cdnfonts.com/s/14160/calibriz.ttf') format('truetype');
+    font-weight: bold;
+    font-style: italic;
+  }
+  
   @page {
     margin: 0;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
@@ -317,7 +351,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     color-adjust: exact !important;
     print-color-adjust: exact !important;
     font-family: ${FORCED_FONT} !important;
-    max-font-size: ${MAX_FONT_SIZE}px !important;
   }
   
   html, body {
@@ -328,7 +361,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
     font-family: ${FORCED_FONT} !important;
-    font-size: ${MAX_FONT_SIZE}px;
     background: white;
   }
 
@@ -514,7 +546,7 @@ router.post("/contract/:employeeId", async (req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────
-   TEMPLATE ROUTES (keep existing)
+   TEMPLATE ROUTES
 ──────────────────────────────────────────────────────────────── */
 router.get("/doc-templates/:type", async (req, res) => {
   try {
