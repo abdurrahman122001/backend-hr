@@ -1,7 +1,7 @@
 // routes/docs.js
 const express = require("express");
 const router = express.Router();
-const puppeteer = require("puppeteer");
+const puppeteer = require("puppeteer-core");
 const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
@@ -21,66 +21,73 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96;
 
-// Font configuration with direct CDN links
-const FONT_CONFIG = {
-  calibri: `
-    @font-face {
-      font-family: 'Calibri';
-      font-style: normal;
-      font-weight: 400;
-      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-regular.woff2') format('woff2');
-    }
-    @font-face {
-      font-family: 'Calibri';
-      font-style: normal;
-      font-weight: 600;
-      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-semibold.woff2') format('woff2');
-    }
-    @font-face {
-      font-family: 'Calibri';
-      font-style: normal;
-      font-weight: 700;
-      src: url('https://static2.sharepointonline.com/files/fabric/assets/fonts/segoeui-westeuropean/segoeui-bold.woff2') format('woff2');
-    }
-  `,
-  arial: `
-    @font-face {
-      font-family: 'Arial';
-      font-style: normal;
-      font-weight: 400;
-      src: local('Arial'), local('ArialMT');
-    }
-  `
-};
-
-// Enhanced Puppeteer launcher for VPS
+// Enhanced browser launcher for VPS compatibility (Hostinger + Snap Chromium)
 async function launchBrowser() {
-  const options = {
-    headless: 'new',
+  const fs = require("fs");
+  const isProduction = process.env.NODE_ENV === "production";
+
+  // Use your actual Snap Chromium path first
+  const possibleChromiumPaths = [
+    "/snap/bin/chromium", // 👈 your working path on Hostinger VPS
+    "/usr/bin/chromium-browser",
+    "/usr/bin/chromium",
+    "/usr/bin/google-chrome-stable",
+    process.env.CHROME_PATH,
+    !isProduction ? require("puppeteer").executablePath() : null,
+  ].filter(Boolean);
+
+  let executablePath;
+  for (const path of possibleChromiumPaths) {
+    try {
+      if (fs.existsSync(path)) {
+        executablePath = path;
+        console.log("✅ Found Chromium at:", path);
+        break;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  if (!executablePath) {
+    throw new Error(
+      "❌ Chromium not found. Please verify that /snap/bin/chromium is installed and accessible."
+    );
+  }
+
+  const launchOptions = {
+    executablePath,
+    headless: true,
     args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--disable-web-security',
-      '--disable-features=VizDisplayCompositor',
-      '--font-render-hinting=medium',
-      '--enable-font-antialiasing',
-      '--disable-background-timer-throttling',
-      '--disable-backgrounding-occluded-windows',
-      '--disable-renderer-backgrounding'
-    ]
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process",
+      "--no-zygote",
+      "--disable-web-security",
+      "--disable-software-rasterizer",
+      "--font-render-hinting=medium",
+      "--enable-font-antialiasing",
+      "--window-size=1280,1024",
+    ],
+    timeout: 30000,
   };
 
-  console.log('Launching browser for PDF generation...');
-  
+  console.log("🚀 Launching Chromium from:", executablePath);
+
   try {
-    const browser = await puppeteer.launch(options);
+    const browser = await puppeteer.launch(launchOptions);
     return browser;
   } catch (error) {
-    console.error('Browser launch failed:', error);
-    throw new Error(`Browser launch failed: ${error.message}`);
+    console.error("⚠️ Browser launch failed, retrying with fallback args:", error);
+    const fallbackOptions = {
+      executablePath,
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      timeout: 30000,
+    };
+    return await puppeteer.launch(fallbackOptions);
   }
 }
 
@@ -130,7 +137,6 @@ function formatTenure(start, end) {
   return parts.join(" ");
 }
 
-// Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
 
@@ -315,7 +321,6 @@ function extractAllPages(canvas = {}) {
   return pages;
 }
 
-// Enhanced HTML generation with embedded fonts
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -352,26 +357,18 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     })
     .join("");
 
+  const pageNumberHTML = totalPages > 1 ? `` : "";
+
   return `<!doctype html>
 <html>
 <head>
 <meta charset="utf-8" />
 <title>${page.name}</title>
 <style>
-  ${FONT_CONFIG.calibri}
-  ${FONT_CONFIG.arial}
-  
   @page {
     margin: 0;
     size: ${pxToMm(page.widthPx)}mm ${pxToMm(page.heightPx)}mm;
   }
-  
-  * {
-    -webkit-print-color-adjust: exact !important;
-    color-adjust: exact !important;
-    print-color-adjust: exact !important;
-  }
-  
   html, body {
     margin: 0;
     padding: 0;
@@ -379,8 +376,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     height: ${page.heightPx}px;
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
-    font-family: 'Calibri', 'Arial', 'Helvetica', sans-serif;
-    background: white;
+    font-family: 'Calibri', Arial, sans-serif;
   }
 
   .page {
@@ -389,7 +385,7 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     position: relative;
     background: #fff;
     color: #000;
-    font-family: 'Calibri', 'Arial', 'Helvetica', sans-serif;
+    font-family: 'Calibri', Arial, sans-serif;
     overflow: hidden;
     box-sizing: border-box;
     transform: translateY(${page.header}px);
@@ -402,38 +398,26 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     -webkit-column-gap: inherit;
     -moz-column-gap: inherit;
     column-gap: inherit;
-    box-sizing: border-box;
   }
 
   .el[style*="text-align: justify"] {
     text-align: justify;
     text-justify: inter-word;
-    -webkit-hyphens: auto;
-    -moz-hyphens: auto;
-    hyphens: auto;
   }
 
-  .el * { 
-    margin: 0; 
-    box-sizing: border-box;
-  }
-  
-  .el {
-    -webkit-font-smoothing: antialiased;
-    -moz-osx-font-smoothing: grayscale;
-    text-rendering: optimizeLegibility;
-  }
+  .el * { margin: 0; }
 </style>
 </head>
 <body>
   <div class="page">
     ${elsHTML}
+    ${pageNumberHTML}
   </div>
 </body>
 </html>`;
 }
 
-// Enhanced PDF generation with font loading
+// Enhanced PDF generation with better error handling
 async function generateDocumentPDF(employeeId, docType, templateId = "") {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -454,73 +438,67 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
     const mergedPdf = await PDFDocument.create();
 
     for (const page of pages) {
-      const p = await browser.newPage();
-      
-      // Set larger viewport for better quality
-      await p.setViewport({ 
-        width: Math.round(page.widthPx), 
-        height: Math.round(page.heightPx),
-        deviceScaleFactor: 2
-      });
+      let pageInstance;
+      try {
+        pageInstance = await browser.newPage();
+        
+        await pageInstance.setViewport({ 
+          width: Math.round(page.widthPx), 
+          height: Math.round(page.heightPx)
+        });
 
-      // Set longer timeout for font loading
-      await p.setDefaultNavigationTimeout(60000);
-      await p.setDefaultTimeout(60000);
+        const html = generateSinglePageHTML(page, tokens, pages.length);
+        
+        await pageInstance.setContent(html, { 
+          waitUntil: "networkidle0",
+          timeout: 30000
+        });
+        
+        await pageInstance.emulateMediaType("screen");
 
-      const html = generateSinglePageHTML(page, tokens, pages.length);
-      
-      // Load HTML with network idle wait
-      await p.setContent(html, { 
-        waitUntil: ['networkidle0', 'load', 'domcontentloaded'],
-        timeout: 60000
-      });
+        const headerMm = pxToMm(page.header);
+        const footerMm = pxToMm(page.footer);
 
-      // Wait for fonts to load completely
-      await p.evaluate(async () => {
-        await document.fonts.ready;
-        // Additional wait for font rendering
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      });
+        const pdfBuffer = await pageInstance.pdf({
+          printBackground: true,
+          preferCSSPageSize: true,
+          width: `${pxToMm(page.widthPx)}mm`,
+          height: `${pxToMm(page.heightPx)}mm`,
+          margin: {
+            top: `${headerMm}mm`,
+            bottom: `${footerMm}mm`,
+            left: "0mm",
+            right: "0mm",
+          },
+          timeout: 30000
+        });
 
-      const headerMm = pxToMm(page.header);
-      const footerMm = pxToMm(page.footer);
-
-      const pdfBuffer = await p.pdf({
-        printBackground: true,
-        preferCSSPageSize: true,
-        width: `${pxToMm(page.widthPx)}mm`,
-        height: `${pxToMm(page.heightPx)}mm`,
-        margin: {
-          top: `${headerMm}mm`,
-          bottom: `${footerMm}mm`,
-          left: "0mm",
-          right: "0mm",
-        },
-        scale: 1,
-        displayHeaderFooter: false,
-        timeout: 60000
-      });
-
-      const tempPdf = await PDFDocument.load(pdfBuffer);
-      const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
-      mergedPdf.addPage(copiedPage);
-      await p.close();
+        const tempPdf = await PDFDocument.load(pdfBuffer);
+        const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
+        mergedPdf.addPage(copiedPage);
+        
+      } finally {
+        if (pageInstance) {
+          await pageInstance.close().catch(console.error);
+        }
+      }
     }
 
     const mergedPdfBytes = await mergedPdf.save();
     return Buffer.from(mergedPdfBytes);
+    
   } catch (error) {
     console.error('PDF generation error:', error);
-    throw error;
+    throw new Error(`PDF generation failed: ${error.message}`);
   } finally {
     if (browser) {
-      await browser.close();
+      await browser.close().catch(console.error);
     }
   }
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
-   PDF ENDPOINTS
+   PDF ENDPOINTS FOR ALL DOCUMENT TYPES
 ────────────────────────────────────────────────────────────────────────────── */
 
 // Experience Letter
@@ -625,9 +603,7 @@ router.get("/doc-templates/:type", async (req, res) => {
     const type = normType(req.params.type);
     const tpl = await DocTemplate.findOne({ type }).lean();
     if (!tpl) return res.status(200).json({ data: null });
-    res.json({
-      data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} },
-    });
+    res.json({ data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} } });
   } catch {
     res.status(500).json({ message: "Failed to load by type" });
   }
@@ -638,17 +614,12 @@ router.post("/doc-templates/:type", async (req, res) => {
     const type = normType(req.params.type);
     const { canvas, defaultValues } = req.body || {};
     if (!canvas) return res.status(400).json({ message: "canvas is required" });
-
     const up = await DocTemplate.findOneAndUpdate(
       { type },
       { $set: { canvas, defaultValues: defaultValues || {} } },
       { upsert: true, new: true }
     ).lean();
-
-    res.json({
-      ok: true,
-      data: { canvas: up.canvas, defaultValues: up.defaultValues || {} },
-    });
+    res.json({ ok: true, data: { canvas: up.canvas, defaultValues: up.defaultValues || {} } });
   } catch {
     res.status(500).json({ message: "Failed to save by type" });
   }
@@ -657,9 +628,7 @@ router.post("/doc-templates/:type", async (req, res) => {
 router.get("/templates", async (req, res) => {
   try {
     const rows = await DocTemplate.find({}, { canvas: 1, type: 1, updatedAt: 1 })
-      .sort({ updatedAt: -1 })
-      .lean();
-
+      .sort({ updatedAt: -1 }).lean();
     const data = rows.map((r) => ({
       _id: String(r._id),
       type: r.type,
@@ -676,15 +645,7 @@ router.get("/templates/:id", async (req, res) => {
   try {
     const tpl = await DocTemplate.findById(req.params.id).lean();
     if (!tpl) return res.status(404).json({ message: "Template not found" });
-    res.json({
-      data: {
-        _id: String(tpl._id),
-        type: tpl.type,
-        canvas: tpl.canvas,
-        defaultValues: tpl.defaultValues || {},
-        updatedAt: tpl.updatedAt,
-      },
-    });
+    res.json({ data: { _id: String(tpl._id), type: tpl.type, canvas: tpl.canvas, defaultValues: tpl.defaultValues || {}, updatedAt: tpl.updatedAt } });
   } catch {
     res.status(500).json({ message: "Failed to load template" });
   }
@@ -693,14 +654,8 @@ router.get("/templates/:id", async (req, res) => {
 router.post("/templates", async (req, res) => {
   try {
     const { type, canvas, defaultValues } = req.body || {};
-    if (!type || !canvas) {
-      return res.status(400).json({ message: "`type` and `canvas` are required" });
-    }
-    const doc = await DocTemplate.create({
-      type,
-      canvas,
-      defaultValues: defaultValues || {},
-    });
+    if (!type || !canvas) return res.status(400).json({ message: "`type` and `canvas` are required" });
+    const doc = await DocTemplate.create({ type, canvas, defaultValues: defaultValues || {} });
     res.status(201).json({ ok: true, id: String(doc._id) });
   } catch {
     res.status(500).json({ message: "Failed to create template" });
@@ -714,12 +669,7 @@ router.put("/templates/:id", async (req, res) => {
     if (type) set.type = type;
     if (canvas) set.canvas = canvas;
     if (defaultValues) set.defaultValues = defaultValues;
-
-    const up = await DocTemplate.findByIdAndUpdate(
-      req.params.id,
-      { $set: set },
-      { new: true }
-    ).lean();
+    const up = await DocTemplate.findByIdAndUpdate(req.params.id, { $set: set }, { new: true }).lean();
     if (!up) return res.status(404).json({ message: "Template not found" });
     res.json({ ok: true });
   } catch {
