@@ -231,3 +231,37 @@ exports.toggleWhatsAppFlag = async (req, res) => {
     res.status(500).json({ error: "Failed to toggle WhatsApp flag" });
   }
 };
+
+exports.getWhatsAppFlags = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Authorization: same rules as view/update
+    const role = String(emp.role || "").trim().toLowerCase();
+    const authorized =
+      role === "owner" ||
+      ["manager", "team lead", "team_lead", "teamlead"].includes(role) ||
+      String(client.assignedTo) === String(emp._id);
+
+    if (!authorized) {
+      return res.status(403).json({ error: "Not authorized to view this client" });
+    }
+
+    // Return all WhatsApp flags
+    res.json({
+      isPinned: client.whatsappPinned || false,
+      isRead: client.whatsappRead || false,
+      isFavourite: client.whatsappFavourite || false,
+      isMuted: client.whatsappMuted || false,
+      isArchived: client.whatsappArchived || false,
+    });
+  } catch (err) {
+    console.error("getWhatsAppFlags error:", err);
+    res.status(500).json({ error: "Failed to fetch WhatsApp flags" });
+  }
+};

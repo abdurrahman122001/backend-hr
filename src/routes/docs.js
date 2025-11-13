@@ -272,10 +272,11 @@ function applyTokens(html, tokens) {
 
 const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 
-/** Extract ALL pages from canvas */
+/** Extract ALL pages from canvas - FIXED VERSION */
 function extractAllPages(canvas = {}) {
   const pages = [];
-  // Array form (multi-page)
+  
+  // Check for new structure (pages array directly in canvas)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -298,7 +299,30 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Flat form (single page)
+  // Fallback to old structure
+  if (Array.isArray(canvas) && canvas.length > 0) {
+    canvas.forEach((p, index) => {
+      const widthPx = num(p?.pageFormat?.width, 794);
+      const heightPx = num(p?.pageFormat?.height, 1123);
+      const header = num(p?.headerHeight ?? 0, 0);
+      const footer = num(p?.footerHeight ?? 0, 0);
+      const elements = Array.isArray(p?.elements) ? p.elements : [];
+
+      pages.push({
+        widthPx,
+        heightPx,
+        header,
+        footer,
+        elements,
+        name: p?.name || `Document Page ${index + 1}`,
+        pageNumber: index + 1,
+        totalPages: canvas.length,
+      });
+    });
+    return pages;
+  }
+
+  // Single page fallback
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);

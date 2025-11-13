@@ -23,4 +23,7 @@ router.patch(
     "/:id/toggle-whatsapp/:flag", requireAuth, clientInfoCtrl.toggleWhatsAppFlag
 );
 
+router.get("/:id/whatsapp-flags", requireAuth, clientInfoCtrl.getWhatsAppFlags);
+
+
 module.exports = router;
