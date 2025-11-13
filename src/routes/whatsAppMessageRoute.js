@@ -43,5 +43,9 @@ router.get("/:id", ctrl.getMessage);
 router.patch("/:id", ctrl.updateMessage);
 router.patch("/:id/edit", ctrl.editMessage); // Enhanced edit endpoint with approval workflow
 router.delete("/:id", ctrl.deleteMessage);
+router.patch("/:id/seen", ctrl.markAsSeen);
+router.get("/unread/counts", ctrl.getUnreadCounts);
+router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
+router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
 module.exports = router;

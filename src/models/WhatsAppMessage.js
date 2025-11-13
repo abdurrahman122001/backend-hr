@@ -42,12 +42,12 @@ const WhatsAppMessageSchema = new Schema(
 
     subject: { type: String },
     note: { type: String },
-    approvalStatus: { 
-      type: String, 
-      enum: ["pending", "approved", "disapproved"], 
-      default: null 
+    approvalStatus: {
+      type: String,
+      enum: ["pending", "approved", "disapproved"],
+      default: null
     },
-        isForwarded: { type: Boolean, default: false },
+    isForwarded: { type: Boolean, default: false },
     originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
     forwardedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
@@ -63,11 +63,14 @@ const WhatsAppMessageSchema = new Schema(
     scheduledAt: { type: Date }, // When the message was scheduled
     scheduledBy: { type: Schema.Types.ObjectId, ref: "Employee" }, // Who scheduled it
     sentAt: { type: Date }, // When it was actually sent
-    status: { 
-      type: String, 
-      enum: ["draft", "scheduled", "sent", "cancelled"], 
-      default: "sent" 
+    status: {
+      type: String,
+      enum: ["draft", "scheduled", "sent", "cancelled"],
+      default: "sent"
     },
+    seenBy: [{
+      employee: { type: Schema.Types.ObjectId, ref: "Employee" },
+    }],
 
     // Files
     attachments: [AttachmentSchema],

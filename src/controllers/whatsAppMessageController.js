@@ -63,7 +63,11 @@ async function applyVisibility(q, req) {
   if (currentUserRole === "team_lead") {
     return {
       ...q,
-      $or: [{ receiver: me }, { receiver: { $in: [me] } }],
+      $or: [
+        { sender: me },
+        { receiver: me },
+        { receiver: { $in: [me] } }
+      ],
     };
   }
 
@@ -296,7 +300,9 @@ exports.listMessages = async function listMessages(req, res) {
 
     if (isTeamLead && me) {
       // Team leads can only see messages where they are in the receiver array
-      q.$or = [{ receiver: me }, { receiver: { $in: [me] } }];
+      q.$or = [
+        { sender: me }, { receiver: me }, { receiver: { $in: [me] } }
+      ];
     } else {
       // Normal user visibility rules
       const between = normalizeIds(betweenRaw);
@@ -810,9 +816,8 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${
-        action === "send" ? "sent immediately" : "converted to draft"
-      }`,
+      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
+        }`,
       data: populated,
     });
   } catch (e) {
@@ -1022,7 +1027,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" }
     ]);
-    
+
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
@@ -1084,7 +1089,7 @@ exports.approveMessage = async function approveMessage(req, res) {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-      
+
       involvedUsersArray.forEach(userId => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
@@ -1093,7 +1098,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           approvedBy: req.employee._id,
           timestamp: new Date()
         });
-        
+
         console.log(`✅ Emitted approval to employee_${userId}`);
       });
 
@@ -1186,7 +1191,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" }
     ]);
-    
+
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
@@ -1248,7 +1253,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-      
+
       involvedUsersArray.forEach(userId => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
@@ -1257,7 +1262,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
           disapprovedBy: req.employee._id,
           timestamp: new Date()
         });
-        
+
         console.log(`✅ Emitted disapproval to employee_${userId}`);
       });
 
@@ -1321,16 +1326,16 @@ exports.editMessage = async function editMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" }
     ]);
-    
+
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     // Get current user info
     const currentUserId = String(req.employee._id);
     const currentUserRole = normalizeRole(req.employee?.role || "");
-    
+
     // 🔥 CRITICAL FIX 1: Use normalized role comparison
     const isTeamLead = currentUserRole === "team_lead";
-    
+
     // 🔥 CRITICAL FIX 2: Proper sender ID comparison
     const isSender = msg.sender && String(msg.sender._id) === currentUserId;
 
@@ -1471,13 +1476,13 @@ exports.editMessage = async function editMessage(req, res) {
     let forwardedMessage = null;
     if (hasContentChanges && isTeamLead && !isSender && msg.approvalStatus === "approved") {
       console.log("👨‍💼 Team Lead editing - auto approving and forwarding to managers");
-      
+
       const senderRole = normalizeRole(msg.sender?.role || "");
-      
+
       // ✅ Forward only if sender was an Employee under supervision
       if (senderRole === "employee") {
         const { managers } = await findTLsAndManagersByOwner(msg.owner);
-        
+
         if (managers.length > 0) {
           try {
             const forwardMsg = await WhatsAppMessage.create({
@@ -1512,7 +1517,7 @@ exports.editMessage = async function editMessage(req, res) {
             // Add forwarding info to response
             responseData.forwardedToManagers = true;
             responseData.forwardedMessage = forwardedMessage;
-            
+
           } catch (forwardError) {
             console.error("❌ Failed to forward message to managers:", forwardError);
             // Don't fail the whole request if forwarding fails
@@ -1555,7 +1560,7 @@ exports.editMessage = async function editMessage(req, res) {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-      
+
       // Emit to ALL involved users
       involvedUsersArray.forEach(userId => {
         io.to(`employee_${userId}`).emit("new_message", {
@@ -1565,7 +1570,7 @@ exports.editMessage = async function editMessage(req, res) {
           editedBy: req.employee._id,
           timestamp: new Date()
         });
-        
+
         console.log(`✅ Emitted edit to employee_${userId}`);
       });
 
@@ -1890,8 +1895,6 @@ exports.deleteAttachment = async function deleteAttachment(req, res) {
   }
 };
 
-// GET /api/assignment-messages/sent
-// Required: client (ObjectId) – only show messages the current user sent to this client
 exports.listMySentToClient = async function listMySentToClient(req, res) {
   try {
     const client = req.query.client || req.query.clientId || null;
@@ -1949,5 +1952,236 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Failed to load sent messages" });
+  }
+};
+
+exports.markAsSeen = async function markAsSeen(req, res) {
+  try {
+    const { id } = req.params;
+    const currentUserId = req.employee._id;
+
+    const msg = await WhatsAppMessage.findById(id);
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Check if user is a receiver of this message
+    const isReceiver = msg.receiver.some(receiverId =>
+      String(receiverId) === String(currentUserId)
+    );
+
+    if (!isReceiver) {
+      return res.status(403).json({ error: "You are not a receiver of this message" });
+    }
+
+    // Check if already seen
+    const alreadySeen = msg.seenBy.some(seen =>
+      String(seen.employee) === String(currentUserId)
+    );
+
+    if (!alreadySeen) {
+      // Add to seenBy array - ONLY employee field
+      msg.seenBy.push({
+        employee: currentUserId
+        // NO seenAt - only employee field as per your schema
+      });
+
+      await msg.save();
+    }
+
+    // Populate and return updated message
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName" },
+      { path: "seenBy.employee", select: "_id name companyEmail" },
+    ]);
+
+    // Emit real-time event - NO seenAt
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+
+      // Notify sender that message was seen
+      io.to(`employee_${msg.sender}`).emit("message_seen", {
+        messageId: msg._id,
+        seenBy: currentUserId
+      });
+
+      // Notify all receivers about the seen status update
+      msg.receiver.forEach(receiverId => {
+        io.to(`employee_${receiverId}`).emit("message_seen", {
+          messageId: msg._id,
+          seenBy: currentUserId
+        });
+      });
+    }
+
+    res.json({
+      message: "Message marked as seen",
+      data: populated
+    });
+
+  } catch (e) {
+    console.error("Error marking message as seen:", e);
+    res.status(500).json({ error: "Failed to mark message as seen" });
+  }
+};
+
+exports.getUnreadCounts = async function getUnreadCounts(req, res) {
+  try {
+    const currentUserId = req.employee._id;
+    const ownerId = req.employee.owner;
+
+    if (!currentUserId || !ownerId) {
+      return res.status(400).json({ error: "User information missing" });
+    }
+
+    console.log("🔍 Fetching unread counts for user:", currentUserId);
+
+    // Method 1: Simple count without aggregation (more reliable)
+    const unreadMessages = await WhatsAppMessage.find({
+      owner: ownerId,
+      receiver: currentUserId,
+      sender: { $ne: currentUserId } // Exclude own messages
+    });
+
+    console.log("📨 Total messages found:", unreadMessages.length);
+
+    // Manually count unread messages
+    let totalUnread = 0;
+    unreadMessages.forEach(message => {
+      const isSeen = message.seenBy.some(seen => 
+        String(seen.employee) === String(currentUserId)
+      );
+      if (!isSeen) {
+        totalUnread++;
+      }
+    });
+
+    console.log("📊 Final unread count:", totalUnread);
+
+    res.json({
+      totalUnreadCount: totalUnread,
+      message: `You have ${totalUnread} unread message${totalUnread !== 1 ? 's' : ''}`
+    });
+
+  } catch (e) {
+    console.error("Error fetching unread counts:", e);
+    res.status(500).json({ error: "Failed to fetch unread counts" });
+  }
+};
+
+exports.getClientMessagesSeenStatus = async function getClientMessagesSeenStatus(req, res) {
+  try {
+    const { clientId } = req.params;
+    const currentUserId = req.employee._id;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID required" });
+    }
+
+    // Get all messages for this client where current user is a receiver
+    const messages = await WhatsAppMessage.find({
+      client: clientId,
+      receiver: currentUserId,
+      // Exclude messages sent by current user
+      sender: { $ne: currentUserId }
+    }).select('_id seenBy');
+
+    // Check if any message is unread
+    const hasUnreadMessages = messages.some(message => 
+      !message.seenBy.some(seen => 
+        String(seen.employee) === String(currentUserId)
+      )
+    );
+
+    res.json({
+      clientId,
+      hasUnreadMessages,
+      totalMessages: messages.length,
+      unreadCount: messages.filter(message => 
+        !message.seenBy.some(seen => 
+          String(seen.employee) === String(currentUserId)
+        )
+      ).length
+    });
+  } catch (e) {
+    console.error("Error fetching seen status:", e);
+    res.status(500).json({ error: "Failed to fetch seen status" });
+  }
+};
+
+exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
+  try {
+    const { clientId } = req.params;
+    const currentUserId = req.employee._id;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Valid client ID required" });
+    }
+
+    // Find all unread messages for this client where current user is a receiver
+    const unreadMessages = await WhatsAppMessage.find({
+      client: clientId,
+      receiver: currentUserId,
+      sender: { $ne: currentUserId }, // Exclude own messages
+      "seenBy.employee": { $ne: currentUserId } // Not already seen
+    });
+
+    console.log(`👀 Marking ${unreadMessages.length} messages as seen for user ${currentUserId}`);
+
+    // Mark each message as seen
+    const updatePromises = unreadMessages.map(async (message) => {
+      // Check if user already seen this message (double check)
+      const alreadySeen = message.seenBy.some(seen => 
+        String(seen.employee) === String(currentUserId)
+      );
+      
+      if (!alreadySeen) {
+        message.seenBy.push({
+          employee: currentUserId
+          // NO seenAt - only employee field as per your schema
+        });
+        return message.save();
+      }
+    });
+
+    await Promise.all(updatePromises);
+
+    // Emit real-time event for all updated messages
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      
+      unreadMessages.forEach(message => {
+        // Notify sender that their messages were seen
+        io.to(`employee_${message.sender}`).emit("messages_seen", {
+          messageId: message._id,
+          seenBy: currentUserId,
+          clientId: clientId,
+          seenAt: new Date()
+        });
+
+        // Notify all receivers about the seen status update
+        message.receiver.forEach(receiverId => {
+          io.to(`employee_${receiverId}`).emit("messages_seen", {
+            messageId: message._id,
+            seenBy: currentUserId,
+            clientId: clientId
+          });
+        });
+      });
+    }
+
+    res.json({
+      success: true,
+      clientId,
+      markedAsSeen: unreadMessages.length,
+      message: `Marked ${unreadMessages.length} messages as seen`
+    });
+
+  } catch (e) {
+    console.error("Error marking messages as seen:", e);
+    res.status(500).json({ error: "Failed to mark messages as seen" });
   }
 };
