@@ -289,6 +289,14 @@ const conversationSchema = new mongoose.Schema(
         ref: "Employee",
       },
     ],
+      mutedBy: [{
+    employee: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Employee'
+    },
+    mutedAt: Date,
+    muteExpiresAt: Date
+  }],
   },
   {
     timestamps: true,
@@ -307,7 +315,32 @@ conversationSchema.methods.getUserPin = function (userId) {
     (pin) => pin.employee.toString() === userId.toString()
   );
 };
+conversationSchema.path('mutedBy').default([]);
 
+// Add helper method to check if conversation is muted by a user
+conversationSchema.methods.isMutedBy = function(employeeId) {
+  if (!this.mutedBy || !Array.isArray(this.mutedBy)) {
+    return false;
+  }
+  
+  const mute = this.mutedBy.find(mute => 
+    mute.employee.toString() === employeeId.toString()
+  );
+  
+  if (!mute) return false;
+  
+  // Check if mute has expired
+  if (mute.muteExpiresAt && new Date() > mute.muteExpiresAt) {
+    // Remove expired mute
+    this.mutedBy = this.mutedBy.filter(m => 
+      m.employee.toString() !== employeeId.toString()
+    );
+    this.save(); // Save the update
+    return false;
+  }
+  
+  return true;
+};
 const spaceSchema = new mongoose.Schema(
   {
     name: {

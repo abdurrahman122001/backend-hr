@@ -423,6 +423,7 @@ exports.getDirectMessages = async (req, res) => {
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
+      .populate("mutedBy.employee", "name companyEmail") // ✅ ADD: Populate mutedBy
       .sort({ updatedAt: -1 });
 
     // ✅ FIXED: Proper pinned status handling
@@ -433,6 +434,14 @@ exports.getDirectMessages = async (req, res) => {
           ? pin.employee._id.toString()
           : pin.employee.toString();
         return pinEmployeeId === req.employee._id.toString();
+      });
+      const isMuted = conv.isMutedBy(req.employee._id);
+      const userMute = conv.mutedBy.find((mute) => {
+        if (!mute.employee) return false;
+        const muteEmployeeId = mute.employee._id
+          ? mute.employee._id.toString()
+          : mute.employee.toString();
+        return muteEmployeeId === req.employee._id.toString();
       });
 
       return {
@@ -445,6 +454,8 @@ exports.getDirectMessages = async (req, res) => {
         updatedAt: conv.updatedAt,
         isPinned: !!userPin, // ✅ Proper boolean conversion
         pinnedAt: userPin ? userPin.pinnedAt : null,
+        isMuted: isMuted, // ✅ Add mute status
+        muteExpiresAt: userMute ? userMute.muteExpiresAt : null, // ✅ Add mute expiration
         type: "dm",
       };
     });
@@ -6403,6 +6414,140 @@ exports.getMessageViews = async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to fetch message views",
+    });
+  }
+};
+// ✅ MUTE CONVERSATION
+exports.muteConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { muteDuration } = req.body; // muteDuration in hours
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Calculate mute expiration time (default 8 hours)
+    const muteExpiresAt = new Date(
+      Date.now() + (muteDuration || 8) * 60 * 60 * 1000
+    );
+
+    // Initialize mutedBy if it doesn't exist
+    if (!conversation.mutedBy) {
+      conversation.mutedBy = [];
+    }
+
+    // Remove existing mute if exists
+    conversation.mutedBy = conversation.mutedBy.filter(
+      (mute) => mute.employee.toString() !== req.employee._id.toString()
+    );
+
+    // Add new mute
+    conversation.mutedBy.push({
+      employee: req.employee._id,
+      mutedAt: new Date(),
+      muteExpiresAt: muteExpiresAt,
+    });
+
+    await conversation.save();
+
+    // ✅ EMIT SOCKET EVENT FOR MUTE
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation_${conversationId}`).emit("conversation_muted", {
+        conversationId,
+        mutedBy: req.employee._id,
+        muteExpiresAt: muteExpiresAt,
+        mutedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation muted successfully",
+      muteExpiresAt: muteExpiresAt,
+      isMuted: true,
+    });
+  } catch (error) {
+    console.error("Mute conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to mute conversation",
+    });
+  }
+};
+
+// ✅ UNMUTE CONVERSATION
+exports.unmuteConversation = async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(conversationId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid conversation ID",
+      });
+    }
+
+    const conversation = await Conversation.findOne({
+      _id: conversationId,
+      participants: req.employee._id,
+    });
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        error: "Conversation not found",
+      });
+    }
+
+    // Initialize mutedBy if it doesn't exist
+    if (!conversation.mutedBy) {
+      conversation.mutedBy = [];
+    }
+
+    // Remove user from mutedBy array
+    conversation.mutedBy = conversation.mutedBy.filter(
+      (mute) => mute.employee.toString() !== req.employee._id.toString()
+    );
+
+    await conversation.save();
+
+    // ✅ EMIT SOCKET EVENT FOR UNMUTE
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`conversation_${conversationId}`).emit("conversation_unmuted", {
+        conversationId,
+        unmutedBy: req.employee._id,
+        unmutedAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Conversation unmuted successfully",
+      isMuted: false,
+    });
+  } catch (error) {
+    console.error("Unmute conversation error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unmute conversation",
     });
   }
 };

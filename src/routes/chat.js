@@ -106,7 +106,9 @@ router.post("/typing", empAuth, chatController.typing);
 router.put("/conversations/:conversationId/unread", empAuth, chatController.markAsUnread);
 router.put("/spaces/:spaceId/unread", empAuth, chatController.spaceMarkAsUnread);
 router.put("/spaces/:spaceId/read", empAuth, chatController.spaceMarkAsRead);
-
+// Add to your chat routes
+router.post('/conversations/:conversationId/mute', empAuth, chatController.muteConversation);
+router.post('/conversations/:conversationId/unmute', empAuth, chatController.unmuteConversation);
 // Block functionality
 router.post("/block", empAuth, chatController.blockUser);
 router.post("/unblock", empAuth, chatController.unblockUser);
