@@ -160,12 +160,72 @@ const messageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // ✅ ADDED: View tracking for space messages
+    viewCount: {
+      type: Number,
+      default: 0,
+    },
+    viewedBy: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        viewedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
   },
   {
     timestamps: true,
   }
 );
 
+// ✅ ADDED: Method to check if message is viewed by a specific employee
+messageSchema.methods.isViewedBy = function (employeeId) {
+  return this.viewedBy.some(
+    (view) => view.employee.toString() === employeeId.toString()
+  );
+};
+
+// ✅ ADDED: Method to add view for space messages
+messageSchema.methods.addView = async function (employeeId) {
+  // Only add view if it's a space message and not already viewed by this user
+  if ((this.space || this.isGroupMessage) && !this.isViewedBy(employeeId)) {
+    this.viewedBy.push({
+      employee: employeeId,
+      viewedAt: new Date(),
+    });
+    this.viewCount += 1;
+    await this.save();
+    return true;
+  }
+  return false;
+};
+
+// ✅ ADDED: Static method to get message views
+messageSchema.statics.getMessageViews = async function (messageId, employeeId) {
+  const message = await this.findById(messageId)
+    .populate("viewedBy.employee", "name companyEmail avatar photographUrl")
+    .select("viewCount viewedBy space isGroupMessage");
+
+  if (!message) {
+    throw new Error("Message not found");
+  }
+
+  const isSpaceMessage = message.space || message.isGroupMessage;
+  const currentUserViewed = message.isViewedBy(employeeId);
+
+  return {
+    viewCount: message.viewCount,
+    viewedBy: message.viewedBy,
+    currentUserViewed,
+    isSpaceMessage,
+  };
+};
 const conversationSchema = new mongoose.Schema(
   {
     participants: [
@@ -234,6 +294,19 @@ const conversationSchema = new mongoose.Schema(
     timestamps: true,
   }
 );
+// Add this to your Conversation schema methods
+conversationSchema.methods.isPinnedBy = function (userId) {
+  return this.pinnedBy.some(
+    (pin) => pin.employee.toString() === userId.toString()
+  );
+};
+
+// Add this to your Conversation model if not already present
+conversationSchema.methods.getUserPin = function (userId) {
+  return this.pinnedBy.find(
+    (pin) => pin.employee.toString() === userId.toString()
+  );
+};
 
 const spaceSchema = new mongoose.Schema(
   {

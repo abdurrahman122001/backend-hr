@@ -4,7 +4,7 @@ const chatController = require("../controllers/chatController");
 const empAuth = require("../middleware/empAuth");
 
 // ✅ IMPORTANT: Import multer configuration from chatController
-const upload = chatController.upload; // This gets the configured multer instance
+const upload = chatController.upload;
 
 // Search and basic routes
 router.get("/search", empAuth, chatController.searchMessages);
@@ -18,11 +18,22 @@ router.get("/conversations/:conversationId/messages", empAuth, chatController.ge
 router.post('/messages/:messageId/star', empAuth, chatController.starMessage);
 router.delete('/messages/:messageId/unstar', empAuth, chatController.unstarMessage);
 router.get('/messages/starred', empAuth, chatController.getStarredMessages);
+router.get('/messages/:messageId/views', empAuth, chatController.getMessageViews);
 
+// Message pinning routes
 router.post('/conversations/:conversationId/messages/:messageId/pin', empAuth, chatController.pinMessage);
 router.delete('/conversations/:conversationId/messages/:messageId/unpin', empAuth, chatController.unpinMessage);
 router.get('/conversations/:conversationId/pinned-messages', empAuth, chatController.getPinnedMessages);
 
+// ✅ ADDED: Global pinned messages route (across all conversations)
+router.get('/pinned-messages/all', empAuth, chatController.getAllPinnedMessages);
+
+// ✅ ADDED: Conversation pinning routes
+router.post('/conversations/:conversationId/pin', empAuth, chatController.pinConversation);
+router.delete('/conversations/:conversationId/unpin', empAuth, chatController.unpinConversation);
+router.get("/conversations/pinned", empAuth, chatController.getPinnedConversations);
+
+// Rest of your existing routes...
 router.delete("/conversations/:conversationId", empAuth, chatController.deleteConversation);
 router.post("/conversations/start", empAuth, chatController.startConversation);
 
@@ -40,11 +51,13 @@ router.get("/conversations/hidden", empAuth, chatController.getHiddenConversatio
 router.post(
   "/messages/direct",
   empAuth,
-  upload.array("attachments", 10), // Use the imported upload instance
+  upload.array("attachments", 10),
   chatController.sendDirectMessage
 );
-router.get('/mentions/messages',empAuth, chatController.getMentionedMessages);
-router.get('/mentions/unread-count',empAuth, chatController.getUnreadMentionsCount);
+
+router.get('/mentions/messages', empAuth, chatController.getMentionedMessages);
+router.get('/mentions/unread-count', empAuth, chatController.getUnreadMentionsCount);
+
 // File serving
 router.get("/uploads/:filename", chatController.serveFile);
 
@@ -75,11 +88,10 @@ router.get("/spaces/:spaceId/details", empAuth, chatController.getSpaceDetails);
 router.post("/spaces/:spaceId/leave", empAuth, chatController.leaveSpace);
 router.post("/spaces/:spaceId/transfer-ownership", empAuth, chatController.transferSpaceOwnership);
 
-// ✅ FIXED: Space messages with proper upload middleware
 router.post(
   "/spaces/:spaceId/messages",
   empAuth,
-  upload.array("attachments", 10), // Use the imported upload instance
+  upload.array("attachments", 10),
   chatController.sendSpaceMessage
 );
 
@@ -107,25 +119,15 @@ router.post("/messages/:messageId/reactions", empAuth, chatController.addReactio
 router.get("/messages/:messageId/reactions", empAuth, chatController.getMessageReactions);
 router.delete("/messages/:messageId", empAuth, chatController.deleteSingleMessage);
 
-// ✅ FIXED: Message update with proper upload middleware
 router.put(
   "/messages/:messageId",
   empAuth,
-  upload.array("files", 10), // Use the imported upload instance
+  upload.array("files", 10),
   chatController.updateMessage
 );
 
-// Conversation pinning
-router.post('/conversations/:conversationId/messages/:messageId/pin', 
-  express.json(), // Add this line
-  empAuth, 
-  chatController.pinMessage
-);
-router.delete('/conversations/:conversationId/messages/:messageId/unpin', 
-  express.json(), // Add this line if you need body data for unpin
-  empAuth, 
-  chatController.unpinMessage
-);
-router.get("/conversations/pinned", empAuth, chatController.getPinnedConversations);
+// File upload routes
+router.post("/upload", empAuth, chatController.uploadFile);
+router.post("/upload-multiple", empAuth, chatController.uploadFiles);
 
 module.exports = router;

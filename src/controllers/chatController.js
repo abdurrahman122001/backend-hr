@@ -14,9 +14,9 @@ const storage = multer.diskStorage({
   },
   filename(req, file, cb) {
     // keep original name, add 3 random chars to avoid collisions
-    const base  = path.parse(file.originalname).name;        // name without ext
-    const ext   = path.extname(file.originalname);           // includes the dot
-    const uniq  = Math.random().toString(36).slice(-3);      // short random bit
+    const base = path.parse(file.originalname).name; // name without ext
+    const ext = path.extname(file.originalname); // includes the dot
+    const uniq = Math.random().toString(36).slice(-3); // short random bit
     cb(null, `${base}-${uniq}${ext}`);
   },
 });
@@ -265,15 +265,13 @@ exports.uploadFiles = async (req, res) => {
     });
   }
 };
-
-// ✅ UPDATE THIS: getConversations function to include pinned conversations
 exports.getConversations = async (req, res) => {
   try {
     // Get direct conversations - UPDATED to include pinned status
     const conversations = await Conversation.find({
       participants: req.employee._id,
       isGroup: false,
-      space: { $exists: false }, // This should exclude spaces, but might not be working
+      space: { $exists: false },
       archivedBy: { $ne: req.employee._id },
     })
       .populate("participants", "name companyEmail avatar photographUrl")
@@ -286,7 +284,7 @@ exports.getConversations = async (req, res) => {
       participants: req.employee._id,
       isGroup: true,
       archivedBy: { $ne: req.employee._id },
-      hiddenBy: { $ne: req.employee._id }, // ✅ EXCLUDE HIDDEN CONVERSATIONS
+      hiddenBy: { $ne: req.employee._id },
       space: { $exists: true },
     })
       .populate("participants", "name companyEmail avatar photographUrl")
@@ -312,20 +310,24 @@ exports.getConversations = async (req, res) => {
     // Process direct messages
     conversations.forEach((conv) => {
       const isPinned = conv.isPinnedBy(req.employee._id);
+      const userPin = conv.pinnedBy?.find((pin) => {
+        if (!pin.employee) return false;
+        const pinEmployeeId = pin.employee._id
+          ? pin.employee._id.toString()
+          : pin.employee.toString();
+        return pinEmployeeId === req.employee._id.toString();
+      });
+
       const conversationData = {
         _id: conv._id,
         participants: conv.participants.filter(
           (p) => p._id.toString() !== req.employee._id.toString()
         ),
         lastMessage: conv.lastMessage,
-        unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+        unreadCount: conv.unreadCount?.get(req.employee._id.toString()) || 0,
         updatedAt: conv.updatedAt,
         isPinned: isPinned,
-        pinnedAt: isPinned
-          ? conv.pinnedBy.find(
-              (pin) => pin.employee.toString() === req.employee._id.toString()
-            )?.pinnedAt
-          : null,
+        pinnedAt: userPin ? userPin.pinnedAt : null,
         type: "dm",
       };
 
@@ -339,23 +341,27 @@ exports.getConversations = async (req, res) => {
     // Process group conversations (spaces)
     groupConversations.forEach((conv) => {
       const isPinned = conv.isPinnedBy(req.employee._id);
+      const userPin = conv.pinnedBy?.find((pin) => {
+        if (!pin.employee) return false;
+        const pinEmployeeId = pin.employee._id
+          ? pin.employee._id.toString()
+          : pin.employee.toString();
+        return pinEmployeeId === req.employee._id.toString();
+      });
+
       const conversationData = {
         _id: conv._id,
         participants: conv.participants,
         lastMessage: conv.lastMessage,
-        unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+        unreadCount: conv.unreadCount?.get(req.employee._id.toString()) || 0,
         updatedAt: conv.updatedAt,
         groupName: conv.groupName,
         groupDescription: conv.groupDescription,
         groupAvatar: conv.groupAvatar,
         admins: conv.admins,
-        space: conv.space, // ✅ Include space reference
+        space: conv.space,
         isPinned: isPinned,
-        pinnedAt: isPinned
-          ? conv.pinnedBy.find(
-              (pin) => pin.employee.toString() === req.employee._id.toString()
-            )?.pinnedAt
-          : null,
+        pinnedAt: userPin ? userPin.pinnedAt : null,
         type: "group",
       };
 
@@ -368,7 +374,7 @@ exports.getConversations = async (req, res) => {
 
     // Sort pinned conversations by pinnedAt (newest first)
     pinnedConversations.sort(
-      (a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)
+      (a, b) => new Date(b.pinnedAt || 0) - new Date(a.pinnedAt || 0)
     );
 
     // Sort unpinned conversations by updatedAt (newest first)
@@ -392,7 +398,7 @@ exports.getConversations = async (req, res) => {
         members: space.members,
         isPrivate: space.isPrivate,
         memberCount: space.members.length,
-        unreadCount: 0, // You might want to calculate this
+        unreadCount: 0,
         type: "space",
       })),
       pinnedCount: pinnedConversations.length,
@@ -407,73 +413,61 @@ exports.getConversations = async (req, res) => {
 
 exports.getDirectMessages = async (req, res) => {
   try {
-    // ✅ STRICTLY get only direct messages (non-group, non-space)
     const conversations = await Conversation.find({
       participants: req.employee._id,
-      isGroup: false, // Must be false for direct messages
-      space: { $exists: false }, // Must not have space reference
-      archivedBy: { $ne: req.employee._id }, // Exclude archived conversations
-      hiddenBy: { $ne: req.employee._id }, // Exclude hidden conversations
+      isGroup: false,
+      space: { $exists: false },
+      archivedBy: { $ne: req.employee._id },
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
       .sort({ updatedAt: -1 });
 
-    console.log(
-      `📨 Found ${conversations.length} direct messages for user ${req.employee._id}`
-    );
+    // ✅ FIXED: Proper pinned status handling
+    const formattedConversations = conversations.map((conv) => {
+      const userPin = conv.pinnedBy.find((pin) => {
+        if (!pin.employee) return false;
+        const pinEmployeeId = pin.employee._id
+          ? pin.employee._id.toString()
+          : pin.employee.toString();
+        return pinEmployeeId === req.employee._id.toString();
+      });
 
-    // Debug: Log conversation types to verify filtering
-    conversations.forEach((conv) => {
-      console.log(
-        `🔍 Conversation ${conv._id}: isGroup=${
-          conv.isGroup
-        }, hasSpace=${!!conv.space}, participants=${conv.participants.length}`
-      );
-    });
-
-    // Separate pinned and unpinned conversations
-    const pinnedConversations = [];
-    const unpinnedConversations = [];
-
-    conversations.forEach((conv) => {
-      const isPinned = conv.isPinnedBy(req.employee._id);
-      const conversationData = {
+      return {
         _id: conv._id,
         participants: conv.participants.filter(
           (p) => p._id.toString() !== req.employee._id.toString()
         ),
         lastMessage: conv.lastMessage,
-        unreadCount: conv.unreadCount.get(req.employee._id.toString()) || 0,
+        unreadCount: conv.unreadCount?.get(req.employee._id.toString()) || 0,
         updatedAt: conv.updatedAt,
-        isPinned: isPinned,
-        pinnedAt: isPinned
-          ? conv.pinnedBy.find(
-              (pin) => pin.employee.toString() === req.employee._id.toString()
-            )?.pinnedAt
-          : null,
+        isPinned: !!userPin, // ✅ Proper boolean conversion
+        pinnedAt: userPin ? userPin.pinnedAt : null,
         type: "dm",
       };
-
-      if (isPinned) {
-        pinnedConversations.push(conversationData);
-      } else {
-        unpinnedConversations.push(conversationData);
-      }
     });
 
-    // Sort pinned conversations by pinnedAt (newest first)
-    pinnedConversations.sort(
-      (a, b) => new Date(b.pinnedAt) - new Date(a.pinnedAt)
+    // Separate pinned and unpinned
+    const pinnedConversations = formattedConversations.filter(
+      (conv) => conv.isPinned
+    );
+    const unpinnedConversations = formattedConversations.filter(
+      (conv) => !conv.isPinned
     );
 
-    // Sort unpinned conversations by updatedAt (newest first)
+    // Sort pinned by pinnedAt (newest first)
+    pinnedConversations.sort(
+      (a, b) => new Date(b.pinnedAt || 0) - new Date(a.pinnedAt || 0)
+    );
+
+    // Sort unpinned by updatedAt (newest first)
     unpinnedConversations.sort(
       (a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)
     );
 
-    // Combine pinned (first) and unpinned (after)
+    // Combine
     const allConversations = [...pinnedConversations, ...unpinnedConversations];
 
     res.json({
@@ -489,6 +483,7 @@ exports.getDirectMessages = async (req, res) => {
       .json({ success: false, error: "Failed to fetch direct messages" });
   }
 };
+
 // ✅ GET SPACE CONVERSATIONS ONLY
 exports.getSpaceConversations = async (req, res) => {
   try {
@@ -4601,7 +4596,6 @@ exports.checkBlockStatus = async (req, res) => {
     });
   }
 };
-// Pin conversation
 exports.pinConversation = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -4626,10 +4620,36 @@ exports.pinConversation = async (req, res) => {
     }
 
     // Check if already pinned
-    if (conversation.isPinnedBy(req.employee._id)) {
-      return res.status(400).json({
-        success: false,
-        error: "Conversation is already pinned",
+    const isAlreadyPinned = conversation.pinnedBy.some(
+      (pin) => pin.employee.toString() === req.employee._id.toString()
+    );
+
+    if (isAlreadyPinned) {
+      // Return success with current state instead of error
+      const updatedConversation = await Conversation.findById(conversationId)
+        .populate("participants", "name companyEmail avatar photographUrl")
+        .populate("lastMessage")
+        .populate("pinnedBy.employee", "name companyEmail");
+
+      return res.json({
+        success: true,
+        message: "Conversation is already pinned",
+        conversation: {
+          _id: updatedConversation._id,
+          participants: updatedConversation.participants.filter(
+            (p) => p._id.toString() !== req.employee._id.toString()
+          ),
+          lastMessage: updatedConversation.lastMessage,
+          unreadCount:
+            updatedConversation.unreadCount?.get(req.employee._id.toString()) ||
+            0,
+          updatedAt: updatedConversation.updatedAt,
+          isPinned: true,
+          pinnedAt: conversation.pinnedBy.find(
+            (pin) => pin.employee.toString() === req.employee._id.toString()
+          )?.pinnedAt,
+          type: updatedConversation.isGroup ? "group" : "dm",
+        },
       });
     }
 
@@ -4667,10 +4687,12 @@ exports.pinConversation = async (req, res) => {
         ),
         lastMessage: updatedConversation.lastMessage,
         unreadCount:
-          updatedConversation.unreadCount.get(req.employee._id.toString()) || 0,
+          updatedConversation.unreadCount?.get(req.employee._id.toString()) ||
+          0,
         updatedAt: updatedConversation.updatedAt,
         isPinned: true,
         pinnedAt: new Date(),
+        type: updatedConversation.isGroup ? "group" : "dm",
       },
     });
   } catch (error) {
@@ -4683,7 +4705,6 @@ exports.pinConversation = async (req, res) => {
   }
 };
 
-// Unpin conversation
 exports.unpinConversation = async (req, res) => {
   try {
     const { conversationId } = req.params;
@@ -4708,7 +4729,11 @@ exports.unpinConversation = async (req, res) => {
     }
 
     // Check if actually pinned
-    if (!conversation.isPinnedBy(req.employee._id)) {
+    const isPinned = conversation.pinnedBy.some(
+      (pin) => pin.employee.toString() === req.employee._id.toString()
+    );
+
+    if (!isPinned) {
       return res.status(400).json({
         success: false,
         error: "Conversation is not pinned",
@@ -4747,9 +4772,11 @@ exports.unpinConversation = async (req, res) => {
         ),
         lastMessage: updatedConversation.lastMessage,
         unreadCount:
-          updatedConversation.unreadCount.get(req.employee._id.toString()) || 0,
+          updatedConversation.unreadCount?.get(req.employee._id.toString()) ||
+          0,
         updatedAt: updatedConversation.updatedAt,
         isPinned: false,
+        type: updatedConversation.isGroup ? "group" : "dm",
       },
     });
   } catch (error) {
@@ -4761,7 +4788,6 @@ exports.unpinConversation = async (req, res) => {
     });
   }
 };
-
 // ✅ GET PINNED CONVERSATIONS ONLY
 exports.getPinnedConversations = async (req, res) => {
   try {
@@ -6312,6 +6338,71 @@ exports.getUnreadMentionsCount = async (req, res) => {
       success: false,
       error: "Failed to get unread mentions count",
       details: error.message,
+    });
+  }
+};
+exports.getMessageViews = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    // ✅ PROPER VALIDATION
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid message ID format",
+      });
+    }
+
+    const message = await Message.findById(messageId)
+      .populate("conversation", "space")
+      .populate("viewedBy.employee", "name companyEmail avatar photographUrl");
+
+    if (!message) {
+      return res.status(404).json({
+        success: false,
+        error: "Message not found",
+      });
+    }
+
+    // Check if it's a space message
+    const isSpaceMessage = message.conversation?.space;
+
+    if (!isSpaceMessage) {
+      return res.status(400).json({
+        success: false,
+        error: "View tracking is only available for space messages",
+      });
+    }
+
+    // Check if user has access to the space
+    const space = await Space.findOne({
+      _id: message.conversation.space,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied to this space",
+      });
+    }
+
+    res.json({
+      success: true,
+      views: {
+        viewCount: message.viewCount || 0,
+        viewedBy: message.viewedBy || [],
+        currentUserViewed: message.viewedBy.some(
+          (view) => view.employee._id.toString() === req.employee._id.toString()
+        ),
+      },
+      isSpaceMessage: true,
+    });
+  } catch (error) {
+    console.error("Get message views error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch message views",
     });
   }
 };

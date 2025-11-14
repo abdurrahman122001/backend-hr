@@ -374,6 +374,8 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
+          { path: "repliedTo", select: "_id note message sender attachments" },
+          { path: "replyContent.originalSender", select: "_id name companyEmail" },
         ])
         .lean(),
       WhatsAppMessage.countDocuments(qFinal),
@@ -479,6 +481,8 @@ exports.listMessagesForManager = async function listMessagesForManager(
         { path: "receiver", select: "_id name companyEmail role" },
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        { path: "repliedTo", select: "_id note message sender attachments" },
+        { path: "replyContent.originalSender", select: "_id name companyEmail" },
       ])
       .lean();
 
@@ -502,6 +506,9 @@ exports.createMessage = async function createMessage(req, res) {
       note,
       isScheduled: isScheduledBody,
       scheduledFor,
+      isReply,
+      repliedTo,
+      replyContent
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -635,6 +642,9 @@ exports.createMessage = async function createMessage(req, res) {
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
+      isReply: isReply || false,
+      repliedTo: isReply ? repliedTo : null,
+      replyContent: isReply ? replyContent : null,
     };
 
     const msg = await WhatsAppMessage.create(msgData);
@@ -645,6 +655,8 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName assignedTo" },
       { path: "scheduledBy", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
     // FIXED: Emit real-time events ONLY to relevant users
@@ -2051,7 +2063,7 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
     // Manually count unread messages
     let totalUnread = 0;
     unreadMessages.forEach(message => {
-      const isSeen = message.seenBy.some(seen => 
+      const isSeen = message.seenBy.some(seen =>
         String(seen.employee) === String(currentUserId)
       );
       if (!isSeen) {
@@ -2090,8 +2102,8 @@ exports.getClientMessagesSeenStatus = async function getClientMessagesSeenStatus
     }).select('_id seenBy');
 
     // Check if any message is unread
-    const hasUnreadMessages = messages.some(message => 
-      !message.seenBy.some(seen => 
+    const hasUnreadMessages = messages.some(message =>
+      !message.seenBy.some(seen =>
         String(seen.employee) === String(currentUserId)
       )
     );
@@ -2100,8 +2112,8 @@ exports.getClientMessagesSeenStatus = async function getClientMessagesSeenStatus
       clientId,
       hasUnreadMessages,
       totalMessages: messages.length,
-      unreadCount: messages.filter(message => 
-        !message.seenBy.some(seen => 
+      unreadCount: messages.filter(message =>
+        !message.seenBy.some(seen =>
           String(seen.employee) === String(currentUserId)
         )
       ).length
@@ -2134,10 +2146,10 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
     // Mark each message as seen
     const updatePromises = unreadMessages.map(async (message) => {
       // Check if user already seen this message (double check)
-      const alreadySeen = message.seenBy.some(seen => 
+      const alreadySeen = message.seenBy.some(seen =>
         String(seen.employee) === String(currentUserId)
       );
-      
+
       if (!alreadySeen) {
         message.seenBy.push({
           employee: currentUserId
@@ -2152,7 +2164,7 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
     // Emit real-time event for all updated messages
     if (req.app.get("io")) {
       const io = req.app.get("io");
-      
+
       unreadMessages.forEach(message => {
         // Notify sender that their messages were seen
         io.to(`employee_${message.sender}`).emit("messages_seen", {

@@ -71,6 +71,18 @@ const WhatsAppMessageSchema = new Schema(
     seenBy: [{
       employee: { type: Schema.Types.ObjectId, ref: "Employee" },
     }],
+    isReply: { type: Boolean, default: false },
+    repliedTo: {
+      type: Schema.Types.ObjectId,
+      ref: "WhatsAppMessage",
+      default: null
+    },
+    replyContent: {
+      originalMessage: String,
+      originalSender: { type: Schema.Types.ObjectId, ref: "Employee" },
+      originalAttachments: [AttachmentSchema],
+      preview: String // Short preview of the original message
+    },
 
     // Files
     attachments: [AttachmentSchema],

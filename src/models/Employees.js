@@ -97,6 +97,8 @@ const EmployeeSchema = new Schema(
         reason: String,
       },
     ],
+    noticePeriod: { type: Number, default: 0 },
+
     // LEAVE ENTITLEMENT
     leaveEntitlement: {
       total: { type: Number, default: 22 },

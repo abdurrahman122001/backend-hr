@@ -78,6 +78,8 @@ const offerEmail = require("./routes/offerEmail");
 const eventRoutes = require("./routes/eventRoutes");
 const upcomingEventsRoutes = require("./routes/upcomingEvents");
 const anniversariesRoute = require("./routes/anniversariesRoute");
+const noticePeriodRouter = require("./routes/noticePeriodRoute");
+
 const app = express();
 
 // ---------- Static ----------
@@ -223,6 +225,8 @@ app.use("/api/offer-email" , requireAuth, offerEmail)
 app.use("/api/events", requireAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
 app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
+app.use("/api/notice-period", requireAuth, noticePeriodRouter);
+
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
