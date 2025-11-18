@@ -5,10 +5,9 @@ const {
   getMyPolicy,
   deleteMyPolicy,
 } = require("../controllers/hrPolicyController");
-const requireAuth = require("../middleware/auth");
 
-router.post("/", requireAuth, saveOrUpdatePolicy);
-router.get("/", requireAuth, getMyPolicy);
-router.delete("/", requireAuth, deleteMyPolicy);
+router.post("/", saveOrUpdatePolicy);
+router.get("/", getMyPolicy);
+router.delete("/", deleteMyPolicy);
 
 module.exports = router;

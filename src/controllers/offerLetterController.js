@@ -21,10 +21,10 @@ const transporter = nodemailer.createTransport({
 
 /* ----------------------------- Env Fallbacks ------------------------------ */
 const FALLBACKS = {
-  name: process.env.COMPANY_NAME || "Mavens Advisors",
-  email: process.env.COMPANY_EMAIL || "HR@mavensadvisor.com",
-  phone: process.env.COMPANY_CONTACT || "+92 312 3850846",
-  website: process.env.COMPANY_WEBSITE || "www.mavensadvisor.com",
+  name: "Mavens",
+  email: "HR@mavensadvisor.com",
+  phone: "+92 312 3850846",
+  website: "www.mavensadvisor.com",
   address: "GULSHAN-E-MAYMAR, KARACHI",
 };
 
@@ -53,23 +53,47 @@ const SALARY_COMPONENTS = [
 
 /* ----------------------------- Helper: Company ---------------------------- */
 async function getCompanyContext(ownerId) {
-  let companyDoc = null;
   try {
-    companyDoc = await CompanyProfile.findOne(
-      { owner: ownerId },
-      { name: 1, email: 1, phone: 1, website: 1, address: 1 }
-    ).lean();
-  } catch (_) {}
-  const name = (companyDoc?.name || "").trim() || FALLBACKS.name;
-  const email = (companyDoc?.email || "").trim() || FALLBACKS.email;
-  const phone = (companyDoc?.phone || "").trim() || FALLBACKS.phone;
-  const website = (companyDoc?.website || "").trim() || FALLBACKS.website;
-  const address =
-    (companyDoc?.address && String(companyDoc.address).trim()) ||
-    FALLBACKS.address;
-  return { name, email, phone, website, address };
-}
+    console.log("🔍 DEBUG: Fetching company profile for owner:", ownerId);
+    
+    const companyDoc = await CompanyProfile.findOne({ owner: ownerId })
+      .select('name email website branches')
+      .lean();
+    
+    console.log("🔍 DEBUG: Company Profile Found:", companyDoc);
+    
+    if (!companyDoc) {
+      console.log("❌ No company profile found, using fallbacks");
+      return FALLBACKS;
+    }
 
+    // Extract branch information
+    let address = FALLBACKS.address;
+    let phone = FALLBACKS.phone;
+    
+    if (companyDoc.branches && companyDoc.branches.length > 0) {
+      const primaryBranch = companyDoc.branches[0];
+      address = primaryBranch.address || FALLBACKS.address;
+      phone = primaryBranch.phone || FALLBACKS.phone;
+      console.log("🔍 DEBUG: Using branch data:", { address, phone });
+    }
+
+    const companyData = {
+      name: companyDoc.name || FALLBACKS.name,
+      email: companyDoc.email || FALLBACKS.email,
+      phone: phone,
+      website: companyDoc.website || FALLBACKS.website,
+      address: address
+    };
+
+    console.log("🔍 DEBUG: Final company context:", companyData);
+    return companyData;
+    
+  } catch (err) {
+    console.error("❌ Error fetching company profile:", err);
+    return FALLBACKS;
+  }
+}
 /* ----------------------------- Helper: Styles ----------------------------- */
 function enforceComicSans(html) {
   const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
@@ -121,6 +145,7 @@ function enforceComicSans(html) {
   ["ul", "ol", "li", "div"].forEach(addFamily);
   return html;
 }
+
 function enforceImgCss(html) {
   html = html.replace(/<img([^>]*?)style="[^"]*"/gi, `<img$1`);
   html = html.replace(
@@ -139,6 +164,7 @@ function formatDateDMY(dateInput) {
     month: "long",
   })} ${d.getFullYear()}`;
 }
+
 function formatTime12hr(timeStr) {
   if (!timeStr) return "";
   let [h, m] = timeStr.includes(":")
@@ -152,46 +178,30 @@ function formatTime12hr(timeStr) {
   if (h === 0) h = 12;
   return `${h}:${String(m).padStart(2, "0")} ${suf}`;
 }
+
 function normalizeTime(s) {
   if (!s || typeof s !== "string") return "";
   const [h = "00", m = "00"] = s.split(":");
   return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
 }
+
 function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
-}
-function probationDaysToMonths(probationDays) {
-  const days = Number(probationDays) || 0;
-  if (!days) return "";
-  const months = Math.round(days / 30);
-  return months > 0
-    ? `${months} month${months > 1 ? "s" : ""}`
-    : `${days} days`;
 }
 
 /* -------------------- Robust template renderer --------------------------- */
 function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+
 function renderWithContext(tpl = "", ctx = {}) {
   let out = String(tpl || "");
-  // Replace longest keys first
   const keys = Object.keys(ctx).sort((a, b) => b.length - a.length);
   for (const k of keys) {
     const re = new RegExp(`{{\\s*${escapeRegExp(k)}\\s*}}`, "g");
     out = out.replace(re, String(ctx[k] ?? ""));
   }
   return out;
-}
-/* ------------------------ Build render context --------------------------- */
-/* ------------------------ Build render context --------------------------- */
-function probationDaysToMonths(probationDays) {
-  const days = Number(probationDays) || 0;
-  if (!days) return "";
-  const months = Math.round(days / 30);
-  return months > 0
-    ? `${months} month${months > 1 ? "s" : ""}`
-    : `${days} days`;
 }
 
 /* ------------------------ Build render context --------------------------- */
@@ -242,8 +252,8 @@ async function buildContext({
 
   const probationDaysNum = Number(probationDays) || 0;
 
-  console.log("🔍 DEBUG probationDays:", probationDays); // Should be raw number like "90"
-  console.log("🔍 DEBUG probationDaysNum:", probationDaysNum); // Should be 90
+  console.log("🔍 DEBUG probationDays:", probationDays);
+  console.log("🔍 DEBUG probationDaysNum:", probationDaysNum);
 
   const ctx = {
     candidateName: safeCandidateName,
@@ -254,15 +264,12 @@ async function buildContext({
     formattedDeadline,
     formattedTime,
     grossSalary,
-
-    // 🔑 CRITICAL FIX: Use raw probation days
-    probationDays: probationDaysNum.toString(), // This keeps it as "90" instead of "3 months"
-
+    probationDays: probationDaysNum.toString(),
     signatureHtml: signatureBlock,
     signatureBlock: signatureBlock,
   };
 
-  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays); // Should be "90"
+  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays);
 
   return {
     ctx,
@@ -272,6 +279,7 @@ async function buildContext({
     grossSalaryRaw,
   };
 }
+
 /* -------------------------- Controller: Send (single-step) --------------- */
 async function sendOfferLetter(req, res) {
   try {
@@ -287,7 +295,7 @@ async function sendOfferLetter(req, res) {
       shift,
       probationDays,
       subject: subjectOverride,
-      letter: letterOverride, // optional from client editor
+      letter: letterOverride,
     } = req.body;
 
     if (
@@ -309,6 +317,14 @@ async function sendOfferLetter(req, res) {
     let ownerId = req.user._id;
     if (!(ownerId instanceof mongoose.Types.ObjectId))
       ownerId = new mongoose.Types.ObjectId(ownerId);
+
+    // Debug: Check if company profile exists
+    console.log("🔍 DEBUG ownerId:", ownerId);
+    const companyExists = await CompanyProfile.findOne({ owner: ownerId });
+    console.log("🔍 DEBUG Company Profile exists:", !!companyExists);
+    if (companyExists) {
+      console.log("🔍 DEBUG Company Profile data:", companyExists);
+    }
 
     const exists = await Employee.findOne({ email: candidateEmail });
     if (exists)

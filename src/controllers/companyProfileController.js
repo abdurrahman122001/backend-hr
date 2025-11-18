@@ -9,6 +9,7 @@ exports.getMyProfile = async (req, res) => {
     res.status(500).json({ error: 'Failed to load profile.' });
   }
 };
+
 exports.upsertProfile = async (req, res) => {
   try {
     const ownerId = req.user._id;

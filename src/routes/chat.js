@@ -12,6 +12,7 @@ router.get("/conversations", empAuth, chatController.getConversations);
 router.get("/direct-messages", empAuth, chatController.getDirectMessages);
 router.get("/space-conversations", empAuth, chatController.getSpaceConversations);
 router.get("/spaces", empAuth, chatController.getSpaces);
+router.get('/conversations/:conversationId/pinned-messages', empAuth, chatController.getPinnedMessages);
 
 // Message routes
 router.get("/conversations/:conversationId/messages", empAuth, chatController.getMessages);
@@ -23,7 +24,6 @@ router.get('/messages/:messageId/views', empAuth, chatController.getMessageViews
 // Message pinning routes
 router.post('/conversations/:conversationId/messages/:messageId/pin', empAuth, chatController.pinMessage);
 router.delete('/conversations/:conversationId/messages/:messageId/unpin', empAuth, chatController.unpinMessage);
-router.get('/conversations/:conversationId/pinned-messages', empAuth, chatController.getPinnedMessages);
 
 // ✅ ADDED: Global pinned messages route (across all conversations)
 router.get('/pinned-messages/all', empAuth, chatController.getAllPinnedMessages);

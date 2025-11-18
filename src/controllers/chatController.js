@@ -6049,7 +6049,98 @@ exports.getPinnedMessages = async (req, res) => {
       });
     }
 
-    // Verify user has access to this conversation
+    // First, check if this is a space ID by looking for a space with this ID
+    const space = await Space.findOne({
+      _id: conversationId,
+      members: req.employee._id,
+    });
+
+    if (space) {
+      // If it's a space ID, find the conversation associated with this space
+      const spaceConversation = await Conversation.findOne({
+        space: conversationId,
+        participants: req.employee._id,
+      });
+
+      if (!spaceConversation) {
+        return res.status(404).json({
+          success: false,
+          error: "Space conversation not found",
+        });
+      }
+
+      // Get pinned messages for the space conversation
+      const pinnedMessages = await Message.find({
+        conversation: spaceConversation._id,
+        isPinned: true,
+      })
+        .populate("sender", "name companyEmail avatar photographUrl")
+        .populate("pinnedBy.employee", "name companyEmail avatar photographUrl")
+        .populate("conversation", "isGroup groupName space")
+        .sort({ "pinnedBy.pinnedAt": -1 })
+        .limit(parseInt(limit))
+        .skip((page - 1) * limit);
+
+      const total = await Message.countDocuments({
+        conversation: spaceConversation._id,
+        isPinned: true,
+      });
+
+      // Format the response for space
+      const formattedMessages = pinnedMessages.map((message) => {
+        const userPin = message.pinnedBy.find(
+          (pin) => pin.employee._id.toString() === req.employee._id.toString()
+        );
+
+        return {
+          _id: message._id,
+          content: message.content,
+          messageType: message.messageType,
+          attachments: message.attachments || [],
+          sender: {
+            _id: message.sender._id,
+            name: message.sender.name,
+            email: message.sender.companyEmail,
+            avatar: message.sender.photographUrl || message.sender.avatar,
+          },
+          conversation: {
+            _id: spaceConversation._id,
+            name: space.name,
+            isGroup: true,
+            isSpace: true,
+          },
+          space: {
+            _id: space._id,
+            name: space.name,
+            description: space.description,
+          },
+          pinnedBy: message.pinnedBy,
+          pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
+          note: userPin ? userPin.note : message.pinnedBy[0]?.note,
+          totalPins: message.pinnedBy.length,
+          isPinned: true,
+          createdAt: message.createdAt,
+          pinnedByCurrentUser: !!userPin,
+        };
+      });
+
+      return res.json({
+        success: true,
+        pinnedMessages: formattedMessages,
+        total,
+        hasMore: (page - 1) * limit + pinnedMessages.length < total,
+        page: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        space: {
+          _id: space._id,
+          name: space.name,
+          description: space.description,
+        },
+        isSpace: true,
+      });
+    }
+
+    // If not a space, treat it as a regular conversation
     const conversation = await Conversation.findOne({
       _id: conversationId,
       participants: req.employee._id,
@@ -6062,7 +6153,84 @@ exports.getPinnedMessages = async (req, res) => {
       });
     }
 
-    // Get pinned messages for this conversation
+    // Check if this conversation has a space reference
+    if (conversation.space) {
+      const spaceData = await Space.findById(conversation.space);
+      
+      // Get pinned messages for this conversation
+      const pinnedMessages = await Message.find({
+        conversation: conversationId,
+        isPinned: true,
+      })
+        .populate("sender", "name companyEmail avatar photographUrl")
+        .populate("pinnedBy.employee", "name companyEmail avatar photographUrl")
+        .populate("conversation", "isGroup groupName space")
+        .sort({ "pinnedBy.pinnedAt": -1 })
+        .limit(parseInt(limit))
+        .skip((page - 1) * limit);
+
+      const total = await Message.countDocuments({
+        conversation: conversationId,
+        isPinned: true,
+      });
+
+      // Format the response for space conversation
+      const formattedMessages = pinnedMessages.map((message) => {
+        const userPin = message.pinnedBy.find(
+          (pin) => pin.employee._id.toString() === req.employee._id.toString()
+        );
+
+        return {
+          _id: message._id,
+          content: message.content,
+          messageType: message.messageType,
+          attachments: message.attachments || [],
+          sender: {
+            _id: message.sender._id,
+            name: message.sender.name,
+            email: message.sender.companyEmail,
+            avatar: message.sender.photographUrl || message.sender.avatar,
+          },
+          conversation: {
+            _id: conversation._id,
+            name: spaceData ? spaceData.name : conversation.groupName,
+            isGroup: true,
+            isSpace: true,
+          },
+          space: spaceData ? {
+            _id: spaceData._id,
+            name: spaceData.name,
+            description: spaceData.description,
+          } : null,
+          pinnedBy: message.pinnedBy,
+          pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
+          note: userPin ? userPin.note : message.pinnedBy[0]?.note,
+          totalPins: message.pinnedBy.length,
+          isPinned: true,
+          createdAt: message.createdAt,
+          pinnedByCurrentUser: !!userPin,
+        };
+      });
+
+      return res.json({
+        success: true,
+        pinnedMessages: formattedMessages,
+        total,
+        hasMore: (page - 1) * limit + pinnedMessages.length < total,
+        page: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        conversation: {
+          _id: conversation._id,
+          name: spaceData ? spaceData.name : conversation.groupName,
+          isGroup: conversation.isGroup,
+          isSpace: true,
+        },
+        space: spaceData,
+        isSpace: true,
+      });
+    }
+
+    // Regular direct message conversation (no space)
     const pinnedMessages = await Message.find({
       conversation: conversationId,
       isPinned: true,
@@ -6079,7 +6247,18 @@ exports.getPinnedMessages = async (req, res) => {
       isPinned: true,
     });
 
-    // Format the response
+    // Get the other participant for direct messages
+    const otherParticipant = conversation.participants.find(
+      (p) => p.toString() !== req.employee._id.toString()
+    );
+    
+    let otherParticipantData = null;
+    if (otherParticipant) {
+      otherParticipantData = await Employee.findById(otherParticipant)
+        .select("name companyEmail avatar photographUrl");
+    }
+
+    // Format the response for direct message
     const formattedMessages = pinnedMessages.map((message) => {
       const userPin = message.pinnedBy.find(
         (pin) => pin.employee._id.toString() === req.employee._id.toString()
@@ -6097,12 +6276,12 @@ exports.getPinnedMessages = async (req, res) => {
           avatar: message.sender.photographUrl || message.sender.avatar,
         },
         conversation: {
-          _id: message.conversation._id,
-          name: message.conversation.isGroup
-            ? message.conversation.groupName
-            : "Direct Message",
-          isGroup: message.conversation.isGroup,
-          isSpace: !!message.conversation.space,
+          _id: conversation._id,
+          name: conversation.isGroup 
+            ? conversation.groupName 
+            : otherParticipantData?.name || "Direct Message",
+          isGroup: conversation.isGroup,
+          isSpace: false,
         },
         pinnedBy: message.pinnedBy,
         pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
@@ -6110,7 +6289,6 @@ exports.getPinnedMessages = async (req, res) => {
         totalPins: message.pinnedBy.length,
         isPinned: true,
         createdAt: message.createdAt,
-        // Include if user has pinned this message
         pinnedByCurrentUser: !!userPin,
       };
     });
@@ -6124,10 +6302,13 @@ exports.getPinnedMessages = async (req, res) => {
       totalPages: Math.ceil(total / limit),
       conversation: {
         _id: conversation._id,
-        name: conversation.isGroup ? conversation.groupName : "Direct Message",
+        name: conversation.isGroup 
+          ? conversation.groupName 
+          : otherParticipantData?.name || "Direct Message",
         isGroup: conversation.isGroup,
-        isSpace: !!conversation.space,
+        isSpace: false,
       },
+      isSpace: false,
     });
   } catch (error) {
     console.error("Get pinned messages error:", error);

@@ -79,6 +79,7 @@ const eventRoutes = require("./routes/eventRoutes");
 const upcomingEventsRoutes = require("./routes/upcomingEvents");
 const anniversariesRoute = require("./routes/anniversariesRoute");
 const noticePeriodRouter = require("./routes/noticePeriodRoute");
+const hrPolicyRoute = require("./routes/hrPolicyRoutes");
 
 const app = express();
 
@@ -226,6 +227,7 @@ app.use("/api/events", requireAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
 app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
 app.use("/api/notice-period", requireAuth, noticePeriodRouter);
+app.use("/api/hr-policies", requireAuth, hrPolicyRoute);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
