@@ -13,9 +13,9 @@ const {
 } = require("./services/ndaService");
 const {
   extractCNICUsingOpenAI,
-  // Optionally, if you want: classifyOfferWithOpenAI, analyzeWithOpenAI
 } = require("./services/deepseekService");
 const Signature = require("./models/Signature");
+const User = require("./models/Users"); // <-- NEW
 
 // IMAP Config
 const imap = new Imap(require("./config/imapConfig"));
@@ -25,7 +25,8 @@ const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const COMPANY_EMAIL = process.env.COMPANY_EMAIL || "hr@mavensadvisors.com";
 const COMPANY_CONTACT = process.env.COMPANY_CONTACT || "+92 312 3850846";
 const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
-const DEFAULT_OWNER_ID = process.env.DEFAULT_OWNER_ID || "6838b0b708e8629ffab534ee";
+const DEFAULT_OWNER_ID =
+  process.env.DEFAULT_OWNER_ID || "6838b0b708e8629ffab534ee";
 
 // MongoDB Connection
 mongoose
@@ -104,7 +105,13 @@ async function getSignatureBlock(ownerId) {
   return signatureBlock;
 }
 
-async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerId) {
+async function sendCompleteProfileLink(
+  id,
+  to,
+  employeeName,
+  companyName,
+  ownerId
+) {
   const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const signatureBlock = await getSignatureBlock(ownerId);
@@ -269,6 +276,8 @@ async function processMessage(stream) {
 
     if (label === "offer_acceptance") {
       let bestName = emp?.name || extractedName || "Candidate";
+
+      // 1) Send email to candidate
       await sendEmail({
         to: fromAddr,
         subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
@@ -302,6 +311,42 @@ async function processMessage(stream) {
           </div>
         `,
       });
+
+      // 2) Send notification email to all admin/super-admin users  <-- NEW
+      try {
+        const admins = await User.find({
+          role: { $in: ["admin", "super-admin"] },
+        });
+
+        for (const admin of admins) {
+          if (!admin.email) continue;
+
+          await sendEmail({
+            to: admin.email,
+            subject: `Offer Accepted: ${bestName}`,
+            html: `
+              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; width:100%;">
+                <p>Dear <strong>${admin.username || "Admin"}</strong>,</p>
+                <p>
+                  The candidate <strong>${bestName}</strong> (<a href="mailto:${fromAddr}">${fromAddr}</a>) has
+                  <strong>accepted</strong> the job offer.
+                </p>
+                ${
+                  emp
+                    ? `<p>Employee record found in the system. Employee ID: <strong>${emp._id}</strong></p>`
+                    : `<p>No existing employee record was found for this email yet.</p>`
+                }
+                <p>
+                  You may proceed with any additional onboarding steps (system account creation, access provisioning, etc.).
+                </p>
+                ${signatureBlock}
+              </div>
+            `,
+          });
+        }
+      } catch (adminErr) {
+        console.error("Error notifying admins about offer acceptance:", adminErr);
+      }
     } else if (label === "offer_rejection") {
       await sendEmail({
         to: fromAddr,
@@ -367,7 +412,9 @@ function checkLatest() {
     fetcher.once("error", (error) => {
       console.error("Fetch error:", error);
     });
-    fetcher.once("end", () => console.log("Done processing new messages"));
+    fetcher.once("end", () =>
+      console.log("Done processing new messages")
+    );
   });
 }
 

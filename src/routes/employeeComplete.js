@@ -278,7 +278,7 @@ router.put("/set-password", async (req, res) => {
     // Hash password and update
     const hash = await bcrypt.hash(password, 10);
     emp.password = hash;
-
+    emp.status = "active";   // <--- Added line
     // Clear the token for security
     emp.setPasswordToken = undefined;
     emp.setPasswordTokenExpires = undefined;
