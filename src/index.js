@@ -80,6 +80,7 @@ const upcomingEventsRoutes = require("./routes/upcomingEvents");
 const anniversariesRoute = require("./routes/anniversariesRoute");
 const noticePeriodRouter = require("./routes/noticePeriodRoute");
 const hrPolicyRoute = require("./routes/hrPolicyRoutes");
+const companyProfile = require("./routes/companyProfile");
 
 const app = express();
 
@@ -179,7 +180,7 @@ app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
-app.use("/api/company-profile", require("./routes/companyProfile"));
+app.use("/api/company-profile", requireAuth, companyProfile);
 app.use("/api/docs", docsRouter);
 app.use("/api/employee-salary", employeeSalaryRouter);
 app.use("/api/departments", requireAuth, departmentsRouter);
