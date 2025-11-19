@@ -17,6 +17,5 @@ router.post('/enable', auth, taxController.enableTaxForOwner);
 router.post('/update', auth, taxController.updateTaxForOwner);
 router.get('/owner-slips', auth, taxController.getOwnerSlipSummaries);
 router.get('/calculation/:slipId', auth, taxController.getTaxCalculationDetails);
-router.post('/test-loan-benefits', auth, taxController.testLoanBenefitsCalculation);
 
 module.exports = router;

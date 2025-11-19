@@ -583,14 +583,13 @@ exports.getSpaces = async (req, res) => {
       .populate("members", "name companyEmail avatar photographUrl")
       .sort({ updatedAt: -1 });
 
-    // Calculate unread counts for spaces
-    const spacesWithUnreadCount = await Promise.all(
+    const spacesWithLastMessage = await Promise.all(
       spaces.map(async (space) => {
         // Find conversation for this space
         const conversation = await Conversation.findOne({
           space: space._id,
           participants: req.employee._id,
-        });
+        }).populate("lastMessage");
 
         const unreadCount = conversation
           ? conversation.unreadCount.get(req.employee._id.toString()) || 0
@@ -606,12 +605,20 @@ exports.getSpaces = async (req, res) => {
           members: space.members,
           isPrivate: space.isPrivate,
           memberCount: space.members.length,
-          unreadCount: unreadCount,
+          unreadCount,
           type: "space",
+
+          // ✅ FIX: attach lastMessage
+          lastMessage: conversation ? conversation.lastMessage : null,
+
+          // Use conversation's update time, not space’s update time
+          updatedAt: conversation ? conversation.updatedAt : space.updatedAt,
+
           isPinned: space.isPinnedBy(req.employee._id),
           pinnedAt: space.isPinnedBy(req.employee._id)
             ? space.pinnedBy.find(
-                (pin) => pin.employee.toString() === req.employee._id.toString()
+                (pin) =>
+                  pin.employee.toString() === req.employee._id.toString()
               )?.pinnedAt
             : null,
         };
@@ -620,14 +627,15 @@ exports.getSpaces = async (req, res) => {
 
     res.json({
       success: true,
-      spaces: spacesWithUnreadCount,
-      totalCount: spacesWithUnreadCount.length,
+      spaces: spacesWithLastMessage,
+      totalCount: spacesWithLastMessage.length,
     });
   } catch (error) {
     console.error("Get spaces error:", error);
     res.status(500).json({ success: false, error: "Failed to fetch spaces" });
   }
 };
+
 
 exports.getMessages = async (req, res) => {
   try {

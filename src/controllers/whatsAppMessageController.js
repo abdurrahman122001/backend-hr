@@ -41,7 +41,6 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
-
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -59,14 +58,22 @@ async function applyVisibility(q, req) {
     return { ...q, owner: ownerId };
   }
 
-  // 🧑‍🤝‍🧑 TEAM LEAD: can see only messages where they are a receiver
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are involved OR manager messages for supervision
   if (currentUserRole === "team_lead") {
+    // Get all managers in the same organization
+    const { managers } = await findTLsAndManagersByOwner(ownerId);
+    
     return {
       ...q,
       $or: [
         { sender: me },
         { receiver: me },
-        { receiver: { $in: [me] } }
+        { receiver: { $in: [me] } },
+        // 🔥 CRITICAL FIX: Allow team leads to see manager messages
+        { 
+          sender: { $in: managers.map(id => oid(id)) },
+          owner: ownerId 
+        }
       ],
     };
   }
@@ -293,40 +300,34 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // FIXED: Team leads should only see messages where they are receivers
+    // 🔥 CRITICAL FIX: Remove the restrictive team lead query logic
+    // Let applyVisibility handle team lead visibility properly
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
 
-    if (isTeamLead && me) {
-      // Team leads can only see messages where they are in the receiver array
+    // Use normal user visibility rules for everyone - applyVisibility will handle role-based restrictions
+    const between = normalizeIds(betweenRaw);
+    if (between.length === 2) {
+      const [a, b] = between;
       q.$or = [
-        { sender: me }, { receiver: me }, { receiver: { $in: [me] } }
+        { sender: a, receiver: { $in: [b] } },
+        { sender: b, receiver: { $in: [a] } },
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
+    } else if (isObjId(participant)) {
+      // FIX: Handle array receiver properly
+      q.$or = [
+        { sender: participant },
+        { receiver: participant }, // single receiver
+        { receiver: { $in: [participant] } }, // array receiver
       ];
     } else {
-      // Normal user visibility rules
-      const between = normalizeIds(betweenRaw);
-      if (between.length === 2) {
-        const [a, b] = between;
-        q.$or = [
-          { sender: a, receiver: { $in: [b] } },
-          { sender: b, receiver: { $in: [a] } },
-          { sender: a, receiver: b },
-          { sender: b, receiver: a },
-        ];
-      } else if (isObjId(participant)) {
-        // FIX: Handle array receiver properly
-        q.$or = [
-          { sender: participant },
-          { receiver: participant }, // single receiver
-          { receiver: { $in: [participant] } }, // array receiver
-        ];
-      } else {
-        if (isObjId(sender)) q.sender = sender;
-        if (isObjId(receiver)) {
-          // FIX: Handle both single receiver and array receiver
-          q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
-        }
+      if (isObjId(sender)) q.sender = sender;
+      if (isObjId(receiver)) {
+        // FIX: Handle both single receiver and array receiver
+        q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
       }
     }
 
@@ -358,7 +359,7 @@ exports.listMessages = async function listMessages(req, res) {
       isTeamLead
     );
 
-    // Pagination & fetch
+    // Rest of the function remains the same...
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -403,7 +404,6 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -492,7 +492,6 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
 // CREATE MESSAGE WITH SUPERVISION LOGIC (UPDATED)
 exports.createMessage = async function createMessage(req, res) {
   try {
@@ -559,10 +558,23 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
+    // 🔥 CRITICAL UPDATE: Add team leads as receivers for manager messages
+    // When manager sends message, automatically include team leads for visibility
+    if (senderRole === "manager" && tls.length > 0) {
+      console.log("👨‍💼 Manager sending message - adding team leads as receivers:", tls);
+      
+      // Add team leads to receivers for supervision visibility
+      tls.forEach(teamLeadId => {
+        if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
+          receivers.push(teamLeadId);
+        }
+      });
+    }
+
     // 🔑 CORRECTED Approval status logic - MATCHING ASSIGNMENT CONTROLLER
     if (senderRole === "manager") {
       approvalStatus = null;
-      // Managers don't need approval, and we don't auto-add team leads
+      // Managers don't need approval, but team leads are now included as receivers
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
       // Team leads don't need approval, and we don't auto-add managers
@@ -659,6 +671,14 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
+    // Log the receiver details for debugging
+    console.log("📨 Message created with receivers:", {
+      sender: senderRole,
+      totalReceivers: receivers.length,
+      teamLeadsIncluded: tls.filter(tl => receivers.includes(tl)).length,
+      managersIncluded: managers.filter(m => receivers.includes(m)).length
+    });
+
     // FIXED: Emit real-time events ONLY to relevant users
     if (req.app.get("io")) {
       const io = req.app.get("io");
@@ -676,9 +696,26 @@ exports.createMessage = async function createMessage(req, res) {
         message: populated,
         type: "message_created",
       });
+
+      // Special notification for team leads when manager sends message
+      if (senderRole === "manager") {
+        tls.forEach(teamLeadId => {
+          if (receivers.includes(teamLeadId)) {
+            io.to(`employee_${teamLeadId}`).emit("new_message", {
+              message: populated,
+              type: "manager_message_visibility",
+              note: "You are included as a receiver for manager message visibility"
+            });
+          }
+        });
+      }
     }
 
-    res.status(201).json(populated);
+    res.status(201).json({
+      ...populated.toObject(),
+      teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
+      totalReceivers: receivers.length
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to create assignment message" });
