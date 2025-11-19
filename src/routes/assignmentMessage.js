@@ -80,7 +80,7 @@ router.patch("/:id/unschedule", ctrl.unscheduleMessage);
 router.patch("/:id/reschedule", ctrl.rescheduleMessage);
 router.patch("/:id/send", ctrl.sendDraft);
 router.patch("/:id/edit-disapproved", ctrl.editDisapprovedMessage);
-router.patch("/:id/edit-pending", ctrl.editPendingMessage);
+router.patch("/:id/edit-pending", upload.array("files", 10), ctrl.editPendingMessage);
 
 // In your backend routes file
 router.get('/thread/:threadId', ctrl.getMessagesByThread);

@@ -19,10 +19,12 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
   }
 
   try {
-    // ✅ Verify token
+    // Verify token
     const payload = jwt.verify(token, JWT_SECRET);
+
+    // Include department from DB
     const emp = await Employee.findById(payload.id).select(
-      "_id role companyEmail name owner"
+      "_id role companyEmail name owner department"
     );
 
     if (!emp) {
@@ -32,26 +34,14 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
         .json({ status: "error", message: "Unauthorized: employee not found" });
     }
 
-    // ✅ Refresh token if it's about to expire (less than 30 minutes left)
-    // const now = Math.floor(Date.now() / 1000);
-    // const remainingTime = payload.exp - now;
-
-    // if (remainingTime < 30 * 60) {
-    //   // Issue a fresh token
-    //   const newToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
-    //     expiresIn: TOKEN_LIFETIME,
-    //   });
-    //   res.setHeader("x-refreshed-token", newToken);
-    //   console.log("🔄 [Auth] Token refreshed automatically for", emp.companyEmail);
-    // }
-
-    // ✅ Attach employee to request
+    // Attach employee data to request
     req.employee = {
       _id: emp._id,
       role: emp.role,
       companyEmail: emp.companyEmail,
       name: emp.name,
       owner: emp.owner,
+      department: emp.department, // <-- ADDED HERE ✔
     };
 
     next();

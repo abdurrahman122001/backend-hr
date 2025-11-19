@@ -4038,27 +4038,66 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     res.status(500).json({ error: "Failed to fetch message counts" });
   }
 };
-
-
-// PATCH /api/assignment-messages/:id/edit-pending - Edit pending message
+// UPDATED: Edit pending message to handle FormData properly
 exports.editPendingMessage = async function editPendingMessage(req, res) {
   try {
     const { id } = req.params;
-    const { subject, note, receiver: receiverBody, receivers: receiversBody } = req.body;
+    
+    console.log("🔄 Processing editPendingMessage for message:", id);
+    console.log("📦 Request content-type:", req.headers['content-type']);
+    console.log("📦 Request body keys:", Object.keys(req.body || {}));
+    console.log("📦 Request files:", req.files ? req.files.length : 0);
+
+    // Handle both FormData and JSON requests
+    let subject, note, receiverBody, receiversBody;
+    let removedAttachments = [];
+    let files = [];
+
+    if (req.headers['content-type']?.includes('multipart/form-data')) {
+      // Handle FormData - use direct field access
+      subject = req.body.subject;
+      note = req.body.note;
+      receiverBody = req.body.receiver;
+      receiversBody = req.body.receivers;
+
+      // Handle removed attachments
+      if (req.body.removedAttachments) {
+        if (Array.isArray(req.body.removedAttachments)) {
+          removedAttachments = req.body.removedAttachments;
+        } else {
+          removedAttachments = [req.body.removedAttachments];
+        }
+      }
+
+      // Handle new files
+      if (req.files && Array.isArray(req.files)) {
+        files = req.files;
+      }
+
+      console.log("📝 FormData parsed:", {
+        subject: subject ? 'provided' : 'missing',
+        note: note ? 'provided' : 'missing',
+        removedAttachments: removedAttachments.length,
+        newFiles: files.length
+      });
+    } else {
+      // Handle regular JSON
+      ({ subject, note, receiver: receiverBody, receivers: receiversBody } = req.body);
+      console.log("📝 JSON data parsed");
+    }
 
     // Enhanced validation
     if (!id) {
       return res.status(400).json({ error: "Message ID is required" });
     }
 
-    // Validate MongoDB ObjectId format
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ error: "Invalid message ID format" });
     }
 
-    if (subject === undefined && note === undefined && !receiverBody && !receiversBody) {
+    if (subject === undefined && note === undefined && !receiverBody && !receiversBody && files.length === 0 && removedAttachments.length === 0) {
       return res.status(400).json({ 
-        error: "No changes provided. Please update subject, note, or receivers." 
+        error: "No changes provided. Please update subject, note, receivers, or attachments." 
       });
     }
 
@@ -4150,6 +4189,8 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     updateFields.lastEditedBy = currentUser._id;
     updateFields.lastEditedAt = new Date();
 
+    console.log("🔄 Updating message with fields:", Object.keys(updateFields));
+
     // Update the message
     const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
       id,
@@ -4160,6 +4201,33 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     if (!updatedMsg) {
       throw new Error("Failed to update message in database");
     }
+
+    // Handle removed attachments
+    if (removedAttachments.length > 0) {
+      console.log(`🗑️ Removing ${removedAttachments.length} attachments`);
+      updatedMsg.attachments = updatedMsg.attachments.filter(
+        attachment => !removedAttachments.includes(attachment._id.toString())
+      );
+    }
+
+    // Handle new file uploads
+    if (files.length > 0) {
+      console.log(`📎 Adding ${files.length} new attachments`);
+      const newAttachments = files.map((f) => ({
+        filename: path.basename(f.filename),
+        originalName: f.originalname,
+        mimetype: f.mimetype,
+        size: f.size,
+        url: buildPublicUrl(req, f.filename),
+        uploadedAt: new Date(),
+        uploadedBy: currentUser._id,
+      }));
+
+      updatedMsg.attachments.push(...newAttachments);
+    }
+
+    // Save the updated message with attachments
+    await updatedMsg.save();
 
     // Populate the updated message
     const populated = await AssignmentMessage.findById(updatedMsg._id).populate([
@@ -4174,6 +4242,13 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     if (!populated) {
       throw new Error("Failed to populate updated message data");
     }
+
+    console.log("✅ Message updated successfully:", {
+      messageId: populated._id,
+      subject: populated.subject,
+      attachments: populated.attachments.length,
+      lastEditedBy: populated.lastEditedBy?.name
+    });
 
     // EMIT REAL-TIME EVENT FOR PENDING MESSAGE EDIT
     try {
@@ -4224,6 +4299,8 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
             timestamp: new Date(),
           });
         }
+
+        console.log("📢 Real-time events emitted to participants");
       } else {
         console.warn("⚠️ Socket.io instance not available for real-time updates");
       }
@@ -4243,6 +4320,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     });
   } catch (e) {
     console.error("❌ Error in editPendingMessage:", e);
+    console.error("❌ Error stack:", e.stack);
 
     // More specific error responses
     if (e.name === "ValidationError") {

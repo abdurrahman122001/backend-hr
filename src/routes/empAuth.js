@@ -60,8 +60,9 @@ router.post("/login", async (req, res) => {
 
   try {
     const emp = await Employee.findOne({ companyEmail }).select(
-      "_id companyEmail password role owner name trustedDevices"
+      "_id companyEmail password role owner name trustedDevices department"
     );
+
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
     if (!emp.password?.trim()) {
@@ -75,23 +76,30 @@ router.post("/login", async (req, res) => {
     const ok = await emp.comparePassword(password);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    // ---------------------
-    // ✅ Check if device is trusted
-    // ---------------------
+    // ---------------------------
+    // CHECK IF DEVICE IS TRUSTED
+    // ---------------------------
     const isTrusted = emp.trustedDevices?.some(
       (d) =>
         d.deviceFingerprint === deviceFingerprint || d.deviceId === deviceToken
     );
 
     if (isTrusted) {
-      // ✅ Trusted device → direct login
+      // ✅ TRUSTED DEVICE → DIRECT LOGIN
       const token = jwt.sign(
-        { id: emp._id, role: emp.role, owner: emp.owner },
+        {
+          id: emp._id,
+          role: emp.role,
+          owner: emp.owner,
+          name: emp.name,
+          companyEmail: emp.companyEmail,
+          department: emp.department, // ⭐ ADD THIS
+        },
         JWT_SECRET,
         { expiresIn: "9h" }
       );
 
-      // ✅ Log check-in session
+      // Log session
       await EmployeeSession.create({
         employeeId: emp._id,
         deviceFingerprint,
@@ -104,21 +112,22 @@ router.post("/login", async (req, res) => {
         token,
         user: {
           id: emp._id,
+          name: emp.name,
           companyEmail: emp.companyEmail,
           role: emp.role,
           owner: emp.owner,
-          name: emp.name || "",
+          department: emp.department, // ⭐ ALSO ADD HERE
         },
         trusted: true,
         expiresIn: 9 * 60 * 60,
       });
     }
 
-    // ---------------------
-    // 2️⃣ Unrecognized device → send 2FA code to admin
-    // ---------------------
+    // ---------------------------
+    // 2FA (UNRECOGNIZED DEVICE)
+    // ---------------------------
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const expires = Date.now() + 10 * 60 * 1000; // 10 min
     codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
 
     const tempToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
@@ -131,25 +140,17 @@ router.post("/login", async (req, res) => {
       "unknown";
     const when = new Date().toISOString();
 
-    const adminTo = "qaziabdurrahman12@gmail.com";
-    const adminSubject = "Employee login verification requested";
-    const adminText =
-      `A login verification was requested.\n` +
-      `Employee: ${emp.companyEmail}\n` +
-      `Time (UTC): ${when}\n` +
-      `IP: ${loginIp}\n` +
-      `Code: ${code} (valid 10 min)\n`;
-
+    // Send to admin
     await sendMail({
-      to: adminTo,
-      subject: adminSubject,
-      text: adminText,
+      to: "qaziabdurrahman12@gmail.com",
+      subject: "Employee login verification requested",
+      text: `Employee: ${emp.companyEmail}\nTime: ${when}\nIP: ${loginIp}\nCode: ${code}`,
       html: `<p><b>New device login verification requested</b></p>
              <ul>
                <li><b>Employee:</b> ${emp.companyEmail}</li>
-               <li><b>Time (UTC):</b> ${when}</li>
+               <li><b>Time:</b> ${when}</li>
                <li><b>IP:</b> ${loginIp}</li>
-               <li><b>Code:</b> <code>${code}</code> (valid 10 min)</li>
+               <li><b>Code:</b> <code>${code}</code></li>
              </ul>`,
     });
 
@@ -158,10 +159,11 @@ router.post("/login", async (req, res) => {
       tempToken,
       user: {
         id: emp._id,
+        name: emp.name,
         companyEmail: emp.companyEmail,
         role: emp.role,
         owner: emp.owner,
-        name: emp.name || "",
+        department: emp.department, // ⭐ ADD THIS HERE TOO
       },
     });
   } catch (err) {
