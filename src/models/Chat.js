@@ -206,6 +206,35 @@ messageSchema.methods.addView = async function (employeeId) {
   return false;
 };
 
+// Add to Message schema methods
+messageSchema.methods.markAsRead = function(userId) {
+  // Check if already read by this user
+  if (!this.isReadBy(userId)) {
+    this.readBy.push({
+      employee: userId,
+      readAt: new Date()
+    });
+    return this.save();
+  }
+  return Promise.resolve(this);
+};
+
+messageSchema.methods.isReadBy = function(userId) {
+  return this.readBy.some(
+    read => read.employee.toString() === userId.toString()
+  );
+};
+
+messageSchema.methods.getUnreadUsers = function(senderId) {
+  const participants = this.conversation?.participants || [];
+  const readUserIds = this.readBy.map(read => read.employee.toString());
+  
+  return participants.filter(participantId => 
+    participantId.toString() !== senderId.toString() && 
+    !readUserIds.includes(participantId.toString())
+  );
+};
+
 // ✅ ADDED: Static method to get message views
 messageSchema.statics.getMessageViews = async function (messageId, employeeId) {
   const message = await this.findById(messageId)
@@ -508,6 +537,28 @@ conversationSchema.methods.isHiddenBy = function (userId) {
   );
 };
 
+// Add to Conversation schema methods
+conversationSchema.methods.updateUnreadCount = function(senderId, increment = true) {
+  this.participants.forEach(participantId => {
+    // Don't increment for the sender
+    if (participantId.toString() !== senderId.toString()) {
+      const currentCount = this.unreadCount.get(participantId.toString()) || 0;
+      const newCount = increment ? currentCount + 1 : Math.max(0, currentCount - 1);
+      this.unreadCount.set(participantId.toString(), newCount);
+    }
+  });
+};
+
+conversationSchema.methods.markAsRead = function(userId) {
+  // Reset unread count for this user
+  this.unreadCount.set(userId.toString(), 0);
+  return this.save();
+};
+
+conversationSchema.methods.getUnreadCount = function(userId) {
+  return this.unreadCount.get(userId.toString()) || 0;
+};
+
 // ============ SPACE SCHEMA METHODS ============
 
 // Method to check if space is pinned by user
@@ -519,6 +570,7 @@ spaceSchema.methods.isPinnedBy = function (userId) {
     (pin) => pin.employee.toString() === userId.toString()
   );
 };
+
 
 // ============ INDEXES ============
 

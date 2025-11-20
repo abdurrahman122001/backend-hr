@@ -131,5 +131,5 @@ router.put(
 // File upload routes
 router.post("/upload", empAuth, chatController.uploadFile);
 router.post("/upload-multiple", empAuth, chatController.uploadFiles);
-
+router.get("/conversations/unread/count", empAuth, chatController.getChatUnreadCount);
 module.exports = router;

@@ -15,6 +15,26 @@ exports.upsertProfile = async (req, res) => {
     const ownerId = req.user._id;
     const data = { ...req.body, owner: ownerId };
 
+    // Ensure only one branch can have useForDocumentation set to true
+    if (data.branches && data.branches.length > 0) {
+      let hasDocumentationBranch = false;
+      data.branches = data.branches.map(branch => {
+        if (branch.useForDocumentation) {
+          if (hasDocumentationBranch) {
+            // If we already found one documentation branch, set this to false
+            return { ...branch, useForDocumentation: false };
+          }
+          hasDocumentationBranch = true;
+        }
+        return branch;
+      });
+      
+      // If no branch is marked for documentation, mark the first one
+      if (!hasDocumentationBranch && data.branches.length > 0) {
+        data.branches[0].useForDocumentation = true;
+      }
+    }
+
     const profile = await CompanyProfile.findOneAndUpdate(
       { owner: ownerId },
       { $set: data },

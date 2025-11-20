@@ -4344,3 +4344,187 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     });
   }
 };
+
+exports.markAsRead = async function markAsRead(req, res) {
+  try {
+    const { id } = req.params;
+    const userId = req.employee._id;
+
+    const message = await AssignmentMessage.findById(id);
+
+    if (!message) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Message not found' 
+      });
+    }
+
+    // Check if user is authorized to read this message
+    const isAuthorized = 
+      message.sender.toString() === userId.toString() ||
+      message.receiver.some(receiver => receiver.toString() === userId.toString());
+
+    if (!isAuthorized) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to access this message'
+      });
+    }
+
+    // Check if user has already read this message
+    const alreadyRead = message.readBy.some(read => 
+      read.employee.toString() === userId.toString()
+    );
+
+    if (!alreadyRead) {
+      message.readBy.push({
+        employee: userId,
+        readAt: new Date()
+      });
+      await message.save();
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Marked as read',
+      data: {
+        messageId: message._id,
+        readBy: message.readBy
+      }
+    });
+  } catch (error) {
+    console.error('Error marking message as read:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Server error while marking message as read' 
+    });
+  }
+};
+
+// Mark message as unread
+exports.markAsUnread = async function markAsUnread(req, res) {
+  try {
+    const { id } = req.params;
+    const userId = req.employee._id;
+
+    const message = await AssignmentMessage.findById(id);
+
+    if (!message) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Message not found' 
+      });
+    }
+
+    // Check if user is authorized
+    const isAuthorized = 
+      message.sender.toString() === userId.toString() ||
+      message.receiver.some(receiver => receiver.toString() === userId.toString());
+
+    if (!isAuthorized) {
+      return res.status(403).json({
+        success: false,
+        error: 'Not authorized to access this message'
+      });
+    }
+
+    // Remove user from readBy array
+    message.readBy = message.readBy.filter(read => 
+      read.employee.toString() !== userId.toString()
+    );
+
+    await message.save();
+
+    res.json({ 
+      success: true, 
+      message: 'Marked as unread',
+      data: {
+        messageId: message._id,
+        readBy: message.readBy
+      }
+    });
+  } catch (error) {
+    console.error('Error marking message as unread:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Server error while marking message as unread' 
+    });
+  }
+};
+
+// Get unread count for user
+exports.getUnreadCount = async function getUnreadCount(req, res) {
+  try {
+    const userId = req.employee._id;
+
+    const unreadCount = await AssignmentMessage.countDocuments({
+      receiver: userId, // Only count messages where user is receiver
+      'readBy.employee': { $ne: userId },
+      isTrashed: false,
+      isSpam: false,
+      status: 'sent'
+    });
+
+    res.json({
+      success: true,
+      data: {
+        unreadCount
+      }
+    });
+  } catch (error) {
+    console.error('Error getting unread count:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error while fetching unread count'
+    });
+  }
+};
+
+// Mark multiple messages as read
+exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
+  try {
+    const { messageIds } = req.body;
+    const userId = req.employee._id;
+
+    if (!messageIds || !Array.isArray(messageIds)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Message IDs array is required'
+      });
+    }
+
+    // Update all messages that haven't been read by this user
+    const result = await AssignmentMessage.updateMany(
+      {
+        _id: { $in: messageIds },
+        'readBy.employee': { $ne: userId },
+        $or: [
+          { sender: userId },
+          { receiver: userId }
+        ]
+      },
+      {
+        $push: {
+          readBy: {
+            employee: userId,
+            readAt: new Date()
+          }
+        }
+      }
+    );
+
+    res.json({
+      success: true,
+      message: `${result.modifiedCount} messages marked as read`,
+      data: {
+        modifiedCount: result.modifiedCount
+      }
+    });
+  } catch (error) {
+    console.error('Error marking multiple messages as read:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error while marking messages as read'
+    });
+  }
+};

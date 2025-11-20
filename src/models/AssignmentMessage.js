@@ -70,6 +70,10 @@ const AssignmentMessageSchema = new Schema(
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    readBy: [{
+      employee: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+      readAt: { type: Date, default: Date.now }
+    }],
 
     // Spam fields
     isSpam: { type: Boolean, default: false },

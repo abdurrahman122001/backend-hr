@@ -82,6 +82,11 @@ router.patch("/:id/send", ctrl.sendDraft);
 router.patch("/:id/edit-disapproved", ctrl.editDisapprovedMessage);
 router.patch("/:id/edit-pending", upload.array("files", 10), ctrl.editPendingMessage);
 
+router.post("/:id/read", ctrl.markAsRead);
+router.post("/:id/unread", ctrl.markAsUnread);
+router.post("/read-multiple", ctrl.markMultipleAsRead);
+router.get("/unread/count", ctrl.getUnreadCount);
+
 // In your backend routes file
 router.get('/thread/:threadId', ctrl.getMessagesByThread);
 // =============================

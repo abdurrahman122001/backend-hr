@@ -6740,3 +6740,43 @@ exports.unmuteConversation = async (req, res) => {
     });
   }
 };
+
+// If you have a chat unread count endpoint, it should look like this:
+exports.getChatUnreadCount = async (req, res) => {
+  try {
+    const userId = req.employee._id;
+
+    const unreadCount = await Conversation.aggregate([
+      {
+        $match: {
+          participants: userId,
+        }
+      },
+      {
+        $project: {
+          unreadForUser: {
+            $ifNull: [`$unreadCount.${userId.toString()}`, 0]
+          }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalUnread: { $sum: "$unreadForUser" }
+        }
+      }
+    ]);
+
+    const totalUnread = unreadCount.length > 0 ? unreadCount[0].totalUnread : 0;
+
+    res.json({
+      success: true,
+      data: {
+        unreadCount: totalUnread
+      }
+    });
+  } catch (error) {
+    console.error('Error getting chat unread count:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+};
