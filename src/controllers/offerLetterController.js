@@ -94,6 +94,42 @@ async function getCompanyContext(ownerId) {
     return FALLBACKS;
   }
 }
+
+/* ------------------------- Controller: Get Signature ---------------------- */
+async function getSignature(req, res) {
+  try {
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: "No user context found." });
+    }
+
+    const ownerId = req.user._id;
+    console.log("🔍 DEBUG: Fetching signature for owner:", ownerId);
+
+    const signature = await Signature.findOne({ owner: ownerId });
+
+    if (!signature) {
+      console.log("🔍 DEBUG: No signature found for owner:", ownerId);
+      return res.status(404).json({ error: "Signature not found" });
+    }
+
+    console.log("🔍 DEBUG: Signature found:", {
+      hasText: !!signature.signatureText,
+      hasImage: !!signature.signatureImage,
+      text: signature.signatureText ? "Present" : "Missing"
+    });
+
+    res.json({
+      signatureText: signature.signatureText,
+      signatureImage: signature.signatureImage,
+      createdAt: signature.createdAt,
+      updatedAt: signature.updatedAt
+    });
+  } catch (err) {
+    console.error("Error fetching signature:", err);
+    res.status(500).json({ error: "Failed to fetch signature" });
+  }
+}
+
 /* ----------------------------- Helper: Styles ----------------------------- */
 function enforceComicSans(html) {
   const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
@@ -265,11 +301,12 @@ async function buildContext({
     formattedTime,
     grossSalary,
     probationDays: probationDaysNum.toString(),
-    signatureHtml: signatureBlock,
+    signatureHtml: signatureBlock, // Changed to signatureHtml for consistency
     signatureBlock: signatureBlock,
   };
 
   console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays);
+  console.log("🔍 DEBUG final ctx.signatureHtml:", ctx.signatureHtml ? "Present" : "Missing");
 
   return {
     ctx,
@@ -363,10 +400,11 @@ async function sendOfferLetter(req, res) {
 
     // Render final subject + html (prefer client override but ensure signature)
     let finalSubject =
-      subjectOverride ||
+      subjectOverride || // This should already be rendered by frontend
       (tpl
         ? renderWithContext(tpl.subject || "", ctx)
         : `Offer of Employment – ${position} at ${companyCtx.name}`);
+    
     let finalHtml =
       letterOverride ||
       (tpl
@@ -376,16 +414,20 @@ async function sendOfferLetter(req, res) {
         <p>Dear <b>${safeCandidateName}</b>,</p>
         <p>We're thrilled to have you on board!</p>
         <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
-        {{signatureBlock}}
+        {{signatureHtml}}
       </div>
     `.trim());
 
     // Ensure signature is present (if template/editor forgot it)
-    if (!/signatureBlock/i.test(finalHtml)) {
-      finalHtml += signatureBlock;
+    if (!/signatureHtml/i.test(finalHtml)) {
+      finalHtml += ctx.signatureHtml || signatureBlock;
     }
 
     finalHtml = enforceImgCss(enforceComicSans(finalHtml));
+
+    // Debug: Log the final subject and HTML
+    console.log("🔍 DEBUG Final Subject:", finalSubject);
+    console.log("🔍 DEBUG Final HTML length:", finalHtml.length);
 
     // Persist generated email
     await OfferEmailGenerated.create({
@@ -447,6 +489,11 @@ async function sendOfferLetter(req, res) {
     });
 
     const text = finalHtml.replace(/<[^>]+>/g, " ");
+    
+    // Debug: Log email sending details
+    console.log("🔍 DEBUG Sending email to:", candidateEmail);
+    console.log("🔍 DEBUG Email subject:", finalSubject);
+    
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: candidateEmail,
@@ -455,6 +502,8 @@ async function sendOfferLetter(req, res) {
       html: finalHtml,
     });
 
+    console.log("✅ Email sent successfully to:", candidateEmail);
+
     return res.json({ success: true });
   } catch (err) {
     console.error("Email send error:", err);
@@ -462,4 +511,7 @@ async function sendOfferLetter(req, res) {
   }
 }
 
-module.exports = { sendOfferLetter };
+module.exports = { 
+  sendOfferLetter,
+  getSignature 
+};

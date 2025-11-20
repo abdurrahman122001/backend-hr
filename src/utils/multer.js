@@ -46,7 +46,13 @@ const ACCEPTED = new Set([
   "audio/x-m4a",
   "audio/flac",
   "audio/x-flac",
-  
+  "application/msword", // .doc
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
+  "application/vnd.ms-word.document.macroEnabled.12", // .docm
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
+  "application/vnd.ms-word.template.macroEnabled.12", // .dotm
+  "application/rtf", // .rtf
+  "text/rtf",
   // Image files
   "image/jpeg",
   "image/jpg",
@@ -56,7 +62,7 @@ const ACCEPTED = new Set([
   "image/svg+xml",
   "image/bmp",
   "image/tiff",
-  
+
   // Video files
   "video/mp4",
   "video/mpeg",
@@ -67,7 +73,7 @@ const ACCEPTED = new Set([
   "video/x-ms-wmv",
   "video/x-flv",
   "video/3gpp",
-  "video/3gpp2"
+  "video/3gpp2",
 ]);
 
 // Also accept by file extension pattern for broader compatibility
@@ -75,21 +81,25 @@ function fileFilter(req, file, cb) {
   // Check by MIME type
   if (ACCEPTED.has(file.mimetype)) {
     cb(null, true);
-  } 
+  }
   // Additional checks for audio files with different MIME types
-  else if (file.mimetype.startsWith('audio/')) {
+  else if (file.mimetype.startsWith("audio/")) {
     cb(null, true);
   }
   // Additional checks for image files with different MIME types
-  else if (file.mimetype.startsWith('image/')) {
+  else if (file.mimetype.startsWith("image/")) {
     cb(null, true);
   }
   // Additional checks for video files with different MIME types
-  else if (file.mimetype.startsWith('video/')) {
+  else if (file.mimetype.startsWith("video/")) {
     cb(null, true);
-  }
-  else {
-    cb(new Error("Only PDF, XLS, XLSX, audio, image, and video files are allowed"), false);
+  } else {
+    cb(
+      new Error(
+        "Only PDF, XLS, XLSX, audio, image, and video files are allowed"
+      ),
+      false
+    );
   }
 }
 
