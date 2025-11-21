@@ -962,10 +962,10 @@ exports.createMessage = async function createMessage(req, res) {
       if (senderRole === "employee") {
         if (needsApproval) {
           console.log("👤 Employee with supervision replying - applying supervision rules");
-          
+
           // Clear any automatically added thread participants
           receivers = [];
-          
+
           // Add only team leads for approval (not the original manager)
           if (tls.length > 0) {
             receivers = [...tls];
@@ -1389,9 +1389,8 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${
-        action === "send" ? "sent immediately" : "converted to draft"
-      }`,
+      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
+        }`,
       data: populated,
     });
   } catch (e) {
@@ -2569,8 +2568,8 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         { path: "receiver", select: "_id name companyEmail role" },
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-        { 
-          path: "lastEditedBy", 
+        {
+          path: "lastEditedBy",
           select: "_id name companyEmail role",
           model: "Employee" // Explicitly specify the model
         },
@@ -4042,7 +4041,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 exports.editPendingMessage = async function editPendingMessage(req, res) {
   try {
     const { id } = req.params;
-    
+
     console.log("🔄 Processing editPendingMessage for message:", id);
     console.log("📦 Request content-type:", req.headers['content-type']);
     console.log("📦 Request body keys:", Object.keys(req.body || {}));
@@ -4096,8 +4095,8 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     }
 
     if (subject === undefined && note === undefined && !receiverBody && !receiversBody && files.length === 0 && removedAttachments.length === 0) {
-      return res.status(400).json({ 
-        error: "No changes provided. Please update subject, note, receivers, or attachments." 
+      return res.status(400).json({
+        error: "No changes provided. Please update subject, note, receivers, or attachments."
       });
     }
 
@@ -4129,10 +4128,10 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     const currentUserId = String(currentUser._id);
     const currentUserRole = normalizeRole(currentUser.role || "");
     const isTeamLead = currentUserRole === "team_lead";
-    
+
     // Check permissions: either sender OR team lead can edit pending messages
     const isSender = String(msg.sender) === currentUserId;
-    
+
     if (!isSender && !isTeamLead) {
       return res.status(403).json({
         error: "You don't have permission to edit this pending message. Only the sender or team leads can edit pending messages.",
@@ -4146,7 +4145,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     if (isTeamLead && !isSender) {
       const messageOwner = String(msg.owner);
       const teamLeadOwner = String(currentUser.owner);
-      
+
       if (messageOwner !== teamLeadOwner) {
         return res.status(403).json({
           error: "You can only edit pending messages within your organization",
@@ -4311,8 +4310,8 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
 
     res.json({
       success: true,
-      message: isTeamLead && !isSender 
-        ? "Pending message updated by team lead" 
+      message: isTeamLead && !isSender
+        ? "Pending message updated by team lead"
         : "Pending message updated successfully",
       data: populated,
       editedByTeamLead: isTeamLead && !isSender,
@@ -4353,14 +4352,14 @@ exports.markAsRead = async function markAsRead(req, res) {
     const message = await AssignmentMessage.findById(id);
 
     if (!message) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Message not found' 
+        error: 'Message not found'
       });
     }
 
     // Check if user is authorized to read this message
-    const isAuthorized = 
+    const isAuthorized =
       message.sender.toString() === userId.toString() ||
       message.receiver.some(receiver => receiver.toString() === userId.toString());
 
@@ -4372,7 +4371,7 @@ exports.markAsRead = async function markAsRead(req, res) {
     }
 
     // Check if user has already read this message
-    const alreadyRead = message.readBy.some(read => 
+    const alreadyRead = message.readBy.some(read =>
       read.employee.toString() === userId.toString()
     );
 
@@ -4384,8 +4383,8 @@ exports.markAsRead = async function markAsRead(req, res) {
       await message.save();
     }
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Marked as read',
       data: {
         messageId: message._id,
@@ -4394,9 +4393,54 @@ exports.markAsRead = async function markAsRead(req, res) {
     });
   } catch (error) {
     console.error('Error marking message as read:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: 'Server error while marking message as read' 
+      error: 'Server error while marking message as read'
+    });
+  }
+};
+
+// Mark all messages in thread as read
+exports.markThreadAsRead = async function markThreadAsRead(req, res) {
+  try {
+    const { threadId } = req.params;
+    const userId = req.employee._id;
+
+    // Find all unread messages in this thread where user is receiver
+    const unreadMessages = await AssignmentMessage.find({
+      threadId: threadId,
+      'readBy.employee': { $ne: userId },
+      $or: [
+        { receiver: userId },
+        { receiver: { $in: [userId] } }
+      ],
+      isTrashed: false
+    });
+
+    // Add user to readBy for all unread messages
+    const updatePromises = unreadMessages.map(msg =>
+      AssignmentMessage.findByIdAndUpdate(msg._id, {
+        $push: {
+          readBy: {
+            employee: userId,
+            readAt: new Date()
+          }
+        }
+      })
+    );
+
+    await Promise.all(updatePromises);
+
+    res.json({
+      success: true,
+      message: `Marked ${unreadMessages.length} messages as read`,
+      readCount: unreadMessages.length
+    });
+  } catch (error) {
+    console.error('Error marking thread as read:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to mark thread as read'
     });
   }
 };
@@ -4410,14 +4454,14 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     const message = await AssignmentMessage.findById(id);
 
     if (!message) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         success: false,
-        error: 'Message not found' 
+        error: 'Message not found'
       });
     }
 
     // Check if user is authorized
-    const isAuthorized = 
+    const isAuthorized =
       message.sender.toString() === userId.toString() ||
       message.receiver.some(receiver => receiver.toString() === userId.toString());
 
@@ -4429,14 +4473,14 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     }
 
     // Remove user from readBy array
-    message.readBy = message.readBy.filter(read => 
+    message.readBy = message.readBy.filter(read =>
       read.employee.toString() !== userId.toString()
     );
 
     await message.save();
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       message: 'Marked as unread',
       data: {
         messageId: message._id,
@@ -4445,9 +4489,9 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     });
   } catch (error) {
     console.error('Error marking message as unread:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
-      error: 'Server error while marking message as unread' 
+      error: 'Server error while marking message as unread'
     });
   }
 };

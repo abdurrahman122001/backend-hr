@@ -1,3 +1,5 @@
+/* — YOUR FULL EXACT FILE STARTS — */
+
 const mongoose = require("mongoose");
 const CompanyProfile = require("../models/CompanyProfile");
 const Salaries = require("../models/Salaries");
@@ -55,40 +57,52 @@ const SALARY_COMPONENTS = [
 async function getCompanyContext(ownerId) {
   try {
     console.log("🔍 DEBUG: Fetching company profile for owner:", ownerId);
-    
+
     const companyDoc = await CompanyProfile.findOne({ owner: ownerId })
-      .select('name email website branches')
+      .select("name email website branches")
       .lean();
-    
+
     console.log("🔍 DEBUG: Company Profile Found:", companyDoc);
-    
+
     if (!companyDoc) {
       console.log("❌ No company profile found, using fallbacks");
       return FALLBACKS;
     }
 
-    // Extract branch information
-    let address = FALLBACKS.address;
-    let phone = FALLBACKS.phone;
-    
+    // --------------------- Find Documentation Branch ---------------------
+    let documentationBranch = null;
+
     if (companyDoc.branches && companyDoc.branches.length > 0) {
-      const primaryBranch = companyDoc.branches[0];
-      address = primaryBranch.address || FALLBACKS.address;
-      phone = primaryBranch.phone || FALLBACKS.phone;
-      console.log("🔍 DEBUG: Using branch data:", { address, phone });
+      // FIX: match both boolean true AND string "true"
+      documentationBranch = companyDoc.branches.find(
+        (b) =>
+          b.useForDocumentation === true || b.useForDocumentation === "true"
+      );
+
+      if (!documentationBranch) {
+        console.log("ℹ️ No documentation branch found, using first branch");
+        documentationBranch = companyDoc.branches[0];
+      }
     }
+
+    // Extract data with FALLBACKS support
+    const address = documentationBranch?.address || FALLBACKS.address;
+    const phone = documentationBranch?.phone || FALLBACKS.phone;
+    const email =
+      documentationBranch?.email || companyDoc.email || FALLBACKS.email;
+
+    console.log("🔍 DEBUG: Using documentation branch:", documentationBranch);
 
     const companyData = {
       name: companyDoc.name || FALLBACKS.name,
-      email: companyDoc.email || FALLBACKS.email,
+      email: email,
       phone: phone,
       website: companyDoc.website || FALLBACKS.website,
-      address: address
+      address: address,
     };
 
     console.log("🔍 DEBUG: Final company context:", companyData);
     return companyData;
-    
   } catch (err) {
     console.error("❌ Error fetching company profile:", err);
     return FALLBACKS;
@@ -115,14 +129,14 @@ async function getSignature(req, res) {
     console.log("🔍 DEBUG: Signature found:", {
       hasText: !!signature.signatureText,
       hasImage: !!signature.signatureImage,
-      text: signature.signatureText ? "Present" : "Missing"
+      text: signature.signatureText ? "Present" : "Missing",
     });
 
     res.json({
       signatureText: signature.signatureText,
       signatureImage: signature.signatureImage,
       createdAt: signature.createdAt,
-      updatedAt: signature.updatedAt
+      updatedAt: signature.updatedAt,
     });
   } catch (err) {
     console.error("Error fetching signature:", err);
@@ -288,25 +302,28 @@ async function buildContext({
 
   const probationDaysNum = Number(probationDays) || 0;
 
-  console.log("🔍 DEBUG probationDays:", probationDays);
-  console.log("🔍 DEBUG probationDaysNum:", probationDaysNum);
-
   const ctx = {
     candidateName: safeCandidateName,
     position,
+
+    // Company info
     companyName: companyCtx.name,
     companyAddress: companyCtx.address,
+    companyPhone: companyCtx.phone || "",
+    companyEmail: companyCtx.email || "",
+    companyWebsite: companyCtx.website || "",
+
+    // Dates and salary
     formattedStartDate,
     formattedDeadline,
     formattedTime,
     grossSalary,
     probationDays: probationDaysNum.toString(),
-    signatureHtml: signatureBlock, // Changed to signatureHtml for consistency
+
+    // Signature
+    signatureHtml: signatureBlock,
     signatureBlock: signatureBlock,
   };
-
-  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays);
-  console.log("🔍 DEBUG final ctx.signatureHtml:", ctx.signatureHtml ? "Present" : "Missing");
 
   return {
     ctx,
@@ -365,11 +382,9 @@ async function sendOfferLetter(req, res) {
 
     const exists = await Employee.findOne({ email: candidateEmail });
     if (exists)
-      return res
-        .status(400)
-        .json({
-          error: "An employee with this email already exists. Offer not sent.",
-        });
+      return res.status(400).json({
+        error: "An employee with this email already exists. Offer not sent.",
+      });
 
     // Build context and load template
     const {
@@ -398,25 +413,35 @@ async function sendOfferLetter(req, res) {
       key,
     }).lean();
 
-    // Render final subject + html (prefer client override but ensure signature)
+    /* ------------------------ FIX APPLIED HERE ------------------------ */
+
+    let finalHtml = "";
+
+    if (letterOverride) {
+      finalHtml = renderWithContext(letterOverride, ctx);
+    } else if (tpl) {
+      finalHtml = renderWithContext(tpl.html || "", ctx);
+    } else {
+      finalHtml = renderWithContext(
+        `
+      <div style="font-family: Arial, sans-serif; line-height:1.7;">
+        <p>Dear <b>{{candidateName}}</b>,</p>
+        <p>We're thrilled to have you on board!</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>{{position}}</b> at <b>{{companyName}}</b>.</p>
+        {{signatureHtml}}
+      </div>
+    `,
+        ctx
+      );
+    }
+
+    /* ------------------------------------------------------------------ */
+
     let finalSubject =
-      subjectOverride || // This should already be rendered by frontend
+      subjectOverride ||
       (tpl
         ? renderWithContext(tpl.subject || "", ctx)
         : `Offer of Employment – ${position} at ${companyCtx.name}`);
-    
-    let finalHtml =
-      letterOverride ||
-      (tpl
-        ? renderWithContext(tpl.html || "", ctx)
-        : `
-      <div style="font-family: Arial, sans-serif; line-height:1.7;">
-        <p>Dear <b>${safeCandidateName}</b>,</p>
-        <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
-        {{signatureHtml}}
-      </div>
-    `.trim());
 
     // Ensure signature is present (if template/editor forgot it)
     if (!/signatureHtml/i.test(finalHtml)) {
@@ -424,10 +449,6 @@ async function sendOfferLetter(req, res) {
     }
 
     finalHtml = enforceImgCss(enforceComicSans(finalHtml));
-
-    // Debug: Log the final subject and HTML
-    console.log("🔍 DEBUG Final Subject:", finalSubject);
-    console.log("🔍 DEBUG Final HTML length:", finalHtml.length);
 
     // Persist generated email
     await OfferEmailGenerated.create({
@@ -439,7 +460,6 @@ async function sendOfferLetter(req, res) {
       context: ctx,
     });
 
-    // Create employee + salary (encrypted) and send email
     const normalizedRT = normalizeTime(reportingTime);
     const probationDaysNum = Number(probationDays) || 0;
 
@@ -457,6 +477,7 @@ async function sendOfferLetter(req, res) {
         ? { leaveEntitlement: { total: 0, usedPaid: 0, usedUnpaid: 0 } }
         : {}),
     });
+
     if (probationDaysNum > 0) {
       await Employee.updateOne(
         { _id: employee._id },
@@ -489,11 +510,7 @@ async function sendOfferLetter(req, res) {
     });
 
     const text = finalHtml.replace(/<[^>]+>/g, " ");
-    
-    // Debug: Log email sending details
-    console.log("🔍 DEBUG Sending email to:", candidateEmail);
-    console.log("🔍 DEBUG Email subject:", finalSubject);
-    
+
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: candidateEmail,
@@ -502,8 +519,6 @@ async function sendOfferLetter(req, res) {
       html: finalHtml,
     });
 
-    console.log("✅ Email sent successfully to:", candidateEmail);
-
     return res.json({ success: true });
   } catch (err) {
     console.error("Email send error:", err);
@@ -511,7 +526,9 @@ async function sendOfferLetter(req, res) {
   }
 }
 
-module.exports = { 
+module.exports = {
   sendOfferLetter,
-  getSignature 
+  getSignature,
 };
+
+/* — YOUR FULL EXACT FILE ENDS — */

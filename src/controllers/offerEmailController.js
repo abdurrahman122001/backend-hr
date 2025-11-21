@@ -16,39 +16,50 @@ const FALLBACKS = {
 /* ----------------------------- Helper: Company ---------------------------- */
 async function getCompanyContext(ownerId) {
   let companyDoc = null;
+
   try {
     companyDoc = await CompanyProfile.findOne(
       { owner: ownerId },
       { name: 1, email: 1, website: 1, branches: 1 }
     ).lean();
-    
+
     console.log("🔍 DEBUG Company Profile Found:", companyDoc);
-    
+
   } catch (err) {
     console.error("Error fetching company profile:", err);
   }
-  
-  // If no company profile found, return fallbacks immediately
+
   if (!companyDoc) {
     console.log("❌ No company profile found for owner:", ownerId);
     return FALLBACKS;
   }
-  
-  // Get primary branch address and phone if available
-  let address = FALLBACKS.address;
-  let phone = FALLBACKS.phone;
-  
+
+  let selectedBranch = null;
+
   if (companyDoc.branches && companyDoc.branches.length > 0) {
-    address = companyDoc.branches[0].address || FALLBACKS.address;
-    phone = companyDoc.branches[0].phone || FALLBACKS.phone;
+    selectedBranch = companyDoc.branches.find(
+      (b) =>
+        b.useForDocumentation === true ||
+        b.useForDocumentation === "true"
+    );
+
+    if (!selectedBranch) {
+      console.log("ℹ️ No documentation branch found — using first branch.");
+      selectedBranch = companyDoc.branches[0];
+    }
   }
+
+  const address = selectedBranch?.address || FALLBACKS.address;
+  const phone = selectedBranch?.phone || FALLBACKS.phone;
+  const email =
+    selectedBranch?.email || companyDoc.email || FALLBACKS.email;
 
   return {
     name: companyDoc.name || FALLBACKS.name,
-    email: companyDoc.email || FALLBACKS.email,
+    email: email,
     phone: phone,
     website: companyDoc.website || FALLBACKS.website,
-    address: address
+    address: address,
   };
 }
 
@@ -80,7 +91,7 @@ function formatNumberWithCommas(x) {
   return Number(x).toLocaleString("en-PK");
 }
 
-// simple {{placeholder}} -> value renderer (no extra deps)
+// simple {{placeholder}} -> value renderer
 function render(tpl = "", ctx = {}) {
   let out = String(tpl);
   Object.entries(ctx).forEach(([k, v]) => {
@@ -91,17 +102,14 @@ function render(tpl = "", ctx = {}) {
 }
 
 /* -------------------- GET current template by key -------------------- */
-// GET /api/offer-email?key=offer_letter
 exports.getTemplate = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const key = String(req.query.key || "offer_letter");
     const tpl = await OfferEmailTemplate.findOne({ owner, key }).lean();
-    
-    // Get company context for default template
+
     const companyCtx = await getCompanyContext(owner);
-    
-    // Get signature for default template
+
     const signature = await Signature.findOne({ owner });
     const signatureBlock = signature
       ? `
@@ -109,11 +117,9 @@ exports.getTemplate = async (req, res) => {
         <br>
         ${
           signature.signatureImage
-            ? `<img src="${process.env.SERVER_URL || ""}${
-                signature.signatureImage
-              }" 
-                     alt="Signature" 
-                     style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+            ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}"
+                  alt="Signature"
+                  style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
             : ""
         }
         <div style="text-align:left;">${signature.signatureText || ""}</div>
@@ -126,29 +132,39 @@ exports.getTemplate = async (req, res) => {
         owner,
         key,
         subject: "Offer of Employment – {{position}} at {{companyName}}",
-        html: `<div style="font-family: Arial, sans-serif; line-height:1.7;">
-          <p>Dear <b>{{candidateName}}</b>,</p>
-          <p>We're thrilled to have you on board!</p>
-          <p>It gives us great pleasure to officially offer you the position of <b>{{position}}</b> at <b>{{companyName}}</b>.</p>
-          <p><strong>Company:</strong> ${companyCtx.name}</p>
-          <p><strong>Address:</strong> ${companyCtx.address}</p>
-          <p><strong>Email:</strong> ${companyCtx.email}</p>
-          <p><strong>Phone:</strong> ${companyCtx.phone}</p>
-          <p><strong>Website:</strong> ${companyCtx.website}</p>
-          <br>
-          <p><strong>Start Date:</strong> {{formattedStartDate}}</p>
-          <p><strong>Reporting Time:</strong> {{formattedTime}}</p>
-          <p><strong>Position:</strong> {{position}}</p>
-          <p><strong>Gross Salary:</strong> Rs. {{grossSalary}}</p>
-          <p><strong>Probation Period:</strong> {{probationDays}} days</p>
-          <p><strong>Confirmation Deadline:</strong> {{formattedDeadline}}</p>
-          <br>
-          <p>We look forward to welcoming you to our team!</p>
-          ${signatureBlock}
-        </div>`,
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height:1.7;">
+
+            <p>Dear <b>{{candidateName}}</b>,</p>
+
+            <p>We are pleased to offer you the position of <b>{{position}}</b> at <b>{{companyName}}</b>.</p>
+
+            <p><strong>Company:</strong> {{companyName}}</p>
+            <p><strong>Address:</strong> {{companyAddress}}</p>
+            <p><strong>Email:</strong> {{companyEmail}}</p>
+            <p><strong>Phone:</strong> {{companyPhone}}</p>
+            <p><strong>Website:</strong> {{companyWebsite}}</p>
+
+            <br>
+
+            <p><strong>Start Date:</strong> {{formattedStartDate}}</p>
+            <p><strong>Reporting Time:</strong> {{formattedTime}}</p>
+            <p><strong>Gross Salary:</strong> Rs. {{grossSalary}}</p>
+            <p><strong>Probation Period:</strong> {{probationDays}} days</p>
+            <p><strong>Confirmation Deadline:</strong> {{formattedDeadline}}</p>
+
+            <br>
+            <p>We look forward to welcoming you!</p>
+
+            ${signatureBlock}
+
+          </div>
+        `,
       });
     }
+
     res.json(tpl);
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch template" });
@@ -156,40 +172,38 @@ exports.getTemplate = async (req, res) => {
 };
 
 /* -------------------- UPSERT template by key -------------------- */
-// POST /api/offer-email  body: { key, subject, html }
 exports.saveTemplate = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const { key = "offer_letter", subject, html } = req.body;
-    if (!subject || !html) return res.status(400).json({ error: "subject and html are required" });
+    if (!subject || !html)
+      return res.status(400).json({ error: "subject and html are required" });
 
     const doc = await OfferEmailTemplate.findOneAndUpdate(
       { owner, key },
       { $set: { subject, html } },
       { new: true, upsert: true }
     );
+
     res.json(doc);
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to save template" });
   }
 };
 
-/* ---------- Preview template with sample data ---------- */
-// POST /api/offer-email/preview body: { key, subject, html, sampleData }
+/* -------------------- PREVIEW TEMPLATE -------------------- */
 exports.previewTemplate = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const { key = "offer_letter", subject, html, sampleData = {} } = req.body;
-    
-    if (!subject || !html) {
-      return res.status(400).json({ error: "subject and html are required" });
-    }
 
-    // Get company context
+    if (!subject || !html)
+      return res.status(400).json({ error: "subject and html are required" });
+
     const companyCtx = await getCompanyContext(owner);
-    
-    // Get signature
+
     const signature = await Signature.findOne({ owner });
     const signatureBlock = signature
       ? `
@@ -197,11 +211,9 @@ exports.previewTemplate = async (req, res) => {
         <br>
         ${
           signature.signatureImage
-            ? `<img src="${process.env.SERVER_URL || ""}${
-                signature.signatureImage
-              }" 
-                     alt="Signature" 
-                     style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+            ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}"
+                   alt="Signature"
+                   style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
             : ""
         }
         <div style="text-align:left;">${signature.signatureText || ""}</div>
@@ -209,95 +221,109 @@ exports.previewTemplate = async (req, res) => {
     `
       : "";
 
-    // Build preview context with sample data
     const previewContext = {
       candidateName: sampleData.candidateName || "John Doe",
       position: sampleData.position || "Software Engineer",
+
+      // FULL COMPANY INFO
       companyName: companyCtx.name,
       companyAddress: companyCtx.address,
-      formattedStartDate: sampleData.formattedStartDate || formatDateDMY(new Date()),
-      formattedDeadline: sampleData.formattedDeadline || formatDateDMY(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+      companyEmail: companyCtx.email,
+      companyPhone: companyCtx.phone,
+      companyWebsite: companyCtx.website,
+
+      formattedStartDate:
+        sampleData.formattedStartDate || formatDateDMY(new Date()),
+      formattedDeadline:
+        sampleData.formattedDeadline ||
+        formatDateDMY(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
       formattedTime: sampleData.formattedTime || formatTime12hr("09:00"),
       grossSalary: sampleData.grossSalary || "100,000",
       probationDays: sampleData.probationDays || "90",
-      signatureBlock: signatureBlock,
+
+      signatureBlock,
       signatureHtml: signatureBlock,
     };
 
-    // Render preview
     const renderedSubject = render(subject, previewContext);
     const renderedHtml = render(html, previewContext);
 
     res.json({
       subject: renderedSubject,
       html: renderedHtml,
-      context: previewContext
+      context: previewContext,
     });
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to generate preview" });
   }
 };
 
-/* ---------- Get available template variables ---------- */
-// GET /api/offer-email/variables
+/* -------------------- GET TEMPLATE VARIABLES -------------------- */
 exports.getTemplateVariables = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const companyCtx = await getCompanyContext(owner);
-    
+
     const variables = {
-      candidateName: "Full name of the candidate",
-      position: "Job position/designation",
+      candidateName: "Full name of candidate",
+      position: "Job title",
       companyName: companyCtx.name,
       companyAddress: companyCtx.address,
-      formattedStartDate: "Formatted start date (e.g., 15 January 2024)",
-      formattedDeadline: "Formatted confirmation deadline date",
-      formattedTime: "Formatted reporting time (e.g., 9:00 AM)",
-      grossSalary: "Formatted gross salary with commas",
-      probationDays: "Probation period in days",
-      signatureBlock: "Signature block with image and text",
-      signatureHtml: "HTML signature block",
+      companyEmail: companyCtx.email,
+      companyPhone: companyCtx.phone,
+      companyWebsite: companyCtx.website,
+      formattedStartDate: "Start date",
+      formattedDeadline: "Confirmation deadline",
+      formattedTime: "Reporting time",
+      grossSalary: "Formatted salary",
+      probationDays: "Probation period (days)",
+      signatureBlock: "Full signature block HTML",
+      signatureHtml: "Alias of signatureBlock",
     };
 
     res.json({
       variables,
-      companyInfo: {
-        name: companyCtx.name,
-        email: companyCtx.email,
-        phone: companyCtx.phone,
-        website: companyCtx.website,
-        address: companyCtx.address
-      }
+      companyInfo: companyCtx,
     });
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch template variables" });
   }
 };
 
-/* ---------- get latest generated for a candidate ---------- */
-// GET /api/offer-email/latest?key=offer_letter&candidateEmail=foo@bar.com
+/* -------------------- GET LATEST GENERATED EMAIL -------------------- */
 exports.getLatestGenerated = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const key = String(req.query.key || "offer_letter");
     const candidateEmail = String(req.query.candidateEmail || "");
-    if (!candidateEmail) return res.status(400).json({ error: "candidateEmail is required" });
 
-    const latest = await OfferEmailGenerated.findOne({ owner, key, candidateEmail })
+    if (!candidateEmail)
+      return res.status(400).json({ error: "candidateEmail is required" });
+
+    const latest = await OfferEmailGenerated.findOne({
+      owner,
+      key,
+      candidateEmail,
+    })
       .sort({ createdAt: -1 })
       .lean();
-    if (!latest) return res.status(404).json({ error: "No generated email found" });
+
+    if (!latest)
+      return res.status(404).json({ error: "No generated email found" });
+
     res.json(latest);
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch latest generated email" });
   }
 };
 
-/* ---------- Get all templates for user ---------- */
-// GET /api/offer-email/all
+/* -------------------- GET ALL USER TEMPLATES -------------------- */
 exports.getAllTemplates = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
@@ -309,18 +335,19 @@ exports.getAllTemplates = async (req, res) => {
   }
 };
 
-/* ---------- Delete template by key ---------- */
-// DELETE /api/offer-email?key=offer_letter
+/* -------------------- DELETE TEMPLATE -------------------- */
 exports.deleteTemplate = async (req, res) => {
   try {
     const owner = new mongoose.Types.ObjectId(req.user?._id || req.req_id);
     const key = String(req.query.key || "offer_letter");
 
     const result = await OfferEmailTemplate.deleteOne({ owner, key });
-    if (result.deletedCount === 0) {
+
+    if (result.deletedCount === 0)
       return res.status(404).json({ error: "Template not found" });
-    }
+
     res.json({ message: "Template deleted successfully" });
+
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to delete template" });

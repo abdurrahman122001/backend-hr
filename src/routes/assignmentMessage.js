@@ -86,6 +86,7 @@ router.post("/:id/read", ctrl.markAsRead);
 router.post("/:id/unread", ctrl.markAsUnread);
 router.post("/read-multiple", ctrl.markMultipleAsRead);
 router.get("/unread/count", ctrl.getUnreadCount);
+router.post("/thread/:threadId/read-all", ctrl.markThreadAsRead);
 
 // In your backend routes file
 router.get('/thread/:threadId', ctrl.getMessagesByThread);
