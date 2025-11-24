@@ -368,10 +368,12 @@ async function buildContext({
 
   console.log("🔍 DEBUG probationDays:", probationDays);
   console.log("🔍 DEBUG probationDaysNum:", probationDaysNum);
+  console.log("🔍 DEBUG department:", department);
 
   const ctx = {
     candidateName: safeCandidateName,
     position,
+    department: department || "Not specified", // Added department variable
     companyName: companyCtx.name,
     companyAddress: companyCtx.address,
     formattedStartDate,
@@ -383,6 +385,7 @@ async function buildContext({
     signatureBlock: signatureBlock,
   };
 
+  console.log("🔍 DEBUG final ctx.department:", ctx.department);
   console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays);
   console.log("🔍 DEBUG final ctx.signatureHtml:", ctx.signatureHtml ? "Present" : "Missing");
 
@@ -493,7 +496,7 @@ async function sendOfferLetter(req, res) {
       <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
         <p>Dear <b>${safeCandidateName}</b>,</p>
         <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
         {{signatureHtml}}
       </div>
     `.trim();
@@ -660,7 +663,7 @@ async function previewOfferLetter(req, res) {
       <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
         <p>Dear <b>${sanitizeName(candidateName)}</b>,</p>
         <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
         {{signatureHtml}}
       </div>
     `.trim();

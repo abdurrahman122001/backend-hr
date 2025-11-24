@@ -137,7 +137,7 @@ exports.getTemplate = async (req, res) => {
 
             <p>Dear <b>{{candidateName}}</b>,</p>
 
-            <p>We are pleased to offer you the position of <b>{{position}}</b> at <b>{{companyName}}</b>.</p>
+            <p>We are pleased to offer you the position of <b>{{position}}</b> in our <b>{{department}}</b> department at <b>{{companyName}}</b>.</p>
 
             <p><strong>Company:</strong> {{companyName}}</p>
             <p><strong>Address:</strong> {{companyAddress}}</p>
@@ -147,6 +147,7 @@ exports.getTemplate = async (req, res) => {
 
             <br>
 
+            <p><strong>Department:</strong> {{department}}</p>
             <p><strong>Start Date:</strong> {{formattedStartDate}}</p>
             <p><strong>Reporting Time:</strong> {{formattedTime}}</p>
             <p><strong>Gross Salary:</strong> Rs. {{grossSalary}}</p>
@@ -224,6 +225,7 @@ exports.previewTemplate = async (req, res) => {
     const previewContext = {
       candidateName: sampleData.candidateName || "John Doe",
       position: sampleData.position || "Software Engineer",
+      department: sampleData.department || "Engineering", // Added department
 
       // FULL COMPANY INFO
       companyName: companyCtx.name,
@@ -269,6 +271,7 @@ exports.getTemplateVariables = async (req, res) => {
     const variables = {
       candidateName: "Full name of candidate",
       position: "Job title",
+      department: "Department name", // Added department variable
       companyName: companyCtx.name,
       companyAddress: companyCtx.address,
       companyEmail: companyCtx.email,
