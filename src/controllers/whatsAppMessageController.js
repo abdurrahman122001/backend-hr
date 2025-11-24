@@ -27,7 +27,6 @@ function normalizeIds(val) {
   return [];
 }
 
-
 function normalizeRole(role) {
   if (!role) return "";
   const raw = String(role).trim();
@@ -62,7 +61,7 @@ async function applyVisibility(q, req) {
   if (currentUserRole === "team_lead") {
     // Get all managers in the same organization
     const { managers } = await findTLsAndManagersByOwner(ownerId);
-    
+
     return {
       ...q,
       $or: [
@@ -70,10 +69,10 @@ async function applyVisibility(q, req) {
         { receiver: me },
         { receiver: { $in: [me] } },
         // 🔥 CRITICAL FIX: Allow team leads to see manager messages
-        { 
-          sender: { $in: managers.map(id => oid(id)) },
-          owner: ownerId 
-        }
+        {
+          sender: { $in: managers.map((id) => oid(id)) },
+          owner: ownerId,
+        },
       ],
     };
   }
@@ -376,7 +375,10 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "repliedTo", select: "_id note message sender attachments" },
-          { path: "replyContent.originalSender", select: "_id name companyEmail" },
+          {
+            path: "replyContent.originalSender",
+            select: "_id name companyEmail",
+          },
         ])
         .lean(),
       WhatsAppMessage.countDocuments(qFinal),
@@ -482,7 +484,10 @@ exports.listMessagesForManager = async function listMessagesForManager(
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         { path: "repliedTo", select: "_id note message sender attachments" },
-        { path: "replyContent.originalSender", select: "_id name companyEmail" },
+        {
+          path: "replyContent.originalSender",
+          select: "_id name companyEmail",
+        },
       ])
       .lean();
 
@@ -492,7 +497,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-// CREATE MESSAGE WITH SUPERVISION LOGIC (UPDATED)
+// CREATE MESSAGE WITH SUPERVISION LOGIC (UPDATED) - TEAM LEAD SENDS TO MANAGER
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -507,7 +512,7 @@ exports.createMessage = async function createMessage(req, res) {
       scheduledFor,
       isReply,
       repliedTo,
-      replyContent
+      replyContent,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -547,28 +552,83 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // ✅ Always include assignedTo employee if present (but only if not already included)
-    if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-      const assignedEmployeeId = String(clientDoc.assignedTo._id);
-      if (
-        !receivers.includes(assignedEmployeeId) &&
-        assignedEmployeeId !== String(sender)
-      ) {
-        receivers.push(assignedEmployeeId);
-      }
-    }
-
-    // 🔥 CRITICAL UPDATE: Add team leads as receivers for manager messages
-    // When manager sends message, automatically include team leads for visibility
-    if (senderRole === "manager" && tls.length > 0) {
-      console.log("👨‍💼 Manager sending message - adding team leads as receivers:", tls);
+    // 🔥 CRITICAL CHANGE: TEAM LEAD SENDS TO MANAGER INSTEAD OF ASSIGNED EMPLOYEE
+    if (senderRole === "team_lead") {
+      console.log("👨‍💼 Team Lead sending message - targeting managers instead of assigned employee");
       
+      // Clear any existing receivers (don't use assigned employee)
+      receivers = [];
+      
+      // Add managers as receivers
+      if (managers.length > 0) {
+        managers.forEach((managerId) => {
+          if (!receivers.includes(managerId) && managerId !== String(sender)) {
+            receivers.push(managerId);
+          }
+        });
+        console.log("✅ Team Lead message directed to managers:", managers);
+      } else {
+        console.log("⚠️ No managers found for organization:", owner);
+      }
+
+      // 🎯 ADD CRM as additional receiver when Team Lead sends message
+      console.log("👨‍💼 Team Lead sending message - adding CRM as receiver");
+
+      // Get CRM employee ID from environment or database
+      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+
+      // Option 2: Find CRM user by role or email from database
+      let crmUser = null;
+      if (!crmEmployeeId) {
+        crmUser = await Employee.findOne({
+          owner: owner,
+          $or: [
+            { role: /crm/i },
+            { role: /customer relationship/i },
+            { companyEmail: /crm/i },
+            { name: /CRM/i },
+          ],
+        })
+          .select("_id")
+          .lean();
+      }
+
+      const crmId = crmEmployeeId || (crmUser ? String(crmUser._id) : null);
+
+      if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
+        receivers.push(crmId);
+        console.log("✅ Added CRM as receiver:", crmId);
+      } else if (!crmId) {
+        console.log("⚠️ CRM user not found for organization:", owner);
+      }
+    } 
+    // 🔥 CRITICAL UPDATE: Add team leads as receivers for manager messages
+    else if (senderRole === "manager" && tls.length > 0) {
+      console.log(
+        "👨‍💼 Manager sending message - adding team leads as receivers:",
+        tls
+      );
+
       // Add team leads to receivers for supervision visibility
-      tls.forEach(teamLeadId => {
+      tls.forEach((teamLeadId) => {
         if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
           receivers.push(teamLeadId);
         }
       });
+    }
+    // 👷 EMPLOYEE LOGIC: Use assigned employee and supervision rules
+    else if (senderRole === "employee") {
+      // ✅ Include assignedTo employee if present (but only if not already included)
+      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+        const assignedEmployeeId = String(clientDoc.assignedTo._id);
+        if (
+          !receivers.includes(assignedEmployeeId) &&
+          assignedEmployeeId !== String(sender)
+        ) {
+          receivers.push(assignedEmployeeId);
+          console.log("✅ Added assigned employee as receiver:", assignedEmployeeId);
+        }
+      }
     }
 
     // 🔑 CORRECTED Approval status logic - MATCHING ASSIGNMENT CONTROLLER
@@ -577,7 +637,7 @@ exports.createMessage = async function createMessage(req, res) {
       // Managers don't need approval, but team leads are now included as receivers
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
-      // Team leads don't need approval, and we don't auto-add managers
+      // Team leads don't need approval, and we send to managers + CRM
     } else if (needsApproval) {
       // Needs approval - add team leads for review
       approvalStatus = "pending";
@@ -601,9 +661,18 @@ exports.createMessage = async function createMessage(req, res) {
           approvalStatus = "pending";
         }
       } else if (senderRole === "team_lead") {
-        // Team lead with no receivers - add managers
+        // Team lead with no receivers - add managers and CRM as fallback
         receivers = [...managers];
+
+        // Try to add CRM again in fallback
+        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+        if (crmEmployeeId && !receivers.includes(crmEmployeeId)) {
+          receivers.push(crmEmployeeId);
+        }
+
         approvalStatus = null;
+        
+        console.log("🔄 Fallback: Team Lead receivers set to managers:", managers);
       } else if (senderRole === "manager") {
         // Manager with no receivers - add team leads
         receivers = [...tls];
@@ -675,8 +744,20 @@ exports.createMessage = async function createMessage(req, res) {
     console.log("📨 Message created with receivers:", {
       sender: senderRole,
       totalReceivers: receivers.length,
-      teamLeadsIncluded: tls.filter(tl => receivers.includes(tl)).length,
-      managersIncluded: managers.filter(m => receivers.includes(m)).length
+      managersIncluded: managers.filter((m) => receivers.includes(m)).length,
+      teamLeadsIncluded: tls.filter((tl) => receivers.includes(tl)).length,
+      crmIncluded: senderRole === "team_lead" ? "Yes" : "No",
+      assignedEmployeeIncluded: senderRole !== "team_lead" && clientDoc?.assignedTo ? "Yes" : "No",
+      receiverBreakdown: {
+        managers: managers.filter((m) => receivers.includes(m)),
+        teamLeads: tls.filter((tl) => receivers.includes(tl)),
+        crm: senderRole === "team_lead" ? 1 : 0,
+        others: receivers.filter(r => 
+          !managers.includes(r) && 
+          !tls.includes(r) && 
+          r !== process.env.CRM_EMPLOYEE_ID
+        )
+      }
     });
 
     // FIXED: Emit real-time events ONLY to relevant users
@@ -699,22 +780,54 @@ exports.createMessage = async function createMessage(req, res) {
 
       // Special notification for team leads when manager sends message
       if (senderRole === "manager") {
-        tls.forEach(teamLeadId => {
+        tls.forEach((teamLeadId) => {
           if (receivers.includes(teamLeadId)) {
             io.to(`employee_${teamLeadId}`).emit("new_message", {
               message: populated,
               type: "manager_message_visibility",
-              note: "You are included as a receiver for manager message visibility"
+              note: "You are included as a receiver for manager message visibility",
             });
           }
         });
+      }
+
+      // Special notification for managers when team lead sends message
+      if (senderRole === "team_lead") {
+        managers.forEach((managerId) => {
+          if (receivers.includes(managerId)) {
+            io.to(`employee_${managerId}`).emit("new_message", {
+              message: populated,
+              type: "team_lead_message_to_manager",
+              note: "Team Lead has sent you a message regarding client communication",
+            });
+          }
+        });
+
+        // Special notification for CRM when team lead sends message
+        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+        if (crmEmployeeId && receivers.includes(crmEmployeeId)) {
+          io.to(`employee_${crmEmployeeId}`).emit("new_message", {
+            message: populated,
+            type: "team_lead_message_to_crm",
+            note: "Team Lead has sent a message that requires CRM attention",
+          });
+        }
       }
     }
 
     res.status(201).json({
       ...populated.toObject(),
       teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
-      totalReceivers: receivers.length
+      crmIncluded: senderRole === "team_lead", // Indicate if CRM was added
+      managersIncluded: senderRole === "team_lead", // Indicate if managers were added (for team lead messages)
+      totalReceivers: receivers.length,
+      receiverSummary: {
+        role: senderRole,
+        sentToManagers: senderRole === "team_lead",
+        sentToTeamLeads: senderRole === "manager", 
+        sentToCRM: senderRole === "team_lead",
+        sentToAssignedEmployee: senderRole !== "team_lead" && clientDoc?.assignedTo ? true : false
+      }
     });
   } catch (e) {
     console.error(e);
@@ -865,8 +978,9 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
-        }`,
+      message: `Message ${
+        action === "send" ? "sent immediately" : "converted to draft"
+      }`,
       data: populated,
     });
   } catch (e) {
@@ -1074,7 +1188,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" }
+      { path: "client", select: "_id clientName" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1105,14 +1219,14 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Create the updated message object for real-time emission
       const updatedMessage = {
         ...populatedMsg.toObject(),
-        approvalStatus: "approved"
+        approvalStatus: "approved",
       };
 
       console.log("📢 Emitting approval to all relevant users:", {
         messageId: id,
         sender: msg.sender?._id,
-        receivers: msg.receiver?.map(r => r._id) || [],
-        teamLead: req.employee._id
+        receivers: msg.receiver?.map((r) => r._id) || [],
+        teamLead: req.employee._id,
       });
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
@@ -1125,8 +1239,9 @@ exports.approveMessage = async function approveMessage(req, res) {
 
       // Add all receivers
       if (msg.receiver && Array.isArray(msg.receiver)) {
-        msg.receiver.forEach(receiver => {
-          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+        msg.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "object" ? receiver._id : receiver;
           if (receiverId) {
             allInvolvedUsers.add(String(receiverId));
           }
@@ -1139,13 +1254,13 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
-      involvedUsersArray.forEach(userId => {
+      involvedUsersArray.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
           approvedBy: req.employee._id,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
 
         console.log(`✅ Emitted approval to employee_${userId}`);
@@ -1156,7 +1271,7 @@ exports.approveMessage = async function approveMessage(req, res) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
-          action: "approved"
+          action: "approved",
         });
         console.log(`✅ Emitted to client_${msg.client._id}`);
       }
@@ -1179,7 +1294,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           // Add metadata to identify this as a forwarded message
           isForwarded: true,
           originalMessage: msg._id,
-          forwardedBy: req.employee._id
+          forwardedBy: req.employee._id,
         });
 
         const populatedForward = await forwardMsg.populate([
@@ -1196,7 +1311,7 @@ exports.approveMessage = async function approveMessage(req, res) {
 
           console.log("📤 Forwarding approved message to managers:", {
             managers: managers,
-            messageId: populatedForward._id
+            messageId: populatedForward._id,
           });
 
           // Notify managers about the new forwarded message
@@ -1206,7 +1321,7 @@ exports.approveMessage = async function approveMessage(req, res) {
               type: "new_message",
               action: "forwarded_approved",
               forwardedBy: req.employee._id,
-              originalMessageId: msg._id
+              originalMessageId: msg._id,
             });
             console.log(`✅ Forwarded to manager: employee_${managerId}`);
           });
@@ -1216,14 +1331,14 @@ exports.approveMessage = async function approveMessage(req, res) {
           ...populatedMsg.toObject(),
           forwardedToManagers: true,
           forwardedMessage: populatedForward,
-          message: "Message approved and forwarded to managers"
+          message: "Message approved and forwarded to managers",
         });
       }
     }
 
     return res.json({
       ...populatedMsg.toObject(),
-      message: "Message approved successfully"
+      message: "Message approved successfully",
     });
   } catch (e) {
     console.error("❌ Error in approveMessage:", e);
@@ -1238,7 +1353,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" }
+      { path: "client", select: "_id clientName" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1269,14 +1384,14 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       // Create the updated message object for real-time emission
       const updatedMessage = {
         ...populatedMsg.toObject(),
-        approvalStatus: "disapproved"
+        approvalStatus: "disapproved",
       };
 
       console.log("📢 Emitting disapproval to all relevant users:", {
         messageId: id,
         sender: msg.sender?._id,
-        receivers: msg.receiver?.map(r => r._id) || [],
-        teamLead: req.employee._id
+        receivers: msg.receiver?.map((r) => r._id) || [],
+        teamLead: req.employee._id,
       });
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
@@ -1289,8 +1404,9 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
       // Add all receivers
       if (msg.receiver && Array.isArray(msg.receiver)) {
-        msg.receiver.forEach(receiver => {
-          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+        msg.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "object" ? receiver._id : receiver;
           if (receiverId) {
             allInvolvedUsers.add(String(receiverId));
           }
@@ -1303,13 +1419,13 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
-      involvedUsersArray.forEach(userId => {
+      involvedUsersArray.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "disapproved",
           disapprovedBy: req.employee._id,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
 
         console.log(`✅ Emitted disapproval to employee_${userId}`);
@@ -1320,7 +1436,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
-          action: "disapproved"
+          action: "disapproved",
         });
         console.log(`✅ Emitted to client_${msg.client._id}`);
       }
@@ -1328,7 +1444,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
     res.json({
       ...populatedMsg.toObject(),
-      message: "Message disapproved successfully"
+      message: "Message disapproved successfully",
     });
   } catch (e) {
     console.error("❌ Error in disapproveMessage:", e);
@@ -1373,7 +1489,7 @@ exports.editMessage = async function editMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" }
+      { path: "client", select: "_id clientName" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1394,16 +1510,21 @@ exports.editMessage = async function editMessage(req, res) {
       currentUserRole,
       isTeamLead,
       isSender,
-      msgSenderId: msg.sender ? String(msg.sender._id) : 'No sender',
+      msgSenderId: msg.sender ? String(msg.sender._id) : "No sender",
       approvalStatus: msg.approvalStatus,
       senderMatch: msg.sender && String(msg.sender._id) === currentUserId,
-      canEdit: isSender || (isTeamLead && (msg.approvalStatus === "pending" || msg.approvalStatus === "disapproved"))
+      canEdit:
+        isSender ||
+        (isTeamLead &&
+          (msg.approvalStatus === "pending" ||
+            msg.approvalStatus === "disapproved")),
     });
 
     // 🔥 CRITICAL FIX 3: Enhanced permission check
     if (!isSender && !isTeamLead) {
       return res.status(403).json({
-        error: "You can only edit your own messages or messages pending your approval",
+        error:
+          "You can only edit your own messages or messages pending your approval",
       });
     }
 
@@ -1414,7 +1535,8 @@ exports.editMessage = async function editMessage(req, res) {
         msg.approvalStatus !== "disapproved"
       ) {
         return res.status(403).json({
-          error: "Team leads can only edit messages with pending or disapproved status",
+          error:
+            "Team leads can only edit messages with pending or disapproved status",
         });
       }
     }
@@ -1474,7 +1596,9 @@ exports.editMessage = async function editMessage(req, res) {
         // Original sender editing their own message
         if (msg.approvalStatus === "disapproved") {
           // If disapproved, goes back to pending for Team Lead review
-          console.log("👤 Sender editing disapproved message - back to pending");
+          console.log(
+            "👤 Sender editing disapproved message - back to pending"
+          );
           msg.approvalStatus = "pending";
         } else if (msg.approvalStatus === "approved") {
           // If already approved and sender edits, keep it approved
@@ -1523,8 +1647,15 @@ exports.editMessage = async function editMessage(req, res) {
 
     // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
     let forwardedMessage = null;
-    if (hasContentChanges && isTeamLead && !isSender && msg.approvalStatus === "approved") {
-      console.log("👨‍💼 Team Lead editing - auto approving and forwarding to managers");
+    if (
+      hasContentChanges &&
+      isTeamLead &&
+      !isSender &&
+      msg.approvalStatus === "approved"
+    ) {
+      console.log(
+        "👨‍💼 Team Lead editing - auto approving and forwarding to managers"
+      );
 
       const senderRole = normalizeRole(msg.sender?.role || "");
 
@@ -1552,7 +1683,7 @@ exports.editMessage = async function editMessage(req, res) {
               status: msg.status,
               scheduledFor: msg.scheduledFor,
               scheduledAt: msg.scheduledAt,
-              scheduledBy: msg.scheduledBy
+              scheduledBy: msg.scheduledBy,
             });
 
             forwardedMessage = await forwardMsg.populate([
@@ -1566,9 +1697,11 @@ exports.editMessage = async function editMessage(req, res) {
             // Add forwarding info to response
             responseData.forwardedToManagers = true;
             responseData.forwardedMessage = forwardedMessage;
-
           } catch (forwardError) {
-            console.error("❌ Failed to forward message to managers:", forwardError);
+            console.error(
+              "❌ Failed to forward message to managers:",
+              forwardError
+            );
             // Don't fail the whole request if forwarding fails
           }
         }
@@ -1582,8 +1715,8 @@ exports.editMessage = async function editMessage(req, res) {
       console.log("📢 Emitting edit to all relevant users:", {
         messageId: id,
         sender: msg.sender?._id,
-        receivers: msg.receiver?.map(r => r._id) || [],
-        editor: req.employee._id
+        receivers: msg.receiver?.map((r) => r._id) || [],
+        editor: req.employee._id,
       });
 
       // 🎯 CRITICAL: Get ALL users involved in this message
@@ -1596,8 +1729,9 @@ exports.editMessage = async function editMessage(req, res) {
 
       // Add all receivers
       if (msg.receiver && Array.isArray(msg.receiver)) {
-        msg.receiver.forEach(receiver => {
-          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+        msg.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "object" ? receiver._id : receiver;
           if (receiverId) {
             allInvolvedUsers.add(String(receiverId));
           }
@@ -1611,13 +1745,13 @@ exports.editMessage = async function editMessage(req, res) {
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
       // Emit to ALL involved users
-      involvedUsersArray.forEach(userId => {
+      involvedUsersArray.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: responseData,
           type: "message_updated",
           action: "edited",
           editedBy: req.employee._id,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
 
         console.log(`✅ Emitted edit to employee_${userId}`);
@@ -1628,7 +1762,7 @@ exports.editMessage = async function editMessage(req, res) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: responseData,
           type: "message_updated",
-          action: "edited"
+          action: "edited",
         });
         console.log(`✅ Emitted to client_${msg.client._id}`);
       }
@@ -1636,13 +1770,13 @@ exports.editMessage = async function editMessage(req, res) {
       // 🔥 NEW: Emit forwarded message to managers
       if (forwardedMessage) {
         console.log("📤 Emitting forwarded message to managers:", {
-          managers: forwardedMessage.receiver?.map(r => r._id) || [],
-          messageId: forwardedMessage._id
+          managers: forwardedMessage.receiver?.map((r) => r._id) || [],
+          messageId: forwardedMessage._id,
         });
 
         // Notify managers about the new forwarded message
         forwardedMessage.receiver.forEach((manager) => {
-          const managerId = typeof manager === 'object' ? manager._id : manager;
+          const managerId = typeof manager === "object" ? manager._id : manager;
           if (managerId) {
             io.to(`employee_${managerId}`).emit("new_message", {
               message: forwardedMessage,
@@ -1650,9 +1784,11 @@ exports.editMessage = async function editMessage(req, res) {
               action: "forwarded_approved",
               forwardedBy: req.employee._id,
               originalMessageId: msg._id,
-              source: "team_lead_edit"
+              source: "team_lead_edit",
             });
-            console.log(`✅ Forwarded edited message to manager: employee_${managerId}`);
+            console.log(
+              `✅ Forwarded edited message to manager: employee_${managerId}`
+            );
           }
         });
       }
@@ -1662,12 +1798,12 @@ exports.editMessage = async function editMessage(req, res) {
         console.log("📢 Notifying about auto-approval");
 
         // Notify ALL involved users about approval
-        involvedUsersArray.forEach(userId => {
+        involvedUsersArray.forEach((userId) => {
           io.to(`employee_${userId}`).emit("new_message", {
             message: responseData,
             type: "message_updated",
             action: "auto_approved",
-            approvedBy: req.employee._id
+            approvedBy: req.employee._id,
           });
         });
 
@@ -1685,11 +1821,11 @@ exports.editMessage = async function editMessage(req, res) {
         console.log("📢 Notifying Team Leads about pending approval");
 
         // Notify ALL involved users about pending status
-        involvedUsersArray.forEach(userId => {
+        involvedUsersArray.forEach((userId) => {
           io.to(`employee_${userId}`).emit("new_message", {
             message: responseData,
             type: "message_updated",
-            action: "pending_approval"
+            action: "pending_approval",
           });
         });
 
@@ -1711,7 +1847,8 @@ exports.editMessage = async function editMessage(req, res) {
     let responseMessage = "Message updated successfully";
     if (msg.approvalStatus === "approved" && isTeamLead && !isSender) {
       if (forwardedMessage) {
-        responseMessage = "Message updated, automatically approved, and forwarded to managers";
+        responseMessage =
+          "Message updated, automatically approved, and forwarded to managers";
       } else {
         responseMessage = "Message updated and automatically approved";
       }
@@ -2015,23 +2152,25 @@ exports.markAsSeen = async function markAsSeen(req, res) {
     }
 
     // Check if user is a receiver of this message
-    const isReceiver = msg.receiver.some(receiverId =>
-      String(receiverId) === String(currentUserId)
+    const isReceiver = msg.receiver.some(
+      (receiverId) => String(receiverId) === String(currentUserId)
     );
 
     if (!isReceiver) {
-      return res.status(403).json({ error: "You are not a receiver of this message" });
+      return res
+        .status(403)
+        .json({ error: "You are not a receiver of this message" });
     }
 
     // Check if already seen
-    const alreadySeen = msg.seenBy.some(seen =>
-      String(seen.employee) === String(currentUserId)
+    const alreadySeen = msg.seenBy.some(
+      (seen) => String(seen.employee) === String(currentUserId)
     );
 
     if (!alreadySeen) {
       // Add to seenBy array - ONLY employee field
       msg.seenBy.push({
-        employee: currentUserId
+        employee: currentUserId,
         // NO seenAt - only employee field as per your schema
       });
 
@@ -2054,23 +2193,22 @@ exports.markAsSeen = async function markAsSeen(req, res) {
       // Notify sender that message was seen
       io.to(`employee_${msg.sender}`).emit("message_seen", {
         messageId: msg._id,
-        seenBy: currentUserId
+        seenBy: currentUserId,
       });
 
       // Notify all receivers about the seen status update
-      msg.receiver.forEach(receiverId => {
+      msg.receiver.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("message_seen", {
           messageId: msg._id,
-          seenBy: currentUserId
+          seenBy: currentUserId,
         });
       });
     }
 
     res.json({
       message: "Message marked as seen",
-      data: populated
+      data: populated,
     });
-
   } catch (e) {
     console.error("Error marking message as seen:", e);
     res.status(500).json({ error: "Failed to mark message as seen" });
@@ -2092,16 +2230,16 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
     const unreadMessages = await WhatsAppMessage.find({
       owner: ownerId,
       receiver: currentUserId,
-      sender: { $ne: currentUserId } // Exclude own messages
+      sender: { $ne: currentUserId }, // Exclude own messages
     });
 
     console.log("📨 Total messages found:", unreadMessages.length);
 
     // Manually count unread messages
     let totalUnread = 0;
-    unreadMessages.forEach(message => {
-      const isSeen = message.seenBy.some(seen =>
-        String(seen.employee) === String(currentUserId)
+    unreadMessages.forEach((message) => {
+      const isSeen = message.seenBy.some(
+        (seen) => String(seen.employee) === String(currentUserId)
       );
       if (!isSeen) {
         totalUnread++;
@@ -2112,54 +2250,58 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
 
     res.json({
       totalUnreadCount: totalUnread,
-      message: `You have ${totalUnread} unread message${totalUnread !== 1 ? 's' : ''}`
+      message: `You have ${totalUnread} unread message${
+        totalUnread !== 1 ? "s" : ""
+      }`,
     });
-
   } catch (e) {
     console.error("Error fetching unread counts:", e);
     res.status(500).json({ error: "Failed to fetch unread counts" });
   }
 };
 
-exports.getClientMessagesSeenStatus = async function getClientMessagesSeenStatus(req, res) {
-  try {
-    const { clientId } = req.params;
-    const currentUserId = req.employee._id;
+exports.getClientMessagesSeenStatus =
+  async function getClientMessagesSeenStatus(req, res) {
+    try {
+      const { clientId } = req.params;
+      const currentUserId = req.employee._id;
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID required" });
+      if (!isObjId(clientId)) {
+        return res.status(400).json({ error: "Valid client ID required" });
+      }
+
+      // Get all messages for this client where current user is a receiver
+      const messages = await WhatsAppMessage.find({
+        client: clientId,
+        receiver: currentUserId,
+        // Exclude messages sent by current user
+        sender: { $ne: currentUserId },
+      }).select("_id seenBy");
+
+      // Check if any message is unread
+      const hasUnreadMessages = messages.some(
+        (message) =>
+          !message.seenBy.some(
+            (seen) => String(seen.employee) === String(currentUserId)
+          )
+      );
+
+      res.json({
+        clientId,
+        hasUnreadMessages,
+        totalMessages: messages.length,
+        unreadCount: messages.filter(
+          (message) =>
+            !message.seenBy.some(
+              (seen) => String(seen.employee) === String(currentUserId)
+            )
+        ).length,
+      });
+    } catch (e) {
+      console.error("Error fetching seen status:", e);
+      res.status(500).json({ error: "Failed to fetch seen status" });
     }
-
-    // Get all messages for this client where current user is a receiver
-    const messages = await WhatsAppMessage.find({
-      client: clientId,
-      receiver: currentUserId,
-      // Exclude messages sent by current user
-      sender: { $ne: currentUserId }
-    }).select('_id seenBy');
-
-    // Check if any message is unread
-    const hasUnreadMessages = messages.some(message =>
-      !message.seenBy.some(seen =>
-        String(seen.employee) === String(currentUserId)
-      )
-    );
-
-    res.json({
-      clientId,
-      hasUnreadMessages,
-      totalMessages: messages.length,
-      unreadCount: messages.filter(message =>
-        !message.seenBy.some(seen =>
-          String(seen.employee) === String(currentUserId)
-        )
-      ).length
-    });
-  } catch (e) {
-    console.error("Error fetching seen status:", e);
-    res.status(500).json({ error: "Failed to fetch seen status" });
-  }
-};
+  };
 
 exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
   try {
@@ -2175,21 +2317,23 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       client: clientId,
       receiver: currentUserId,
       sender: { $ne: currentUserId }, // Exclude own messages
-      "seenBy.employee": { $ne: currentUserId } // Not already seen
+      "seenBy.employee": { $ne: currentUserId }, // Not already seen
     });
 
-    console.log(`👀 Marking ${unreadMessages.length} messages as seen for user ${currentUserId}`);
+    console.log(
+      `👀 Marking ${unreadMessages.length} messages as seen for user ${currentUserId}`
+    );
 
     // Mark each message as seen
     const updatePromises = unreadMessages.map(async (message) => {
       // Check if user already seen this message (double check)
-      const alreadySeen = message.seenBy.some(seen =>
-        String(seen.employee) === String(currentUserId)
+      const alreadySeen = message.seenBy.some(
+        (seen) => String(seen.employee) === String(currentUserId)
       );
 
       if (!alreadySeen) {
         message.seenBy.push({
-          employee: currentUserId
+          employee: currentUserId,
           // NO seenAt - only employee field as per your schema
         });
         return message.save();
@@ -2202,21 +2346,21 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
     if (req.app.get("io")) {
       const io = req.app.get("io");
 
-      unreadMessages.forEach(message => {
+      unreadMessages.forEach((message) => {
         // Notify sender that their messages were seen
         io.to(`employee_${message.sender}`).emit("messages_seen", {
           messageId: message._id,
           seenBy: currentUserId,
           clientId: clientId,
-          seenAt: new Date()
+          seenAt: new Date(),
         });
 
         // Notify all receivers about the seen status update
-        message.receiver.forEach(receiverId => {
+        message.receiver.forEach((receiverId) => {
           io.to(`employee_${receiverId}`).emit("messages_seen", {
             messageId: message._id,
             seenBy: currentUserId,
-            clientId: clientId
+            clientId: clientId,
           });
         });
       });
@@ -2226,9 +2370,8 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       success: true,
       clientId,
       markedAsSeen: unreadMessages.length,
-      message: `Marked ${unreadMessages.length} messages as seen`
+      message: `Marked ${unreadMessages.length} messages as seen`,
     });
-
   } catch (e) {
     console.error("Error marking messages as seen:", e);
     res.status(500).json({ error: "Failed to mark messages as seen" });
