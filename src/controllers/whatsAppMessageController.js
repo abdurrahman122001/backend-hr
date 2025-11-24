@@ -497,7 +497,6 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-// CREATE MESSAGE WITH SUPERVISION LOGIC (UPDATED) - TEAM LEAD SENDS TO MANAGER
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -602,11 +601,10 @@ exports.createMessage = async function createMessage(req, res) {
         console.log("⚠️ CRM user not found for organization:", owner);
       }
     } 
-    // 🔥 CRITICAL UPDATE: Add team leads as receivers for manager messages
-    else if (senderRole === "manager" && tls.length > 0) {
+    // 🔥 CRITICAL UPDATE: Add team leads AND assigned employee as receivers for manager messages
+    else if (senderRole === "manager") {
       console.log(
-        "👨‍💼 Manager sending message - adding team leads as receivers:",
-        tls
+        "👨‍💼 Manager sending message - adding team leads AND assigned employee as receivers"
       );
 
       // Add team leads to receivers for supervision visibility
@@ -615,6 +613,18 @@ exports.createMessage = async function createMessage(req, res) {
           receivers.push(teamLeadId);
         }
       });
+
+      // 🔥 NEW: Add assigned employee as receiver
+      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+        const assignedEmployeeId = String(clientDoc.assignedTo._id);
+        if (
+          !receivers.includes(assignedEmployeeId) &&
+          assignedEmployeeId !== String(sender)
+        ) {
+          receivers.push(assignedEmployeeId);
+          console.log("✅ Added assigned employee as receiver:", assignedEmployeeId);
+        }
+      }
     }
     // 👷 EMPLOYEE LOGIC: Use assigned employee and supervision rules
     else if (senderRole === "employee") {
@@ -746,15 +756,17 @@ exports.createMessage = async function createMessage(req, res) {
       totalReceivers: receivers.length,
       managersIncluded: managers.filter((m) => receivers.includes(m)).length,
       teamLeadsIncluded: tls.filter((tl) => receivers.includes(tl)).length,
+      assignedEmployeeIncluded: clientDoc?.assignedTo ? (receivers.includes(String(clientDoc.assignedTo._id)) ? "Yes" : "No") : "No",
       crmIncluded: senderRole === "team_lead" ? "Yes" : "No",
-      assignedEmployeeIncluded: senderRole !== "team_lead" && clientDoc?.assignedTo ? "Yes" : "No",
       receiverBreakdown: {
         managers: managers.filter((m) => receivers.includes(m)),
         teamLeads: tls.filter((tl) => receivers.includes(tl)),
+        assignedEmployee: clientDoc?.assignedTo ? [String(clientDoc.assignedTo._id)].filter(id => receivers.includes(id)) : [],
         crm: senderRole === "team_lead" ? 1 : 0,
         others: receivers.filter(r => 
           !managers.includes(r) && 
           !tls.includes(r) && 
+          r !== (clientDoc?.assignedTo ? String(clientDoc.assignedTo._id) : null) &&
           r !== process.env.CRM_EMPLOYEE_ID
         )
       }
@@ -789,6 +801,18 @@ exports.createMessage = async function createMessage(req, res) {
             });
           }
         });
+
+        // Special notification for assigned employee when manager sends message
+        if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+          const assignedEmployeeId = String(clientDoc.assignedTo._id);
+          if (receivers.includes(assignedEmployeeId)) {
+            io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
+              message: populated,
+              type: "manager_direct_message",
+              note: "Manager has sent you a direct message",
+            });
+          }
+        }
       }
 
       // Special notification for managers when team lead sends message
@@ -818,6 +842,7 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(201).json({
       ...populated.toObject(),
       teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
+      assignedEmployeeIncluded: senderRole === "manager" && clientDoc?.assignedTo ? true : false, // Indicate if assigned employee was added
       crmIncluded: senderRole === "team_lead", // Indicate if CRM was added
       managersIncluded: senderRole === "team_lead", // Indicate if managers were added (for team lead messages)
       totalReceivers: receivers.length,
@@ -825,8 +850,8 @@ exports.createMessage = async function createMessage(req, res) {
         role: senderRole,
         sentToManagers: senderRole === "team_lead",
         sentToTeamLeads: senderRole === "manager", 
-        sentToCRM: senderRole === "team_lead",
-        sentToAssignedEmployee: senderRole !== "team_lead" && clientDoc?.assignedTo ? true : false
+        sentToAssignedEmployee: senderRole === "manager" && clientDoc?.assignedTo ? true : false,
+        sentToCRM: senderRole === "team_lead"
       }
     });
   } catch (e) {
