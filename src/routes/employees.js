@@ -11,98 +11,165 @@ const upload = require("../middleware/upload");
 // ------------------------------
 // Helpers
 // ------------------------------
-/**
- * Resolve the effective tenant/owner id for the current user.
- * Priority: explicit user.owner -> user.createdBy -> user._id
- */
 function getEffectiveOwnerId(user) {
   return user?.owner || user?.createdBy || user?._id;
 }
 
-/**
- * Backward-compatible scope:
- * Match employees when EITHER
- *  - owner array contains ownerId OR userId
- *  - OR createdBy equals ownerId OR userId
- */
+// Simple scope builder without circular references
 function buildEmployeeScope(user, includeTrashed = false) {
   const ownerId = getEffectiveOwnerId(user);
   const userId = user?._id;
-  
-  // Build the base scope without circular references
-  const baseScope = {
+
+  console.log("🔍 Building employee scope for user:", {
+    userId: userId?.toString(),
+    ownerId: ownerId?.toString(),
+    includeTrashed
+  });
+
+  // Create base ownership query
+  const ownershipQuery = {
     $or: [
       { owner: { $in: [ownerId, userId] } },
       { createdBy: { $in: [ownerId, userId] } },
-    ],
+    ]
   };
-  
-  // Handle trashed items
-  if (!includeTrashed) {
-    // For non-trashed items, use $and to combine both conditions
+
+  // Handle trashed condition
+  if (includeTrashed) {
     return {
-      $and: [
-        baseScope,
-        {
-          $or: [
-            { isTrashed: false },
-            { isTrashed: { $exists: false } }
-          ]
-        }
-      ]
+      ...ownershipQuery,
+      isTrashed: true
     };
   } else {
-    // For trashed items, combine base scope with isTrashed: true
     return {
-      $and: [
-        baseScope,
-        { isTrashed: true }
+      ...ownershipQuery,
+      $or: [
+        { isTrashed: false },
+        { isTrashed: { $exists: false } }
       ]
     };
   }
 }
 
 // ------------------------------
-// GET /api/employees
-// Fetch employees by owner OR createdBy (both supported)
+// Debug Middleware
 // ------------------------------
-router.get("/", requireAuth, async (req, res) => {
+const debugAuth = (req, res, next) => {
+  console.log("=== AUTH DEBUG ===");
+  console.log("User from token:", {
+    _id: req.user?._id?.toString(),
+    owner: req.user?.owner?.toString(),
+    createdBy: req.user?.createdBy?.toString(),
+    role: req.user?.role,
+    email: req.user?.email
+  });
+  console.log("=== END DEBUG ===");
+  next();
+};
+
+// ------------------------------
+// GET /api/employees
+// ------------------------------
+router.get("/", requireAuth, debugAuth, async (req, res) => {
   try {
     const { trashed } = req.query;
     const includeTrashed = trashed === "true";
     
     const scope = buildEmployeeScope(req.user, includeTrashed);
 
-    console.log("Fetching employees with scope:", JSON.stringify(scope, null, 2));
+    console.log("📋 Final query scope:", JSON.stringify(scope, null, 2));
 
     const list = await Employee.find(scope)
       .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
     
+    console.log(`✅ Found ${list.length} employees for user ${req.user?._id}`);
+    
     res.json({ status: "success", data: list });
   } catch (err) {
-    console.error("Error fetching employees:", err);
+    console.error("❌ Error fetching employees:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
 
+// ------------------------------
+// GET /api/employees/simple (Alternative endpoint)
+// ------------------------------
+router.get("/simple", requireAuth, async (req, res) => {
+  try {
+    const { trashed } = req.query;
+    const includeTrashed = trashed === "true";
+    
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    console.log("🔍 Simple endpoint - User:", {
+      userId: userId?.toString(),
+      ownerId: ownerId?.toString()
+    });
+
+    // Simple query without complex nesting
+    let query = {
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ]
+    };
+
+    // Add trashed condition
+    if (includeTrashed) {
+      query.isTrashed = true;
+    } else {
+      query.isTrashed = { $ne: true };
+    }
+
+    console.log("📋 Simple query:", JSON.stringify(query, null, 2));
+
+    const list = await Employee.find(query)
+      .populate("shifts", "name")
+      .sort({ name: 1 })
+      .lean();
+    
+    console.log(`✅ Simple endpoint found ${list.length} employees`);
+    
+    res.json({ status: "success", data: list });
+  } catch (err) {
+    console.error("❌ Error in simple employees fetch:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ------------------------------
+// GET /api/employees/attendance
+// ------------------------------
 router.get("/attendance", requireAuth, async (req, res) => {
   try {
     const { trashed, includeOffboarded } = req.query;
     const includeTrashed = trashed === "true";
     const showOffboarded = includeOffboarded === "true";
 
-    const scope = buildEmployeeScope(req.user, includeTrashed);
-    
-    let finalQuery = { ...scope };
-    
-    // ✅ Default behavior: hide offboarded
-    if (!showOffboarded) {
-      finalQuery.status = { $ne: "offboarded" };
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    let query = {
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ]
+    };
+
+    if (includeTrashed) {
+      query.isTrashed = true;
+    } else {
+      query.isTrashed = { $ne: true };
     }
 
-    const list = await Employee.find(finalQuery)
+    if (!showOffboarded) {
+      query.status = { $ne: "offboarded" };
+    }
+
+    const list = await Employee.find(query)
       .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
@@ -110,40 +177,46 @@ router.get("/attendance", requireAuth, async (req, res) => {
     res.json({ status: "success", data: list });
 
   } catch (err) {
-    console.error("Error fetching attendance employees:", err);
+    console.error("❌ Error fetching attendance employees:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
 
 // ------------------------------
 // GET /api/employees/birthdays
-// (delegates to controller)
 // ------------------------------
 router.get("/birthdays", requireAuth, getUpcomingBirthdays);
 router.get("/anniversaries", requireAuth, getUpcomingAnniversaries);
 
 // ------------------------------
 // GET /api/employees/names
-// Minimal payload (id + name) with the same scope
 // ------------------------------
 router.get("/names", requireAuth, async (req, res) => {
   try {
-    const scope = buildEmployeeScope(req.user);
-    const docs = await Employee.find(scope)
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    const query = {
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ],
+      isTrashed: { $ne: true }
+    };
+
+    const docs = await Employee.find(query)
       .sort({ name: 1 })
       .select("_id name")
       .lean();
     res.json({ status: "success", data: docs });
   } catch (err) {
-    console.error("Error fetching employee names:", err);
+    console.error("❌ Error fetching employee names:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
 
 // ------------------------------
 // POST /api/employees
-// Create employee and record BOTH owner and createdBy
-// (owner = effective tenant id, createdBy = current user id)
 // ------------------------------
 router.post("/", requireAuth, async (req, res) => {
   const {
@@ -179,9 +252,11 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
 
+    console.log("👤 Creating employee with owner:", ownerId?.toString());
+
     const emp = await Employee.create({
-      owner: [ownerId], // tenant/HR id (array as per your schema)
-      createdBy: req.user._id, // who created this employee
+      owner: [ownerId],
+      createdBy: req.user._id,
       name,
       position,
       department,
@@ -208,19 +283,28 @@ router.post("/", requireAuth, async (req, res) => {
 
     res.status(201).json({ status: "success", data: emp });
   } catch (err) {
-    console.error("Error creating employee:", err);
+    console.error("❌ Error creating employee:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
 
 // ------------------------------
 // GET /api/employees/list
-// Same scope; includes shift names
 // ------------------------------
 router.get("/list", requireAuth, async (req, res) => {
   try {
-    const scope = buildEmployeeScope(req.user);
-    const emps = await Employee.find(scope)
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    const query = {
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ],
+      isTrashed: { $ne: true }
+    };
+
+    const emps = await Employee.find(query)
       .select("-owner")
       .populate("shifts", "name")
       .sort({ name: 1 })
@@ -228,14 +312,13 @@ router.get("/list", requireAuth, async (req, res) => {
 
     res.json({ status: "success", data: emps });
   } catch (err) {
-    console.error("Error fetching employee list:", err);
+    console.error("❌ Error fetching employee list:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
 
 // ------------------------------
 // GET /api/employees/:id
-// Scoped by owner OR createdBy
 // ------------------------------
 router.get("/:id", requireAuth, async (req, res) => {
   try {
@@ -246,22 +329,31 @@ router.get("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Invalid employee id" });
     }
 
-    const scope = buildEmployeeScope(req.user);
-    const emp = await Employee.findOne({ _id: id, ...scope })
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    const query = {
+      _id: id,
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ]
+    };
+
+    const emp = await Employee.findOne(query)
       .populate("shifts", "name")
       .lean();
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
     res.json({ status: "success", employee: emp });
   } catch (err) {
-    console.error("Error fetching employee by ID:", err);
+    console.error("❌ Error fetching employee by ID:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // PATCH /api/employees/:id
-// Scoped update by owner OR createdBy
 // ------------------------------
 router.patch("/:id", requireAuth, async (req, res) => {
   try {
@@ -272,9 +364,19 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Invalid employee id" });
     }
 
-    const scope = buildEmployeeScope(req.user);
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    const query = {
+      _id: id,
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ]
+    };
+
     const emp = await Employee.findOneAndUpdate(
-      { _id: id, ...scope },
+      query,
       req.body,
       { new: true, runValidators: true }
     ).populate("shifts", "name");
@@ -286,14 +388,13 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
     res.json(emp);
   } catch (err) {
-    console.error("Error updating employee:", err);
+    console.error("❌ Error updating employee:", err);
     res.status(400).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // DELETE /api/employees/:id
-// Move to trash instead of actual deletion
 // ------------------------------
 router.delete("/:id", requireAuth, async (req, res) => {
   try {
@@ -304,9 +405,19 @@ router.delete("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Invalid employee id" });
     }
 
-    const scope = buildEmployeeScope(req.user);
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
+
+    const query = {
+      _id: id,
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ]
+    };
+
     const emp = await Employee.findOneAndUpdate(
-      { _id: id, ...scope },
+      query,
       {
         isTrashed: true,
         trashedAt: new Date(),
@@ -327,14 +438,13 @@ router.delete("/:id", requireAuth, async (req, res) => {
       data: emp 
     });
   } catch (err) {
-    console.error("Error deleting employee:", err);
+    console.error("❌ Error deleting employee:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // POST /api/employees/:id/restore
-// Restore from trash
 // ------------------------------
 router.post("/:id/restore", requireAuth, async (req, res) => {
   try {
@@ -345,7 +455,6 @@ router.post("/:id/restore", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Invalid employee id" });
     }
 
-    // For restore, use a simpler query to avoid complex scope
     const ownerId = getEffectiveOwnerId(req.user);
     const userId = req.user?._id;
     
@@ -378,14 +487,13 @@ router.post("/:id/restore", requireAuth, async (req, res) => {
       data: emp 
     });
   } catch (err) {
-    console.error("Error restoring employee:", err);
+    console.error("❌ Error restoring employee:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // DELETE /api/employees/:id/permanent
-// Permanent deletion (only for trashed items)
 // ------------------------------
 router.delete("/:id/permanent", requireAuth, async (req, res) => {
   try {
@@ -396,7 +504,6 @@ router.delete("/:id/permanent", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Invalid employee id" });
     }
 
-    // For permanent delete, use a simpler query
     const ownerId = getEffectiveOwnerId(req.user);
     const userId = req.user?._id;
     
@@ -420,14 +527,13 @@ router.delete("/:id/permanent", requireAuth, async (req, res) => {
       message: "Employee permanently deleted" 
     });
   } catch (err) {
-    console.error("Error permanently deleting employee:", err);
+    console.error("❌ Error permanently deleting employee:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // GET /api/employees/trash/count
-// Get count of trashed items
 // ------------------------------
 router.get("/trash/count", requireAuth, async (req, res) => {
   try {
@@ -444,24 +550,29 @@ router.get("/trash/count", requireAuth, async (req, res) => {
     
     res.json({ status: "success", count });
   } catch (err) {
-    console.error("Error fetching trash count:", err);
+    console.error("❌ Error fetching trash count:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------------------
 // GET /api/employees/roles
-// Get distinct roles
 // ------------------------------
 router.get("/roles", requireAuth, async (req, res) => {
   try {
-    const scope = buildEmployeeScope(req.user);
+    const ownerId = getEffectiveOwnerId(req.user);
+    const userId = req.user?._id;
 
-    // Distinct roles only for employees within user's scope
-    const roles = await Employee.distinct("role", {
-      ...scope,
+    const query = {
+      $or: [
+        { owner: { $in: [ownerId, userId] } },
+        { createdBy: { $in: [ownerId, userId] } },
+      ],
+      isTrashed: { $ne: true },
       role: { $ne: null },
-    });
+    };
+
+    const roles = await Employee.distinct("role", query);
 
     const formatted = roles.map((r) => ({
       label: r,
@@ -470,14 +581,12 @@ router.get("/roles", requireAuth, async (req, res) => {
 
     res.json({ status: "success", data: formatted });
   } catch (error) {
-    console.error("Error fetching roles:", error);
+    console.error("❌ Error fetching roles:", error);
     res.status(500).json({ status: "error", message: error.message });
   }
 });
 
 // PATCH /api/employees/:id/role
-// Update employee role
-// ------------------------------
 router.patch("/:id/role", updateEmployeeRole);
 
 module.exports = router;
