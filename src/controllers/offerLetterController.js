@@ -144,7 +144,7 @@ async function getSignature(req, res) {
 
 /* ----------------------------- Helper: Styles ----------------------------- */
 function enforceComicSans(html) {
-  const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px";
+  const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000000;";
   const pRequired = [
     "margin:0 !important",
     "margin-block-start:0",
@@ -154,6 +154,8 @@ function enforceComicSans(html) {
     "mso-line-height-rule:exactly",
     family,
   ].join("; ");
+  
+  // Replace all <p> tags with proper styling
   html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
     if (/style\s*=/.test(attrs)) {
       const newAttrs = attrs.replace(/style\s*=\s*"([^"]*)"/i, (_m, style) => {
@@ -161,6 +163,7 @@ function enforceComicSans(html) {
           .replace(/(^|;)\s*margin[^;]*;?/gi, "")
           .replace(/(^|;)\s*margin-block-(start|end)\s*:[^;]*;?/gi, "")
           .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/(^|;)\s*color\s*:[^;]*;?/gi, "")
           .replace(/(^|;)\s*mso-[^;]*;?/gi, "")
           .replace(/;;+/g, ";")
           .replace(/^\s*;|;\s*$/g, "");
@@ -172,12 +175,15 @@ function enforceComicSans(html) {
     const spaced = attrs.trim().length ? " " + attrs.trim() : "";
     return `<p style="${pRequired}"${spaced}>`;
   });
+
+  // Add font family and color to other elements
   const addFamily = (tag) => {
     html = html.replace(
       new RegExp(`<${tag}\\b([^>]*)style="([^"]*)"([^>]*)>`, "gi"),
       (full, pre, style, post) => {
         const cleaned = style
           .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+          .replace(/(^|;)\s*color\s*:[^;]*;?/gi, "")
           .replace(/;;+/g, ";")
           .replace(/^\s*;|;\s*$/g, "");
         return `<${tag}${pre}style="${family}${
@@ -190,7 +196,35 @@ function enforceComicSans(html) {
       `<${tag} style="${family}"$1>`
     );
   };
-  ["ul", "ol", "li", "div"].forEach(addFamily);
+
+  // Add font family and color to span elements specifically
+  html = html.replace(
+    /<span\b([^>]*)style="([^"]*)"([^>]*)>/gi,
+    (full, pre, style, post) => {
+      const cleaned = style
+        .replace(/(^|;)\s*font-family\s*:[^;]*;?/gi, "")
+        .replace(/(^|;)\s*color\s*:[^;]*;?/gi, "")
+        .replace(/;;+/g, ";")
+        .replace(/^\s*;|;\s*$/g, "");
+      return `<span${pre}style="${family}${
+        cleaned ? " " + cleaned : ""
+      }"${post}>`;
+    }
+  );
+
+  html = html.replace(
+    /<span\b(?![^>]*\bstyle=)([^>]*)>/gi,
+    `<span style="${family}"$1>`
+  );
+
+  ["ul", "ol", "li", "div", "td", "th"].forEach(addFamily);
+
+  // Ensure body has black text
+  html = html.replace(
+    /<body\b([^>]*)>/gi,
+    `<body style="color: #000000; font-family: Arial, Helvetica, sans-serif;"$1>`
+  );
+
   return html;
 }
 
@@ -200,6 +234,38 @@ function enforceImgCss(html) {
     /<img([^>]*?)\/?>/gi,
     `<img$1 style="height:200px;width:200px;object-fit:contain;display:inline-block;vertical-align:middle;max-width:200px;max-height:200px;" />`
   );
+  return html;
+}
+
+/* ----------------------- Remove Blue Variable Styling --------------------- */
+function removeBlueVariableStyling(html) {
+  console.log("🔍 DEBUG: Removing blue variable styling from email HTML");
+  
+  // Remove variable-blue class and inline blue styling
+  html = html.replace(/class="variable-blue"/gi, '');
+  html = html.replace(/class='variable-blue'/gi, '');
+  
+  // Remove inline blue color styles
+  html = html.replace(/style="[^"]*color:\s*#2563eb[^"]*"/gi, (match) => {
+    // Remove only the color property from the style attribute
+    return match.replace(/color:\s*#2563eb;?\s*/gi, '')
+               .replace(/background[^;]*#dbeafe[^;]*;?\s*/gi, '')
+               .replace(/border[^;]*#3b82f6[^;]*;?\s*/gi, '')
+               .replace(/;\s*"/, '"')
+               .replace(/\s*"\s*$/, '"')
+               .replace(/style="\s*"/, '');
+  });
+  
+  // Remove any remaining blue color declarations
+  html = html.replace(/color:\s*#2563eb;?/gi, '');
+  html = html.replace(/background[^;]*#dbeafe[^;]*;?/gi, '');
+  html = html.replace(/border[^;]*#3b82f6[^;]*;?/gi, '');
+  
+  // Clean up empty style attributes
+  html = html.replace(/style="\s*"/g, '');
+  html = html.replace(/style='\s*'/g, '');
+  
+  console.log("🔍 DEBUG: Blue styling removed from email");
   return html;
 }
 
@@ -282,7 +348,7 @@ async function buildContext({
   const signature = await Signature.findOne({ owner: ownerId });
   const signatureBlock = signature
     ? `
-    <div>
+    <div style="color: #000000;">
       <br>
       ${
         signature.signatureImage
@@ -293,7 +359,7 @@ async function buildContext({
                    style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
           : ""
       }
-      <div style="text-align:left;">${signature.signatureText || ""}</div>
+      <div style="text-align:left; color: #000000;">${signature.signatureText || ""}</div>
     </div>
   `
     : "";
@@ -424,7 +490,7 @@ async function sendOfferLetter(req, res) {
       finalHtml = tpl
         ? renderWithContext(tpl.html || "", ctx)
         : `
-      <div style="font-family: Arial, sans-serif; line-height:1.7;">
+      <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
         <p>Dear <b>${safeCandidateName}</b>,</p>
         <p>We're thrilled to have you on board!</p>
         <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
@@ -438,9 +504,10 @@ async function sendOfferLetter(req, res) {
       }
     }
 
-    // IMPORTANT: DO NOT automatically add signature if letterOverride is provided
-    // The frontend is responsible for including the signature in the letterOverride
-
+    // IMPORTANT: Remove blue variable styling before sending to email
+    finalHtml = removeBlueVariableStyling(finalHtml);
+    
+    // Then apply CSS enforcement to ensure black text
     finalHtml = enforceImgCss(enforceComicSans(finalHtml));
 
     // Debug: Log the final subject and HTML
@@ -530,7 +597,95 @@ async function sendOfferLetter(req, res) {
   }
 }
 
+/* ------------------------- Controller: Preview Email ---------------------- */
+async function previewOfferLetter(req, res) {
+  try {
+    const {
+      candidateName,
+      position,
+      salaryBreakup = {},
+      startDate,
+      reportingTime,
+      confirmationDeadlineDate,
+      department,
+      shift,
+      probationDays,
+      subject: subjectOverride,
+      letter: letterOverride,
+    } = req.body;
+
+    if (!req.user || !req.user._id) {
+      return res.status(401).json({ error: "No user context found." });
+    }
+
+    const ownerId = req.user._id;
+
+    const {
+      ctx,
+      companyCtx,
+      signatureBlock,
+    } = await buildContext({
+      ownerId,
+      candidateName,
+      candidateEmail: "preview@example.com",
+      position,
+      salaryBreakup,
+      startDate,
+      reportingTime,
+      confirmationDeadlineDate,
+      department,
+      shift,
+      probationDays,
+    });
+
+    const key = "offer_letter";
+    const tpl = await OfferEmailTemplate.findOne({
+      owner: ownerId,
+      key,
+    }).lean();
+
+    // Render final subject + html
+    let finalSubject =
+      subjectOverride ||
+      (tpl
+        ? renderWithContext(tpl.subject || "", ctx)
+        : `Offer of Employment – ${position} at ${companyCtx.name}`);
+    
+    let finalHtml = letterOverride;
+
+    if (!finalHtml) {
+      finalHtml = tpl
+        ? renderWithContext(tpl.html || "", ctx)
+        : `
+      <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
+        <p>Dear <b>${sanitizeName(candidateName)}</b>,</p>
+        <p>We're thrilled to have you on board!</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> at <b>${companyCtx.name}</b>.</p>
+        {{signatureHtml}}
+      </div>
+    `.trim();
+
+      if (finalHtml.includes('{{signatureHtml}}')) {
+        finalHtml = finalHtml.replace('{{signatureHtml}}', ctx.signatureHtml || signatureBlock);
+      }
+    }
+
+    // Apply CSS enforcement for preview as well
+    finalHtml = enforceImgCss(enforceComicSans(finalHtml));
+
+    res.json({
+      subject: finalSubject,
+      html: finalHtml,
+      context: ctx
+    });
+  } catch (err) {
+    console.error("Preview error:", err);
+    res.status(500).json({ error: "Failed to generate preview" });
+  }
+}
+
 module.exports = { 
   sendOfferLetter,
-  getSignature 
+  getSignature,
+  previewOfferLetter
 };
