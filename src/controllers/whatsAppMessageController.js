@@ -1214,6 +1214,8 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1235,6 +1237,8 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
     // 🔥 CRITICAL FIX: Emit events to ALL relevant users
@@ -1307,7 +1311,9 @@ exports.approveMessage = async function approveMessage(req, res) {
     if (senderRole === "employee") {
       const { managers } = await findTLsAndManagersByOwner(msg.owner);
       if (managers.length > 0) {
-        const forwardMsg = await WhatsAppMessage.create({
+        
+        // 🔥 CRITICAL FIX: Include replyContent and repliedTo in forwarded message
+        const forwardMsgData = {
           owner: msg.owner,
           client: msg.client,
           sender: msg.sender,
@@ -1316,11 +1322,17 @@ exports.approveMessage = async function approveMessage(req, res) {
           note: msg.note || "",
           attachments: msg.attachments,
           approvalStatus: "approved",
+          // 🔥 INCLUDE REPLY CONTENT AND THREAD INFO
+          isReply: msg.isReply,
+          repliedTo: msg.repliedTo,
+          replyContent: msg.replyContent,
           // Add metadata to identify this as a forwarded message
           isForwarded: true,
           originalMessage: msg._id,
           forwardedBy: req.employee._id,
-        });
+        };
+
+        const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
 
         const populatedForward = await forwardMsg.populate([
           { path: "owner", select: "_id name companyEmail" },
@@ -1328,6 +1340,8 @@ exports.approveMessage = async function approveMessage(req, res) {
           { path: "receiver", select: "_id name companyEmail role" },
           { path: "client", select: "_id clientName" },
           { path: "forwardedBy", select: "_id name companyEmail" },
+          { path: "replyContent.originalSender", select: "_id name companyEmail" },
+          { path: "repliedTo", select: "_id note message sender attachments" },
         ]);
 
         // 🎯 CRITICAL: Emit new message event for the forwarded message to managers
@@ -1337,6 +1351,9 @@ exports.approveMessage = async function approveMessage(req, res) {
           console.log("📤 Forwarding approved message to managers:", {
             managers: managers,
             messageId: populatedForward._id,
+            hasReplyContent: !!msg.replyContent,
+            hasRepliedTo: !!msg.repliedTo,
+            isReply: msg.isReply,
           });
 
           // Notify managers about the new forwarded message
@@ -1347,6 +1364,12 @@ exports.approveMessage = async function approveMessage(req, res) {
               action: "forwarded_approved",
               forwardedBy: req.employee._id,
               originalMessageId: msg._id,
+              // Include context about the reply chain
+              replyContext: msg.isReply ? {
+                hasOriginalThread: true,
+                originalSender: msg.replyContent?.originalSender,
+                repliedToMessage: msg.repliedTo?._id
+              } : null
             });
             console.log(`✅ Forwarded to manager: employee_${managerId}`);
           });
@@ -1357,6 +1380,11 @@ exports.approveMessage = async function approveMessage(req, res) {
           forwardedToManagers: true,
           forwardedMessage: populatedForward,
           message: "Message approved and forwarded to managers",
+          // Include reply context in response
+          replyContext: msg.isReply ? {
+            includedReplyContent: true,
+            originalThreadPreserved: true
+          } : null
         });
       }
     }

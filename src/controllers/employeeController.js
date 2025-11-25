@@ -9,16 +9,38 @@ dayjs.extend(customParseFormat);
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-// Helper: Get the "owner" id for data isolation
+function normalizeToCurrentYear(dateStr) {
+  if (!dateStr) return null;
+
+  let original = dayjs(dateStr, ["YYYY-MM-DD", "DD-MM-YYYY", "MM-DD-YYYY"]);
+  if (!original.isValid()) return null;
+
+  const today = dayjs();
+
+  // ❌ If employee has not yet joined or DOB is in future → skip
+  if (original.isAfter(today)) {
+    return null;
+  }
+
+  const normalized = original.year(today.year());
+
+  // If this year's event already passed → set to next year
+  if (normalized.isBefore(today, "day")) {
+    return normalized.add(1, "year");
+  }
+
+  return normalized;
+}
+
+// ---------------------------------------------
+// Get Owner ID based on your existing logic
+// ---------------------------------------------
 function getEffectiveOwnerId(user) {
-  // If user is an admin created by another admin, return createdBy
   if (user.role === "admin" && user.createdBy) {
     return user.createdBy;
   }
-  // Else use their own _id
   return user._id;
 }
-
 // Helper: Compute next birthday as a dayjs object
 function getNextBirthday(dob) {
   if (!dob) return null;
@@ -159,66 +181,76 @@ exports.getUpcomingBirthdays = async (req, res) => {
 
 exports.getUpcomingAnniversaries = async (req, res) => {
   try {
-    const ownerId = getEffectiveOwnerId(req.user);
+    const ownerId = getEffectiveOwnerId(req.user); // <-- Correct owner ID
 
-    const employees = await Employee.find({
+    const today = dayjs();
+    const next30 = today.add(30, "day");
+
+    const emps = await Employee.find({
       owner: { $in: [ownerId] },
-      $or: [
-        { joiningDate: { $exists: true, $ne: null, $ne: "" } },
-        { dateOfJoining: { $exists: true, $ne: null, $ne: "" } },
-      ],
-    }).select("name joiningDate dateOfJoining photographUrl email");
+      status: { $ne: "offboarded" },
+      isTrashed: false,
+    }).select(
+      "name dateOfBirth joiningDate department designation photographUrl email"
+    );
 
-    const today = dayjs().startOf("day");
-    const end = today.add(7, "day");
+    const result = [];
 
-    const upcoming = employees
-      .map((e) => {
-        const raw = (e.joiningDate || e.dateOfJoining || "").trim();
-        if (!raw) return null;
+    emps.forEach((emp) => {
+      // ------------------------------------------------------
+      // 🎂 Birthday Anniversary
+      // ------------------------------------------------------
+      if (emp.dateOfBirth) {
+        const upcoming = normalizeToCurrentYear(emp.dateOfBirth);
 
-        // ✅ Try multiple formats and trim
-        let join =
-          dayjs(raw, "YYYY-MM-DD", true) ||
-          dayjs(raw, "DD-MM-YYYY", true) ||
-          dayjs(raw);
-        if (!join.isValid()) return null;
+        if (upcoming && upcoming.isAfter(today) && upcoming.isBefore(next30)) {
+          result.push({
+            type: "birthday",
+            ...emp.toObject(),
+            upcomingDate: upcoming.format("YYYY-MM-DD"),
+            daysLeft: upcoming.diff(today, "day"),
+          });
+        }
+      }
 
-        // Construct this year's anniversary
-        let anniversary = dayjs(
-          `${today.year()}-${join.format("MM-DD")}`,
-          "YYYY-MM-DD"
-        );
+      // ------------------------------------------------------
+      // 🏆 Work Anniversary
+      // ------------------------------------------------------
+      if (emp.joiningDate) {
+        const joining = dayjs(emp.joiningDate);
 
-        // If anniversary passed this year, add 1 year
-        if (anniversary.isBefore(today, "day")) {
-          anniversary = anniversary.add(1, "year");
+        // ❌ If joining date is in future → skip
+        if (joining.isAfter(today)) {
+          return;
         }
 
-        const diffDays = anniversary.diff(today, "day");
-        const yearsOfService = today.year() - join.year();
+        const upcoming = normalizeToCurrentYear(emp.joiningDate);
 
-        if (diffDays >= 0 && diffDays <= 7) {
-          return {
-            ...e.toObject(),
-            nextAnniversary: anniversary,
-            yearsOfService,
-            daysLeft: diffDays,
-          };
+        if (upcoming && upcoming.isAfter(today) && upcoming.isBefore(next30)) {
+          result.push({
+            type: "work_anniversary",
+            ...emp.toObject(),
+            upcomingDate: upcoming.format("YYYY-MM-DD"),
+            daysLeft: upcoming.diff(today, "day"),
+          });
         }
+      }
+    });
 
-        return null;
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.nextAnniversary.diff(b.nextAnniversary));
+    // Sort by nearest upcoming
+    result.sort((a, b) => a.daysLeft - b.daysLeft);
 
-    console.log("Final upcoming anniversaries:", upcoming.length);
-    res.status(200).json(upcoming);
+    res.json({
+      status: "success",
+      count: result.length,
+      anniversaries: result,
+    });
   } catch (err) {
-    console.error("Error in getUpcomingAnniversaries:", err);
-    res
-      .status(500)
-      .json({ error: "Could not fetch anniversaries: " + err.message });
+    console.error("Error fetching anniversaries", err);
+    res.status(500).json({
+      status: "error",
+      message: "Internal server error",
+    });
   }
 };
 
