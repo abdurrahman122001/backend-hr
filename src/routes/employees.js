@@ -76,23 +76,15 @@ router.get("/", requireAuth, async (req, res) => {
 });
 router.get("/attendance", requireAuth, async (req, res) => {
   try {
-    const { trashed, includeOffboarded } = req.query;
+    const { trashed } = req.query;
     const includeTrashed = trashed === "true";
-    const showOffboarded = includeOffboarded === "true";
 
     const scope = buildEmployeeScope(req.user, includeTrashed);
-    let query = { ...scope };
 
-    // ✅ Default behavior: hide offboarded
-    if (!showOffboarded) {
-      query.status = { $ne: "offboarded" };
-    }
+    // ❌ Remove all "offboarded" filtering logic
+    const query = { ...scope };
 
-    // ✅ If includeOffboarded=true → remove status filter so offboarded appear
-    if (showOffboarded) {
-      delete query.status;
-    }
-
+    // ✔ Fetch all employees (active + offboarded)
     const list = await Employee.find(query).sort({ name: 1 }).lean();
 
     res.json({ status: "success", data: list });

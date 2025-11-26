@@ -1381,7 +1381,8 @@ exports.getRecordsByDate = async (req, res) => {
       owner: { $in: [oid(ownerId), oid(userId)] }, // support legacy/user-scoped data
       date,
     })
-      .populate("employee", "name designation department email")
+      // ⭐ MUST include status and _id so previous offboarded attendance shows
+      .populate("employee", "name designation department email status _id")
       .lean();
 
     res.json(records);
@@ -1405,7 +1406,8 @@ exports.getRecordsByDateRange = async (req, res) => {
       owner: { $in: [oid(ownerId), oid(userId)] },
       date: { $gte: from, $lte: to },
     })
-      .populate("employee", "name position department")
+      // ⭐ MUST include status + _id, otherwise old offboarded attendance doesn't show in UI
+      .populate("employee", "name position department email status _id")
       .lean();
 
     res.json(records);
@@ -1470,7 +1472,8 @@ exports.getRecordsByEmployee = async (req, res) => {
       employee: oid(id),
     })
       .sort({ date: 1 })
-      .populate("employee", "name position department")
+      // ⭐ MUST include status + _id so UI can show old offboarded attendance
+      .populate("employee", "name position department email status _id")
       .lean();
 
     res.json(records);
@@ -1479,6 +1482,7 @@ exports.getRecordsByEmployee = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
 
 // GET /api/attendance/employee/:id/stats?from=...&to=...
 exports.getStatsByEmployee = async (req, res) => {
