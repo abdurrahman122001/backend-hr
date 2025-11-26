@@ -11,7 +11,7 @@ const { upload } = require("../utils/multer");
 router.post(
   "/create",
   requireEmployeeAuth,
-  upload.array("images", 5), // Allow up to 5 images
+  upload.array("images", 10), // Allow up to 5 images
   bugController.createBug
 );
 

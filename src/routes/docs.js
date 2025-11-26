@@ -229,11 +229,17 @@ async function tokenMap(emp, defaults = {}) {
     "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
     "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
     "salary.gross": formatWithCommas(
-      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
+        ? decryptedSalary.grossSalary
+        : decryptedSalary.calculatedTotal
     ),
+
     "salary.total": formatWithCommas(
-      decryptedSalary.grossSalary || decryptedSalary.calculatedTotal
+      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
+        ? decryptedSalary.grossSalary
+        : decryptedSalary.calculatedTotal
     ),
+
     // simple pronoun defaults (change if you store an actual field)
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
@@ -275,7 +281,7 @@ const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 /** Extract ALL pages from canvas - FIXED VERSION */
 function extractAllPages(canvas = {}) {
   const pages = [];
-  
+
   // Check for new structure (pages array directly in canvas)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
@@ -363,14 +369,16 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const html = applyTokens(el.content || "", tokens);
 
       // CSS for multi-column layout
-      const columnStyle = columns > 1 
-        ? `column-count: ${columns}; column-gap: ${columnGap}px;`
-        : '';
+      const columnStyle =
+        columns > 1
+          ? `column-count: ${columns}; column-gap: ${columnGap}px;`
+          : "";
 
       // FIXED: Proper justify alignment with text-justify
-      const alignStyle = align === "justify" 
-        ? "text-align: justify; text-justify: inter-word;" 
-        : `text-align: ${align};`;
+      const alignStyle =
+        align === "justify"
+          ? "text-align: justify; text-justify: inter-word;"
+          : `text-align: ${align};`;
 
       return `<div class="el" style="
         position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;
@@ -584,6 +592,35 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
   }
 });
 
+// Salary Certificate (POST - same style as contract POST)
+router.post("/salary-certificate/:employeeId", async (req, res) => {
+  try {
+    const { employeeId } = req.params;
+    const { key } = req.body || {};
+    const templateId = String(req.query.templateId || "");
+
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "salary_certificate",
+      templateId
+    );
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      'attachment; filename="SalaryCertificate.pdf"'
+    );
+    res.status(200).end(pdf);
+  } catch (err) {
+    console.error("salary-certificate pdf error:", err);
+    if (!res.headersSent) {
+      res
+        .status(500)
+        .json({ message: err.message || "Failed to generate PDF" });
+    }
+  }
+});
+
 // Contract (with optional decryption key support)
 router.post("/contract/:employeeId", async (req, res) => {
   try {
@@ -744,6 +781,8 @@ router.put("/templates/:id", async (req, res) => {
     res.status(500).json({ message: "Failed to update template" });
   }
 });
+
+
 
 router.delete("/templates/:id", async (req, res) => {
   try {
