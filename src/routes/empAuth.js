@@ -302,8 +302,7 @@ router.get("/all-sessions", async (req, res) => {
   try {
     const sessions = await EmployeeSession.find()
       .populate("employeeId", "name companyEmail role")
-      .sort({ loginTime: -1 })
-      .limit(100);
+      .sort({ loginTime: -1 });  // removed limit
 
     const formatted = sessions.map((s) => ({
       id: s._id,
