@@ -12,6 +12,34 @@ const toNum = (v) => {
   const n = Number(String(v).replace(/,/g, "").trim());
   return Number.isFinite(n) ? n : 0;
 };
+const monthOrder = [
+  "January","February","March","April","May","June",
+  "July","August","September","October","November","December"
+];
+
+// Generate full fiscal months starting from the given month/year
+function generateFiscalMonths(startMonth, startYear) {
+  const startIndex = monthOrder.indexOf(startMonth);
+  let year = parseInt(startYear);
+
+  const result = [];
+
+  for (let i = 0; i < 12; i++) {
+    const index = (startIndex + i) % 12;
+
+    // When we wrap from December -> January, increase year
+    if (index === 0 && i > 0) year++;
+
+    result.push({
+      month: monthOrder[index],
+      year: year.toString(),
+      processedAt: new Date()
+    });
+  }
+
+  return result;
+}
+
 
 const toStr = (num) => Math.round(Number(num) || 0).toString();
 
@@ -236,9 +264,6 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   };
 }
 
-/* ---------------------- NEW: Auto Tax Configuration ---------------------- */
-
-/** Enable auto-tax application from specific month */
 exports.enableAutoTax = async (req, res) => {
   try {
     const { fiscalYear = "2025-26", fromMonth, fromYear } = req.body;
@@ -249,39 +274,64 @@ exports.enableAutoTax = async (req, res) => {
       });
     }
 
-    const taxCfg = await TaxConfig.findOneAndUpdate(
+    // Load existing TaxConfig WITHOUT overwriting slabs
+    let taxCfg = await TaxConfig.findOne({ fiscalYear });
+
+    if (!taxCfg) {
+      return res.status(400).json({
+        error: `TaxConfig for fiscal year ${fiscalYear} does not exist. Create slabs first.`,
+      });
+    }
+
+    if (!taxCfg.slabs || taxCfg.slabs.length === 0) {
+      return res.status(400).json({
+        error: `No tax slabs defined for ${fiscalYear}. Cannot enable auto-tax.`,
+      });
+    }
+
+    // Update auto-tax-only fields (safe)
+    await TaxConfig.updateOne(
       { fiscalYear },
       {
         autoApplyEnabled: true,
-        autoApplyFromMonth: {
-          month: fromMonth,
-          year: fromYear,
-        },
+        autoApplyFromMonth: { month: fromMonth, year: fromYear },
         autoApplyEnabledAt: new Date(),
         $addToSet: { autoEnabledOwners: req.user._id },
-      },
-      { upsert: true, new: true }
+      }
     );
 
-    // Apply tax to all future slips from the specified month
-    const result = await applyAutoTaxToFutureSlips(
+    // Reload updated config
+    taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+
+    // Create full fiscal year month cycle
+    const fiscalMonths = generateFiscalMonths(fromMonth, fromYear);
+
+    // Store fiscal months to DB
+    await TaxConfig.updateOne(
+      { fiscalYear },
+      { $addToSet: { processedAutoTaxMonths: { $each: fiscalMonths } } }
+    );
+
+    // Apply tax to all slips inside fiscal-year cycle
+    const appliedSlips = await applyAutoTaxToFutureSlips(
       req.user._id,
-      fromMonth,
-      fromYear,
+      fiscalMonths,
       taxCfg
     );
 
     return res.json({
       success: true,
-      message: `Auto-tax enabled from ${fromMonth} ${fromYear}`,
+      message: `Auto-tax enabled successfully for fiscal year ${fiscalYear}`,
       taxConfig: {
         fiscalYear: taxCfg.fiscalYear,
-        autoApplyEnabled: taxCfg.autoApplyEnabled,
+        autoApplyEnabled: true,
         autoApplyFromMonth: taxCfg.autoApplyFromMonth,
         autoApplyEnabledAt: taxCfg.autoApplyEnabledAt,
+        processedAutoTaxMonths: fiscalMonths,
       },
-      appliedToSlips: result,
+      appliedToSlips: appliedSlips,
     });
+
   } catch (err) {
     console.error("enableAutoTax error:", err);
     return res.status(500).json({ error: "Failed to enable auto-tax" });
@@ -357,43 +407,19 @@ exports.getAutoTaxStatus = async (req, res) => {
     return res.status(500).json({ error: "Failed to get auto-tax status" });
   }
 };
-
-/** Apply auto-tax to all slips from specified month onwards */
-async function applyAutoTaxToFutureSlips(ownerId, fromMonth, fromYear, taxCfg) {
+async function applyAutoTaxToFutureSlips(ownerId, fiscalMonths, taxCfg) {
   try {
-    // Get all slips from the specified month onwards
-    const monthOrder = [
-      "January",
-      "February",
-      "March",
-      "April",
-      "May",
-      "June",
-      "July",
-      "August",
-      "September",
-      "October",
-      "November",
-      "December",
-    ];
-
-    const fromMonthIndex = monthOrder.indexOf(fromMonth);
-
-    const futureSlips = await SalarySlip.find({ owner: ownerId })
+    // Fetch all slips for this owner
+    const allSlips = await SalarySlip.find({ owner: ownerId })
       .populate("employee")
       .lean();
 
-    const slipsToUpdate = futureSlips.filter((slip) => {
-      const slipYear = parseInt(slip.year);
-      const targetYear = parseInt(fromYear);
-      const slipMonthIndex = monthOrder.indexOf(slip.month);
-
-      // Include slips from the target month/year onwards
-      return (
-        slipYear > targetYear ||
-        (slipYear === targetYear && slipMonthIndex >= fromMonthIndex)
-      );
-    });
+    // Filter slips matching any fiscal year month
+    const slipsToUpdate = allSlips.filter((slip) =>
+      fiscalMonths.some(
+        (fm) => fm.month === slip.month && fm.year === slip.year
+      )
+    );
 
     const results = [];
 
@@ -401,15 +427,15 @@ async function applyAutoTaxToFutureSlips(ownerId, fromMonth, fromYear, taxCfg) {
       const slip = await SalarySlip.findById(slipData._id);
       if (!slip) continue;
 
+      // Calculate tax using slabs
       const calc = await calculateSlipWithTaxAsync(slip, taxCfg);
 
-      // Update slip with tax calculations
+      // Update slip (encrypted)
       await writeEnc(slip, "grossSalary", calc.grossMonthly);
       await writeEnc(slip, "taxDeduction", calc.monthlyTax);
       await writeEnc(slip, "totalAllowances", calc.totalAllowances);
       await writeEnc(slip, "totalDeductions", calc.totalDeductions);
       await writeEnc(slip, "netPayable", calc.netPayable);
-
       await slip.save();
 
       results.push({
@@ -418,28 +444,18 @@ async function applyAutoTaxToFutureSlips(ownerId, fromMonth, fromYear, taxCfg) {
         month: slip.month,
         year: slip.year,
         taxApplied: calc.monthlyTax,
+        netPayable: calc.netPayable,
       });
     }
 
-    // Mark this month as processed
-    await TaxConfig.updateOne(
-      { fiscalYear: taxCfg.fiscalYear },
-      {
-        $addToSet: {
-          processedAutoTaxMonths: {
-            month: fromMonth,
-            year: fromYear,
-          },
-        },
-      }
-    );
-
     return results;
+
   } catch (err) {
     console.error("applyAutoTaxToFutureSlips error:", err);
     return [];
   }
 }
+
 
 /** Auto-apply tax to new slips if auto-tax is enabled - ENHANCED FOR ATTENDANCE FLOW */
 exports.autoApplyTaxIfEnabled = async function (slip) {

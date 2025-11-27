@@ -74,6 +74,44 @@ router.get("/", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: err.message });
   }
 });
+
+// Add new route for load more functionality
+router.get("/load-more", requireAuth, async (req, res) => {
+  try {
+    const { skip = 0, limit = 15, trashed = "false" } = req.query;
+    const includeTrashed = trashed === "true";
+    
+    const scope = buildEmployeeScope(req.user, includeTrashed);
+    const query = { ...scope };
+
+    const skipNum = parseInt(skip);
+    const limitNum = parseInt(limit);
+
+    const list = await Employee.find(query)
+      .sort({ name: 1 })
+      .skip(skipNum)
+      .limit(limitNum)
+      .lean();
+
+    const totalCount = await Employee.countDocuments(query);
+    const hasMore = skipNum + limitNum < totalCount;
+
+    res.json({ 
+      status: "success", 
+      data: list,
+      pagination: {
+        skip: skipNum,
+        limit: limitNum,
+        total: totalCount,
+        hasMore: hasMore
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+
 router.get("/attendance", requireAuth, async (req, res) => {
   try {
     const { trashed } = req.query;
