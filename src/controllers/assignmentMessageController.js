@@ -101,116 +101,268 @@ function normalizeRole(role) {
 }
 
 async function applyVisibility(q, req) {
-  if (!req.employee?._id) return q;
+  // 🚨 CRITICAL: Return impossible query if no authenticated user
+  if (!req.employee?._id) {
+    return { _id: null };
+  }
 
   const me = oid(String(req.employee._id));
-  if (!me) return q;
+  if (!me) {
+    return { _id: null };
+  }
 
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
-    return { ...q, owner: ownerId };
-  }
-
-  // 🧑‍🤝‍🧑 TEAM LEAD: can see ALL messages for their owner's organization
-  if (currentUserRole === "team_lead" && ownerId) {
-    return { ...q, owner: ownerId };
-  }
-
-  // 👷 NORMAL EMPLOYEE: STRICT participant-based visibility
-  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
-
-  // For thread-based queries, ensure user is participant in EACH message
-  if (q.threadId) {
-    // For thread views, user must be participant in the thread
-    const threadMessages = await AssignmentMessage.find({
-      threadId: q.threadId,
-      $or: visOr,
-    })
-      .select("_id")
-      .lean();
-
-    if (threadMessages.length === 0) {
-      // User has no access to this thread at all
-      return { _id: null }; // Return impossible query
-    }
-
-    // User has access to at least some messages in thread, keep threadId filter
-    return { ...q, $or: visOr };
-  }
-
-  // For non-thread queries, apply normal visibility
-  const now = new Date();
-  const baseQuery = { ...q };
-
-  // Remove isTrashed from base query if it exists
-  const isTrashedFilter = baseQuery.isTrashed;
-  delete baseQuery.isTrashed;
-
-  // Handle scheduled messages specifically
-  if (q.isScheduled === true && q.status === "scheduled") {
-    const scheduledQuery = {
-      ...baseQuery,
-      $and: [{ $or: visOr }],
-    };
-
-    if (isTrashedFilter !== undefined) {
-      scheduledQuery.isTrashed = isTrashedFilter;
-    }
-    return scheduledQuery;
-  }
-
-  // Build the main visibility query for employees
-  const finalQuery = {
+  // 🚨 CRITICAL: Base visibility - user must ALWAYS be participant
+  const participantFilter = {
     $or: [
-      {
-        ...baseQuery,
-        $and: [
-          {
-            $or: [
-              { isScheduled: { $ne: true } },
-              { isScheduled: true, status: "sent" },
-              {
-                isScheduled: true,
-                status: "scheduled",
-                scheduledFor: { $lte: now },
-              },
-            ],
-          },
-          { $or: visOr },
-        ],
-      },
-      {
-        ...baseQuery,
-        isScheduled: true,
-        status: "scheduled",
-        scheduledFor: { $gt: now },
-        sender: me,
-      },
-    ],
+      { sender: me },
+      { receiver: me },
+      { receiver: { $in: [me] } }
+    ]
   };
 
-  if (isTrashedFilter !== undefined) {
-    finalQuery.isTrashed = isTrashedFilter;
+  // 🧑‍💼 MANAGER: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
+  if (currentUserRole === "manager" && ownerId) {
+    const managerQuery = {
+      $and: [
+        { owner: ownerId }, // Within their organization
+        participantFilter    // AND they are participant
+      ]
+    };
+
+    // For thread-based queries, maintain thread context but ensure participation
+    if (q.threadId) {
+      managerQuery.$and.push({ threadId: q.threadId });
+
+      // Verify manager has access to this thread
+      const threadAccess = await AssignmentMessage.findOne({
+        threadId: q.threadId,
+        $and: [
+          { owner: ownerId },
+          participantFilter
+        ]
+      });
+
+      if (!threadAccess) {
+        return { _id: null }; // No access to this thread
+      }
+    }
+
+    // Handle scheduled messages for managers
+    if (q.isScheduled === true && q.status === "scheduled") {
+      const now = new Date();
+      return {
+        ...managerQuery,
+        isScheduled: true,
+        status: "scheduled",
+        $or: [
+          { scheduledFor: { $lte: now } }, // Past scheduled messages they can see
+          { sender: me } // Or their own future scheduled messages
+        ]
+      };
+    }
+
+    // Apply trash/spam filters if present
+    if (q.isTrashed !== undefined) {
+      managerQuery.$and.push({ isTrashed: q.isTrashed });
+    }
+    if (q.isSpam !== undefined) {
+      managerQuery.$and.push({ isSpam: q.isSpam });
+    }
+
+    return managerQuery;
   }
 
-  return finalQuery;
+  // 🎯 TEAM LEAD: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
+  if (currentUserRole === "team_lead" && ownerId) {
+    const teamLeadQuery = {
+      $and: [
+        { owner: ownerId }, // Within their organization
+        participantFilter    // AND they are participant
+      ]
+    };
+
+    // For thread-based queries
+    if (q.threadId) {
+      teamLeadQuery.$and.push({ threadId: q.threadId });
+
+      // Verify team lead has access to this thread
+      const threadAccess = await AssignmentMessage.findOne({
+        threadId: q.threadId,
+        $and: [
+          { owner: ownerId },
+          participantFilter
+        ]
+      });
+
+      if (!threadAccess) {
+        return { _id: null };
+      }
+    }
+
+    // Special case: Team leads can see pending approval messages from their organization
+    // but ONLY if they are participants OR if they need to review them
+    if (q.approvalStatus === "pending" || q.filter === "review") {
+      // For review filter, team leads can see pending messages from their org
+      // that require their approval (direct supervision mode)
+      const reviewQuery = {
+        $and: [
+          { owner: ownerId },
+          { approvalStatus: "pending" },
+          {
+            $or: [
+              participantFilter, // They are participant
+              // OR it's a message from employees under their supervision
+              {
+                sender: {
+                  $in: await getEmployeesUnderSupervision(ownerId, "team_lead")
+                }
+              }
+            ]
+          }
+        ]
+      };
+
+      // Apply additional filters
+      if (q.threadId) reviewQuery.$and.push({ threadId: q.threadId });
+      if (q.isTrashed !== undefined) reviewQuery.$and.push({ isTrashed: q.isTrashed });
+      if (q.isSpam !== undefined) reviewQuery.$and.push({ isSpam: q.isSpam });
+
+      return reviewQuery;
+    }
+
+    // Handle scheduled messages for team leads
+    if (q.isScheduled === true && q.status === "scheduled") {
+      const now = new Date();
+      return {
+        ...teamLeadQuery,
+        isScheduled: true,
+        status: "scheduled",
+        $or: [
+          { scheduledFor: { $lte: now } },
+          { sender: me }
+        ]
+      };
+    }
+
+    // Apply filters
+    if (q.isTrashed !== undefined) {
+      teamLeadQuery.$and.push({ isTrashed: q.isTrashed });
+    }
+    if (q.isSpam !== undefined) {
+      teamLeadQuery.$and.push({ isSpam: q.isSpam });
+    }
+
+    return teamLeadQuery;
+  }
+
+  // 👷 NORMAL EMPLOYEE: STRICT participant-based visibility ONLY
+  const employeeQuery = {
+    $and: [participantFilter]
+  };
+
+  // For thread-based queries, verify access to the thread
+  if (q.threadId) {
+    employeeQuery.$and.push({ threadId: q.threadId });
+
+    const threadAccess = await AssignmentMessage.findOne({
+      threadId: q.threadId,
+      $or: participantFilter.$or
+    });
+
+    if (!threadAccess) {
+      return { _id: null }; // No access to this thread
+    }
+  }
+
+  // Handle scheduled messages specifically for employees
+  const now = new Date();
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return {
+      $and: [
+        participantFilter,
+        { isScheduled: true },
+        { status: "scheduled" },
+        {
+          $or: [
+            { scheduledFor: { $lte: now } }, // Past scheduled messages
+            { sender: me } // Or their own future scheduled messages
+          ]
+        }
+      ]
+    };
+  }
+
+  // Handle normal messages with scheduled logic
+  const baseConditions = {
+    $or: [
+      { isScheduled: { $ne: true } }, // Not scheduled
+      { isScheduled: true, status: "sent" }, // Scheduled but sent
+      {
+        isScheduled: true,
+        status: "scheduled",
+        scheduledFor: { $lte: now } // Scheduled but time has passed
+      }
+    ]
+  };
+
+  employeeQuery.$and.push(baseConditions);
+
+  // Apply additional filters
+  if (q.owner && isObjId(q.owner)) {
+    employeeQuery.$and.push({ owner: q.owner });
+  }
+  if (q.client && isObjId(q.client)) {
+    employeeQuery.$and.push({ client: q.client });
+  }
+  if (q.sender && isObjId(q.sender)) {
+    employeeQuery.$and.push({ sender: q.sender });
+  }
+  if (q.status && ["draft", "scheduled", "sent", "cancelled"].includes(q.status)) {
+    employeeQuery.$and.push({ status: q.status });
+  }
+  if (q.approvalStatus && ["pending", "approved", "disapproved"].includes(q.approvalStatus)) {
+    employeeQuery.$and.push({ approvalStatus: q.approvalStatus });
+  }
+  if (q.isTrashed !== undefined) {
+    employeeQuery.$and.push({ isTrashed: q.isTrashed });
+  }
+  if (q.isSpam !== undefined) {
+    employeeQuery.$and.push({ isSpam: q.isSpam });
+  }
+  if (q.isScheduled !== undefined) {
+    employeeQuery.$and.push({ isScheduled: q.isScheduled });
+  }
+
+  return employeeQuery;
+}
+
+// Helper function to get employees under supervision
+async function getEmployeesUnderSupervision(ownerId, supervisorRole) {
+  try {
+    const employees = await Employee.find({
+      owner: ownerId,
+      ...(supervisorRole === "team_lead" && {
+        $or: [
+          { supervisionMode: "direct" },
+          { supervisionMode: "needs_approval" }
+        ]
+      })
+    }).select("_id").lean();
+
+    return employees.map(emp => emp._id);
+  } catch (error) {
+    console.error("Error getting employees under supervision:", error);
+    return [];
+  }
 }
 /** ---------- SOCKET.IO UTILITIES ---------- **/
 function getIO(req) {
   return req.app.get("io");
 }
-
-async function emitToSpecificReceivers(
-  io,
-  message,
-  eventName = "new_assignment_message"
-) {
+async function emitToSpecificReceivers(io, message, eventName = "new_assignment_message") {
   try {
     const populatedMessage = await AssignmentMessage.findById(message._id)
       .populate("owner")
@@ -219,13 +371,10 @@ async function emitToSpecificReceivers(
       .populate("client")
       .populate("attachments.uploadedBy");
 
-    if (!populatedMessage) {
-      console.error("❌ Message not found for targeted emission:", message._id);
-      return;
-    }
+    if (!populatedMessage) return;
 
-    // 🔥 FIXED: Get ALL unique recipients (sender + receivers)
-    const allRecipients = new Set();
+    // 🔥 CRITICAL: Get ONLY the actual recipients from the database
+    const actualRecipients = new Set();
 
     // Add sender
     const senderId = String(
@@ -234,45 +383,34 @@ async function emitToSpecificReceivers(
         : populatedMessage.sender?._id
     );
     if (senderId && senderId !== 'undefined') {
-      allRecipients.add(senderId);
+      actualRecipients.add(senderId);
     }
 
-    // Add receivers - handle both array and single receiver
+    // 🔥 ONLY add receivers that are actually in the receiver array
     if (Array.isArray(populatedMessage.receiver)) {
       populatedMessage.receiver.forEach((receiver) => {
         const receiverId = String(
           typeof receiver === "string" ? receiver : receiver?._id
         );
-        if (receiverId && receiverId !== 'undefined' && receiverId !== senderId) {
-          allRecipients.add(receiverId);
+        // 🔥 Only add if it's a valid receiver ID
+        if (receiverId && receiverId !== 'undefined') {
+          actualRecipients.add(receiverId);
         }
       });
-    } else if (populatedMessage.receiver) {
-      const receiverId = String(
-        typeof populatedMessage.receiver === "string"
-          ? populatedMessage.receiver
-          : populatedMessage.receiver?._id
-      );
-      if (receiverId && receiverId !== 'undefined' && receiverId !== senderId) {
-        allRecipients.add(receiverId);
-      }
     }
 
-    console.log(`🔔 Real-time ${eventName} emitting to:`, Array.from(allRecipients));
+    console.log(`🔒 ${eventName}: Emitting to ACTUAL recipients only:`, Array.from(actualRecipients));
 
-    // 🔥 CRITICAL FIX: Emit ONLY to specific recipient rooms
-    allRecipients.forEach((recipientId) => {
+    // 🔥 Emit ONLY to actual recipients
+    actualRecipients.forEach((recipientId) => {
       if (recipientId) {
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
         console.log(`📤 Emitted to employee_${recipientId}`);
       }
     });
 
-    // For thread-based messages, also emit to thread room for real-time updates
-    if (populatedMessage.threadId) {
-      io.to(`thread_${populatedMessage.threadId}`).emit(eventName, populatedMessage);
-      console.log(`📤 Also emitted to thread_${populatedMessage.threadId}`);
-    }
+    // 🔥 REMOVE thread-based emission for sensitive operations
+    // ❌ Don't emit to thread room for edits/approvals
 
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
@@ -305,7 +443,6 @@ async function emitToAssignmentClients(
     console.error("❌ Error in emitToAssignmentClients:", error);
   }
 }
-
 async function emitMessageUpdate(io, message, action) {
   try {
     const populatedMessage = await AssignmentMessage.findById(message._id)
@@ -316,23 +453,25 @@ async function emitMessageUpdate(io, message, action) {
 
     if (!populatedMessage) return;
 
-    // Get all participants in the thread
-    const allParticipants = new Set();
+    // 🔥 CRITICAL: Only get actual participants, not thread participants
+    const actualParticipants = new Set();
 
     // Add sender
     const senderId = String(populatedMessage.sender._id);
-    allParticipants.add(senderId);
+    actualParticipants.add(senderId);
 
-    // Add receivers
+    // Add ONLY the receivers from this specific message
     if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
       populatedMessage.receiver.forEach((receiver) => {
         const receiverId = String(receiver._id);
-        allParticipants.add(receiverId);
+        actualParticipants.add(receiverId);
       });
     }
 
-    // Emit to all participants
-    allParticipants.forEach((participantId) => {
+    console.log(`🔒 ${action}: Emitting to actual participants only:`, Array.from(actualParticipants));
+
+    // Emit to actual participants only
+    actualParticipants.forEach((participantId) => {
       io.to(`employee_${participantId}`).emit("assignment_message_updated", {
         message: populatedMessage,
         action: action,
@@ -340,26 +479,22 @@ async function emitMessageUpdate(io, message, action) {
       });
     });
 
-    // Special handling for approval actions
-    if (action === "approved") {
-      // Notify team leads about approval
-      io.to("assignment_team_leads").emit("assignment_message_approved", {
+    // 🔥 REMOVED: Thread-based and role-based broadcasting for sensitive operations
+    if (action === "approved" || action === "disapproved") {
+      // Keep approval/disapproval logic but ensure it's properly filtered
+      const role = action === "approved" ? "assignment_managers" : "assignment_team_leads";
+      io.to(role).emit(`assignment_message_${action}`, {
         message: populatedMessage,
-        action: "approved",
-        timestamp: new Date(),
-      });
-    } else if (action === "disapproved") {
-      // Notify team leads about disapproval
-      io.to("assignment_team_leads").emit("assignment_message_disapproved", {
-        message: populatedMessage,
-        action: "disapproved",
+        action: action,
         timestamp: new Date(),
       });
     }
+
   } catch (error) {
     console.error("❌ Error emitting message update:", error);
   }
 }
+
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
 async function findTLsAndManagersByOwner(ownerId) {
   if (!isObjId(ownerId)) return { tls: [], managers: [], employees: [] };
@@ -894,6 +1029,7 @@ exports.createMessage = async function createMessage(req, res) {
     }
 
     // Only handle client assignment if client is provided
+    let assignedTeamMemberId = null;
     if (client && isObjId(client)) {
       const Client = require("../models/ClientInfo");
       const clientDoc = await Client.findById(client)
@@ -902,12 +1038,12 @@ exports.createMessage = async function createMessage(req, res) {
 
       // Include assignedTo employee if present
       if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-        const assignedEmployeeId = String(clientDoc.assignedTo._id);
+        assignedTeamMemberId = String(clientDoc.assignedTo._id);
         if (
-          !receivers.includes(assignedEmployeeId) &&
-          assignedEmployeeId !== String(sender)
+          !receivers.includes(assignedTeamMemberId) &&
+          assignedTeamMemberId !== String(sender)
         ) {
-          receivers.push(assignedEmployeeId);
+          receivers.push(assignedTeamMemberId);
         }
       }
     }
@@ -918,12 +1054,44 @@ exports.createMessage = async function createMessage(req, res) {
     console.log("👥 Available recipients:", {
       teamLeads: tls.length,
       managers: managers.length,
-      currentReceivers: receivers.length
+      currentReceivers: receivers.length,
+      assignedTeamMember: assignedTeamMemberId
     });
 
+    // 🔥 CRITICAL FIX: MANAGER MESSAGE LOGIC
     if (senderRole === "manager") {
       approvalStatus = null;
       console.log("👔 Manager sending - no approval needed");
+
+      // 🔥 FIXED: For managers, ONLY send to:
+      // 1. Explicitly specified receivers (from receiverBody/receiversBody)
+      // 2. Assigned team member (if any)
+      // 3. ONE team lead (not all team leads)
+
+      // Remove any automatically added managers or team leads
+      receivers = receivers.filter(receiverId => {
+        // Keep only explicitly specified receivers and assigned team member
+        const isExplicitReceiver =
+          normalizeIds(receiverBody).includes(receiverId) ||
+          normalizeIds(receiversBody).includes(receiverId);
+
+        const isAssignedTeamMember = receiverId === assignedTeamMemberId;
+
+        return isExplicitReceiver || isAssignedTeamMember;
+      });
+
+      // 🔥 ADD ONLY ONE TEAM LEAD (not all)
+      if (tls.length > 0 && client && isObjId(client)) {
+        // Use the first team lead, or you can implement more sophisticated logic
+        const primaryTeamLead = tls[0];
+        if (!receivers.includes(primaryTeamLead)) {
+          receivers.push(primaryTeamLead);
+          console.log("✅ Manager message: Added primary team lead:", primaryTeamLead);
+        }
+      }
+
+      console.log("🎯 Manager final receivers:", receivers);
+
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
       console.log("🎯 Team Lead sending - no approval needed");
@@ -1139,7 +1307,8 @@ exports.createMessage = async function createMessage(req, res) {
       approvalStatus,
       isReply: !!replyTo,
       hasTeamLeads: receivers.some(r => tls.includes(r)),
-      hasManagers: receivers.some(r => managers.includes(r))
+      hasManagers: receivers.some(r => managers.includes(r)),
+      hasAssignedTeamMember: !!assignedTeamMemberId && receivers.includes(assignedTeamMemberId)
     });
 
     // Scheduling logic (same as before)
@@ -1212,6 +1381,7 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
+
 exports.getMessage = async function getMessage(req, res) {
   try {
     const messageId = req.params.id;
@@ -4037,7 +4207,6 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     res.status(500).json({ error: "Failed to fetch message counts" });
   }
 };
-// UPDATED: Edit pending message to handle FormData properly
 exports.editPendingMessage = async function editPendingMessage(req, res) {
   try {
     const { id } = req.params;
@@ -4246,20 +4415,48 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
       messageId: populated._id,
       subject: populated.subject,
       attachments: populated.attachments.length,
-      lastEditedBy: populated.lastEditedBy?.name
+      lastEditedBy: populated.lastEditedBy?.name,
+      receivers: populated.receiver.map(r => ({
+        id: r._id,
+        name: r.name,
+        email: r.companyEmail
+      }))
     });
 
-    // EMIT REAL-TIME EVENT FOR PENDING MESSAGE EDIT
+    // 🔥 CRITICAL FIX: PROPER SOCKET EMISSION - ONLY TO AUTHORIZED PARTICIPANTS
+    // 🔥 CRITICAL FIX: PROPER SOCKET EMISSION - ONLY TO AUTHORIZED PARTICIPANTS
     try {
       const io = getIO(req);
       if (io) {
-        // Emit message update
-        await emitMessageUpdate(io, populated, "pending_message_edited");
+        // 🔥 GET ONLY ACTUAL PARTICIPANTS WHO SHOULD SEE THIS MESSAGE
+        const authorizedParticipants = new Set();
 
-        // Notify all relevant parties about the edit
+        // Add sender (always authorized)
+        const senderId = String(populated.sender._id);
+        authorizedParticipants.add(senderId);
+
+        // 🔥 CRITICAL: Add ONLY the receivers from the ACTUAL message (not thread participants)
+        if (populated.receiver && Array.isArray(populated.receiver)) {
+          populated.receiver.forEach((receiver) => {
+            const receiverId = String(receiver._id);
+            authorizedParticipants.add(receiverId);
+          });
+        }
+
+        // Add the editor if not already included
+        authorizedParticipants.add(String(currentUser._id));
+
+        console.log("🔒 Emitting to authorized participants only:", {
+          participants: Array.from(authorizedParticipants),
+          sender: senderId,
+          receivers: populated.receiver.map(r => String(r._id)),
+          editor: currentUser._id
+        });
+
+        // Prepare notification data
         const notificationData = {
           message: populated,
-          action: "edited",
+          action: "pending_message_edited",
           editedBy: {
             _id: currentUser._id,
             name: currentUser.name,
@@ -4270,36 +4467,26 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
           editedByTeamLead: isTeamLead && !isSender,
         };
 
-        // Notify all participants in the thread
-        const allParticipants = new Set();
-
-        // Add sender
-        const senderId = String(populated.sender._id);
-        allParticipants.add(senderId);
-
-        // Add receivers
-        if (populated.receiver && Array.isArray(populated.receiver)) {
-          populated.receiver.forEach((receiver) => {
-            const receiverId = String(receiver._id);
-            allParticipants.add(receiverId);
-          });
-        }
-
-        // Emit to all participants
-        allParticipants.forEach((participantId) => {
+        // 🔥 EMIT ONLY TO AUTHORIZED PARTICIPANTS - NO BROADCAST, NO THREAD ROOM
+        authorizedParticipants.forEach((participantId) => {
           io.to(`employee_${participantId}`).emit("assignment_message_updated", notificationData);
+          console.log(`📤 Emitted to authorized participant: employee_${participantId}`);
         });
 
-        // Special notification if team lead edited someone else's message
+        // 🔥 REMOVED: Thread room emission - this was causing unauthorized users to see messages
+        // 🔥 REMOVED: Team leads room broadcast - only actual participants should see
+
+        // Special notification ONLY to the original sender if team lead edited their message
         if (isTeamLead && !isSender) {
           io.to(`employee_${senderId}`).emit("team_lead_edited_your_message", {
             message: populated,
             editedBy: notificationData.editedBy,
             timestamp: new Date(),
           });
+          console.log(`📤 Notified sender about team lead edit: employee_${senderId}`);
         }
 
-        console.log("📢 Real-time events emitted to participants");
+        console.log("✅ Real-time events emitted to authorized participants only");
       } else {
         console.warn("⚠️ Socket.io instance not available for real-time updates");
       }

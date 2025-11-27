@@ -60,10 +60,19 @@ router.post("/login", async (req, res) => {
 
   try {
     const emp = await Employee.findOne({ companyEmail }).select(
-      "_id companyEmail password role owner name trustedDevices department"
+      "_id companyEmail password role owner name trustedDevices department status"
     );
 
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
+
+    // ❌ Block login for offboarded employees
+    if (emp.status && emp.status.toLowerCase() === "offboarded") {
+      return res.status(403).json({
+        error: "Account Disabled",
+        message:
+          "Your account has been offboarded. Please contact HR if you believe this is a mistake.",
+      });
+    }
 
     if (!emp.password?.trim()) {
       return res.status(403).json({
@@ -215,9 +224,7 @@ router.post("/confirm-code", async (req, res) => {
 
     // ✅ Save trusted device if not already stored
     if (
-      !emp.trustedDevices.some(
-        (d) => d.deviceFingerprint === deviceFingerprint
-      )
+      !emp.trustedDevices.some((d) => d.deviceFingerprint === deviceFingerprint)
     ) {
       emp.trustedDevices.push({
         deviceId,
@@ -302,7 +309,7 @@ router.get("/all-sessions", async (req, res) => {
   try {
     const sessions = await EmployeeSession.find()
       .populate("employeeId", "name companyEmail role")
-      .sort({ loginTime: -1 });  // removed limit
+      .sort({ loginTime: -1 }); // removed limit
 
     const formatted = sessions.map((s) => ({
       id: s._id,

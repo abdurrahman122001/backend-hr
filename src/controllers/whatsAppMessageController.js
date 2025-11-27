@@ -350,14 +350,6 @@ exports.listMessages = async function listMessages(req, res) {
     // Apply visibility rules for ALL users including team leads
     const qFinal = await applyVisibility(q, req);
 
-    console.log("🔍 Final query:", JSON.stringify(qFinal, null, 2));
-    console.log(
-      "👤 Current user role:",
-      currentUserRole,
-      "Team lead:",
-      isTeamLead
-    );
-
     // Rest of the function remains the same...
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
@@ -553,7 +545,6 @@ exports.createMessage = async function createMessage(req, res) {
 
     // 🔥 CRITICAL CHANGE: TEAM LEAD SENDS TO MANAGER INSTEAD OF ASSIGNED EMPLOYEE
     if (senderRole === "team_lead") {
-      console.log("👨‍💼 Team Lead sending message - targeting managers instead of assigned employee");
       
       // Clear any existing receivers (don't use assigned employee)
       receivers = [];
@@ -565,13 +556,7 @@ exports.createMessage = async function createMessage(req, res) {
             receivers.push(managerId);
           }
         });
-        console.log("✅ Team Lead message directed to managers:", managers);
-      } else {
-        console.log("⚠️ No managers found for organization:", owner);
-      }
-
-      // 🎯 ADD CRM as additional receiver when Team Lead sends message
-      console.log("👨‍💼 Team Lead sending message - adding CRM as receiver");
+      } 
 
       // Get CRM employee ID from environment or database
       const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
@@ -596,17 +581,11 @@ exports.createMessage = async function createMessage(req, res) {
 
       if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
         receivers.push(crmId);
-        console.log("✅ Added CRM as receiver:", crmId);
-      } else if (!crmId) {
-        console.log("⚠️ CRM user not found for organization:", owner);
-      }
+      } 
     } 
     // 🔥 CRITICAL UPDATE: Add team leads AND assigned employee as receivers for manager messages
     else if (senderRole === "manager") {
-      console.log(
-        "👨‍💼 Manager sending message - adding team leads AND assigned employee as receivers"
-      );
-
+      
       // Add team leads to receivers for supervision visibility
       tls.forEach((teamLeadId) => {
         if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
@@ -622,7 +601,6 @@ exports.createMessage = async function createMessage(req, res) {
           assignedEmployeeId !== String(sender)
         ) {
           receivers.push(assignedEmployeeId);
-          console.log("✅ Added assigned employee as receiver:", assignedEmployeeId);
         }
       }
     }
@@ -636,7 +614,6 @@ exports.createMessage = async function createMessage(req, res) {
           assignedEmployeeId !== String(sender)
         ) {
           receivers.push(assignedEmployeeId);
-          console.log("✅ Added assigned employee as receiver:", assignedEmployeeId);
         }
       }
     }
@@ -682,7 +659,6 @@ exports.createMessage = async function createMessage(req, res) {
 
         approvalStatus = null;
         
-        console.log("🔄 Fallback: Team Lead receivers set to managers:", managers);
       } else if (senderRole === "manager") {
         // Manager with no receivers - add team leads
         receivers = [...tls];
@@ -750,27 +726,6 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
-    // Log the receiver details for debugging
-    console.log("📨 Message created with receivers:", {
-      sender: senderRole,
-      totalReceivers: receivers.length,
-      managersIncluded: managers.filter((m) => receivers.includes(m)).length,
-      teamLeadsIncluded: tls.filter((tl) => receivers.includes(tl)).length,
-      assignedEmployeeIncluded: clientDoc?.assignedTo ? (receivers.includes(String(clientDoc.assignedTo._id)) ? "Yes" : "No") : "No",
-      crmIncluded: senderRole === "team_lead" ? "Yes" : "No",
-      receiverBreakdown: {
-        managers: managers.filter((m) => receivers.includes(m)),
-        teamLeads: tls.filter((tl) => receivers.includes(tl)),
-        assignedEmployee: clientDoc?.assignedTo ? [String(clientDoc.assignedTo._id)].filter(id => receivers.includes(id)) : [],
-        crm: senderRole === "team_lead" ? 1 : 0,
-        others: receivers.filter(r => 
-          !managers.includes(r) && 
-          !tls.includes(r) && 
-          r !== (clientDoc?.assignedTo ? String(clientDoc.assignedTo._id) : null) &&
-          r !== process.env.CRM_EMPLOYEE_ID
-        )
-      }
-    });
 
     // FIXED: Emit real-time events ONLY to relevant users
     if (req.app.get("io")) {
@@ -1182,10 +1137,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
             });
           }
         }
-
-        console.log(
-          `Sent scheduled message: ${message._id} to ${message.receiver.length} recipients`
-        );
         results.sent++;
       } catch (error) {
         console.error(
@@ -1251,12 +1202,6 @@ exports.approveMessage = async function approveMessage(req, res) {
         approvalStatus: "approved",
       };
 
-      console.log("📢 Emitting approval to all relevant users:", {
-        messageId: id,
-        sender: msg.sender?._id,
-        receivers: msg.receiver?.map((r) => r._id) || [],
-        teamLead: req.employee._id,
-      });
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
       const allInvolvedUsers = new Set();
@@ -1292,7 +1237,6 @@ exports.approveMessage = async function approveMessage(req, res) {
           timestamp: new Date(),
         });
 
-        console.log(`✅ Emitted approval to employee_${userId}`);
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1302,7 +1246,6 @@ exports.approveMessage = async function approveMessage(req, res) {
           type: "message_updated",
           action: "approved",
         });
-        console.log(`✅ Emitted to client_${msg.client._id}`);
       }
     }
 
@@ -1347,15 +1290,6 @@ exports.approveMessage = async function approveMessage(req, res) {
         // 🎯 CRITICAL: Emit new message event for the forwarded message to managers
         if (req.app.get("io")) {
           const io = req.app.get("io");
-
-          console.log("📤 Forwarding approved message to managers:", {
-            managers: managers,
-            messageId: populatedForward._id,
-            hasReplyContent: !!msg.replyContent,
-            hasRepliedTo: !!msg.repliedTo,
-            isReply: msg.isReply,
-          });
-
           // Notify managers about the new forwarded message
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
@@ -1371,7 +1305,6 @@ exports.approveMessage = async function approveMessage(req, res) {
                 repliedToMessage: msg.repliedTo?._id
               } : null
             });
-            console.log(`✅ Forwarded to manager: employee_${managerId}`);
           });
         }
 
@@ -1440,12 +1373,6 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         approvalStatus: "disapproved",
       };
 
-      console.log("📢 Emitting disapproval to all relevant users:", {
-        messageId: id,
-        sender: msg.sender?._id,
-        receivers: msg.receiver?.map((r) => r._id) || [],
-        teamLead: req.employee._id,
-      });
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
       const allInvolvedUsers = new Set();
@@ -1481,7 +1408,6 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
           timestamp: new Date(),
         });
 
-        console.log(`✅ Emitted disapproval to employee_${userId}`);
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1491,7 +1417,6 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
           type: "message_updated",
           action: "disapproved",
         });
-        console.log(`✅ Emitted to client_${msg.client._id}`);
       }
     }
 
@@ -1524,25 +1449,18 @@ exports.getMessage = async function getMessage(req, res) {
     res.status(500).json({ error: "Failed to fetch message" });
   }
 };
-
 // PATCH /api/assignment-messages/:id/edit - ENHANCED APPROVAL WORKFLOW
 exports.editMessage = async function editMessage(req, res) {
   try {
     const { id } = req.params;
     const { subject, note, receiver, receivers } = req.body;
 
-    console.log("📝 Edit message request:", {
-      messageId: id,
-      currentUser: req.employee._id,
-      currentUserRole: req.employee.role,
-      hasNote: !!note,
-      hasSubject: !!subject,
-    });
-
     const msg = await WhatsAppMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -1556,22 +1474,6 @@ exports.editMessage = async function editMessage(req, res) {
 
     // 🔥 CRITICAL FIX 2: Proper sender ID comparison
     const isSender = msg.sender && String(msg.sender._id) === currentUserId;
-
-    console.log("🔍 DEBUG Edit Permissions:", {
-      messageId: id,
-      currentUserId,
-      currentUserRole,
-      isTeamLead,
-      isSender,
-      msgSenderId: msg.sender ? String(msg.sender._id) : "No sender",
-      approvalStatus: msg.approvalStatus,
-      senderMatch: msg.sender && String(msg.sender._id) === currentUserId,
-      canEdit:
-        isSender ||
-        (isTeamLead &&
-          (msg.approvalStatus === "pending" ||
-            msg.approvalStatus === "disapproved")),
-    });
 
     // 🔥 CRITICAL FIX 3: Enhanced permission check
     if (!isSender && !isTeamLead) {
@@ -1598,12 +1500,6 @@ exports.editMessage = async function editMessage(req, res) {
     const isMessageChanged = note && note !== msg.note;
     const isSubjectChanged = subject && subject !== msg.subject;
     const hasContentChanges = isMessageChanged || isSubjectChanged;
-
-    console.log("📊 Content changes:", {
-      isMessageChanged,
-      isSubjectChanged,
-      hasContentChanges,
-    });
 
     // Add to edit history if message content is changing
     if (hasContentChanges) {
@@ -1643,30 +1539,21 @@ exports.editMessage = async function editMessage(req, res) {
     if (hasContentChanges) {
       if (isTeamLead && !isSender) {
         // Team Lead editing someone else's message - AUTO APPROVE
-        console.log("👨‍💼 Team Lead editing - auto approving");
         msg.approvalStatus = "approved";
       } else if (isSender) {
         // Original sender editing their own message
-        if (msg.approvalStatus === "disapproved") {
-          // If disapproved, goes back to pending for Team Lead review
-          console.log(
-            "👤 Sender editing disapproved message - back to pending"
-          );
+        if (msg.approvalStatus === "disapproved") {          
           msg.approvalStatus = "pending";
         } else if (msg.approvalStatus === "approved") {
           // If already approved and sender edits, keep it approved
-          console.log("👤 Sender editing approved message - remains approved");
           msg.approvalStatus = "approved";
         }
         // If pending, remains pending
       } else if (isTeamLead && isSender) {
         // Team Lead editing their own message - no approval needed
-        console.log("👨‍💼 Team Lead editing own message - no approval needed");
         msg.approvalStatus = null;
       }
     }
-
-    console.log("✅ Final approval status:", msg.approvalStatus);
 
     // Update receivers if provided
     let newReceivers = [];
@@ -1687,6 +1574,8 @@ exports.editMessage = async function editMessage(req, res) {
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "scheduledBy", select: "_id name companyEmail" },
       { path: "editedBy", select: "_id name companyEmail" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
     // Prepare response data with edit information
@@ -1699,6 +1588,7 @@ exports.editMessage = async function editMessage(req, res) {
     };
 
     // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
+    // 🔥 CRITICAL: PRESERVE REPLYTO AND THREAD INFO LIKE IN APPROVE FUNCTION
     let forwardedMessage = null;
     if (
       hasContentChanges &&
@@ -1706,9 +1596,6 @@ exports.editMessage = async function editMessage(req, res) {
       !isSender &&
       msg.approvalStatus === "approved"
     ) {
-      console.log(
-        "👨‍💼 Team Lead editing - auto approving and forwarding to managers"
-      );
 
       const senderRole = normalizeRole(msg.sender?.role || "");
 
@@ -1718,7 +1605,8 @@ exports.editMessage = async function editMessage(req, res) {
 
         if (managers.length > 0) {
           try {
-            const forwardMsg = await WhatsAppMessage.create({
+            // 🔥 CRITICAL: Include replyTo and replyContent like in approve function
+            const forwardMsgData = {
               owner: msg.owner,
               client: msg.client,
               sender: msg.sender,
@@ -1727,6 +1615,10 @@ exports.editMessage = async function editMessage(req, res) {
               note: msg.note || "",
               attachments: msg.attachments,
               approvalStatus: "approved",
+              // 🔥 PRESERVE REPLY CONTENT AND THREAD INFO LIKE IN APPROVE
+              isReply: msg.isReply,
+              repliedTo: msg.repliedTo,
+              replyContent: msg.replyContent,
               // Add metadata to identify this as a forwarded message
               isForwarded: true,
               originalMessage: msg._id,
@@ -1737,7 +1629,9 @@ exports.editMessage = async function editMessage(req, res) {
               scheduledFor: msg.scheduledFor,
               scheduledAt: msg.scheduledAt,
               scheduledBy: msg.scheduledBy,
-            });
+            };
+
+            const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
 
             forwardedMessage = await forwardMsg.populate([
               { path: "owner", select: "_id name companyEmail" },
@@ -1745,6 +1639,8 @@ exports.editMessage = async function editMessage(req, res) {
               { path: "receiver", select: "_id name companyEmail role" },
               { path: "client", select: "_id clientName" },
               { path: "forwardedBy", select: "_id name companyEmail" },
+              { path: "replyContent.originalSender", select: "_id name companyEmail" },
+              { path: "repliedTo", select: "_id note message sender attachments" },
             ]);
 
             // Add forwarding info to response
@@ -1764,13 +1660,6 @@ exports.editMessage = async function editMessage(req, res) {
     // 🔥 ENHANCED REAL-TIME NOTIFICATION SYSTEM FOR EDITS
     if (req.app.get("io")) {
       const io = req.app.get("io");
-
-      console.log("📢 Emitting edit to all relevant users:", {
-        messageId: id,
-        sender: msg.sender?._id,
-        receivers: msg.receiver?.map((r) => r._id) || [],
-        editor: req.employee._id,
-      });
 
       // 🎯 CRITICAL: Get ALL users involved in this message
       const allInvolvedUsers = new Set();
@@ -1807,7 +1696,6 @@ exports.editMessage = async function editMessage(req, res) {
           timestamp: new Date(),
         });
 
-        console.log(`✅ Emitted edit to employee_${userId}`);
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1817,16 +1705,10 @@ exports.editMessage = async function editMessage(req, res) {
           type: "message_updated",
           action: "edited",
         });
-        console.log(`✅ Emitted to client_${msg.client._id}`);
       }
 
       // 🔥 NEW: Emit forwarded message to managers
       if (forwardedMessage) {
-        console.log("📤 Emitting forwarded message to managers:", {
-          managers: forwardedMessage.receiver?.map((r) => r._id) || [],
-          messageId: forwardedMessage._id,
-        });
-
         // Notify managers about the new forwarded message
         forwardedMessage.receiver.forEach((manager) => {
           const managerId = typeof manager === "object" ? manager._id : manager;
@@ -1838,17 +1720,19 @@ exports.editMessage = async function editMessage(req, res) {
               forwardedBy: req.employee._id,
               originalMessageId: msg._id,
               source: "team_lead_edit",
+              // Include reply context
+              replyContext: msg.isReply ? {
+                hasOriginalThread: true,
+                originalSender: msg.replyContent?.originalSender,
+                repliedToMessage: msg.repliedTo?._id
+              } : null
             });
-            console.log(
-              `✅ Forwarded edited message to manager: employee_${managerId}`
-            );
           }
         });
       }
 
       // Special notifications based on approval status changes
       if (msg.approvalStatus === "approved") {
-        console.log("📢 Notifying about auto-approval");
 
         // Notify ALL involved users about approval
         involvedUsersArray.forEach((userId) => {
@@ -1871,7 +1755,6 @@ exports.editMessage = async function editMessage(req, res) {
           });
         }
       } else if (msg.approvalStatus === "pending") {
-        console.log("📢 Notifying Team Leads about pending approval");
 
         // Notify ALL involved users about pending status
         involvedUsersArray.forEach((userId) => {
@@ -1911,8 +1794,6 @@ exports.editMessage = async function editMessage(req, res) {
       responseMessage = "Message updated (already approved)";
     }
 
-    console.log("🎯 Final response:", responseMessage);
-
     // Build final response
     const finalResponse = {
       message: responseMessage,
@@ -1925,6 +1806,16 @@ exports.editMessage = async function editMessage(req, res) {
     if (forwardedMessage) {
       finalResponse.forwardedToManagers = true;
       finalResponse.forwardedMessage = forwardedMessage;
+    }
+
+    // 🔥 ADD REPLY CONTEXT TO RESPONSE LIKE IN APPROVE FUNCTION
+    if (msg.isReply) {
+      finalResponse.replyContext = {
+        includedReplyContent: true,
+        originalThreadPreserved: true,
+        hasRepliedTo: !!msg.repliedTo,
+        hasReplyContent: !!msg.replyContent
+      };
     }
 
     res.json(finalResponse);
@@ -2277,16 +2168,12 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
       return res.status(400).json({ error: "User information missing" });
     }
 
-    console.log("🔍 Fetching unread counts for user:", currentUserId);
-
     // Method 1: Simple count without aggregation (more reliable)
     const unreadMessages = await WhatsAppMessage.find({
       owner: ownerId,
       receiver: currentUserId,
       sender: { $ne: currentUserId }, // Exclude own messages
     });
-
-    console.log("📨 Total messages found:", unreadMessages.length);
 
     // Manually count unread messages
     let totalUnread = 0;
@@ -2298,8 +2185,6 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
         totalUnread++;
       }
     });
-
-    console.log("📊 Final unread count:", totalUnread);
 
     res.json({
       totalUnreadCount: totalUnread,
@@ -2373,9 +2258,6 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       "seenBy.employee": { $ne: currentUserId }, // Not already seen
     });
 
-    console.log(
-      `👀 Marking ${unreadMessages.length} messages as seen for user ${currentUserId}`
-    );
 
     // Mark each message as seen
     const updatePromises = unreadMessages.map(async (message) => {
