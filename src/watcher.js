@@ -274,7 +274,21 @@ async function processMessage(stream) {
     const label = classifyEmail(bodyText);
     const signatureBlock = await getSignatureBlock(ownerId);
 
-    if (label === "offer_acceptance") {
+       if (label === "offer_acceptance") {
+      // 🔹 Ensure employee exists and update status to Onboarding
+      if (emp) {
+        emp.status = "Onboarding";   // <-- NEW
+        await emp.save();            // <-- NEW
+      } else {
+        // If there is no employee yet, create one with status Onboarding
+        emp = await Employee.create({
+          email: fromAddr,
+          owner: ownerId,
+          name: extractedName || parsed.from.value[0]?.name || "Candidate",
+          status: "Onboarding",      // <-- NEW
+        });
+      }
+
       let bestName = emp?.name || extractedName || "Candidate";
 
       // 1) Send email to candidate
@@ -312,7 +326,7 @@ async function processMessage(stream) {
         `,
       });
 
-      // 2) Send notification email to all admin/super-admin users  <-- NEW
+      // 2) Send notification email to all admin/super-admin users
       try {
         const admins = await User.find({
           role: { $in: ["admin", "super-admin"] },
@@ -333,7 +347,7 @@ async function processMessage(stream) {
                 </p>
                 ${
                   emp
-                    ? `<p>Employee record found in the system. Employee ID: <strong>${emp._id}</strong></p>`
+                    ? `<p>Employee record found in the system. Employee ID: <strong>${emp._id}</strong> | Status: <strong>${emp.status}</strong></p>`
                     : `<p>No existing employee record was found for this email yet.</p>`
                 }
                 <p>

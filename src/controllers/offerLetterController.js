@@ -54,16 +54,11 @@ const SALARY_COMPONENTS = [
 /* ----------------------------- Helper: Company ---------------------------- */
 async function getCompanyContext(ownerId) {
   try {
-    console.log("🔍 DEBUG: Fetching company profile for owner:", ownerId);
-    
     const companyDoc = await CompanyProfile.findOne({ owner: ownerId })
-      .select('name email website branches')
+      .select("name email website branches")
       .lean();
 
-    console.log("🔍 DEBUG: Company Profile Found:", companyDoc);
-
     if (!companyDoc) {
-      console.log("❌ No company profile found, using fallbacks");
       return FALLBACKS;
     }
 
@@ -78,29 +73,24 @@ async function getCompanyContext(ownerId) {
 
       // 2. If none found, use the FIRST branch as fallback
       if (!documentationBranch) {
-        console.log("ℹ️ No documentation branch found, using first branch");
         documentationBranch = companyDoc.branches[0];
       }
     }
 
     // Extract data with FALLBACKS support
     const address = documentationBranch?.address || FALLBACKS.address;
-    const phone   = documentationBranch?.phone   || FALLBACKS.phone;
-    const email   = documentationBranch?.email   || companyDoc.email || FALLBACKS.email;
-
-    console.log("🔍 DEBUG: Using documentation branch:", documentationBranch);
+    const phone = documentationBranch?.phone || FALLBACKS.phone;
+    const email =
+      documentationBranch?.email || companyDoc.email || FALLBACKS.email;
 
     const companyData = {
-      name:    companyDoc.name    || FALLBACKS.name,
-      email:   email,
-      phone:   phone,
+      name: companyDoc.name || FALLBACKS.name,
+      email: email,
+      phone: phone,
       website: companyDoc.website || FALLBACKS.website,
-      address: address
+      address: address,
     };
-
-    console.log("🔍 DEBUG: Final company context:", companyData);
     return companyData;
-
   } catch (err) {
     console.error("❌ Error fetching company profile:", err);
     return FALLBACKS;
@@ -115,26 +105,17 @@ async function getSignature(req, res) {
     }
 
     const ownerId = req.user._id;
-    console.log("🔍 DEBUG: Fetching signature for owner:", ownerId);
 
     const signature = await Signature.findOne({ owner: ownerId });
 
     if (!signature) {
-      console.log("🔍 DEBUG: No signature found for owner:", ownerId);
       return res.status(404).json({ error: "Signature not found" });
     }
-
-    console.log("🔍 DEBUG: Signature found:", {
-      hasText: !!signature.signatureText,
-      hasImage: !!signature.signatureImage,
-      text: signature.signatureText ? "Present" : "Missing"
-    });
-
     res.json({
       signatureText: signature.signatureText,
       signatureImage: signature.signatureImage,
       createdAt: signature.createdAt,
-      updatedAt: signature.updatedAt
+      updatedAt: signature.updatedAt,
     });
   } catch (err) {
     console.error("Error fetching signature:", err);
@@ -144,7 +125,8 @@ async function getSignature(req, res) {
 
 /* ----------------------------- Helper: Styles ----------------------------- */
 function enforceComicSans(html) {
-  const family = "font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000000;";
+  const family =
+    "font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000000;";
   const pRequired = [
     "margin:0 !important",
     "margin-block-start:0",
@@ -154,7 +136,7 @@ function enforceComicSans(html) {
     "mso-line-height-rule:exactly",
     family,
   ].join("; ");
-  
+
   // Replace all <p> tags with proper styling
   html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
     if (/style\s*=/.test(attrs)) {
@@ -239,33 +221,30 @@ function enforceImgCss(html) {
 
 /* ----------------------- Remove Blue Variable Styling --------------------- */
 function removeBlueVariableStyling(html) {
-  console.log("🔍 DEBUG: Removing blue variable styling from email HTML");
-  
   // Remove variable-blue class and inline blue styling
-  html = html.replace(/class="variable-blue"/gi, '');
-  html = html.replace(/class='variable-blue'/gi, '');
-  
+  html = html.replace(/class="variable-blue"/gi, "");
+  html = html.replace(/class='variable-blue'/gi, "");
+
   // Remove inline blue color styles
   html = html.replace(/style="[^"]*color:\s*#2563eb[^"]*"/gi, (match) => {
     // Remove only the color property from the style attribute
-    return match.replace(/color:\s*#2563eb;?\s*/gi, '')
-               .replace(/background[^;]*#dbeafe[^;]*;?\s*/gi, '')
-               .replace(/border[^;]*#3b82f6[^;]*;?\s*/gi, '')
-               .replace(/;\s*"/, '"')
-               .replace(/\s*"\s*$/, '"')
-               .replace(/style="\s*"/, '');
+    return match
+      .replace(/color:\s*#2563eb;?\s*/gi, "")
+      .replace(/background[^;]*#dbeafe[^;]*;?\s*/gi, "")
+      .replace(/border[^;]*#3b82f6[^;]*;?\s*/gi, "")
+      .replace(/;\s*"/, '"')
+      .replace(/\s*"\s*$/, '"')
+      .replace(/style="\s*"/, "");
   });
-  
+
   // Remove any remaining blue color declarations
-  html = html.replace(/color:\s*#2563eb;?/gi, '');
-  html = html.replace(/background[^;]*#dbeafe[^;]*;?/gi, '');
-  html = html.replace(/border[^;]*#3b82f6[^;]*;?/gi, '');
-  
+  html = html.replace(/color:\s*#2563eb;?/gi, "");
+  html = html.replace(/background[^;]*#dbeafe[^;]*;?/gi, "");
+  html = html.replace(/border[^;]*#3b82f6[^;]*;?/gi, "");
+
   // Clean up empty style attributes
-  html = html.replace(/style="\s*"/g, '');
-  html = html.replace(/style='\s*'/g, '');
-  
-  console.log("🔍 DEBUG: Blue styling removed from email");
+  html = html.replace(/style="\s*"/g, "");
+  html = html.replace(/style='\s*'/g, "");
   return html;
 }
 
@@ -359,17 +338,14 @@ async function buildContext({
                    style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
           : ""
       }
-      <div style="text-align:left; color: #000000;">${signature.signatureText || ""}</div>
+      <div style="text-align:left; color: #000000;">${
+        signature.signatureText || ""
+      }</div>
     </div>
   `
     : "";
 
   const probationDaysNum = Number(probationDays) || 0;
-
-  console.log("🔍 DEBUG probationDays:", probationDays);
-  console.log("🔍 DEBUG probationDaysNum:", probationDaysNum);
-  console.log("🔍 DEBUG department:", department);
-
   const ctx = {
     candidateName: safeCandidateName,
     position,
@@ -384,10 +360,6 @@ async function buildContext({
     signatureHtml: signatureBlock,
     signatureBlock: signatureBlock,
   };
-
-  console.log("🔍 DEBUG final ctx.department:", ctx.department);
-  console.log("🔍 DEBUG final ctx.probationDays:", ctx.probationDays);
-  console.log("🔍 DEBUG final ctx.signatureHtml:", ctx.signatureHtml ? "Present" : "Missing");
 
   return {
     ctx,
@@ -436,21 +408,12 @@ async function sendOfferLetter(req, res) {
     if (!(ownerId instanceof mongoose.Types.ObjectId))
       ownerId = new mongoose.Types.ObjectId(ownerId);
 
-    // Debug: Check if company profile exists
-    console.log("🔍 DEBUG ownerId:", ownerId);
     const companyExists = await CompanyProfile.findOne({ owner: ownerId });
-    console.log("🔍 DEBUG Company Profile exists:", !!companyExists);
-    if (companyExists) {
-      console.log("🔍 DEBUG Company Profile data:", companyExists);
-    }
-
     const exists = await Employee.findOne({ email: candidateEmail });
     if (exists)
-      return res
-        .status(400)
-        .json({
-          error: "An employee with this email already exists. Offer not sent.",
-        });
+      return res.status(400).json({
+        error: "An employee with this email already exists. Offer not sent.",
+      });
 
     // Build context and load template
     const {
@@ -485,7 +448,7 @@ async function sendOfferLetter(req, res) {
       (tpl
         ? renderWithContext(tpl.subject || "", ctx)
         : `Offer of Employment – ${position} at ${companyCtx.name}`);
-    
+
     let finalHtml = letterOverride;
 
     // If no letter override provided, use template or default
@@ -496,27 +459,27 @@ async function sendOfferLetter(req, res) {
       <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
         <p>Dear <b>${safeCandidateName}</b>,</p>
         <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${
+            department || "relevant"
+          }</b> department at <b>${companyCtx.name}</b>.</p>
         {{signatureHtml}}
       </div>
     `.trim();
 
       // Only add signature if using template/default AND signatureHtml placeholder exists
-      if (finalHtml.includes('{{signatureHtml}}')) {
-        finalHtml = finalHtml.replace('{{signatureHtml}}', ctx.signatureHtml || signatureBlock);
+      if (finalHtml.includes("{{signatureHtml}}")) {
+        finalHtml = finalHtml.replace(
+          "{{signatureHtml}}",
+          ctx.signatureHtml || signatureBlock
+        );
       }
     }
 
     // IMPORTANT: Remove blue variable styling before sending to email
     finalHtml = removeBlueVariableStyling(finalHtml);
-    
+
     // Then apply CSS enforcement to ensure black text
     finalHtml = enforceImgCss(enforceComicSans(finalHtml));
-
-    // Debug: Log the final subject and HTML
-    console.log("🔍 DEBUG Final Subject:", finalSubject);
-    console.log("🔍 DEBUG Final HTML length:", finalHtml.length);
-    console.log("🔍 DEBUG Using letter override:", !!letterOverride);
 
     // Persist generated email
     await OfferEmailGenerated.create({
@@ -540,6 +503,7 @@ async function sendOfferLetter(req, res) {
       department: department || null,
       owner: ownerId,
       createdBy: ownerId,
+      status: "Offered",
       rt: normalizedRT,
       shifts: shift ? [shift] : undefined,
       ...(probationDaysNum > 0
@@ -549,6 +513,7 @@ async function sendOfferLetter(req, res) {
     if (probationDaysNum > 0) {
       await Employee.updateOne(
         { _id: employee._id },
+        {status: "Offered"},
         { $set: { "leaveEntitlement.total": 0 } },
         { runValidators: false }
       );
@@ -578,11 +543,7 @@ async function sendOfferLetter(req, res) {
     });
 
     const text = finalHtml.replace(/<[^>]+>/g, " ");
-    
-    // Debug: Log email sending details
-    console.log("🔍 DEBUG Sending email to:", candidateEmail);
-    console.log("🔍 DEBUG Email subject:", finalSubject);
-    
+
     await transporter.sendMail({
       from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
       to: candidateEmail,
@@ -590,8 +551,6 @@ async function sendOfferLetter(req, res) {
       text,
       html: finalHtml,
     });
-
-    console.log("✅ Email sent successfully to:", candidateEmail);
 
     return res.json({ success: true });
   } catch (err) {
@@ -623,11 +582,7 @@ async function previewOfferLetter(req, res) {
 
     const ownerId = req.user._id;
 
-    const {
-      ctx,
-      companyCtx,
-      signatureBlock,
-    } = await buildContext({
+    const { ctx, companyCtx, signatureBlock } = await buildContext({
       ownerId,
       candidateName,
       candidateEmail: "preview@example.com",
@@ -653,7 +608,7 @@ async function previewOfferLetter(req, res) {
       (tpl
         ? renderWithContext(tpl.subject || "", ctx)
         : `Offer of Employment – ${position} at ${companyCtx.name}`);
-    
+
     let finalHtml = letterOverride;
 
     if (!finalHtml) {
@@ -663,13 +618,18 @@ async function previewOfferLetter(req, res) {
       <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
         <p>Dear <b>${sanitizeName(candidateName)}</b>,</p>
         <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
+        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${
+            department || "relevant"
+          }</b> department at <b>${companyCtx.name}</b>.</p>
         {{signatureHtml}}
       </div>
     `.trim();
 
-      if (finalHtml.includes('{{signatureHtml}}')) {
-        finalHtml = finalHtml.replace('{{signatureHtml}}', ctx.signatureHtml || signatureBlock);
+      if (finalHtml.includes("{{signatureHtml}}")) {
+        finalHtml = finalHtml.replace(
+          "{{signatureHtml}}",
+          ctx.signatureHtml || signatureBlock
+        );
       }
     }
 
@@ -679,7 +639,7 @@ async function previewOfferLetter(req, res) {
     res.json({
       subject: finalSubject,
       html: finalHtml,
-      context: ctx
+      context: ctx,
     });
   } catch (err) {
     console.error("Preview error:", err);
@@ -687,8 +647,8 @@ async function previewOfferLetter(req, res) {
   }
 }
 
-module.exports = { 
+module.exports = {
   sendOfferLetter,
   getSignature,
-  previewOfferLetter
+  previewOfferLetter,
 };

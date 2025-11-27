@@ -1,15 +1,21 @@
-// backend/src/index.js
 require("dotenv").config();
-const AttendanceConfig = require("./models/AttendanceConfig");
 
-const express = require("express");
+const path = require("path");
+const fs = require("fs");
 const http = require("http");
+const https = require("https");
+const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cron = require("node-cron");
-const path = require("path");
-const socketIo = require("socket.io");
-// Route imports
+
+// ---------- Models used in cron / elsewhere ----------
+const AttendanceConfig = require("./models/AttendanceConfig");
+const Employee = require("./models/Employees");
+const Attendance = require("./models/Attendance");
+const PayrollPeriod = require("./models/PayrollPeriod");
+const empAuth = require("./middleware/empAuth");
+// ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
 const hrAuthRoutes = require("./routes/hrAuth");
@@ -28,7 +34,7 @@ const departmentsRouter = require("./routes/departments");
 const designationsRouter = require("./routes/designations");
 const docsRouter = require("./routes/docs");
 const employeeSalaryRouter = require("./routes/employeeSalary");
-const hierarchyController = require("./controllers/hierarchyController");
+const hierarchyController = require("./controllers/hierarchyController"); // (not mounted here, imported to ensure build)
 const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
 const loansRoutes = require("./routes/loans");
@@ -37,75 +43,66 @@ const requireAuth = require("./middleware/auth");
 const requireEmployeeAuth = require("./middleware/empAuth");
 const empAttendanceRouter = require("./routes/empAttendance");
 const employeeBirthdays = require("./routes/empBirthdayRoutes");
-const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
-const employeeLeavesRouter = require("./routes/employeeLeaves");
-const assignmentMessageController = require("./controllers/assignmentMessageController");
-
-// Model imports
-const Employee = require("./models/Employees");
-const Attendance = require("./models/Attendance");
 const sendSlipEmail = require("./routes/sendSlipEmail");
 const probationPeriodRouter = require("./routes/probationPeriods");
 const leaveRecordsRouter = require("./routes/leaveRecords");
 const certificateRoutes = require("./routes/certificate");
 const ExtraFields = require("./routes/extraFields");
-const usersRoute = require("./routes/users"); // <-- Correc
-const setDateRoute = require("./routes//setDate");
-// IMAP watcher
-const { startWatcher } = require("./watcher");
+const usersRoute = require("./routes/users");
+const setDateRoute = require("./routes/setDate"); // ✅ fixed double slash
+const { startWatcher } = require("./watcher"); // IMAP watcher
 const fontSettingRoute = require("./routes/fontSetting");
-const descryptionKeys = require("./routes/decryptionKeys");
+const decryptionKeysRoute = require("./routes/decryptionKeys");
 const pfRoute = require("./routes/pf");
-const GratuityRoute = require("./routes/gratuitySettings");
-const SignaturRoute = require("./routes/signature");
+const gratuityRoute = require("./routes/gratuitySettings");
+const signatureRoute = require("./routes/signature");
 const roleRoutes = require("./routes/role");
 const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
+const employeeDocsRouter = require("./routes/employeeDocs");
+const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
 const managerRoutes = require("./routes/manager");
 const taskRoutes = require("./routes/tasks");
 const clientInfoRoutes = require("./routes/clientInfo");
 const assignMessageRoutes = require("./routes/assignmentMessage");
-const emailRoutes = require("./routes/emailRoutes");
+const employeeLeavesRouter = require("./routes/employeeLeaves");
 const generateRouter = require("./routes/generate-pdfs");
 const AssignmentMessage = require("./models/AssignmentMessage");
-const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
+const assignmentMessageController = require("./controllers/assignmentMessageController");
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
+const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
 const offerEmail = require("./routes/offerEmail");
-// Get today's date in YYYY-MM-DD format (for cron job)
+const eventRoutes = require("./routes/eventRoutes");
+const upcomingEventsRoutes = require("./routes/upcomingEvents");
+const anniversariesRoute = require("./routes/anniversariesRoute");
+const noticePeriodRouter = require("./routes/noticePeriodRoute");
+const hrPolicyRoute = require("./routes/hrPolicyRoutes");
+const companyProfile = require("./routes/companyProfile");
+const bugRoutes = require("./routes/bugRoutes");
+
+
 const app = express();
-// Wrap express in an HTTP server for Socket-IO
-const server = http.createServer(app);
 
-// Initialize Socket-IO
-const { Server } = require("socket.io");
-const io = new Server(server, { cors: { origin: "*" } });
-
-// Make `io` available on `req.app` in case you ever want to emit from inside routes
-app.set("io", io);
-
-// === Middleware ===
-app.use(
-  cors({
-    origin: [
-      "http://admin.virsme.com",
-      "http://admin.innand.com",
-      "http://apis.innand.com",
-      "http://employee.virsme.com",
-      "http://hr.virsme.com",
-      "http://localhost:8080",
-      "http://innand.com",
-      "http://localhost:8081",
-      "http://localhost:8082",
-    ],
-    credentials: true, // if you need cookies/auth
-  })
-);
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+// ---------- Static ----------
 app.use(
   "/uploads",
-  express.static(path.join(__dirname, "./uploads"))
+  express.static(path.join(__dirname, "./uploads"), {
+    setHeaders: (res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*"); // or restrict to http://localhost:8080
+      res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    },
+  })
+);
+app.use(
+  "/upload",
+  express.static(path.join(__dirname, "../uploads"))
+);
+
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "../uploads"))
 );
 
 // If you want a separate mount for chat‐attachments you can,
@@ -114,11 +111,62 @@ app.use(
   "/uploads/chat-attachments",
   express.static(path.join(__dirname, "../uploads/chat-attachments"))
 );
+// ---------- CORS ----------
+// If you need wildcard subdomains, switch to a regex check.
+// For now, this is a strict allowlist.
+const ALLOWED_ORIGINS = [
+  "http://admin.virsme.com",
+  "https://admin.virsme.com",
+  "http://admin.innand.com",
+  "https://admin.innand.com",
+  "http://apis.innand.com",
+  "https://apis.innand.com",
+  "http://employee.virsme.com",
+  "https://employee.virsme.com",
+  "http://hr.virsme.com",
+  "https://hr.virsme.com",
+  "http://innand.com",
+  "https://innand.com",
+  "http://www.innand.com",
+  "https://complete-profile.virsme.com",
+  "https://www.innand.com",
+  "http://localhost:8080",
+  "http://localhost:8081",
+  "http://localhost:8082",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
 
+app.use(
+  cors({
+    origin(origin, cb) {
+      // Allow server-to-server, Postman, curl
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true,
+  })
+);
+
+// (Optional) CORS error handler to avoid generic 500s
+app.use((err, _req, res, next) => {
+  if (err && /CORS blocked/.test(String(err.message))) {
+    return res.status(403).json({ error: err.message });
+  }
+  return next(err);
+});
+
+// ---------- Body parsers ----------
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+// ---------- Public routes ----------
 app.use("/api/auth", authRouter);
 app.use("/api/emp-auth", empAuthRouter);
-// === Protected routes ===
-app.use("/api/employees", employeesRouter);
+
+// ---------- Protected routes ----------
+app.use("/api/employees", employeesRouter); // leave public if intentional
 app.use("/api/attendance", requireAuth, attendanceRouter);
 app.use("/api/leaves", requireAuth, leavesRouter);
 app.use("/api/settings", requireAuth, settingsRouter);
@@ -130,67 +178,139 @@ app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
-app.use("/api/company-profile", require("./routes/companyProfile"));
+app.use("/api/company-profile", requireAuth, companyProfile);
 app.use("/api/docs", docsRouter);
-app.use("/api/employee-salary", employeeSalaryRouter); // <--- THIS LINE
+app.use("/api/employee-salary", employeeSalaryRouter);
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
+app.use("/api/employee-docs", employeeDocsRouter);
+app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
+// Intentionally expose both /api/loans and /api/loan to the same router?
+// Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
 app.use("/api/loan", loansRoutes);
+
 app.use("/api/probation-periods", probationPeriodRouter);
 app.use("/api/leave-records", requireAuth, leaveRecordsRouter);
 app.use("/api/certificates", certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
-app.use("/api/decryption-keys", requireAuth, descryptionKeys);
+app.use("/api/decryption-keys", requireAuth, decryptionKeysRoute);
 app.use("/api/extra-fields", requireAuth, ExtraFields);
 app.use("/api/pf", pfRoute);
-app.use("/api/gratuity", requireAuth, GratuityRoute);
+app.use("/api/gratuity", requireAuth, gratuityRoute);
 app.use("/api/role", requireAuth, roleRoutes);
 app.use("/api/pages", requireAuth, pageRoute);
 app.use("/api/users", requireAuth, usersRoute);
 app.use("/api/setDate", requireAuth, setDateRoute);
-app.use("/api/signature", requireAuth, SignaturRoute);
+app.use("/api/signature", requireAuth, signatureRoute);
 app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", taxRoutes);
-app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
+app.use("/api/employee-docs", employeeDocsRouter);
 app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
+
 app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/client-info", clientInfoRoutes);
 app.use("/api/assignment-messages", assignMessageRoutes);
+app.use("/api/generate", requireAuth, generateRouter);
+app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/email", emailRoutes);
-app.use("/api/generate", requireAuth, generateRouter);
-app.use("/api/offer-email" , requireAuth, offerEmail)
-app.post("/api/hierarchy/create", requireAuth, hierarchyController.create);
-app.post(
-  "/api/hierarchy/bulkCreate",
-  requireAuth,
-  hierarchyController.bulkCreate
-);
-app.get("/api/hierarchy", requireAuth, hierarchyController.getHierarchy);
-app.get(
-  "/api/hierarchy/directReports/:employeeId",
-  requireAuth,
-  hierarchyController.getDirectReports
-);
-app.get(
-  "/api/hierarchy/managementChain/:employeeId",
-  requireAuth,
-  hierarchyController.getManagementChain
-);
-app.delete(
-  "/api/hierarchy/:id",
-  requireAuth,
-  hierarchyController.deleteHierarchy
-);
-app.get("/api/employees/count", async (req, res) => {
+app.use("/api/offer-email", requireAuth, offerEmail);
+app.use("/api/events", requireAuth, eventRoutes);
+app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
+app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
+app.use("/api/notice-period", requireAuth, noticePeriodRouter);
+app.use("/api/hr-policies", requireAuth, hrPolicyRoute);
+app.use("/api/bugs", bugRoutes);
+
+// ---------- MongoDB ----------
+const MONGODB_URI = process.env.MONGODB_URI;
+if (!MONGODB_URI) {
+  console.error("❌ Missing MONGODB_URI in environment.");
+  process.exit(1);
+}
+
+mongoose.set("strictQuery", false);
+mongoose
+  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(async () => {
+    console.log("▶ MongoDB connected");
+
+    // Start IMAP watcher once DB is up (wrap to avoid crashing if it throws)
+    try {
+      startWatcher();
+    } catch (e) {
+      console.warn("⚠️ IMAP watcher failed to start:", e?.message || e);
+    }
+
+    // Setup change streams safely (replica set required)
+    setupEmployeeChangeStream();
+  })
+  .catch((err) => {
+    console.error("❌ MongoDB connection error:", err);
+    process.exit(1);
+  });
+
+// ---------- Change Streams: Watch Employee inserts/updates ----------
+function setupEmployeeChangeStream() {
+  try {
+    const changeStream = Employee.watch();
+
+    changeStream.on("change", (change) => {
+      if (!app.get("io")) return; // Socket not ready yet
+      const io = app.get("io");
+
+      if (change.operationType === "insert") {
+        const emp = change.fullDocument || {};
+        io.emit("employee_added", {
+          message: `New employee added: ${emp.name || "Unknown"}`,
+          createdAt: emp.createdAt || new Date().toISOString(),
+        });
+      }
+
+      if (change.operationType === "update") {
+        const updatedFields = change.updateDescription?.updatedFields || {};
+        if ("cnic" in updatedFields) {
+          const newCnic = updatedFields.cnic;
+          Employee.findById(change.documentKey?._id)
+            .lean()
+            .then((emp) => {
+              if (!emp) return;
+              io.emit("employee_cnic_updated", {
+                message: `CNIC for ${emp.name} updated to ${newCnic}`,
+                createdAt: new Date().toISOString(),
+              });
+            })
+            .catch((e) => console.error("watch update fetch error:", e));
+        }
+      }
+    });
+
+    changeStream.on("error", (err) => {
+      console.warn(
+        "⚠️ Employee change stream error (likely no replica set). Disabling watcher.",
+        err?.message || err
+      );
+      try {
+        changeStream.close();
+      } catch { }
+    });
+  } catch (e) {
+    console.warn(
+      "⚠️ Change streams not supported (no replica set / permissions?). Skipping.",
+      e?.message || e
+    );
+  }
+}
+
+// ---------- Public: employee count ----------
+app.get("/api/employees/count", async (_req, res) => {
   try {
     const count = await Employee.countDocuments();
     res.json({ count });
@@ -199,10 +319,148 @@ app.get("/api/employees/count", async (req, res) => {
   }
 });
 
-// Make io available to routes
+// ---------- Cron: auto-fill YESTERDAY’s attendance ----------
+// Runs at 00:00 in configured timezone (default Asia/Karachi)
+const ATTENDANCE_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    try {
+      // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+
+      const y = yesterday.getFullYear();
+      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
+      const d = String(yesterday.getDate()).padStart(2, "0");
+      const date = `${y}-${m}-${d}`;
+
+      const config = await AttendanceConfig.findOne({}).lean();
+      if (config && config.markAbsentManually === true) {
+        return;
+      }
+
+      // Skip holidays
+      const holiday = await Attendance.findOne({
+        date,
+        isHoliday: true,
+      }).lean();
+      if (holiday) {
+        return;
+      }
+
+      // Employees already recorded for that date
+      const done = await Attendance.find({ date }).select("employee").lean();
+      const doneIds = new Set(done.map((r) => String(r.employee)));
+
+      // All employees
+      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
+
+      // Payroll periods
+      const allPayrolls = await PayrollPeriod.find({}).lean();
+
+      // Day name for yesterday (lowercase long weekday)
+      const dayName = yesterday
+        .toLocaleDateString("en-US", { weekday: "long" })
+        .toLowerCase();
+      const ops = [];
+
+      for (const e of allEmps) {
+        if (doneIds.has(String(e._id))) continue;
+
+        const payroll = allPayrolls.find(
+          (p) =>
+            Array.isArray(p.shifts) &&
+            Array.isArray(e.shifts) &&
+            e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
+        );
+
+        // If no payroll period or no nonWorkingDays config → mark absent
+        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
+          ops.push({
+            updateOne: {
+              filter: { employee: e._id, date },
+              update: {
+                $setOnInsert: {
+                  employee: e._id,
+                  date,
+                  owner: e.owner || null,
+                  status: "Absent",
+                  checkIn: null,
+                  checkOut: null,
+                  notes: null,
+                  markedByHR: false,
+                },
+              },
+              upsert: true,
+            },
+          });
+          continue;
+        }
+
+        // Respect non-working days
+        const nonWorking = payroll.nonWorkingDays.map((n) =>
+          String(n).toLowerCase().trim()
+        );
+        if (nonWorking.includes(dayName)) {
+          // It's a non-working day for this employee; skip
+          continue;
+        }
+
+        // Otherwise, mark absent
+        ops.push({
+          updateOne: {
+            filter: { employee: e._id, date },
+            update: {
+              $setOnInsert: {
+                employee: e._id,
+                date,
+                owner: e.owner || null,
+                status: "Absent",
+                checkIn: null,
+                checkOut: null,
+                notes: null,
+                markedByHR: false,
+              },
+            },
+            upsert: true,
+          },
+        });
+      }
+
+      if (ops.length) {
+        const result = await Attendance.bulkWrite(ops);
+        const upserted = result?.upsertedCount || 0;
+      } else {
+      }
+    } catch (err) {
+      console.error("[cron] Error auto-filling attendance:", err);
+    }
+  },
+  { timezone: ATTENDANCE_CRON_TZ }
+);
+
+// ---------- TLS (Let’s Encrypt) & Server Startup ----------
+const ENABLE_HTTPS = false; // Disable HTTPS for local testing
+const HTTP_PORT = 4000;
+
+const httpServer = http.createServer(app);
+primaryServer = httpServer;
+
+httpServer.listen(HTTP_PORT, () => {
+  console.log(`🔓 Server running locally on http://localhost:${HTTP_PORT}`);
+});
+
+// ---------- Socket.IO on the primary server ----------
+const { Server } = require("socket.io");
+const io = new Server(primaryServer, {
+  // If you want to restrict, set origin: ALLOWED_ORIGINS instead of "*"
+  cors: { origin: "*", credentials: true },
+});
 app.set("io", io);
 
 io.on("connection", (socket) => {
+
   // Join employee room
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
@@ -212,6 +470,134 @@ io.on("connection", (socket) => {
     socket.join(`employee_${employeeId}`);
   });
 
+  socket.on("join_client_updates", (ownerId) => {
+    if (!ownerId) {
+      console.error("❌ join_client_updates: ownerId is required");
+      return;
+    }
+    socket.join(`client_updates_${ownerId}`);
+  });
+
+  socket.on("client_updated", async (data, callback) => {
+    try {
+      const { action, client, ownerId } = data;
+
+      if (!client || !ownerId) {
+        console.error("❌ client_updated: client and ownerId are required");
+        if (callback) callback({ success: false, error: "Missing required data" });
+        return;
+      }
+      // Broadcast to all team members of this owner
+      io.to(`client_updates_${ownerId}`).emit(`client_${action}`, {
+        client,
+        action,
+        timestamp: new Date().toISOString()
+      });
+
+      // Also notify assignment managers
+      io.to("assignment_managers").emit(`client_${action}`, {
+        client,
+        action,
+        timestamp: new Date().toISOString()
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: `Client ${action} broadcasted successfully`,
+          deliveredTo: `client_updates_${ownerId}`
+        });
+      }
+
+    } catch (error) {
+      console.error("❌ Error broadcasting client update:", error);
+      if (callback) {
+        callback({ success: false, error: error.message });
+      }
+    }
+  });
+
+  socket.on("join_manager_updates", (managerId) => {
+    if (!managerId) {
+      console.error("❌ join_manager_updates: managerId is required");
+      return;
+    }
+    socket.join(`manager_updates_${managerId}`);
+  });
+
+  // In your backend socket setup
+  socket.on("client_assigned", async (data, callback) => {
+    try {
+      const { clientId, employeeId, assignedTo, clientName, dba, assignedBy, previousAssignee } = data;
+
+      if (!clientId) {
+        console.error("❌ client_assigned: clientId is required");
+        if (callback) callback({ success: false, error: "clientId is required" });
+        return;
+      }
+      if (employeeId) {
+        io.to(`employee_${employeeId}`).emit("client_assignment_updated", {
+          type: "CLIENT_ASSIGNED_TO_YOU",
+          clientId,
+          clientName,
+          dba,
+          assignedBy,
+          assignedAt: new Date().toISOString(),
+          action: "assigned",
+          assignedTo: employeeId, // ✅ THIS IS CRITICAL - must match client-side check
+          previousAssignee: previousAssignee // ✅ Add this too
+        });
+      }
+
+      // ✅ Notify the PREVIOUSLY assigned employee (if any)
+      if (previousAssignee && previousAssignee.toString() !== employeeId) {
+        io.to(`employee_${previousAssignee}`).emit("client_assignment_updated", {
+          type: "CLIENT_UNASSIGNED_FROM_YOU",
+          clientId,
+          clientName,
+          dba,
+          assignedBy,
+          unassignedAt: new Date().toISOString(),
+          action: "unassigned",
+          previousAssignee: previousAssignee, // ✅ Add this
+          assignedTo: null // ✅ Important for unassignment
+        });
+
+        console.log(`✅ Emitted unassignment to previous employee_${previousAssignee}`);
+      }
+
+      // ✅ Notify all managers/team leads
+      io.to("assignment_managers").emit("client_assignment_updated", {
+        type: "CLIENT_ASSIGNMENT_CHANGED",
+        clientId,
+        employeeId,
+        assignedTo,
+        clientName,
+        dba,
+        assignedBy,
+        previousAssignee,
+        assignedAt: new Date().toISOString(),
+        action: employeeId ? "assigned" : "unassigned"
+      });
+
+      // ✅ Broadcast general client update
+      io.to(`client_updates_${assignedBy?.owner || assignedBy}`).emit("client_updated", {
+        client: { _id: clientId, clientName, dba, assignedTo: employeeId },
+        action: "updated",
+        timestamp: new Date().toISOString()
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Client assignment broadcasted successfully",
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error broadcasting client assignment:", error);
+      if (callback) callback({ success: false, error: error.message });
+    }
+  });
   // Join assignment client room
   socket.on("join_assignment_chat", (clientId) => {
     if (!clientId) {
@@ -219,28 +605,46 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`assignment_client_${clientId}`);
+    console.log(`🏢 Joined assignment client room: ${clientId}`);
   });
 
   // Join manager room
   socket.on("join_assignment_managers", () => {
     socket.join("assignment_managers");
+    console.log(`👔 Joined assignment managers room`);
   });
 
-  // Handle assignment message disapproval - UPDATED FOR ARRAY RECEIVER
-  socket.on("assignment_message_disapproved", async (data, callback) => {
+  // Join team leads room
+  socket.on("join_assignment_team_leads", () => {
+    socket.join("assignment_team_leads");
+    console.log(`🎯 Joined assignment team leads room`);
+  });
+
+  // Join thread room
+  socket.on("join_thread", (threadId) => {
+    if (!threadId) {
+      console.error("❌ join_thread: threadId is required");
+      return;
+    }
+    socket.join(`thread_${threadId}`);
+    console.log(`🧵 Joined thread: ${threadId}`);
+  });
+
+  // 🔥 NEW: Handle attachment uploads in real-time
+  socket.on("assignment_message_attachments_updated", async (data, callback) => {
     try {
+      console.log("📎 Processing attachment update:", data);
 
-      const { message } = data;
+      const { messageId, attachments, action } = data;
 
-      if (!message || !message._id) {
-        console.error("❌ Invalid message data in disapproval");
-        if (callback)
-          callback({ success: false, error: "Invalid message data" });
+      if (!messageId) {
+        console.error("❌ assignment_message_attachments_updated: messageId is required");
+        if (callback) callback({ success: false, error: "messageId is required" });
         return;
       }
 
-      // Populate the message with all necessary data
-      const populatedMessage = await AssignmentMessage.findById(message._id)
+      // Populate the message with all necessary data including attachments
+      const populatedMessage = await AssignmentMessage.findById(messageId)
         .populate("owner")
         .populate("sender")
         .populate("receiver")
@@ -248,20 +652,248 @@ io.on("connection", (socket) => {
         .populate("attachments.uploadedBy");
 
       if (!populatedMessage) {
-        console.error(
-          "❌ Disapproved assignment message not found:",
-          message._id
-        );
+        console.error("❌ Message not found for attachment update:", messageId);
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
+
+      // Get all participants
+      const senderId = typeof populatedMessage.sender === "string" 
+        ? populatedMessage.sender 
+        : populatedMessage.sender?._id;
+
+      let receiverIds = [];
+      if (Array.isArray(populatedMessage.receiver)) {
+        receiverIds = populatedMessage.receiver
+          .map((receiver) => typeof receiver === "string" ? receiver : receiver?._id)
+          .filter(Boolean);
+      }
+
+      const allParticipants = new Set([senderId, ...receiverIds].filter(Boolean));
+      const clientId = typeof populatedMessage.client === "string" 
+        ? populatedMessage.client 
+        : populatedMessage.client?._id;
+
+      console.log(`📤 Broadcasting attachment ${action} to ${allParticipants.size} participants`);
+
+      // 1. Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_attachments_updated", {
+          messageId: populatedMessage._id,
+          attachments: populatedMessage.attachments || [],
+          action: action, // 'added', 'removed', 'updated'
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+        console.log(`📨 Sent attachment update to employee_${participantId}`);
+      });
+
+      // 2. Emit to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_attachments_updated", {
+          messageId: populatedMessage._id,
+          attachments: populatedMessage.attachments || [],
+          action: action,
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 3. Emit to client room if applicable
+      if (clientId) {
+        io.to(`assignment_client_${clientId}`).emit("assignment_message_attachments_updated", {
+          messageId: populatedMessage._id,
+          attachments: populatedMessage.attachments || [],
+          action: action,
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 4. Also emit general message update for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
+          action: "attachments_updated",
+          timestamp: new Date(),
+        });
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: `Attachment ${action} broadcasted successfully`,
+          deliveredTo: {
+            participants: Array.from(allParticipants),
+            thread: populatedMessage.threadId,
+            client: clientId,
+          },
+        });
+      }
+
+      console.log("✅ Attachment update broadcast completed successfully");
+
+    } catch (error) {
+      console.error("❌ Error broadcasting attachment update:", error);
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "SOCKET_ATTACHMENT_UPDATE_ERROR",
+        });
+      }
+    }
+  });
+
+  // 🔥 NEW: Handle message edits with attachments
+  socket.on("assignment_message_edited", async (data, callback) => {
+    try {
+      console.log("✏️ Processing message edit:", data);
+
+      const { messageId, updates } = data;
+
+      if (!messageId) {
+        console.error("❌ assignment_message_edited: messageId is required");
+        if (callback) callback({ success: false, error: "messageId is required" });
+        return;
+      }
+
+      // Populate the message with all necessary data
+      const populatedMessage = await AssignmentMessage.findById(messageId)
+        .populate("owner")
+        .populate("sender")
+        .populate("receiver")
+        .populate("client")
+        .populate("attachments.uploadedBy")
+        .populate("lastEditedBy");
+
+      if (!populatedMessage) {
+        console.error("❌ Message not found for edit:", messageId);
+        if (callback) callback({ success: false, error: "Message not found" });
+        return;
+      }
+
+      // Get all participants
+      const senderId = typeof populatedMessage.sender === "string" 
+        ? populatedMessage.sender 
+        : populatedMessage.sender?._id;
+
+      let receiverIds = [];
+      if (Array.isArray(populatedMessage.receiver)) {
+        receiverIds = populatedMessage.receiver
+          .map((receiver) => typeof receiver === "string" ? receiver : receiver?._id)
+          .filter(Boolean);
+      }
+
+      const allParticipants = new Set([senderId, ...receiverIds].filter(Boolean));
+      const clientId = typeof populatedMessage.client === "string" 
+        ? populatedMessage.client 
+        : populatedMessage.client?._id;
+
+      console.log(`📤 Broadcasting message edit to ${allParticipants.size} participants`);
+
+      // 1. Emit specific edit event
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_edited", {
+          messageId: populatedMessage._id,
+          message: populatedMessage,
+          updates: updates,
+          timestamp: new Date(),
+        });
+      });
+
+      // 2. Emit to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_edited", {
+          messageId: populatedMessage._id,
+          message: populatedMessage,
+          updates: updates,
+          timestamp: new Date(),
+        });
+      }
+
+      // 3. Also emit general update for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
+          action: "edited",
+          timestamp: new Date(),
+        });
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Message edit broadcasted successfully",
+          deliveredTo: {
+            participants: Array.from(allParticipants),
+            thread: populatedMessage.threadId,
+            client: clientId,
+          },
+        });
+      }
+
+      console.log("✅ Message edit broadcast completed successfully");
+
+    } catch (error) {
+      console.error("❌ Error broadcasting message edit:", error);
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "SOCKET_MESSAGE_EDIT_ERROR",
+        });
+      }
+    }
+  });
+
+  // Handle assignment message approval - UPDATED WITH ATTACHMENTS
+  socket.on("assignment_message_approved", async (data, callback) => {
+    try {
+      console.log("🔔 Processing assignment message approval:", data);
+
+      const { message } = data;
+
+      if (!message || !message._id) {
+        console.error("❌ Invalid message data in approval");
+        if (callback)
+          callback({ success: false, error: "Invalid message data" });
+        return;
+      }
+
+      // Populate the message with all necessary data INCLUDING ATTACHMENTS
+      const populatedMessage = await AssignmentMessage.findById(message._id)
+        .populate("owner")
+        .populate("sender")
+        .populate("receiver")
+        .populate("client")
+        .populate("attachments.uploadedBy") // 🔥 IMPORTANT: Populate attachments
+        .populate("approvedBy");
+
+      if (!populatedMessage) {
+        console.error("❌ Approved assignment message not found:", message._id);
+        if (callback) callback({ success: false, error: "Message not found" });
+        return;
+      }
+
+      // Log attachment info for debugging
+      console.log("📎 Approval - Message attachments:", {
+        messageId: populatedMessage._id,
+        attachmentsCount: populatedMessage.attachments?.length || 0,
+        attachments: populatedMessage.attachments?.map(a => ({
+          id: a._id,
+          name: a.originalName,
+          size: a.size
+        }))
+      });
+
       // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
           : populatedMessage.client?._id;
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Handle receiver as array consistently
       let actualReceiverIds = [];
 
       if (Array.isArray(populatedMessage.receiver)) {
@@ -277,65 +909,221 @@ io.on("connection", (socket) => {
             : populatedMessage.receiver?._id,
         ].filter(Boolean);
       }
-      // 1. Broadcast to the assignment client room
-      if (clientId) {
-        socket
-          .to(`assignment_client_${clientId}`)
-          .emit("assignment_message_updated", {
-            message: {
-              ...populatedMessage,
-              receiver: actualReceiverIds,
-            },
-            action: "disapproved",
-          });
-      }
 
-      // 2. Notify the sender about disapproval
+      // Get sender ID
       const senderId =
         typeof populatedMessage.sender === "string"
           ? populatedMessage.sender
           : populatedMessage.sender?._id;
 
-      if (senderId) {
-        socket
-          .to(`employee_${senderId}`)
-          .emit("assignment_message_disapproved", {
-            message: {
-              ...populatedMessage,
-              receiver: actualReceiverIds,
-            },
-            action: "disapproved",
-            timestamp: new Date(),
-          });
-      }
+      console.log(`📤 Broadcasting approval to ${actualReceiverIds.length} receivers`);
 
-      // 3. Notify all receivers about disapproval
-      actualReceiverIds.forEach((receiverId) => {
-        if (receiverId && receiverId !== senderId) {
-          socket
-            .to(`employee_${receiverId}`)
-            .emit("assignment_message_disapproved", {
-              message: {
-                ...populatedMessage,
-                receiver: actualReceiverIds,
-              },
-              action: "disapproved",
-              timestamp: new Date(),
-            });
-        }
+      // 1. Emit specific approval event to all participants
+      const allParticipants = new Set([
+        senderId,
+        ...actualReceiverIds
+      ].filter(Boolean));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+        console.log(`📨 Sent approval to employee_${participantId}`);
       });
 
-      // 4. Notify team leads
-      socket
-        .to("assignment_team_leads")
-        .emit("assignment_message_disapproved", {
-          message: {
-            ...populatedMessage,
-            receiver: actualReceiverIds,
+      // 2. Also emit general update event for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
+          action: "approved",
+          timestamp: new Date(),
+        });
+      });
+
+      // 3. Notify team leads
+      io.to("assignment_team_leads").emit("assignment_message_approved", {
+        messageId: populatedMessage._id,
+        approvalStatus: "approved",
+        message: populatedMessage,
+        timestamp: new Date(),
+      });
+
+      // 4. Broadcast to client room if applicable
+      if (clientId) {
+        io.to(`assignment_client_${clientId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 5. Broadcast to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_approved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "approved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // Send success callback
+      if (callback) {
+        callback({
+          success: true,
+          message: "Approval notification delivered",
+          deliveredTo: {
+            client: clientId,
+            sender: senderId,
+            receivers: actualReceiverIds,
+            teamLeads: true,
+            thread: populatedMessage.threadId,
           },
+        });
+      }
+
+      console.log("✅ Approval broadcast completed successfully");
+
+    } catch (error) {
+      console.error("❌ Error broadcasting approval notification:", error);
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "SOCKET_APPROVAL_ERROR",
+        });
+      }
+    }
+  });
+
+  // Handle assignment message disapproval - UPDATED WITH ATTACHMENTS
+  socket.on("assignment_message_disapproved", async (data, callback) => {
+    try {
+      console.log("🔔 Processing assignment message disapproval:", data);
+
+      const { message } = data;
+
+      if (!message || !message._id) {
+        console.error("❌ Invalid message data in disapproval");
+        if (callback)
+          callback({ success: false, error: "Invalid message data" });
+        return;
+      }
+
+      // Populate the message with all necessary data INCLUDING ATTACHMENTS
+      const populatedMessage = await AssignmentMessage.findById(message._id)
+        .populate("owner")
+        .populate("sender")
+        .populate("receiver")
+        .populate("client")
+        .populate("attachments.uploadedBy"); // 🔥 IMPORTANT: Populate attachments
+
+      if (!populatedMessage) {
+        console.error("❌ Disapproved assignment message not found:", message._id);
+        if (callback) callback({ success: false, error: "Message not found" });
+        return;
+      }
+
+      // Log attachment info for debugging
+      console.log("📎 Disapproval - Message attachments:", {
+        messageId: populatedMessage._id,
+        attachmentsCount: populatedMessage.attachments?.length || 0,
+        attachments: populatedMessage.attachments?.map(a => ({
+          id: a._id,
+          name: a.originalName,
+          size: a.size
+        }))
+      });
+
+      // Get the client ID
+      const clientId =
+        typeof populatedMessage.client === "string"
+          ? populatedMessage.client
+          : populatedMessage.client?._id;
+
+      // Handle receiver as array consistently
+      let actualReceiverIds = [];
+
+      if (Array.isArray(populatedMessage.receiver)) {
+        actualReceiverIds = populatedMessage.receiver
+          .map((receiver) =>
+            typeof receiver === "string" ? receiver : receiver?._id
+          )
+          .filter(Boolean);
+      } else if (populatedMessage.receiver) {
+        actualReceiverIds = [
+          typeof populatedMessage.receiver === "string"
+            ? populatedMessage.receiver
+            : populatedMessage.receiver?._id,
+        ].filter(Boolean);
+      }
+
+      // Get sender ID
+      const senderId =
+        typeof populatedMessage.sender === "string"
+          ? populatedMessage.sender
+          : populatedMessage.sender?._id;
+
+      console.log(`📤 Broadcasting disapproval to ${actualReceiverIds.length} receivers`);
+
+      // 1. Emit specific disapproval event to all participants
+      const allParticipants = new Set([
+        senderId,
+        ...actualReceiverIds
+      ].filter(Boolean));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+        console.log(`📨 Sent disapproval to employee_${participantId}`);
+      });
+
+      // 2. Also emit general update event for compatibility
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+          message: populatedMessage,
           action: "disapproved",
           timestamp: new Date(),
         });
+      });
+
+      // 3. Notify team leads
+      io.to("assignment_team_leads").emit("assignment_message_disapproved", {
+        messageId: populatedMessage._id,
+        approvalStatus: "disapproved",
+        message: populatedMessage,
+        timestamp: new Date(),
+      });
+
+      // 4. Broadcast to client room if applicable
+      if (clientId) {
+        io.to(`assignment_client_${clientId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
+
+      // 5. Broadcast to thread room
+      if (populatedMessage.threadId) {
+        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_disapproved", {
+          messageId: populatedMessage._id,
+          approvalStatus: "disapproved",
+          message: populatedMessage,
+          timestamp: new Date(),
+        });
+      }
 
       // Send success callback
       if (callback) {
@@ -347,9 +1135,13 @@ io.on("connection", (socket) => {
             sender: senderId,
             receivers: actualReceiverIds,
             teamLeads: true,
+            thread: populatedMessage.threadId,
           },
         });
       }
+
+      console.log("✅ Disapproval broadcast completed successfully");
+
     } catch (error) {
       console.error("❌ Error broadcasting disapproval notification:", error);
       if (callback) {
@@ -362,12 +1154,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Join team leads room
-  socket.on("join_assignment_team_leads", () => {
-    socket.join("assignment_team_leads");
-  });
-
-  // Handle assignment message resubmission events - UPDATED FOR ARRAY RECEIVER
+  // Handle assignment message resubmission events - UPDATED WITH ATTACHMENTS
   socket.on("assignment_message_resubmitted", async (data, callback) => {
     try {
       const { message } = data;
@@ -379,22 +1166,25 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Populate the message with all necessary data
+      // Populate the message with all necessary data INCLUDING ATTACHMENTS
       const populatedMessage = await AssignmentMessage.findById(message._id)
         .populate("owner")
         .populate("sender")
         .populate("receiver")
         .populate("client")
-        .populate("attachments.uploadedBy");
+        .populate("attachments.uploadedBy"); // 🔥 IMPORTANT: Populate attachments
 
       if (!populatedMessage) {
-        console.error(
-          "❌ Resubmitted assignment message not found:",
-          message._id
-        );
+        console.error("❌ Resubmitted assignment message not found:", message._id);
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
+
+      // Log attachment info for debugging
+      console.log("📎 Resubmission - Message attachments:", {
+        messageId: populatedMessage._id,
+        attachmentsCount: populatedMessage.attachments?.length || 0
+      });
 
       // Get the client ID
       const clientId =
@@ -402,7 +1192,7 @@ io.on("connection", (socket) => {
           ? populatedMessage.client
           : populatedMessage.client?._id;
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Handle receiver as array consistently
       let actualReceiverIds = [];
 
       if (Array.isArray(populatedMessage.receiver)) {
@@ -418,6 +1208,7 @@ io.on("connection", (socket) => {
             : populatedMessage.receiver?._id,
         ].filter(Boolean);
       }
+
       // 1. Broadcast to the assignment client room
       if (clientId) {
         socket
@@ -500,10 +1291,9 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Handle assignment message sending - SEND ONLY TO SPECIFIC RECEIVER IDs
+  // Handle assignment message sending - UPDATED WITH ATTACHMENTS
   socket.on("send_assignment_message", async (data, callback) => {
     try {
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -513,20 +1303,31 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Populate the message with all necessary data
+      // Populate the message with all necessary data INCLUDING ATTACHMENTS
       const populatedMessage = await AssignmentMessage.findById(message._id)
         .populate("owner")
         .populate("sender")
         .populate("receiver")
         .populate("client")
         .populate("scheduledBy")
-        .populate("attachments.uploadedBy");
+        .populate("attachments.uploadedBy"); // 🔥 IMPORTANT: Populate attachments
 
       if (!populatedMessage) {
         console.error("❌ Assignment message not found:", message._id);
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
+
+      // Log attachment info for debugging
+      console.log("📎 New Message - Attachments:", {
+        messageId: populatedMessage._id,
+        attachmentsCount: populatedMessage.attachments?.length || 0,
+        attachments: populatedMessage.attachments?.map(a => ({
+          id: a._id,
+          name: a.originalName,
+          size: a.size
+        }))
+      });
 
       // Use the targeted emission function
       await emitToSpecificReceivers(
@@ -554,7 +1355,8 @@ io.on("connection", (socket) => {
       }
     }
   });
-  // Handle assignment message updates - UPDATED FOR ARRAY RECEIVER
+
+  // Handle assignment message updates - UPDATED FOR ATTACHMENTS
   socket.on("assignment_message_updated", (data) => {
     try {
       const { message, action, clientId } = data;
@@ -564,7 +1366,14 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // CRITICAL FIX: Handle receiver as array consistently
+      // Log attachment info for debugging
+      console.log("📎 Message Update - Attachments:", {
+        messageId: message._id,
+        action: action,
+        attachmentsCount: message.attachments?.length || 0
+      });
+
+      // Handle receiver as array consistently
       let receiverIds = [];
 
       if (Array.isArray(message.receiver)) {
@@ -594,7 +1403,7 @@ io.on("connection", (socket) => {
           {
             message: {
               ...message,
-              receiver: receiverIds, // Ensure consistent format
+              receiver: receiverIds,
             },
             action,
           }
@@ -610,7 +1419,7 @@ io.on("connection", (socket) => {
         io.to(`employee_${participantId}`).emit("assignment_message_updated", {
           message: {
             ...message,
-            receiver: receiverIds, // Ensure consistent format
+            receiver: receiverIds,
           },
           action,
         });
@@ -626,139 +1435,35 @@ io.on("connection", (socket) => {
           action,
         });
       }
+
+      // Broadcast to thread room if available
+      if (message.threadId) {
+        io.to(`thread_${message.threadId}`).emit("assignment_message_updated", {
+          message: {
+            ...message,
+            receiver: receiverIds,
+          },
+          action,
+        });
+      }
+
     } catch (error) {
       console.error("❌ Error in assignment_message_updated:", error);
     }
   });
 
-  socket.on("disconnect", (reason) => {
-    console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
-  });
-
-  socket.on("error", (error) => {
-    console.error("🔴 Socket error:", error);
-  });
-});
-
-io.on("connection", (socket) => {
-  // Join room based on employee ID
-  socket.on("join_employee", (employeeId) => {
-    socket.join(`employee_${employeeId}`);
-  });
-
-  // Join room based on client ID
-  socket.on("join_client", (clientId) => {
-    socket.join(`client_${clientId}`);
-  });
-
-  // ========== ASSIGNMENT MESSAGES HANDLERS ==========
-  socket.on("join_assignment_chat", (clientId) => {
-    socket.join(`assignment_client_${clientId}`);
-  });
-
-  socket.on("send_assignment", async (data, callback) => {
-    try {
-      const { message, client, recipientIds, senderId } = data;
-
-      if (!message) {
-        console.error("❌ Invalid assignment message data");
-        if (callback)
-          callback({ success: false, error: "Invalid message data" });
-        return;
-      }
-
-      // Populate the assignment message with all data
-      const populatedMessage = await AssignmentMessage.findById(message._id)
-        .populate("owner")
-        .populate("sender")
-        .populate("receiver")
-        .populate("client")
-        .populate("scheduledBy");
-
-      if (!populatedMessage) {
-        console.error("❌ Assignment message not found:", message._id);
-        if (callback) callback({ success: false, error: "Message not found" });
-        return;
-      }
-
-      const clientId =
-        typeof populatedMessage.client === "string"
-          ? populatedMessage.client
-          : populatedMessage.client?._id;
-
-      // 1. Broadcast to assignment client room
-      if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit(
-          "new_assignment_message",
-          populatedMessage
-        );
-      }
-
-      // 2. Broadcast to employee recipients from message data
-      if (
-        populatedMessage.receiver &&
-        Array.isArray(populatedMessage.receiver)
-      ) {
-        populatedMessage.receiver.forEach((receiver) => {
-          const receiverId =
-            typeof receiver === "string" ? receiver : receiver._id;
-          if (receiverId) {
-            io.to(`employee_${receiverId}`).emit(
-              "new_assignment_message",
-              populatedMessage
-            );
-          }
-        });
-      }
-
-      // 3. Broadcast to additional recipientIds if provided
-      if (recipientIds && recipientIds.length > 0) {
-        recipientIds.forEach((employeeId) => {
-          if (employeeId !== senderId) {
-            io.to(`employee_${employeeId}`).emit(
-              "new_assignment_message",
-              populatedMessage
-            );
-          }
-        });
-      }
-
-      // 4. Send confirmation to sender
-      socket.emit("new_assignment_message", populatedMessage);
-
-      if (callback) {
-        callback({
-          success: true,
-          message: "Assignment message delivered to all recipients",
-        });
-      }
-    } catch (error) {
-      console.error("❌ Error broadcasting assignment message:", error);
-      if (callback) {
-        callback({ success: false, error: error.message });
-      }
-    }
-  });
-
-  // Handle assignment message status updates
-  socket.on("assignment_message_status_update", (data) => {
-    const { messageId, status, clientId } = data;
-    io.to(`assignment_client_${clientId}`).emit("assignment_message_status", {
-      messageId,
-      status,
+  // Test socket events - for debugging
+  socket.on("test_approval_event", (data) => {
+    console.log("🧪 Test approval event received:", data);
+    // Echo back to test socket connection
+    socket.emit("test_approval_response", {
+      success: true,
+      message: "Test event received",
+      data: data,
+      timestamp: new Date()
     });
   });
 
-  // Join manager room for assignments
-  socket.on("join_assignment_managers", () => {
-    socket.join("assignment_managers");
-  });
-
-  // Join team leads room for assignments
-  socket.on("join_assignment_team_leads", () => {
-    socket.join("assignment_team_leads");
-  });
-
   socket.on("disconnect", (reason) => {
     console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
   });
@@ -767,6 +1472,400 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+
+
+io.on("connection", (socket) => {
+  console.log("🟢 Client connected:", socket.id);
+
+  // Employee joins their personal room
+  socket.on("join_employee", (employeeId) => {
+    if (!employeeId) {
+      console.error("❌ join_employee: employeeId is required");
+      return;
+    }
+    socket.join(`employee_${employeeId}`);
+    console.log(`👤 Employee ${employeeId} joined their room`);
+  });
+
+  // Join client room for specific client chats
+  socket.on("join_client", (clientId) => {
+    if (!clientId) {
+      console.error("❌ join_client: clientId is required");
+      return;
+    }
+    socket.join(`client_${clientId}`);
+    console.log(`💬 Client ${clientId} room joined by ${socket.id}`);
+  });
+
+  // Join conversation room (for group chats)
+  socket.on("join_conversation", (conversationId) => {
+    if (!conversationId) {
+      console.error("❌ join_conversation: conversationId is required");
+      return;
+    }
+    socket.join(`conversation_${conversationId}`);
+    console.log(`💬 Conversation ${conversationId} room joined by ${socket.id}`);
+  });
+
+  // 🎯 CRITICAL FIX: Handle WhatsApp message events specifically
+  socket.on("whatsapp_send_message", async (data) => {
+    try {
+      const { message, clientId, senderId, receivers } = data;
+
+      if (!message || !clientId || !senderId) {
+        console.error("❌ whatsapp_send_message: message, clientId, and senderId are required");
+        socket.emit("message_error", { error: "Missing required fields" });
+        return;
+      }
+
+      console.log("📤 WhatsApp message sent:", {
+        clientId,
+        senderId,
+        receivers,
+        messageId: message._id
+      });
+
+      // Notify sender
+      socket.emit("new_message", {
+        message: message,
+        type: "message_sent",
+        action: "sent"
+      });
+
+      // Notify all receivers
+      if (receivers && Array.isArray(receivers)) {
+        receivers.forEach(receiverId => {
+          socket.to(`employee_${receiverId}`).emit("new_message", {
+            message: message,
+            type: "new_assignment",
+            action: "received"
+          });
+          console.log(`✅ Notified receiver: employee_${receiverId}`);
+        });
+      }
+
+      // Also broadcast to client room for real-time chat
+      socket.to(`client_${clientId}`).emit("new_message", {
+        message: message,
+        type: "new_message",
+        action: "client_received"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_send_message:", error);
+      socket.emit("message_error", { error: "Failed to send message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message approval events
+  socket.on("whatsapp_approve_message", async (data) => {
+    try {
+      const { message, approvedBy, receivers, clientId } = data;
+
+      if (!message || !approvedBy) {
+        console.error("❌ whatsapp_approve_message: message and approvedBy are required");
+        return;
+      }
+
+      console.log("✅ WhatsApp message approved:", {
+        messageId: message._id,
+        approvedBy,
+        receivers,
+        clientId
+      });
+
+      // Create the updated message object with approval status
+      const updatedMessage = {
+        ...message,
+        approvalStatus: "approved"
+      };
+
+      // 🎯 Notify ALL involved users about approval
+      const allInvolvedUsers = new Set();
+
+      // Add sender
+      if (message.sender && message.sender._id) {
+        allInvolvedUsers.add(String(message.sender._id));
+      }
+
+      // Add all receivers from original message
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach(receiver => {
+          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+          if (receiverId) {
+            allInvolvedUsers.add(String(receiverId));
+          }
+        });
+      }
+
+      // Add the team lead who approved
+      allInvolvedUsers.add(String(approvedBy));
+
+      // Add any additional receivers from approval
+      if (receivers && Array.isArray(receivers)) {
+        receivers.forEach(receiverId => {
+          allInvolvedUsers.add(String(receiverId));
+        });
+      }
+
+      // Convert to array and emit to each user
+      const involvedUsersArray = Array.from(allInvolvedUsers);
+
+      involvedUsersArray.forEach(userId => {
+        socket.to(`employee_${userId}`).emit("new_message", {
+          message: updatedMessage,
+          type: "message_updated",
+          action: "approved",
+          approvedBy: approvedBy,
+          timestamp: new Date()
+        });
+        console.log(`✅ Emitted approval to employee_${userId}`);
+      });
+
+      // Also emit to the client room for real-time chat updates
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("new_message", {
+          message: updatedMessage,
+          type: "message_updated",
+          action: "approved"
+        });
+        console.log(`✅ Emitted to client_${clientId}`);
+      }
+
+      // Notify sender specifically
+      socket.emit("new_message", {
+        message: updatedMessage,
+        type: "message_approved",
+        action: "approved"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_approve_message:", error);
+      socket.emit("message_error", { error: "Failed to approve message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle forwarded approved messages to managers
+  socket.on("whatsapp_forward_to_managers", async (data) => {
+    try {
+      const { message, managers, forwardedBy, clientId } = data;
+
+      if (!message || !managers || !Array.isArray(managers)) {
+        console.error("❌ whatsapp_forward_to_managers: message and managers array are required");
+        return;
+      }
+
+      console.log("📤 Forwarding approved message to managers:", {
+        messageId: message._id,
+        managers: managers,
+        forwardedBy: forwardedBy
+      });
+
+      // Mark this as a forwarded message
+      const forwardedMessage = {
+        ...message,
+        isForwarded: true,
+        forwardedBy: forwardedBy,
+        originalMessageId: message._id
+      };
+
+      // Notify each manager about the new forwarded message
+      managers.forEach((managerId) => {
+        socket.to(`employee_${managerId}`).emit("new_message", {
+          message: forwardedMessage,
+          type: "new_approved_message",
+          action: "forwarded_approved",
+          forwardedBy: forwardedBy,
+          originalMessageId: message._id,
+          timestamp: new Date()
+        });
+        console.log(`✅ Forwarded to manager: employee_${managerId}`);
+      });
+
+      // Notify the forwarder that forwarding was successful
+      socket.emit("new_message", {
+        message: forwardedMessage,
+        type: "message_forwarded",
+        action: "forwarded_to_managers"
+      });
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_forward_to_managers:", error);
+      socket.emit("message_error", { error: "Failed to forward message to managers" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message editing events
+  socket.on("whatsapp_edit_message", async (data) => {
+    try {
+      const { message, editedBy, clientId } = data;
+
+      if (!message || !editedBy) {
+        console.error("❌ whatsapp_edit_message: message and editedBy are required");
+        return;
+      }
+
+      console.log("✏️ WhatsApp message edited:", {
+        messageId: message._id,
+        editedBy,
+        clientId
+      });
+
+      // Notify ALL involved users about edit
+      const allInvolvedUsers = new Set();
+
+      // Add sender
+      if (message.sender && message.sender._id) {
+        allInvolvedUsers.add(String(message.sender._id));
+      }
+
+      // Add all receivers
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach(receiver => {
+          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+          if (receiverId) {
+            allInvolvedUsers.add(String(receiverId));
+          }
+        });
+      }
+
+      // Add the editor
+      allInvolvedUsers.add(String(editedBy));
+
+      // Convert to array and emit to each user
+      const involvedUsersArray = Array.from(allInvolvedUsers);
+
+      involvedUsersArray.forEach(userId => {
+        socket.to(`employee_${userId}`).emit("new_message", {
+          message: message,
+          type: "message_updated",
+          action: "edited",
+          editedBy: editedBy,
+          timestamp: new Date()
+        });
+        console.log(`✅ Emitted edit to employee_${userId}`);
+      });
+
+      // Also emit to the client room for real-time chat updates
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("new_message", {
+          message: message,
+          type: "message_updated",
+          action: "edited"
+        });
+        console.log(`✅ Emitted to client_${clientId}`);
+      }
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_edit_message:", error);
+      socket.emit("message_error", { error: "Failed to edit message" });
+    }
+  });
+
+  // 🎯 CRITICAL FIX: Handle message status updates (delivered, read, etc.)
+  socket.on("whatsapp_message_status", async (data) => {
+    try {
+      const { messageId, status, userId, clientId } = data;
+
+      if (!messageId || !status) {
+        console.error("❌ whatsapp_message_status: messageId and status are required");
+        return;
+      }
+
+      console.log("📊 WhatsApp message status update:", {
+        messageId,
+        status,
+        userId
+      });
+
+      // Notify relevant users about status change
+      socket.emit("message_status", {
+        messageId: messageId,
+        status: status
+      });
+
+      // If there's a specific user who triggered the status update, notify them
+      if (userId) {
+        socket.to(`employee_${userId}`).emit("message_status", {
+          messageId: messageId,
+          status: status
+        });
+      }
+
+      // Also notify client room if applicable
+      if (clientId) {
+        socket.to(`client_${clientId}`).emit("message_status", {
+          messageId: messageId,
+          status: status
+        });
+      }
+
+    } catch (error) {
+      console.error("❌ Error in whatsapp_message_status:", error);
+      socket.emit("message_error", { error: "Failed to update message status" });
+    }
+  });
+
+  // Handle generic message sending (keep for backward compatibility)
+  socket.on("send_message", async (data) => {
+    try {
+      const { conversationId, message } = data;
+
+      if (!conversationId || !message) {
+        console.error("❌ send_message: conversationId and message are required");
+        return;
+      }
+
+      // Broadcast to ALL clients in the conversation room
+      io.to(`conversation_${conversationId}`).emit("receive_message", message);
+
+      // Also send to sender for confirmation
+      socket.emit("message_sent", { success: true, message });
+    } catch (error) {
+      console.error("❌ Error in send_message:", error);
+      socket.emit("message_error", { error: "Failed to send message" });
+    }
+  });
+
+  // Handle typing indicators
+  socket.on("user_typing", (data) => {
+    const { conversationId, user, isSpace = false } = data;
+
+    if (!conversationId || !user) {
+      console.error("❌ user_typing: conversationId and user are required");
+      return;
+    }
+
+    const room = isSpace
+      ? `space_${conversationId}`
+      : `conversation_${conversationId}`;
+    socket.to(room).emit("user_typing", { user, conversationId });
+  });
+
+  socket.on("user_stopped_typing", (data) => {
+    const { conversationId, user, isSpace = false } = data;
+
+    if (!conversationId || !user) {
+      console.error("❌ user_stopped_typing: conversationId and user are required");
+      return;
+    }
+
+    const room = isSpace
+      ? `space_${conversationId}`
+      : `conversation_${conversationId}`;
+    socket.to(room).emit("user_stopped_typing", { user, conversationId });
+  });
+
+  // Handle disconnection
+  socket.on("disconnect", (reason) => {
+    console.log("🔴 Client disconnected:", socket.id, "Reason:", reason);
+  });
+
+  socket.on("error", (error) => {
+    console.error("🔴 Socket error:", error);
+  });
+});
+
 io.on("connection", (socket) => {
 
   socket.on("join_user", (userId) => {
@@ -901,168 +2000,103 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-// === Watch Employee collection for inserts ===
-Employee.watch().on("change", (change) => {
-  // 1) New document inserted
-  if (change.operationType === "insert") {
-    const emp = change.fullDocument;
-    io.emit("employee_added", {
-      message: `New employee added: ${emp.name}`,
-      createdAt: emp.createdAt,
+// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
+const emitWhatsAppMessage = (io, data) => {
+  const { message, type, action, targetUsers, clientId } = data;
+
+  if (!message || !type) {
+    console.error("❌ emitWhatsAppMessage: message and type are required");
+    return;
+  }
+
+  console.log("📢 Server emitting WhatsApp message:", {
+    messageId: message._id,
+    type,
+    action,
+    targetUsers: targetUsers?.length || 0,
+    clientId
+  });
+
+  // Emit to specific users if provided
+  if (targetUsers && Array.isArray(targetUsers)) {
+    targetUsers.forEach(userId => {
+      io.to(`employee_${userId}`).emit("new_message", {
+        message: message,
+        type: type,
+        action: action,
+        timestamp: new Date()
+      });
+      console.log(`✅ Emitted to employee_${userId}`);
     });
   }
 
-  // 2) Existing document updated
-  if (change.operationType === "update") {
-    const updatedFields = change.updateDescription.updatedFields;
-    // a) CNIC field was set or changed
-    if ("cnic" in updatedFields) {
-      const newCnic = updatedFields.cnic;
-      // You can fetch the full doc if you need other fields:
-      Employee.findById(change.documentKey._id)
-        .lean()
-        .then((emp) => {
-          io.emit("employee_cnic_updated", {
-            message: `CNIC for ${emp.name} updated to ${newCnic}`,
-            createdAt: new Date().toISOString(),
-          });
-        })
-        .catch(console.error);
-    }
+  // Always emit to client room if clientId provided
+  if (clientId) {
+    io.to(`client_${clientId}`).emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log(`✅ Emitted to client_${clientId}`);
   }
-});
 
-// === MongoDB connection ===
-mongoose
-  .connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => {
-    console.log("▶ MongoDB connected");
-    // Start IMAP watcher once DB is up
-    startWatcher();
-  })
-  .catch((err) => console.error("❌ MongoDB connection error:", err));
+  // If no specific users, emit to all connected clients (broadcast)
+  if (!targetUsers || targetUsers.length === 0) {
+    io.emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log("📢 Broadcasted to all connected clients");
+  }
+};
 
-// === Cron job: auto-fill yesterday’s attendance ===
-cron.schedule(
-  "0 0 * * *",
-  async () => {
-    try {
-      const config = await AttendanceConfig.findOne({}).lean();
-      if (config && config.markAbsentManually === true) {
-        return;
-      }
-      const holiday = await Attendance.findOne({ date, isHoliday: true });
-      if (holiday) {
-        return;
-      }
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
-      const y = yesterday.getFullYear();
-      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
-      const d = String(yesterday.getDate()).padStart(2, "0");
-      const date = `${y}-${m}-${d}`;
+// 🎯 CRITICAL FIX: Specific function for forwarding to managers
+const emitForwardToManagers = (io, data) => {
+  const { message, managers, forwardedBy, clientId } = data;
 
-      // Identify who already has records
-      const done = await Attendance.find({ date }).select("employee").lean();
-      const doneIds = new Set(done.map((r) => r.employee.toString()));
+  if (!message || !managers || !Array.isArray(managers)) {
+    console.error("❌ emitForwardToManagers: message and managers array are required");
+    return;
+  }
 
-      // Get all employees, including their shifts
-      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
+  console.log("📤 Server forwarding to managers:", {
+    messageId: message._id,
+    managersCount: managers.length,
+    forwardedBy
+  });
 
-      // Get all payroll periods
-      const allPayrolls = await PayrollPeriod.find({}).lean();
+  const forwardedMessage = {
+    ...message,
+    isForwarded: true,
+    forwardedBy: forwardedBy,
+    originalMessageId: message._id
+  };
 
-      // Get day name (e.g., 'sunday') for yesterday
-      const dayName = yesterday
-        .toLocaleDateString("en-US", { weekday: "long" })
-        .toLowerCase();
-      const ops = [];
+  managers.forEach(managerId => {
+    io.to(`employee_${managerId}`).emit("new_message", {
+      message: forwardedMessage,
+      type: "new_approved_message",
+      action: "forwarded_approved",
+      forwardedBy: forwardedBy,
+      originalMessageId: message._id,
+      timestamp: new Date()
+    });
+    console.log(`✅ Forwarded to manager: employee_${managerId}`);
+  });
+};
 
-      for (const e of allEmps) {
-        // Skip employees who already have attendance for the day
-        if (doneIds.has(e._id.toString())) continue;
+// Export the emission functions for use in controllers
+module.exports = {
+  emitWhatsAppMessage,
+  emitForwardToManagers
+};
 
-        // Find payroll period for any of employee's shifts (first match)
-        const payroll = allPayrolls.find(
-          (p) =>
-            Array.isArray(p.shifts) &&
-            e.shifts &&
-            e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
-        );
-
-        // If no payroll period or nonWorkingDays, mark absent as before
-        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
-          ops.push({
-            updateOne: {
-              filter: { employee: e._id, date },
-              update: {
-                $setOnInsert: {
-                  employee: e._id,
-                  date,
-                  owner: e.owner,
-                  status: "Absent",
-                  checkIn: null,
-                  checkOut: null,
-                  notes: null,
-                  markedByHR: false,
-                },
-              },
-              upsert: true,
-            },
-          });
-          continue;
-        }
-
-        // Check if yesterday is a non-working day for this payroll period
-        const nonWorking = payroll.nonWorkingDays.map((n) =>
-          String(n).toLowerCase().trim()
-        );
-        if (nonWorking.includes(dayName)) {
-          // It's a non-working day, skip marking absent
-          continue;
-        }
-
-        // Otherwise, mark absent as usual
-        ops.push({
-          updateOne: {
-            filter: { employee: e._id, date },
-            update: {
-              $setOnInsert: {
-                employee: e._id,
-                date,
-                owner: e.owner,
-                status: "Absent",
-                checkIn: null,
-                checkOut: null,
-                notes: null,
-                markedByHR: false,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
-
-      if (ops.length) {
-        const res = await Attendance.bulkWrite(ops);
-      } else {
-        console.log(
-          `[cron] All employees have attendance for ${date} or it's a non-working day.`
-        );
-      }
-    } catch (err) {
-      console.error("[cron] Error auto-filling attendance:", err);
-    }
-  },
-  { timezone: "UTC" }
-);
 cron.schedule(
   "* * * * *", // Every minute
   async () => {
     try {
+      console.log("[cron] Checking for scheduled messages to send...");
       const results = await assignmentMessageController.sendScheduledMessages(
         io
       );
@@ -1081,8 +2115,7 @@ cron.schedule(
   },
   { timezone: "UTC" }
 );
-// === Start the server (with Socket-IO) ===
-const PORT = process.env.PORT || 4000;
-server.listen(PORT, () => {
-  console.log(`▶ API + Socket.IO listening on port ${PORT}`);
+// ---------- Optional root route ----------
+app.get("/", (_req, res) => {
+  res.send("OK");
 });
