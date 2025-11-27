@@ -11,9 +11,7 @@ const {
   generateAndSaveContract,
   generateAndSaveSalaryCertificate,
 } = require("./services/ndaService");
-const {
-  extractCNICUsingOpenAI,
-} = require("./services/deepseekService");
+const { extractCNICUsingOpenAI } = require("./services/deepseekService");
 const Signature = require("./models/Signature");
 const User = require("./models/Users"); // <-- NEW
 
@@ -274,18 +272,18 @@ async function processMessage(stream) {
     const label = classifyEmail(bodyText);
     const signatureBlock = await getSignatureBlock(ownerId);
 
-       if (label === "offer_acceptance") {
+    if (label === "offer_acceptance") {
       // 🔹 Ensure employee exists and update status to Onboarding
       if (emp) {
-        emp.status = "Onboarding";   // <-- NEW
-        await emp.save();            // <-- NEW
+        emp.status = "Onboarding"; // <-- NEW
+        await emp.save(); // <-- NEW
       } else {
         // If there is no employee yet, create one with status Onboarding
         emp = await Employee.create({
           email: fromAddr,
           owner: ownerId,
           name: extractedName || parsed.from.value[0]?.name || "Candidate",
-          status: "Onboarding",      // <-- NEW
+          status: "Onboarding", // <-- NEW
         });
       }
 
@@ -359,7 +357,10 @@ async function processMessage(stream) {
           });
         }
       } catch (adminErr) {
-        console.error("Error notifying admins about offer acceptance:", adminErr);
+        console.error(
+          "Error notifying admins about offer acceptance:",
+          adminErr
+        );
       }
     } else if (label === "offer_rejection") {
       await sendEmail({
@@ -367,7 +368,9 @@ async function processMessage(stream) {
         subject: "Thank You for Your Response – Offer Not Accepted",
         html: `
           <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #222; width:100%">
-            <p>Dear <strong>${emp?.name || extractedName || "Candidate"}</strong>,</p>
+            <p>Dear <strong>${
+              emp?.name || extractedName || "Candidate"
+            }</strong>,</p>
             <p>
               Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
             </p>
@@ -426,9 +429,7 @@ function checkLatest() {
     fetcher.once("error", (error) => {
       console.error("Fetch error:", error);
     });
-    fetcher.once("end", () =>
-      console.log("Done processing new messages")
-    );
+    fetcher.once("end", () => console.log("Done processing new messages"));
   });
 }
 
