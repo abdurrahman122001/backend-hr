@@ -15,6 +15,8 @@ const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
 const empAuth = require("./middleware/empAuth");
+const puppeteer = require("puppeteer");
+
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
@@ -81,7 +83,6 @@ const hrPolicyRoute = require("./routes/hrPolicyRoutes");
 const companyProfile = require("./routes/companyProfile");
 const bugRoutes = require("./routes/bugRoutes");
 
-
 const app = express();
 
 // ---------- Static ----------
@@ -104,6 +105,8 @@ app.use(
   "/uploads",
   express.static(path.join(__dirname, "../uploads"))
 );
+
+
 
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
@@ -221,7 +224,7 @@ app.use("/api/generate", requireAuth, generateRouter);
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/offer-email", requireAuth, offerEmail);
+app.use("/api/offer-email" , requireAuth, offerEmail)
 app.use("/api/events", requireAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
 app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
@@ -299,7 +302,7 @@ function setupEmployeeChangeStream() {
       );
       try {
         changeStream.close();
-      } catch { }
+      } catch {}
     });
   } catch (e) {
     console.warn(
@@ -337,6 +340,9 @@ cron.schedule(
 
       const config = await AttendanceConfig.findOne({}).lean();
       if (config && config.markAbsentManually === true) {
+        console.log(
+          "[cron] markAbsentManually = true; skipping auto-absent marking."
+        );
         return;
       }
 
@@ -346,8 +352,13 @@ cron.schedule(
         isHoliday: true,
       }).lean();
       if (holiday) {
+        console.log(
+          `[cron] ${date} is a holiday; skipping auto-absent marking.`
+        );
         return;
       }
+
+      console.log(`[cron] Auto-filling 'Absent' for ${date} where needed`);
 
       // Employees already recorded for that date
       const done = await Attendance.find({ date }).select("employee").lean();
@@ -363,6 +374,8 @@ cron.schedule(
       const dayName = yesterday
         .toLocaleDateString("en-US", { weekday: "long" })
         .toLowerCase();
+      console.log(`[cron] Yesterday was: ${dayName}`);
+
       const ops = [];
 
       for (const e of allEmps) {
@@ -431,7 +444,11 @@ cron.schedule(
       if (ops.length) {
         const result = await Attendance.bulkWrite(ops);
         const upserted = result?.upsertedCount || 0;
+        console.log(`[cron] Upserted ${upserted} records for ${date}`);
       } else {
+        console.log(
+          `[cron] Nothing to upsert for ${date} (already marked or non-working).`
+        );
       }
     } catch (err) {
       console.error("[cron] Error auto-filling attendance:", err);
@@ -441,15 +458,73 @@ cron.schedule(
 );
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------
-const ENABLE_HTTPS = false; // Disable HTTPS for local testing
-const HTTP_PORT = 4000;
+const ENABLE_HTTPS =
+  (process.env.ENABLE_HTTPS || "true").toLowerCase() !== "false";
+const DEFAULT_DOMAIN = process.env.DOMAIN || "innand.com";
 
-const httpServer = http.createServer(app);
-primaryServer = httpServer;
+const CERT_FULLCHAIN =
+  process.env.CERT_FULLCHAIN ||
+  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/fullchain.pem`;
+const CERT_PRIVKEY =
+  process.env.CERT_PRIVKEY ||
+  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
 
-httpServer.listen(HTTP_PORT, () => {
-  console.log(`🔓 Server running locally on http://localhost:${HTTP_PORT}`);
-});
+const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
+const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
+
+let primaryServer; // the server we attach socket.io to
+let httpsEnabled = false;
+
+if (
+  ENABLE_HTTPS &&
+  fs.existsSync(CERT_FULLCHAIN) &&
+  fs.existsSync(CERT_PRIVKEY)
+) {
+  // Start HTTPS server
+  const httpsServer = https.createServer(
+    {
+      cert: fs.readFileSync(CERT_FULLCHAIN),
+      key: fs.readFileSync(CERT_PRIVKEY),
+    },
+    app
+  );
+  primaryServer = httpsServer;
+  httpsEnabled = true;
+
+  httpsServer.listen(HTTPS_PORT, () => {
+    console.log(
+      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`
+    );
+  });
+
+  // Lightweight HTTP → HTTPS redirect
+  http
+    .createServer((req, res) => {
+      const host = req.headers.host || DEFAULT_DOMAIN;
+      const location = `https://${host}${req.url}`;
+      res.writeHead(301, { Location: location });
+      res.end();
+    })
+    .listen(HTTP_PORT, () => {
+      console.log(
+        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`
+      );
+    });
+} else {
+  // Fallback to HTTP only (useful for local/dev or when cert files missing)
+  const httpServer = http.createServer(app);
+  primaryServer = httpServer;
+
+  httpServer.listen(HTTP_PORT, () => {
+    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
+    if (ENABLE_HTTPS) {
+      console.warn(
+        "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
+          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY."
+      );
+    }
+  });
+}
 
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
@@ -460,6 +535,7 @@ const io = new Server(primaryServer, {
 app.set("io", io);
 
 io.on("connection", (socket) => {
+  console.log("🟢 Socket client connected:", socket.id);
 
   // Join employee room
   socket.on("join_employee", (employeeId) => {
@@ -468,6 +544,7 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`employee_${employeeId}`);
+    console.log(`👤 Employee ${employeeId} joined their room`);
   });
 
   socket.on("join_client_updates", (ownerId) => {
@@ -476,6 +553,7 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`client_updates_${ownerId}`);
+    console.log(`✅ User joined client updates for owner: ${ownerId}`);
   });
 
   socket.on("client_updated", async (data, callback) => {
@@ -487,6 +565,9 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Missing required data" });
         return;
       }
+
+      console.log(`📢 Client ${action}: ${client.clientName} (${client._id})`);
+
       // Broadcast to all team members of this owner
       io.to(`client_updates_${ownerId}`).emit(`client_${action}`, {
         client,
@@ -523,6 +604,7 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`manager_updates_${managerId}`);
+    console.log(`✅ Manager ${managerId} joined manager updates room`);
   });
 
   // In your backend socket setup
@@ -535,6 +617,10 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "clientId is required" });
         return;
       }
+
+      console.log(`🔔 Client assignment: ${clientName} -> ${employeeId || 'unassigned'}`);
+      console.log(`📍 Emitting to employee_${employeeId}`);
+
       if (employeeId) {
         io.to(`employee_${employeeId}`).emit("client_assignment_updated", {
           type: "CLIENT_ASSIGNED_TO_YOU",
@@ -547,6 +633,8 @@ io.on("connection", (socket) => {
           assignedTo: employeeId, // ✅ THIS IS CRITICAL - must match client-side check
           previousAssignee: previousAssignee // ✅ Add this too
         });
+
+        console.log(`✅ Emitted client_assignment_updated to employee_${employeeId}`);
       }
 
       // ✅ Notify the PREVIOUSLY assigned employee (if any)
@@ -1472,8 +1560,6 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-
-
 io.on("connection", (socket) => {
   console.log("🟢 Client connected:", socket.id);
 
@@ -1610,7 +1696,7 @@ io.on("connection", (socket) => {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-
+      
       involvedUsersArray.forEach(userId => {
         socket.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
@@ -1734,7 +1820,7 @@ io.on("connection", (socket) => {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-
+      
       involvedUsersArray.forEach(userId => {
         socket.to(`employee_${userId}`).emit("new_message", {
           message: message,
@@ -1865,6 +1951,97 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
+const emitWhatsAppMessage = (io, data) => {
+  const { message, type, action, targetUsers, clientId } = data;
+  
+  if (!message || !type) {
+    console.error("❌ emitWhatsAppMessage: message and type are required");
+    return;
+  }
+
+  console.log("📢 Server emitting WhatsApp message:", {
+    messageId: message._id,
+    type,
+    action,
+    targetUsers: targetUsers?.length || 0,
+    clientId
+  });
+
+  // Emit to specific users if provided
+  if (targetUsers && Array.isArray(targetUsers)) {
+    targetUsers.forEach(userId => {
+      io.to(`employee_${userId}`).emit("new_message", {
+        message: message,
+        type: type,
+        action: action,
+        timestamp: new Date()
+      });
+      console.log(`✅ Emitted to employee_${userId}`);
+    });
+  }
+
+  // Always emit to client room if clientId provided
+  if (clientId) {
+    io.to(`client_${clientId}`).emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log(`✅ Emitted to client_${clientId}`);
+  }
+
+  // If no specific users, emit to all connected clients (broadcast)
+  if (!targetUsers || targetUsers.length === 0) {
+    io.emit("new_message", {
+      message: message,
+      type: type,
+      action: action
+    });
+    console.log("📢 Broadcasted to all connected clients");
+  }
+};
+
+// 🎯 CRITICAL FIX: Specific function for forwarding to managers
+const emitForwardToManagers = (io, data) => {
+  const { message, managers, forwardedBy, clientId } = data;
+  
+  if (!message || !managers || !Array.isArray(managers)) {
+    console.error("❌ emitForwardToManagers: message and managers array are required");
+    return;
+  }
+
+  console.log("📤 Server forwarding to managers:", {
+    messageId: message._id,
+    managersCount: managers.length,
+    forwardedBy
+  });
+
+  const forwardedMessage = {
+    ...message,
+    isForwarded: true,
+    forwardedBy: forwardedBy,
+    originalMessageId: message._id
+  };
+
+  managers.forEach(managerId => {
+    io.to(`employee_${managerId}`).emit("new_message", {
+      message: forwardedMessage,
+      type: "new_approved_message",
+      action: "forwarded_approved",
+      forwardedBy: forwardedBy,
+      originalMessageId: message._id,
+      timestamp: new Date()
+    });
+    console.log(`✅ Forwarded to manager: employee_${managerId}`);
+  });
+};
+
+// Export the emission functions for use in controllers
+module.exports = {
+  emitWhatsAppMessage,
+  emitForwardToManagers
+};
 
 io.on("connection", (socket) => {
 
@@ -2000,98 +2177,6 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
-const emitWhatsAppMessage = (io, data) => {
-  const { message, type, action, targetUsers, clientId } = data;
-
-  if (!message || !type) {
-    console.error("❌ emitWhatsAppMessage: message and type are required");
-    return;
-  }
-
-  console.log("📢 Server emitting WhatsApp message:", {
-    messageId: message._id,
-    type,
-    action,
-    targetUsers: targetUsers?.length || 0,
-    clientId
-  });
-
-  // Emit to specific users if provided
-  if (targetUsers && Array.isArray(targetUsers)) {
-    targetUsers.forEach(userId => {
-      io.to(`employee_${userId}`).emit("new_message", {
-        message: message,
-        type: type,
-        action: action,
-        timestamp: new Date()
-      });
-      console.log(`✅ Emitted to employee_${userId}`);
-    });
-  }
-
-  // Always emit to client room if clientId provided
-  if (clientId) {
-    io.to(`client_${clientId}`).emit("new_message", {
-      message: message,
-      type: type,
-      action: action
-    });
-    console.log(`✅ Emitted to client_${clientId}`);
-  }
-
-  // If no specific users, emit to all connected clients (broadcast)
-  if (!targetUsers || targetUsers.length === 0) {
-    io.emit("new_message", {
-      message: message,
-      type: type,
-      action: action
-    });
-    console.log("📢 Broadcasted to all connected clients");
-  }
-};
-
-// 🎯 CRITICAL FIX: Specific function for forwarding to managers
-const emitForwardToManagers = (io, data) => {
-  const { message, managers, forwardedBy, clientId } = data;
-
-  if (!message || !managers || !Array.isArray(managers)) {
-    console.error("❌ emitForwardToManagers: message and managers array are required");
-    return;
-  }
-
-  console.log("📤 Server forwarding to managers:", {
-    messageId: message._id,
-    managersCount: managers.length,
-    forwardedBy
-  });
-
-  const forwardedMessage = {
-    ...message,
-    isForwarded: true,
-    forwardedBy: forwardedBy,
-    originalMessageId: message._id
-  };
-
-  managers.forEach(managerId => {
-    io.to(`employee_${managerId}`).emit("new_message", {
-      message: forwardedMessage,
-      type: "new_approved_message",
-      action: "forwarded_approved",
-      forwardedBy: forwardedBy,
-      originalMessageId: message._id,
-      timestamp: new Date()
-    });
-    console.log(`✅ Forwarded to manager: employee_${managerId}`);
-  });
-};
-
-// Export the emission functions for use in controllers
-module.exports = {
-  emitWhatsAppMessage,
-  emitForwardToManagers
-};
-
 cron.schedule(
   "* * * * *", // Every minute
   async () => {
