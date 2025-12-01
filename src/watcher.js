@@ -3,6 +3,7 @@ require("dotenv").config();
 const Imap = require("imap");
 const { simpleParser } = require("mailparser");
 const mongoose = require("mongoose");
+const verifyEmail = require("./utils/verifyEmail"); // <-- ADD THIS
 
 const { sendEmail } = require("./services/mailService");
 const Employee = require("./models/Employees");
@@ -183,6 +184,32 @@ async function processMessage(stream) {
 
     const fromAddr = parsed.from.value[0].address.toLowerCase();
     const bodyText = (parsed.text || "").trim();
+
+    try {
+      const isValid = await verifyEmail(fromAddr);
+
+      if (!isValid) {
+        console.warn(`❌ Email rejected by ZeroBounce: ${fromAddr}`);
+
+        // Optionally send rejection email to sender
+        await sendEmail({
+          to: fromAddr,
+          subject: "Email Verification Failed",
+          html: `
+        <div style="font-family: Arial; font-size: 16px; color: #222;">
+          <p>Dear Sender,</p>
+          <p>Your email address <strong>${fromAddr}</strong> could not be verified by our system and was rejected.</p>
+          <p>Please ensure you are using a valid email address.</p>
+        </div>
+      `,
+        });
+
+        return; // ❗ STOP processing this email completely
+      }
+    } catch (e) {
+      console.error("ZeroBounce verification failed:", e);
+      // Allow email when API fails (fail-safe)
+    }
 
     let emp = await Employee.findOne({ email: fromAddr });
     let extractedName = "";

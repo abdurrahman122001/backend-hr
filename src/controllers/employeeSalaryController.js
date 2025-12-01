@@ -1,25 +1,246 @@
-const Employee = require('../models/Employees');
-const SalarySlip = require('../models/Salaries');
-const Shift = require('../models/Shift');
-const { encrypt, decrypt } = require('../utils/encryption');
-const { sendCompleteProfileLink } = require('../services/profileEmailService');
-const path = require('path');
-const fs = require('fs');
+const Employee = require("../models/Employees");
+const SalarySlip = require("../models/Salaries");
+const Shift = require("../models/Shift");
+const TaxConfig = require("../models/TaxConfig");
+const { encrypt, decrypt } = require("../utils/encryption");
+const { sendCompleteProfileLink } = require("../services/profileEmailService");
+const path = require("path");
+const fs = require("fs");
+
 /** --- helpers --- */
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const CNIC_REGEX = /^\d{5}-\d{7}-\d$/;
 
 const COMP_FIELDS = [
-  'basic','dearnessAllowance','houseRentAllowance','conveyanceAllowance',
-  'medicalAllowance','utilityAllowance','overtimeCompensation','dislocationAllowance',
-  'leaveEncashment','bonus','arrears','autoAllowance','incentive',
-  'fuelAllowance','othersAllowances','grossSalary'
+  "basic",
+  "dearnessAllowance",
+  "houseRentAllowance",
+  "conveyanceAllowance",
+  "medicalAllowance",
+  "utilityAllowance",
+  "overtimeCompensation",
+  "dislocationAllowance",
+  "leaveEncashment",
+  "bonus",
+  "arrears",
+  "autoAllowance",
+  "incentive",
+  "fuelAllowance",
+  "othersAllowances",
+  "grossSalary",
+];
+
+// Tax calculation fields
+const TAX_FIELDS = [
+  "taxDeduction",
+  "annualTaxDeduction",
+  "totalAllowances",
+  "totalDeductions",
+  "netPayable",
 ];
 
 const safeNumber = (v, def = 0) => {
   const n = Number(v);
   return Number.isFinite(n) ? n : def;
 };
+
+/* ---------------------------- Tax Calculation Logic ---------------------------- */
+
+const toNum = (v) => {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const n = Number(String(v).replace(/,/g, "").trim());
+  return Number.isFinite(n) ? n : 0;
+};
+
+const toStr = (num) => Math.round(Number(num) || 0).toString();
+
+/** Decrypt number from encrypted field */
+const readEncNumberAsync = async (maybeEnc, fieldName = "") => {
+  if (maybeEnc === null || maybeEnc === undefined) return 0;
+  if (typeof maybeEnc === "number") return toNum(maybeEnc);
+  const raw = String(maybeEnc).trim();
+  if (!raw) return 0;
+  try {
+    const decMaybe = decrypt(raw);
+    const dec =
+      typeof decMaybe?.then === "function" ? await decMaybe : decMaybe;
+    const num = toNum(dec);
+    return num;
+  } catch {
+    const num = toNum(raw);
+    return num;
+  }
+};
+
+/** Encrypt and save value */
+const writeEnc = async (doc, key, value) => {
+  const encMaybe = encrypt(toStr(value));
+  doc[key] = typeof encMaybe?.then === "function" ? await encMaybe : encMaybe;
+};
+
+/** Read first existing key */
+const readFirstNumAsync = async (obj, keys) => {
+  for (const k of keys) {
+    const path = k.split(".");
+    let cur = obj;
+    for (const p of path) cur = cur?.[p];
+    const n = await readEncNumberAsync(cur, k);
+    if (n !== 0 || (cur !== undefined && cur !== "")) return n;
+  }
+  return 0;
+};
+
+function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
+  const A = Math.max(0, toNum(annualTaxable));
+
+  console.log(
+    `[TAX-CALC] Calculating tax for annual taxable: ${A.toLocaleString()}`
+  );
+
+  const slabs = (rawSlabs || [])
+    .map((s) => ({
+      from: toNum(s.from),
+      to: s.to == null ? Infinity : toNum(s.to),
+      fixed: toNum(s.fixed),
+      rate: toNum(s.rateOver) / 100,
+    }))
+    .filter((s) => Number.isFinite(s.from) && s.to >= s.from)
+    .sort((a, b) => a.from - b.from);
+
+  if (!slabs.length) return 0;
+
+  for (const s of slabs) {
+    if (A >= s.from && A <= s.to) {
+      // ⭐ FIXED FORMULA:
+      // annualTax = fixed + (A - s.from) * rate
+      const over = Math.max(0, A - s.from);
+      const tax = Math.round(s.fixed + over * s.rate);
+
+      console.log(
+        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${s.fixed}, Rate ${
+          s.rate * 100
+        }%, Over ${over}, Annual Tax=${tax}`
+      );
+
+      return tax;
+    }
+  }
+
+  // If highest slab (open ended)
+  const last = slabs[slabs.length - 1];
+  if (last.to === Infinity) {
+    const over = Math.max(0, A - last.from);
+    const tax = Math.round(last.fixed + over * last.rate);
+
+    console.log(
+      `[TAX-CALC] Top slab: FROM ${last.from}+ : Fixed ${last.fixed}, Rate ${
+        last.rate * 100
+      }%, Over ${over}, Annual Tax=${tax}`
+    );
+
+    return tax;
+  }
+
+  return 0;
+}
+
+
+async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
+  try {
+    // 1) Calculate Gross Monthly Salary
+    let grossMonthly = 0;
+    for (const key of COMP_FIELDS) {
+      if (key !== "grossSalary") {
+        const value = await readFirstNumAsync(salarySlip, [key]);
+        grossMonthly += value;
+      }
+    }
+
+    const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
+    const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
+
+    const basic = await readFirstNumAsync(salarySlip, ["basic"]);
+    const medMonthly = await readFirstNumAsync(salarySlip, [
+      "medicalAllowance",
+    ]);
+
+    // 2) Correct Medical Exemption (Pakistan Law)
+    const medExemptMonthly = taxCfg?.enableMedicalExemption
+      ? Math.min(medMonthly, basic * 0.1) // <-- FIXED
+      : 0;
+
+    // 3) Monthly Taxable Income
+    const taxableMonthly = Math.max(0, finalGrossMonthly - medExemptMonthly);
+
+    // 4) Annual Taxable
+    const annualTaxable = taxableMonthly * 12;
+
+    // 5) Slab Calculation
+    const annualTax = computeAnnualTaxBandOnly(
+      annualTaxable,
+      taxCfg?.slabs || []
+    );
+
+    const monthlyTax = Math.round(annualTax / 12);
+
+    // 6) Allowances & Net Payable
+    const totalAllowances = finalGrossMonthly - basic;
+    const totalDeductions = monthlyTax;
+    const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
+
+    return {
+      grossMonthly: finalGrossMonthly,
+      annualGross: finalGrossMonthly * 12,
+      medExemptMonthly,
+      taxableMonthly,
+      annualTaxable,
+      annualTax,
+      monthlyTax,
+      totalAllowances,
+      totalDeductions,
+      netPayable,
+    };
+  } catch (error) {
+    console.error("Error in calculateTaxForSalarySlip:", error);
+    throw error;
+  }
+}
+
+async function autoCalculateAndSaveTax(salarySlip) {
+  try {
+    let taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    if (!taxCfg)
+      taxCfg = await TaxConfig.findOne().sort({ createdAt: -1 }).lean();
+    if (!taxCfg) return null;
+
+    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
+
+    await writeEnc(salarySlip, "grossSalary", taxCalculation.grossMonthly);
+    await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
+    await writeEnc(salarySlip, "annualTaxDeduction", taxCalculation.annualTax);
+    await writeEnc(
+      salarySlip,
+      "totalAllowances",
+      taxCalculation.totalAllowances
+    );
+    await writeEnc(
+      salarySlip,
+      "totalDeductions",
+      taxCalculation.totalDeductions
+    );
+    await writeEnc(salarySlip, "netPayable", taxCalculation.netPayable);
+
+    await salarySlip.save();
+
+    return taxCalculation;
+  } catch (err) {
+    console.error("❌ Error in autoCalculateAndSaveTax:", err);
+    return null;
+  }
+}
+
+/* ---------------------- Existing Functions (Updated) ---------------------- */
 
 exports.getEmployeeAndSalarySlip = async (req, res) => {
   try {
@@ -37,8 +258,9 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     // fetch shifts (by owner)
     let shifts = [];
     if (employee.owner) {
-      shifts = await Shift.find({ owner: employee.owner })
-        .select('_id name start end timezone');
+      shifts = await Shift.find({ owner: employee.owner }).select(
+        "_id name start end timezone"
+      );
     }
 
     // build employee object with safe defaults for nested structs only
@@ -53,16 +275,21 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     };
     // ensure numeric comp fields exist (frontend safety)
     for (const f of COMP_FIELDS) {
-      if (employeeObj.compensation[f] === undefined || employeeObj.compensation[f] === null) {
+      if (
+        employeeObj.compensation[f] === undefined ||
+        employeeObj.compensation[f] === null
+      ) {
         employeeObj.compensation[f] = 0;
       }
     }
     employeeObj.providentFund.override = !!employeeObj.providentFund.override;
 
-    // salary slip -> decrypted view for FE
+    // salary slip -> decrypted view for FE (including tax fields)
     let decryptedSalarySlip = salarySlip ? { ...salarySlip.toObject() } : {};
+    const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
+
     if (salarySlip) {
-      for (const field of COMP_FIELDS) {
+      for (const field of ALL_FIELDS) {
         if (decryptedSalarySlip[field]) {
           try {
             const dv = await decrypt(decryptedSalarySlip[field], req.query.key);
@@ -79,17 +306,17 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     } else {
       // default view if no slip yet
       decryptedSalarySlip = {
-        candidateName: employeeObj.name || '',
-        candidateEmail: employeeObj.email || '',
-        position: employeeObj.designation || '',
-        department: employeeObj.department || '',
-        startDate: employeeObj.joiningDate || '',
-        reportingTime: employeeObj.rt || '',
+        candidateName: employeeObj.name || "",
+        candidateEmail: employeeObj.email || "",
+        position: employeeObj.designation || "",
+        department: employeeObj.department || "",
+        startDate: employeeObj.joiningDate || "",
+        reportingTime: employeeObj.rt || "",
         month: new Date().toLocaleString("en-US", { month: "long" }),
         year: new Date().getFullYear().toString(),
-        isActive: true
+        isActive: true,
       };
-      for (const f of COMP_FIELDS) decryptedSalarySlip[f] = 0;
+      for (const f of ALL_FIELDS) decryptedSalarySlip[f] = 0;
     }
 
     res.status(200).json({
@@ -99,43 +326,82 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     });
   } catch (err) {
     console.error("Error in getEmployeeAndSalarySlip:", err);
-    res.status(500).json({ error: "Internal server error", details: err.message });
+    res
+      .status(500)
+      .json({ error: "Internal server error", details: err.message });
   }
 };
 
 exports.updateEmployeeAndSalarySlip = async (req, res) => {
   try {
-    const { employee: employeeData = {}, salarySlip: salarySlipData = {} } = req.body;
+    const { employee: employeeData = {}, salarySlip: salarySlipData = {} } =
+      req.body;
 
     if (!isValidObjectId(req.params.id)) {
       return res.status(400).json({ error: "Invalid employee ID format" });
     }
 
-    // Fetch existing docs
+    // Fetch existing employee
     const existingEmployee = await Employee.findById(req.params.id);
     if (!existingEmployee) {
       return res.status(404).json({ error: "Employee not found" });
     }
-    const existingSalarySlip = await SalarySlip.findOne({ employee: req.params.id });
 
-    /** Build $set for employee (partial, tolerant) */
+    // Fetch existing salary slip
+    const existingSalarySlip = await SalarySlip.findOne({
+      employee: req.params.id,
+    });
+
+    /* ------------------ EMPLOYEE UPDATE ------------------ */
+
     const employeeSet = {};
-    // Shallow keys
     const shallowKeys = [
-      'name','owner','cnic','email','companyEmail','password',
-      'fatherOrHusbandName','photographUrl','dateOfBirth','gender','nationality',
-      'cnicIssueDate','cnicExpiryDate','maritalStatus','religion',
-      'latestQualification','fieldOfQualification','otherQualification','otherFieldOfQualification',
-      'phone','permanentAddress','presentAddress','bankName','bankAccountNumber',
-      'nomineeName','nomineeRelation','nomineeCnic','nomineeNo',
-      'rt','department','designation','joiningDate','leavingDate', // <-- added leavingDate
-      'isHR','isAdmin','userAccount', 'role'
+      "name",
+      "owner",
+      "cnic",
+      "email",
+      "companyEmail",
+      "password",
+      "fatherOrHusbandName",
+      "photographUrl",
+      "dateOfBirth",
+      "gender",
+      "nationality",
+      "cnicIssueDate",
+      "cnicExpiryDate",
+      "maritalStatus",
+      "religion",
+      "latestQualification",
+      "fieldOfQualification",
+      "otherQualification",
+      "otherFieldOfQualification",
+      "phone",
+      "permanentAddress",
+      "presentAddress",
+      "bankName",
+      "bankAccountNumber",
+      "nomineeName",
+      "nomineeRelation",
+      "nomineeCnic",
+      "nomineeNo",
+      "rt",
+      "department",
+      "designation",
+      "joiningDate",
+      "leavingDate",
+      "isHR",
+      "isAdmin",
+      "userAccount",
+      "role",
     ];
+
     for (const k of shallowKeys) {
       if (k in employeeData && employeeData[k] !== undefined) {
-        if (k === 'cnic') {
-          // Ignore invalid CNIC rather than fail
-          if (typeof employeeData.cnic === 'string' && CNIC_REGEX.test(employeeData.cnic)) {
+        if (k === "cnic") {
+          if (
+            typeof employeeData.cnic === "string" &&
+            CNIC_REGEX.test(employeeData.cnic)
+          ) {
             employeeSet.cnic = employeeData.cnic;
           }
         } else {
@@ -144,137 +410,126 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       }
     }
 
-    // shifts (ensure array)
-    if ('shifts' in employeeData && employeeData.shifts !== undefined) {
-      employeeSet.shifts = Array.isArray(employeeData.shifts) ? employeeData.shifts : [];
+    if ("shifts" in employeeData && employeeData.shifts !== undefined) {
+      employeeSet.shifts = Array.isArray(employeeData.shifts)
+        ? employeeData.shifts
+        : [];
     }
 
-    // leaveEntitlement (clamp numbers, partial)
-    if ('leaveEntitlement' in employeeData && employeeData.leaveEntitlement) {
+    if ("leaveEntitlement" in employeeData && employeeData.leaveEntitlement) {
       const le = employeeData.leaveEntitlement || {};
-      employeeSet['leaveEntitlement.total']      = Math.max(0, safeNumber(le.total, 0));
-      employeeSet['leaveEntitlement.usedPaid']   = Math.max(0, safeNumber(le.usedPaid, 0));
-      employeeSet['leaveEntitlement.usedUnpaid'] = Math.max(0, safeNumber(le.usedUnpaid, 0));
-      employeeSet['leaveEntitlement.manuallySet']= !!le.manuallySet;
+      employeeSet["leaveEntitlement.total"] = Math.max(
+        0,
+        safeNumber(le.total, 0)
+      );
+      employeeSet["leaveEntitlement.usedPaid"] = Math.max(
+        0,
+        safeNumber(le.usedPaid, 0)
+      );
+      employeeSet["leaveEntitlement.usedUnpaid"] = Math.max(
+        0,
+        safeNumber(le.usedUnpaid, 0)
+      );
+      employeeSet["leaveEntitlement.manuallySet"] = !!le.manuallySet;
     }
 
-    // compensation (partial numeric merge)
-    if ('compensation' in employeeData && employeeData.compensation) {
+    if ("compensation" in employeeData && employeeData.compensation) {
       for (const f of COMP_FIELDS) {
-        if (f in employeeData.compensation && employeeData.compensation[f] !== undefined) {
-          employeeSet[`compensation.${f}`] = safeNumber(employeeData.compensation[f], 0);
+        if (f in employeeData.compensation) {
+          employeeSet[`compensation.${f}`] = safeNumber(
+            employeeData.compensation[f],
+            0
+          );
         }
       }
-      // if no explicit gross provided, we can sum the provided pieces we are updating
-      // but to keep this tolerant (no surprise overwrites), only set gross if user sent it.
-      if ('grossSalary' in employeeData.compensation) {
-        employeeSet['compensation.grossSalary'] = safeNumber(employeeData.compensation.grossSalary, 0);
-      }
     }
 
-    // Update employee (no validator-based 400s)
     const updatedEmployee = await Employee.findByIdAndUpdate(
       req.params.id,
       { $set: employeeSet },
-      { new: true, runValidators: false } // tolerant
+      { new: true, runValidators: false }
     );
 
-    /** Build $set for salary slip (partial, tolerant) */
+    /* ------------------ SALARY SLIP UPDATE ------------------ */
+
     let updatedSalarySlip;
+    let taxCalculationResult = null;
+
     if (salarySlipData && Object.keys(salarySlipData).length > 0) {
       const slipSet = {};
 
-      // copy non-comp fields directly if provided
       const nonCompKeys = [
-        'candidateName','candidateEmail','position','department',
-        'startDate','reportingTime','month','year','isActive'
+        "candidateName",
+        "candidateEmail",
+        "position",
+        "department",
+        "startDate",
+        "reportingTime",
+        "month",
+        "year",
+        "isActive",
       ];
+
       for (const k of nonCompKeys) {
-        if (k in salarySlipData && salarySlipData[k] !== undefined) {
-          slipSet[k] = salarySlipData[k];
-        }
+        if (k in salarySlipData) slipSet[k] = salarySlipData[k];
       }
 
-      // encrypt only provided comp fields (partial)
+      // encrypt updated compensation fields
       const providedComp = [];
       for (const f of COMP_FIELDS) {
-        if (f in salarySlipData && salarySlipData[f] !== undefined) {
+        if (f in salarySlipData) {
           const val = safeNumber(salarySlipData[f], 0);
-          try {
-            slipSet[f] = await encrypt(String(val));
-            providedComp.push(f);
-          } catch (err) {
-            console.warn(`Failed to encrypt ${f}:`, err);
-            // skip this field (don’t fail whole request)
-          }
+          slipSet[f] = await encrypt(String(val));
+          providedComp.push(f);
         }
       }
 
-      // If grossSalary wasn't explicitly provided but some components were provided:
-      if (!('grossSalary' in salarySlipData) && providedComp.some(f => f !== 'grossSalary')) {
-        // Best-effort re-calc: If we have a key and existing slip, merge old+new to compute.
-        if (existingSalarySlip && req.query.key) {
-          try {
-            // Build merged numeric view for sum
-            const merged = {};
-            // start from existing decrypted (where possible)
-            for (const f of COMP_FIELDS) {
-              if (f === 'grossSalary') continue;
-              let base = 0;
-              if (existingSalarySlip[f]) {
-                try {
-                  base = safeNumber(await decrypt(existingSalarySlip[f], req.query.key), 0);
-                } catch { base = 0; }
-              }
-              merged[f] = base;
-            }
-            // overlay with newly provided numeric values
-            for (const f of providedComp) {
-              if (f !== 'grossSalary') {
-                merged[f] = safeNumber(salarySlipData[f], 0);
-              }
-            }
-            // sum
-            let gross = 0;
-            for (const f of COMP_FIELDS) {
-              if (f !== 'grossSalary') gross += safeNumber(merged[f], 0);
-            }
-            slipSet['grossSalary'] = await encrypt(String(gross));
-          } catch (err) {
-            console.warn('Failed to recompute/encrypt grossSalary, leaving unchanged:', err);
-          }
-        }
-        // if no key or no existing slip, we leave grossSalary unchanged (tolerant).
-      }
+      // REQUIRED FIELDS FIX
+      const ownerId =
+        req.user?._id ||
+        req._id ||
+        employeeData.owner ||
+        existingEmployee.owner;
 
-      // upsert/update salary slip
+      slipSet.owner = ownerId;
+      slipSet.month =
+        salarySlipData.month || existingSalarySlip?.month || (new Date().getMonth() + 1).toString();
+      slipSet.year =
+        salarySlipData.year || existingSalarySlip?.year || new Date().getFullYear().toString();
+
       if (existingSalarySlip) {
         updatedSalarySlip = await SalarySlip.findOneAndUpdate(
           { employee: req.params.id },
           { $set: { ...slipSet, employee: req.params.id } },
-          { new: true, runValidators: false }
+          { new: true }
         );
       } else {
-        updatedSalarySlip = await SalarySlip.create({ ...slipSet, employee: req.params.id });
+        updatedSalarySlip = await SalarySlip.create({
+          ...slipSet,
+          employee: req.params.id,
+        });
+      }
+
+      if (updatedSalarySlip) {
+        taxCalculationResult = await autoCalculateAndSaveTax(updatedSalarySlip);
       }
     } else {
-      updatedSalarySlip = existingSalarySlip || null;
+      updatedSalarySlip = existingSalarySlip;
     }
 
-    // Build decrypted salary slip response (tolerant if no key)
+    /* ------------------ RESPONSE ------------------ */
+
     let decryptedSalarySlip = null;
     if (updatedSalarySlip) {
       const raw = updatedSalarySlip.toObject();
       decryptedSalarySlip = { ...raw };
-      for (const f of COMP_FIELDS) {
-        if (raw[f]) {
-          try {
-            const dv = await decrypt(raw[f], req.query.key);
-            decryptedSalarySlip[f] = safeNumber(dv, 0);
-          } catch (err) {
-            decryptedSalarySlip[f] = 0;
-          }
-        } else {
+      const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
+
+      for (const f of ALL_FIELDS) {
+        try {
+          const dv = await decrypt(raw[f], req.query.key);
+          decryptedSalarySlip[f] = safeNumber(dv, 0);
+        } catch {
           decryptedSalarySlip[f] = 0;
         }
       }
@@ -283,20 +538,119 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     res.status(200).json({
       employee: updatedEmployee,
       salarySlip: decryptedSalarySlip,
-      message: 'Employee and salary slip updated successfully (tolerant update).'
+      taxCalculation: taxCalculationResult
+        ? {
+            monthlyTax: taxCalculationResult.monthlyTax,
+            annualTax: taxCalculationResult.annualTax,
+            netPayable: taxCalculationResult.netPayable,
+            annualTaxable: taxCalculationResult.annualTaxable,
+            grossMonthly: taxCalculationResult.grossMonthly,
+          }
+        : null,
+      message:
+        "Employee and salary slip updated successfully with auto tax calculation.",
     });
   } catch (err) {
-    console.error('Error in updateEmployeeAndSalarySlip:', err);
-    res.status(500).json({ error: 'Internal server error', details: err.message });
+    console.error("Error in updateEmployeeAndSalarySlip:", err);
+    res
+      .status(500)
+      .json({ error: "Internal server error", details: err.message });
   }
 };
+
+
+/* ---------------------- Manual Tax Calculation Endpoint ---------------------- */
+exports.calculateTaxForEmployee = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fiscalYear = "2025-26" } = req.body;
+
+    if (!isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid employee ID format" });
+    }
+
+    const salarySlip = await SalarySlip.findOne({ employee: id });
+    if (!salarySlip) {
+      return res
+        .status(404)
+        .json({ error: "Salary slip not found for this employee" });
+    }
+
+    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    if (!taxCfg) {
+      return res
+        .status(404)
+        .json({ error: `Tax config for ${fiscalYear} not found` });
+    }
+
+    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
+
+    // Update the salary slip with calculated tax
+    await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
+    await writeEnc(salarySlip, "annualTaxDeduction", taxCalculation.annualTax);
+    await writeEnc(
+      salarySlip,
+      "totalDeductions",
+      taxCalculation.totalDeductions
+    );
+    await writeEnc(salarySlip, "netPayable", taxCalculation.netPayable);
+
+    await salarySlip.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Tax calculated and saved successfully",
+      taxCalculation: {
+        grossMonthly: taxCalculation.grossMonthly,
+        monthlyTax: taxCalculation.monthlyTax,
+        annualTax: taxCalculation.annualTax,
+        netPayable: taxCalculation.netPayable,
+        annualTaxable: taxCalculation.annualTaxable,
+        medExemptMonthly: taxCalculation.medExemptMonthly,
+      },
+    });
+  } catch (err) {
+    console.error("Error in calculateTaxForEmployee:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to calculate tax", details: err.message });
+  }
+};
+
+/* ---------------------- Get Tax Configuration ---------------------- */
+exports.getTaxConfiguration = async (req, res) => {
+  try {
+    const { fiscalYear = "2025-26" } = req.query;
+
+    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    if (!taxCfg) {
+      return res
+        .status(404)
+        .json({ error: `Tax configuration for ${fiscalYear} not found` });
+    }
+
+    res.status(200).json({
+      success: true,
+      taxConfig: taxCfg,
+    });
+  } catch (err) {
+    console.error("Error in getTaxConfiguration:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to get tax configuration", details: err.message });
+  }
+};
+
+/* ---------------------- Existing Functions (Unchanged) ---------------------- */
 
 exports.updateEmployeePhoto = async (req, res) => {
   try {
     const { id } = req.params;
 
     if (!req.file) {
-      return res.status(400).json({ success: false, message: "No photo uploaded" });
+      return res
+        .status(400)
+        .json({ success: false, message: "No photo uploaded" });
     }
 
     // New photo URL
@@ -305,7 +659,9 @@ exports.updateEmployeePhoto = async (req, res) => {
     // Fetch employee to delete old photo if it exists
     const employee = await Employee.findById(id);
     if (!employee) {
-      return res.status(404).json({ success: false, message: "Employee not found" });
+      return res
+        .status(404)
+        .json({ success: false, message: "Employee not found" });
     }
 
     // Delete old photo from disk if it exists
@@ -336,6 +692,31 @@ exports.updateEmployeePhoto = async (req, res) => {
     });
   }
 };
+exports.calculatePreviewTax = async (req, res) => {
+  try {
+    const { salaryBreakup, grossMonthly } = req.body;
+
+    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" });
+    if (!taxCfg) return res.status(404).json({ error: "Tax config missing" });
+
+    const fakeSlip = {
+      basic: salaryBreakup.basic || 0,
+      medicalAllowance: salaryBreakup.medicalAllowance || 0,
+      grossSalary: grossMonthly,
+      ...salaryBreakup,
+    };
+
+    const calc = await calculateTaxForSalarySlip(fakeSlip, taxCfg);
+
+    return res.json({
+      success: true,
+      taxCalculation: calc,
+    });
+  } catch (err) {
+    console.error("Preview tax error:", err);
+    res.status(500).json({ error: "Failed to calculate preview tax" });
+  }
+};
 
 exports.resendCompleteProfileLink = async (req, res) => {
   try {
@@ -345,7 +726,8 @@ exports.resendCompleteProfileLink = async (req, res) => {
     }
     const emp = await Employee.findById(id);
     if (!emp) return res.status(404).json({ message: "Employee not found" });
-    if (!emp.email) return res.status(400).json({ message: "Employee email is missing" });
+    if (!emp.email)
+      return res.status(400).json({ message: "Employee email is missing" });
 
     const ownerId = emp.owner || DEFAULT_OWNER_ID;
     await sendCompleteProfileLink({
@@ -355,9 +737,15 @@ exports.resendCompleteProfileLink = async (req, res) => {
       ownerId,
     });
 
-    return res.json({ success: true, message: "Complete-profile email resent." });
+    return res.json({
+      success: true,
+      message: "Complete-profile email resent.",
+    });
   } catch (err) {
+    f;
     console.error("resendCompleteProfileLink error:", err);
-    return res.status(500).json({ message: err.message || "Failed to resend profile email" });
+    return res
+      .status(500)
+      .json({ message: err.message || "Failed to resend profile email" });
   }
 };

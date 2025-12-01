@@ -8,6 +8,8 @@ const Signature = require("../models/Signature");
 const OfferEmailTemplate = require("../models/OfferEmailTemplate");
 const probationPeriods = require("../models/ProbationPeriod");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
+const verifyEmail = require("../utils/verifyEmail");
+
 require("dotenv").config();
 
 /* ----------------------------- Mail Transport ----------------------------- */
@@ -50,6 +52,7 @@ const SALARY_COMPONENTS = [
   "fuelAllowance",
   "othersAllowances",
 ];
+
 
 /* ----------------------------- Helper: Company ---------------------------- */
 async function getCompanyContext(ownerId) {
@@ -369,8 +372,6 @@ async function buildContext({
     grossSalaryRaw,
   };
 }
-
-/* -------------------------- Controller: Send (single-step) --------------- */
 async function sendOfferLetter(req, res) {
   try {
     const {
@@ -401,21 +402,36 @@ async function sendOfferLetter(req, res) {
         .status(400)
         .json({ error: "Missing required fields for sending offer." });
     }
+
     if (!req.user || !req.user._id) {
       return res.status(401).json({ error: "No user context found." });
     }
+
     let ownerId = req.user._id;
     if (!(ownerId instanceof mongoose.Types.ObjectId))
       ownerId = new mongoose.Types.ObjectId(ownerId);
 
-    const companyExists = await CompanyProfile.findOne({ owner: ownerId });
     const exists = await Employee.findOne({ email: candidateEmail });
-    if (exists)
+    if (exists) {
       return res.status(400).json({
         error: "An employee with this email already exists. Offer not sent.",
       });
+    }
 
-    // Build context and load template
+    /* ---------------------------------------------------------
+     * ⭐ ZEROBOUNCE EMAIL VERIFICATION (with IP bypass fix)
+     * --------------------------------------------------------- */
+    const isValidEmail = await verifyEmail(candidateEmail);
+
+    if (!isValidEmail) {
+      return res.status(400).json({
+        error:
+          "The provided email address is invalid or undeliverable. Email sending has been blocked.",
+      });
+    }
+    /* --------------------------------------------------------- */
+
+    // Build template context
     const {
       ctx,
       companyCtx,
@@ -442,31 +458,29 @@ async function sendOfferLetter(req, res) {
       key,
     }).lean();
 
-    // Render final subject + html (prefer client override)
+    // Render subject
     let finalSubject =
-      subjectOverride || // This should already be rendered by frontend
+      subjectOverride ||
       (tpl
         ? renderWithContext(tpl.subject || "", ctx)
         : `Offer of Employment – ${position} at ${companyCtx.name}`);
 
+    // Render letter
     let finalHtml = letterOverride;
 
-    // If no letter override provided, use template or default
     if (!finalHtml) {
       finalHtml = tpl
         ? renderWithContext(tpl.html || "", ctx)
         : `
-      <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
-        <p>Dear <b>${safeCandidateName}</b>,</p>
-        <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${
-            department || "relevant"
-          }</b> department at <b>${companyCtx.name}</b>.</p>
-        {{signatureHtml}}
-      </div>
-    `.trim();
+          <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
+            <p>Dear <b>${safeCandidateName}</b>,</p>
+            <p>We're thrilled to have you on board!</p>
+            <p>It gives us great pleasure to officially offer you the position of <b>${position}</b>
+            in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
+            {{signatureHtml}}
+          </div>
+        `.trim();
 
-      // Only add signature if using template/default AND signatureHtml placeholder exists
       if (finalHtml.includes("{{signatureHtml}}")) {
         finalHtml = finalHtml.replace(
           "{{signatureHtml}}",
@@ -475,13 +489,11 @@ async function sendOfferLetter(req, res) {
       }
     }
 
-    // IMPORTANT: Remove blue variable styling before sending to email
+    // Clean styling + enforce email-safe layout
     finalHtml = removeBlueVariableStyling(finalHtml);
-
-    // Then apply CSS enforcement to ensure black text
     finalHtml = enforceImgCss(enforceComicSans(finalHtml));
 
-    // Persist generated email
+    // Save generated email
     await OfferEmailGenerated.create({
       owner: ownerId,
       key,
@@ -491,7 +503,9 @@ async function sendOfferLetter(req, res) {
       context: ctx,
     });
 
-    // Create employee + salary (encrypted) and send email
+    /* ---------------------------------------------------------
+     * ➕ CREATE EMPLOYEE
+     * --------------------------------------------------------- */
     const normalizedRT = normalizeTime(reportingTime);
     const probationDaysNum = Number(probationDays) || 0;
 
@@ -510,21 +524,23 @@ async function sendOfferLetter(req, res) {
         ? { leaveEntitlement: { total: 0, usedPaid: 0, usedUnpaid: 0 } }
         : {}),
     });
-    if (probationDaysNum > 0) {
-      await Employee.updateOne(
-        { _id: employee._id },
-        {status: "Offered"},
-        { $set: { "leaveEntitlement.total": 0 } },
-        { runValidators: false }
-      );
-      employee = await Employee.findById(employee._id);
-    }
 
+    /* ---------------------------------------------------------
+     * ⭐ FIX: Auto-generate month & year required in Salaries
+     * --------------------------------------------------------- */
+    const jsDate = new Date(startDate);
+    const month = String(jsDate.getMonth() + 1).padStart(2, "0");
+    const year = String(jsDate.getFullYear());
+
+    /* ---------------------------------------------------------
+     * ➕ CREATE SALARY RECORD
+     * --------------------------------------------------------- */
     const encryptedSalaryFields = await Promise.all(
       SALARY_COMPONENTS.map(async (k) => ({
         [k]: await encrypt((salaryBreakup?.[k] || 0).toString()),
       }))
     );
+
     const encryptedSalaryBreakup = Object.assign({}, ...encryptedSalaryFields);
 
     await Salaries.create({
@@ -538,10 +554,15 @@ async function sendOfferLetter(req, res) {
       grossSalary: await encrypt(grossSalaryRaw.toString()),
       owner: ownerId,
       createdBy: ownerId,
+      month, // ⭐ REQUIRED FIELD ADDED
+      year,  // ⭐ REQUIRED FIELD ADDED
       ...encryptedSalaryBreakup,
-      probationDays: await encrypt((Number(probationDays) || 0).toString()),
+      probationDays: await encrypt(probationDaysNum.toString()),
     });
 
+    /* ---------------------------------------------------------
+     * SEND EMAIL
+     * --------------------------------------------------------- */
     const text = finalHtml.replace(/<[^>]+>/g, " ");
 
     await transporter.sendMail({
@@ -558,6 +579,7 @@ async function sendOfferLetter(req, res) {
     return res.status(500).json({ error: "Failed to send offer letter." });
   }
 }
+
 
 /* ------------------------- Controller: Preview Email ---------------------- */
 async function previewOfferLetter(req, res) {
