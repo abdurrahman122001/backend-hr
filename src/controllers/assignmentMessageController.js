@@ -2580,6 +2580,22 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
 ) {
   try {
     const { id } = req.params;
+    
+    // ✅ FIX: Add null/undefined check for req.body
+    if (!req.body || typeof req.body !== 'object') {
+      console.error('❌ Request body is missing or invalid:', {
+        hasReqBody: !!req.body,
+        typeOfReqBody: typeof req.body,
+        contentType: req.headers['content-type'],
+        method: req.method
+      });
+      return res.status(400).json({ 
+        error: "Request body is missing or invalid. Please send JSON data with subject and/or note.",
+        contentType: req.headers['content-type'],
+        expectedContentType: "application/json"
+      });
+    }
+    
     const { subject, note } = req.body;
 
     if (!id) {

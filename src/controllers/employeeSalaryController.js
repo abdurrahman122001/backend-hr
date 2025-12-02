@@ -118,9 +118,9 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
       const tax = Math.round(s.fixed + over * s.rate);
 
       console.log(
-        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${s.fixed}, Rate ${
-          s.rate * 100
-        }%, Over ${over}, Annual Tax=${tax}`
+        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${
+          s.fixed
+        }, Rate ${s.rate * 100}%, Over ${over}, Annual Tax=${tax}`
       );
 
       return tax;
@@ -145,7 +145,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   return 0;
 }
 
-
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
     // 1) Calculate Gross Monthly Salary
@@ -165,35 +164,92 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       "medicalAllowance",
     ]);
 
-    // 2) Correct Medical Exemption (Pakistan Law)
-    const medExemptMonthly = taxCfg?.enableMedicalExemption
-      ? Math.min(medMonthly, basic * 0.1) // <-- FIXED
+    /* ------------------------------------------------------------
+       2) MEDICAL EXEMPTION (Pakistan Law)
+    ------------------------------------------------------------ */
+const medExemptMonthly = taxCfg?.enableMedicalExemption
+      ? medMonthly   // FULL medical allowance exempt
       : 0;
 
-    // 3) Monthly Taxable Income
+    /* ------------------------------------------------------------
+       3) TAXABLE MONTHLY INCOME
+    ------------------------------------------------------------ */
     const taxableMonthly = Math.max(0, finalGrossMonthly - medExemptMonthly);
 
-    // 4) Annual Taxable
-    const annualTaxable = taxableMonthly * 12;
+    /* ------------------------------------------------------------
+       4) JOINING DATE BASED MONTH COUNT
+    ------------------------------------------------------------ */
 
-    // 5) Slab Calculation
+    // default fiscal year = July → June
+    const fiscalStartMonth = 7; // July
+    const fiscalEndMonth = 6; // June
+
+    let joiningDate = null;
+
+    // salarySlip should have employee reference populated elsewhere
+    if (salarySlip?.employee?.joiningDate) {
+      joiningDate = new Date(salarySlip.employee.joiningDate);
+    } else {
+      // manually fetch employee if not populated
+      const emp = await Employee.findById(salarySlip.employee).lean();
+      if (emp?.joiningDate) joiningDate = new Date(emp.joiningDate);
+    }
+
+    const today = new Date();
+
+    const fiscalStart = new Date(today.getFullYear(), fiscalStartMonth - 1, 1);
+
+    // If current month is Jan–Jun, fiscal year actually started last year
+    if (today.getMonth() + 1 <= fiscalEndMonth) {
+      fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
+    }
+
+    const effectiveStart =
+      joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
+
+    // Calculate remaining months including the joining month
+    const fiscalEnd = new Date(
+      fiscalStart.getFullYear() + 1,
+      fiscalEndMonth - 1,
+      1
+    );
+    fiscalEnd.setMonth(fiscalEnd.getMonth() + 1); // move to next month for full-cycle calculation
+
+    let monthsRemaining =
+      (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
+      (fiscalEnd.getMonth() - effectiveStart.getMonth());
+
+    if (monthsRemaining < 1) monthsRemaining = 1; // Safety
+
+    /* ------------------------------------------------------------
+       5) Annual Taxable Income Using Remaining Months
+    ------------------------------------------------------------ */
+    const annualTaxable = taxableMonthly * monthsRemaining;
+
+    /* ------------------------------------------------------------
+       6) Slab Calculation (annual)
+    ------------------------------------------------------------ */
     const annualTax = computeAnnualTaxBandOnly(
       annualTaxable,
       taxCfg?.slabs || []
     );
 
-    const monthlyTax = Math.round(annualTax / 12);
+    // NOW DIVIDE TAX BASED ON REMAINING MONTHS (NOT 12)
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
 
-    // 6) Allowances & Net Payable
+    /* ------------------------------------------------------------
+       7) Allowances & Net Payable
+    ------------------------------------------------------------ */
     const totalAllowances = finalGrossMonthly - basic;
     const totalDeductions = monthlyTax;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
     return {
       grossMonthly: finalGrossMonthly,
-      annualGross: finalGrossMonthly * 12,
+      annualGross: finalGrossMonthly * monthsRemaining,
       medExemptMonthly,
       taxableMonthly,
+      monthsRemaining, // <-- NEW FIELD (important)
       annualTaxable,
       annualTax,
       monthlyTax,
@@ -493,9 +549,13 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
       slipSet.owner = ownerId;
       slipSet.month =
-        salarySlipData.month || existingSalarySlip?.month || (new Date().getMonth() + 1).toString();
+        salarySlipData.month ||
+        existingSalarySlip?.month ||
+        (new Date().getMonth() + 1).toString();
       slipSet.year =
-        salarySlipData.year || existingSalarySlip?.year || new Date().getFullYear().toString();
+        salarySlipData.year ||
+        existingSalarySlip?.year ||
+        new Date().getFullYear().toString();
 
       if (existingSalarySlip) {
         updatedSalarySlip = await SalarySlip.findOneAndUpdate(
@@ -557,7 +617,6 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       .json({ error: "Internal server error", details: err.message });
   }
 };
-
 
 /* ---------------------- Manual Tax Calculation Endpoint ---------------------- */
 exports.calculateTaxForEmployee = async (req, res) => {
