@@ -14,7 +14,6 @@ const ClientInfoSchema = new Schema(
     clientName: { type: String, required: true, trim: true },
     clientEmail: { type: String, required: true, trim: true, lowercase: true },
     country: { type: String, required: true },
-    country: { type: String, required: true },
 
     // 🔹 Location and general info
     companyLocation: { type: String },
@@ -30,13 +29,10 @@ const ClientInfoSchema = new Schema(
     websites: [{ type: String }],
     incorporationYear: { type: String }, // keep string for flexibility
     servicesStartDate: { type: String }, // YYYY-MM-DD
-    incorporationYear: { type: String },
-    servicesStartDate: { type: String },   // YYYY-MM-DD
     monthlyTransactions: { type: Number },
     accountingBasis: { type: String }, // Cash / Accrual
     numberOfBankFeeds: { type: Number },
     taxStatus: { type: String },
-    websites: [{ type: String }],
 
     // 🔹 UK-specific fields
     region: { type: String },
@@ -54,7 +50,48 @@ const ClientInfoSchema = new Schema(
     whatsappMuted: { type: Boolean, default: false },
     whatsappArchived: { type: Boolean, default: false },
 
-    // 🔹 Assignment
+    // 🔹 CLIENT'S COMPANY EMPLOYEES (NEW)
+    companyEmployees: [
+      {
+        name: { 
+          type: String, 
+          required: true, 
+          trim: true 
+        },
+        designation: { 
+          type: String, 
+          required: true, 
+          trim: true 
+        },
+        email: { 
+          type: String, 
+          trim: true,
+          lowercase: true 
+        },
+        phone: { 
+          type: String, 
+          trim: true 
+        },
+        department: { 
+          type: String, 
+          trim: true 
+        },
+        isPrimaryContact: { 
+          type: Boolean, 
+          default: false 
+        },
+        notes: { 
+          type: String, 
+          trim: true 
+        },
+        addedAt: { 
+          type: Date, 
+          default: Date.now 
+        }
+      }
+    ],
+
+    // 🔹 Assignment (your platform's employee assigned to handle this client)
     assignedTo: {
       type: Schema.Types.ObjectId,
       ref: "Employee",

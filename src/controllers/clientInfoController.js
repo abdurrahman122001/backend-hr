@@ -8,7 +8,6 @@ const isManagerLike = (role) => {
   return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
 };
 
-
 exports.createClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
@@ -18,13 +17,38 @@ exports.createClientInfo = async (req, res) => {
       return res.status(403).json({ error: "Only Managers/Team Leads can create client info" });
     }
 
-    const { ownerId, ...rest } = req.body;
+    const { ownerId, companyEmployees = [], ...rest } = req.body;
+    
     if (!ownerId) return res.status(400).json({ error: "ownerId is required" });
+
+    // Validate companyEmployees if provided during creation
+    const validatedEmployees = [];
+    if (Array.isArray(companyEmployees) && companyEmployees.length > 0) {
+      for (const empData of companyEmployees) {
+        if (!empData.name || !empData.designation) {
+          return res.status(400).json({ 
+            error: "Each company employee must have name and designation" 
+          });
+        }
+        
+        validatedEmployees.push({
+          name: empData.name.trim(),
+          designation: empData.designation.trim(),
+          email: empData.email ? empData.email.trim().toLowerCase() : undefined,
+          phone: empData.phone ? empData.phone.trim() : undefined,
+          department: empData.department ? empData.department.trim() : undefined,
+          isPrimaryContact: empData.isPrimaryContact || false,
+          notes: empData.notes ? empData.notes.trim() : undefined,
+          addedAt: new Date()
+        });
+      }
+    }
 
     const doc = await ClientInfo.create({
       ...rest,
-      owner: ownerId,       // User _id
-      createdBy: emp._id,   // creator (manager or team lead)
+      owner: ownerId,
+      createdBy: emp._id,
+      companyEmployees: validatedEmployees,
     });
 
     res.status(201).json(doc);
@@ -33,7 +57,6 @@ exports.createClientInfo = async (req, res) => {
     res.status(500).json({ error: "Failed to create client info" });
   }
 };
-
 
 exports.getClientInfo = async (req, res) => {
   try {
@@ -67,7 +90,6 @@ exports.getClientInfo = async (req, res) => {
   }
 };
 
-
 exports.getMyClients = async (req, res) => {
   try {
     const employeeId = req.employee._id;
@@ -86,16 +108,14 @@ exports.getMyClients = async (req, res) => {
   }
 };
 
-/**
- * PUT /api/client-info/:id
- * Update a client info record (all fields allowed)
- */
 exports.updateClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
+    const { companyEmployees, ...updates } = req.body;
+    
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -109,11 +129,40 @@ exports.updateClientInfo = async (req, res) => {
       return res.status(403).json({ error: "Not authorized to update this client info" });
     }
 
-    // Allow all fields from body to be updated
-    const updates = req.body;
+    // If companyEmployees is provided in update, replace the entire array
+    if (companyEmployees !== undefined) {
+      if (!Array.isArray(companyEmployees)) {
+        return res.status(400).json({ error: "companyEmployees must be an array" });
+      }
+      
+      const validatedEmployees = [];
+      for (const empData of companyEmployees) {
+        if (!empData.name || !empData.designation) {
+          return res.status(400).json({ 
+            error: "Each company employee must have name and designation" 
+          });
+        }
+        
+        validatedEmployees.push({
+          name: empData.name.trim(),
+          designation: empData.designation.trim(),
+          email: empData.email ? empData.email.trim().toLowerCase() : undefined,
+          phone: empData.phone ? empData.phone.trim() : undefined,
+          department: empData.department ? empData.department.trim() : undefined,
+          isPrimaryContact: empData.isPrimaryContact || false,
+          notes: empData.notes ? empData.notes.trim() : undefined,
+          addedAt: empData.addedAt || new Date()
+        });
+      }
+      
+      updates.companyEmployees = validatedEmployees;
+    }
 
-    const updated = await ClientInfo.findByIdAndUpdate(id, updates, { new: true })
-      .populate("assignedTo", "_id name companyEmail");
+    const updated = await ClientInfo.findByIdAndUpdate(
+      id, 
+      updates, 
+      { new: true }
+    ).populate("assignedTo", "_id name companyEmail");
 
     res.json(updated);
   } catch (err) {
@@ -122,36 +171,141 @@ exports.updateClientInfo = async (req, res) => {
   }
 };
 
-/**
- * DELETE /api/client-info/:id
- * Delete a client info record
- */
-exports.deleteClientInfo = async (req, res) => {
+// Add a single company employee to client
+exports.addCompanyEmployee = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
+    const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
+    
+    if (!name || !designation) {
+      return res.status(400).json({ error: "Name and designation are required" });
+    }
+
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
+    // Check authorization
     const role = String(emp.role || "").trim().toLowerCase();
-
-    // Authorization: only Owner, Manager, Team Lead, or creator can delete
     if (
       role !== "owner" &&
       !isManagerLike(emp.role) &&
-      String(client.createdBy) !== String(emp._id)
+      String(client.assignedTo) !== String(emp._id)
     ) {
-      return res.status(403).json({ error: "Not authorized to delete this client info" });
+      return res.status(403).json({ error: "Not authorized to add employees to this client" });
     }
 
-    await client.deleteOne();
+    const newEmployee = {
+      name: name.trim(),
+      designation: designation.trim(),
+      email: email ? email.trim().toLowerCase() : undefined,
+      phone: phone ? phone.trim() : undefined,
+      department: department ? department.trim() : undefined,
+      isPrimaryContact: isPrimaryContact || false,
+      notes: notes ? notes.trim() : undefined,
+      addedAt: new Date()
+    };
 
-    res.json({ success: true, message: "Client info deleted successfully" });
+    client.companyEmployees.push(newEmployee);
+    await client.save();
+
+    const updatedClient = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail");
+
+    res.json(updatedClient);
   } catch (err) {
-    console.error("deleteClientInfo error:", err);
-    res.status(500).json({ error: "Failed to delete client info" });
+    console.error("addCompanyEmployee error:", err);
+    res.status(500).json({ error: "Failed to add company employee" });
+  }
+};
+
+// Remove a company employee from client
+exports.removeCompanyEmployee = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id, employeeIndex } = req.params;
+    
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Check authorization
+    const role = String(emp.role || "").trim().toLowerCase();
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.assignedTo) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to remove employees from this client" });
+    }
+
+    const index = parseInt(employeeIndex);
+    if (isNaN(index) || index < 0 || index >= client.companyEmployees.length) {
+      return res.status(400).json({ error: "Invalid employee index" });
+    }
+
+    // Remove the employee at specified index
+    client.companyEmployees.splice(index, 1);
+    await client.save();
+
+    const updatedClient = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail");
+
+    res.json(updatedClient);
+  } catch (err) {
+    console.error("removeCompanyEmployee error:", err);
+    res.status(500).json({ error: "Failed to remove company employee" });
+  }
+};
+
+// Update a specific company employee
+exports.updateCompanyEmployee = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id, employeeIndex } = req.params;
+    const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
+    
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // Check authorization
+    const role = String(emp.role || "").trim().toLowerCase();
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.assignedTo) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to update employees of this client" });
+    }
+
+    const index = parseInt(employeeIndex);
+    if (isNaN(index) || index < 0 || index >= client.companyEmployees.length) {
+      return res.status(400).json({ error: "Invalid employee index" });
+    }
+
+    // Update the employee
+    if (name) client.companyEmployees[index].name = name.trim();
+    if (designation) client.companyEmployees[index].designation = designation.trim();
+    if (email !== undefined) client.companyEmployees[index].email = email ? email.trim().toLowerCase() : undefined;
+    if (phone !== undefined) client.companyEmployees[index].phone = phone ? phone.trim() : undefined;
+    if (department !== undefined) client.companyEmployees[index].department = department ? department.trim() : undefined;
+    if (isPrimaryContact !== undefined) client.companyEmployees[index].isPrimaryContact = isPrimaryContact;
+    if (notes !== undefined) client.companyEmployees[index].notes = notes ? notes.trim() : undefined;
+
+    await client.save();
+
+    const updatedClient = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail");
+
+    res.json(updatedClient);
+  } catch (err) {
+    console.error("updateCompanyEmployee error:", err);
+    res.status(500).json({ error: "Failed to update company employee" });
   }
 };
 
@@ -185,6 +339,36 @@ exports.getClientById = async (req, res) => {
   }
 };
 
+exports.deleteClientInfo = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const role = String(emp.role || "").trim().toLowerCase();
+
+    // Authorization: only Owner, Manager, Team Lead, or creator can delete
+    if (
+      role !== "owner" &&
+      !isManagerLike(emp.role) &&
+      String(client.createdBy) !== String(emp._id)
+    ) {
+      return res.status(403).json({ error: "Not authorized to delete this client info" });
+    }
+
+    await client.deleteOne();
+
+    res.json({ success: true, message: "Client info deleted successfully" });
+  } catch (err) {
+    console.error("deleteClientInfo error:", err);
+    res.status(500).json({ error: "Failed to delete client info" });
+  }
+};
+
+// Keep your existing toggleWhatsAppFlag and getWhatsAppFlags functions
 exports.toggleWhatsAppFlag = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);

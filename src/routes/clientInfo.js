@@ -18,12 +18,18 @@ router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
 // Delete specific client info (Owner/Manager/Team Lead/Creator)
 router.delete("/:id", requireAuth, clientInfoCtrl.deleteClientInfo);
 
+// Get client by ID
 router.get("/:id", requireAuth, clientInfoCtrl.getClientById);
+
+// Manage company employees
+router.post("/:id/company-employees", requireAuth, clientInfoCtrl.addCompanyEmployee);
+router.delete("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.removeCompanyEmployee);
+router.put("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.updateCompanyEmployee);
+
+// WhatsApp flags
 router.patch(
     "/:id/toggle-whatsapp/:flag", requireAuth, clientInfoCtrl.toggleWhatsAppFlag
 );
-
 router.get("/:id/whatsapp-flags", requireAuth, clientInfoCtrl.getWhatsAppFlags);
-
 
 module.exports = router;

@@ -79,8 +79,10 @@ router.patch("/:id/schedule", ctrl.scheduleMessage);
 router.patch("/:id/unschedule", ctrl.unscheduleMessage);
 router.patch("/:id/reschedule", ctrl.rescheduleMessage);
 router.patch("/:id/send", ctrl.sendDraft);
-router.patch("/:id/edit-disapproved", ctrl.editDisapprovedMessage);
-router.patch("/:id/edit-pending", upload.array("files", 10), ctrl.editPendingMessage);
+router.patch('/:id/edit-disapproved', 
+  upload.array('files'),  // Handle file uploads
+  ctrl.editDisapprovedMessage
+);router.patch("/:id/edit-pending", upload.array("files", 10), ctrl.editPendingMessage);
 
 router.post("/:id/read", ctrl.markAsRead);
 router.post("/:id/unread", ctrl.markAsUnread);

@@ -2573,107 +2573,227 @@ exports.getDraftCount = async function getDraftCount(req, res) {
     res.status(500).json({ error: "Failed to get draft count" });
   }
 };
-
-exports.editDisapprovedMessage = async function editDisapprovedMessage(
-  req,
-  res
-) {
+exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res) {
   try {
     const { id } = req.params;
-    
-    // ✅ FIX: Add null/undefined check for req.body
-    if (!req.body || typeof req.body !== 'object') {
-      console.error('❌ Request body is missing or invalid:', {
-        hasReqBody: !!req.body,
-        typeOfReqBody: typeof req.body,
-        contentType: req.headers['content-type'],
-        method: req.method
-      });
-      return res.status(400).json({ 
-        error: "Request body is missing or invalid. Please send JSON data with subject and/or note.",
-        contentType: req.headers['content-type'],
-        expectedContentType: "application/json"
-      });
-    }
-    
-    const { subject, note } = req.body;
 
-    if (!id) {
-      return res.status(400).json({ error: "Message ID is required" });
+    // 🔥 FIXED: Better null/undefined checking
+    console.log("📦 Request body:", req.body);
+    console.log("📦 Request files:", req.files);
+    console.log("📦 Content-Type:", req.headers['content-type']);
+
+    // Initialize variables with defaults
+    let subject, note;
+    let removedAttachments = [];
+    let files = [];
+
+    // Safely get request body data
+    const requestBody = req.body || {};
+
+    // Try to parse JSON if request body is a string (can happen with FormData)
+    let parsedBody = requestBody;
+    if (typeof requestBody === 'string' && requestBody.trim().startsWith('{')) {
+      try {
+        parsedBody = JSON.parse(requestBody);
+      } catch (e) {
+        console.error("Failed to parse JSON body:", e);
+        parsedBody = {};
+      }
+    }
+
+    // Extract subject and note with fallbacks
+    subject = parsedBody.subject || parsedBody.Subject || '';
+    note = parsedBody.note || parsedBody.Note || '';
+
+    // Handle removed attachments
+    if (parsedBody.removedAttachments || parsedBody.removedattachments) {
+      const removedAttachmentsRaw = parsedBody.removedAttachments || parsedBody.removedattachments;
+      try {
+        if (typeof removedAttachmentsRaw === 'string') {
+          if (removedAttachmentsRaw.trim().startsWith('[')) {
+            removedAttachments = JSON.parse(removedAttachmentsRaw);
+          } else {
+            removedAttachments = [removedAttachmentsRaw].filter(Boolean);
+          }
+        } else if (Array.isArray(removedAttachmentsRaw)) {
+          removedAttachments = removedAttachmentsRaw;
+        } else if (removedAttachmentsRaw) {
+          removedAttachments = [removedAttachmentsRaw].filter(Boolean);
+        }
+      } catch (e) {
+        console.error('Error parsing removedAttachments:', e);
+        removedAttachments = [];
+      }
+    }
+
+    // Handle files from FormData
+    if (req.files) {
+      // Handle different file upload configurations
+      if (Array.isArray(req.files)) {
+        files = req.files;
+      } else if (req.files.files && Array.isArray(req.files.files)) {
+        files = req.files.files;
+      } else if (req.files.attachments && Array.isArray(req.files.attachments)) {
+        files = req.files.attachments;
+      } else if (typeof req.files === 'object') {
+        // If it's an object with file objects
+        files = Object.values(req.files).flat();
+      }
+    }
+
+    // Debug logging
+    console.log("✅ Extracted data:", {
+      subject,
+      noteLength: note?.length || 0,
+      removedAttachmentsCount: removedAttachments.length,
+      filesCount: files.length
+    });
+
+    // Validation - check if id is valid
+    if (!id || id.trim() === '') {
+      return res.status(400).json({ 
+        error: "Message ID is required and must not be empty" 
+      });
     }
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ error: "Invalid message ID format" });
+      return res.status(400).json({ 
+        error: "Invalid message ID format. Must be a valid MongoDB ObjectId" 
+      });
     }
 
-    if (subject === undefined && note === undefined) {
-      return res
-        .status(400)
-        .json({ error: "No changes provided. Please update subject or note." });
-    }
-
-    if (subject !== undefined && subject.trim().length === 0) {
-      return res.status(400).json({ error: "Subject cannot be empty" });
-    }
-
-    if (note !== undefined && note.trim().length === 0) {
-      return res.status(400).json({ error: "Note cannot be empty" });
-    }
-
+    // Find the message first to check its current status
     const msg = await AssignmentMessage.findById(id);
     if (!msg) {
-      return res.status(404).json({ error: "Message not found" });
+      return res.status(404).json({ 
+        error: "Message not found",
+        messageId: id
+      });
     }
 
+    // Check if message is disapproved
     if (msg.approvalStatus !== "disapproved") {
       return res.status(400).json({
         error: "Only disapproved messages can be edited for resubmission",
         currentStatus: msg.approvalStatus,
+        allowedStatus: "disapproved"
       });
     }
 
-    // FIXED: Allow both original sender AND team leads to edit disapproved messages
-    const isSender = String(msg.sender) === String(req.employee._id);
-    const isTeamLead = req.employee.role?.toLowerCase() === "team lead"; // Fixed: changed "team lead" to "team_lead"
+    // Check permissions
+    const currentUserId = req.employee?._id;
+    const messageSenderId = String(msg.sender);
+    
+    if (!currentUserId) {
+      return res.status(401).json({ 
+        error: "Authentication required. No employee ID found." 
+      });
+    }
 
-    if (!isSender && !isTeamLead) {
+    const isSender = messageSenderId === String(currentUserId);
+    const userRole = req.employee?.role?.toLowerCase() || '';
+    const isTeamLead = userRole.includes('team') && userRole.includes('lead');
+    const isManager = userRole.includes('manager');
+
+    // Allow sender or team leads to edit
+    if (!isSender && !isTeamLead && !isManager) {
       return res.status(403).json({
-        error: "You can only edit your own messages or messages as a Team Lead",
-        messageOwner: msg.sender,
-        currentUser: req.employee._id,
-        userRole: req.employee.role,
-        isSender,
-        isTeamLead,
+        error: "You don't have permission to edit this message",
+        messageOwner: messageSenderId,
+        currentUser: currentUserId,
+        userRole: req.employee?.role || 'unknown',
+        allowedRoles: ["sender", "team_lead", "manager"]
       });
     }
 
-    const updateFields = {};
-    if (subject !== undefined) {
-      updateFields.subject = subject.trim();
+    // Check if any changes are provided
+    const hasSubjectChange = subject !== undefined && subject !== null && String(subject).trim() !== '';
+    const hasNoteChange = note !== undefined && note !== null && String(note).trim() !== '';
+    const hasFileChanges = files.length > 0 || removedAttachments.length > 0;
+
+    if (!hasSubjectChange && !hasNoteChange && !hasFileChanges) {
+      return res.status(400).json({ 
+        error: "No changes provided",
+        instructions: "Please update at least one of: subject, note, or attachments.",
+        currentSubject: msg.subject || "No subject",
+        currentNoteLength: msg.note?.length || 0,
+        currentAttachmentsCount: msg.attachments?.length || 0
+      });
     }
-    if (note !== undefined) {
-      updateFields.note = note.trim();
+
+    // Prepare update data - keep existing values if not provided
+    const updateData = {
+      approvalStatus: "pending",
+      updatedAt: new Date(),
+      resubmittedAt: new Date(),
+      lastEditedBy: currentUserId,
+      lastEditedAt: new Date()
+    };
+
+    // Only update subject if provided and different
+    if (hasSubjectChange) {
+      const trimmedSubject = String(subject).trim();
+      if (trimmedSubject !== msg.subject) {
+        updateData.subject = trimmedSubject;
+      }
+    } else {
+      // Keep existing subject
+      updateData.subject = msg.subject || "";
     }
 
-    updateFields.approvalStatus = "pending";
-    updateFields.updatedAt = new Date();
-    updateFields.resubmittedAt = new Date();
+    // Only update note if provided and different
+    if (hasNoteChange) {
+      const trimmedNote = String(note).trim();
+      if (trimmedNote !== msg.note) {
+        updateData.note = trimmedNote;
+      }
+    } else {
+      // Keep existing note
+      updateData.note = msg.note || "";
+    }
 
-    // FIXED: Store lastEditedBy as a reference to the Employee model instead of embedding
-    updateFields.lastEditedBy = req.employee._id; // Store just the ID for population
-    updateFields.lastEditedAt = new Date();
+    console.log("🔄 Update data:", updateData);
 
+    // Apply basic updates first
     const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
       id,
-      { $set: updateFields },
+      { $set: updateData },
       { new: true, runValidators: true }
     );
 
     if (!updatedMsg) {
-      throw new Error("Failed to update message in database");
+      throw new Error(`Failed to update message ${id} in database`);
     }
 
-    // FIXED: Enhanced population to ensure lastEditedBy is properly populated
+    // Handle removed attachments
+    if (removedAttachments.length > 0) {
+      console.log("🗑️ Removing attachments:", removedAttachments);
+      updatedMsg.attachments = updatedMsg.attachments.filter(
+        attachment => !removedAttachments.includes(attachment._id.toString())
+      );
+    }
+
+    // Handle new file uploads
+    if (files.length > 0) {
+      console.log("📎 Adding new files:", files.length);
+      const newAttachments = files.map((f) => ({
+        filename: path.basename(f.filename || f.originalname),
+        originalName: f.originalname || f.filename || 'unnamed_file',
+        mimetype: f.mimetype || 'application/octet-stream',
+        size: f.size || 0,
+        url: buildPublicUrl(req, f.filename || f.originalname),
+        uploadedAt: new Date(),
+        uploadedBy: currentUserId,
+      }));
+
+      updatedMsg.attachments.push(...newAttachments);
+    }
+
+    // Save the updated message with attachments
+    await updatedMsg.save();
+    console.log("✅ Message updated successfully:", updatedMsg._id);
+
+    // Populate the updated message
     const populated = await AssignmentMessage.findById(updatedMsg._id)
       .populate([
         { path: "owner", select: "_id name companyEmail" },
@@ -2684,18 +2804,17 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         {
           path: "lastEditedBy",
           select: "_id name companyEmail role",
-          model: "Employee" // Explicitly specify the model
+          model: "Employee"
         },
       ])
-      .lean(); // Use lean() for better performance
+      .lean();
 
     if (!populated) {
       throw new Error("Failed to populate updated message data");
     }
 
-    // FIXED: Ensure lastEditedBy has proper structure for frontend
+    // Ensure lastEditedBy has proper structure
     if (populated.lastEditedBy && typeof populated.lastEditedBy === 'object') {
-      // If lastEditedBy is populated properly, ensure it has the right structure
       populated.lastEditedBy = {
         _id: populated.lastEditedBy._id,
         name: populated.lastEditedBy.name || "Unknown User",
@@ -2703,97 +2822,85 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         role: populated.lastEditedBy.role || "employee"
       };
     } else {
-      // Fallback: if population failed, create the structure manually
       populated.lastEditedBy = {
-        _id: req.employee._id,
+        _id: currentUserId,
         name: req.employee.name || "Unknown User",
         companyEmail: req.employee.companyEmail || "unknown@company.com",
         role: req.employee.role || "employee"
       };
     }
 
-    // 🔥 UPDATED: Enhanced real-time emission for resubmission
+    // 🔥 Real-time emission
     try {
       const io = getIO(req);
       if (io) {
-        // Emit message update to all participants
-        await emitMessageUpdate(io, populated, "disapproved_message_edited");
-
-        // Send specific resubmission notification
+        // Emit to all participants
         const allParticipants = new Set();
 
         // Add sender
-        const senderId = String(populated.sender._id);
-        allParticipants.add(senderId);
+        if (populated.sender && populated.sender._id) {
+          allParticipants.add(String(populated.sender._id));
+        }
 
         // Add receivers
         if (populated.receiver && Array.isArray(populated.receiver)) {
           populated.receiver.forEach((receiver) => {
-            const receiverId = String(receiver._id);
-            allParticipants.add(receiverId);
+            if (receiver && receiver._id) {
+              allParticipants.add(String(receiver._id));
+            }
           });
         }
 
-        // Add the editor if not already included
-        allParticipants.add(String(req.employee._id));
+        // Add the editor
+        allParticipants.add(String(currentUserId));
 
-        // Emit resubmission event to all participants
-        allParticipants.forEach((participantId) => {
-          io.to(`employee_${participantId}`).emit(
-            "assignment_message_resubmitted",
-            {
-              message: populated,
-              action: "resubmitted",
-              resubmittedBy: {
-                _id: req.employee._id,
-                name: req.employee.name,
-                companyEmail: req.employee.companyEmail,
-                role: req.employee.role,
-              },
-              timestamp: new Date(),
-            }
-          );
-        });
-
-        // Special notification to team leads
-        io.to("assignment_team_leads").emit("assignment_message_resubmitted", {
+        // Emit resubmission event
+        const resubmitEvent = {
           message: populated,
           action: "resubmitted",
           resubmittedBy: {
-            _id: req.employee._id,
+            _id: currentUserId,
             name: req.employee.name,
             companyEmail: req.employee.companyEmail,
             role: req.employee.role,
           },
           timestamp: new Date(),
+        };
+
+        allParticipants.forEach((participantId) => {
+          io.to(`employee_${participantId}`).emit(
+            "assignment_message_resubmitted",
+            resubmitEvent
+          );
         });
 
-        // Notify the sender
-        io.to(`employee_${req.employee._id}`).emit(
-          "message_resubmission_success",
-          {
-            message: populated,
-            timestamp: new Date(),
-          }
-        );
-      } else {
-        console.warn(
-          "⚠️ Socket.io instance not available for real-time updates"
-        );
+        // Special notification to team leads
+        io.to("assignment_team_leads").emit("assignment_message_resubmitted", resubmitEvent);
+
+        console.log("📡 Emitted real-time events to", allParticipants.size, "participants");
       }
     } catch (socketError) {
-      console.error("❌ Socket.io event error (non-critical):", socketError);
+      console.error("❌ Socket.io event error:", socketError);
+      // Don't fail the request if socket fails
     }
 
     res.json({
       success: true,
       message: "Disapproved message edited and submitted for review",
       data: populated,
+      changes: {
+        subjectChanged: hasSubjectChange,
+        noteChanged: hasNoteChange,
+        filesAdded: files.length,
+        attachmentsRemoved: removedAttachments.length
+      },
       timestamp: new Date(),
     });
   } catch (e) {
     console.error("❌ Error in editDisapprovedMessage:", e);
+    console.error("❌ Error stack:", e.stack);
 
+    // More specific error responses
     if (e.name === "ValidationError") {
       return res.status(400).json({
         error: "Validation failed",
@@ -2802,16 +2909,23 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     }
 
     if (e.name === "CastError") {
-      return res.status(400).json({ error: "Invalid data format" });
+      return res.status(400).json({ 
+        error: "Invalid data format",
+        details: e.message 
+      });
     }
 
     if (e.code === 11000) {
-      return res.status(400).json({ error: "Duplicate entry found" });
+      return res.status(400).json({ 
+        error: "Duplicate entry found",
+        details: e.message 
+      });
     }
 
     res.status(500).json({
       error: "Failed to edit disapproved message",
-      ...(process.env.NODE_ENV === "development" && { debug: e.message }),
+      details: process.env.NODE_ENV === "development" ? e.message : undefined,
+      timestamp: new Date(),
     });
   }
 };
