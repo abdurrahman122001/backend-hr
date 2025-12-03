@@ -38,6 +38,6 @@ router.post('/bulkCreate', ctrl.bulkCreate);
 router.get('/', ctrl.getHierarchy);
 router.get('/:employeeId/directReports', ctrl.getDirectReports);
 router.get('/:employeeId/managementChain', ctrl.getManagementChain);
-router.delete('/hierarchy/:id', requireAuth, ctrl.deleteHierarchy);
+router.delete('/:id', requireAuth, ctrl.deleteHierarchy);
 
 module.exports = router;

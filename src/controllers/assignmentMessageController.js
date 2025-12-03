@@ -2577,11 +2577,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
   try {
     const { id } = req.params;
 
-    // 🔥 FIXED: Better null/undefined checking
-    console.log("📦 Request body:", req.body);
-    console.log("📦 Request files:", req.files);
-    console.log("📦 Content-Type:", req.headers['content-type']);
-
     // Initialize variables with defaults
     let subject, note;
     let removedAttachments = [];
@@ -2640,14 +2635,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         files = Object.values(req.files).flat();
       }
     }
-
-    // Debug logging
-    console.log("✅ Extracted data:", {
-      subject,
-      noteLength: note?.length || 0,
-      removedAttachmentsCount: removedAttachments.length,
-      filesCount: files.length
-    });
 
     // Validation - check if id is valid
     if (!id || id.trim() === '') {
@@ -2751,9 +2738,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
       // Keep existing note
       updateData.note = msg.note || "";
     }
-
-    console.log("🔄 Update data:", updateData);
-
     // Apply basic updates first
     const updatedMsg = await AssignmentMessage.findByIdAndUpdate(
       id,
@@ -2767,7 +2751,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
 
     // Handle removed attachments
     if (removedAttachments.length > 0) {
-      console.log("🗑️ Removing attachments:", removedAttachments);
       updatedMsg.attachments = updatedMsg.attachments.filter(
         attachment => !removedAttachments.includes(attachment._id.toString())
       );
@@ -2775,7 +2758,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
 
     // Handle new file uploads
     if (files.length > 0) {
-      console.log("📎 Adding new files:", files.length);
       const newAttachments = files.map((f) => ({
         filename: path.basename(f.filename || f.originalname),
         originalName: f.originalname || f.filename || 'unnamed_file',
@@ -2791,8 +2773,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
 
     // Save the updated message with attachments
     await updatedMsg.save();
-    console.log("✅ Message updated successfully:", updatedMsg._id);
-
     // Populate the updated message
     const populated = await AssignmentMessage.findById(updatedMsg._id)
       .populate([
@@ -2876,8 +2856,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
 
         // Special notification to team leads
         io.to("assignment_team_leads").emit("assignment_message_resubmitted", resubmitEvent);
-
-        console.log("📡 Emitted real-time events to", allParticipants.size, "participants");
       }
     } catch (socketError) {
       console.error("❌ Socket.io event error:", socketError);

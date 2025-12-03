@@ -15,16 +15,19 @@ const AttachmentSchema = new Schema(
   { _id: true }
 );
 
-const EditHistorySchema = new Schema({
-  previousMessage: String,
-  previousSubject: String,
-  previousApprovalStatus: {
-    type: String,
-    enum: ["pending", "approved", "disapproved", null],
+const EditHistorySchema = new Schema(
+  {
+    previousMessage: String,
+    previousSubject: String,
+    previousApprovalStatus: {
+      type: String,
+      enum: ["pending", "approved", "disapproved", null],
+    },
+    editedAt: { type: Date, default: Date.now },
+    editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
   },
-  editedAt: { type: Date, default: Date.now },
-  editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
-}, { _id: true });
+  { _id: true }
+);
 
 const WhatsAppMessageSchema = new Schema(
   {
@@ -45,7 +48,7 @@ const WhatsAppMessageSchema = new Schema(
     approvalStatus: {
       type: String,
       enum: ["pending", "approved", "disapproved"],
-      default: null
+      default: null,
     },
     isForwarded: { type: Boolean, default: false },
     originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
@@ -66,22 +69,27 @@ const WhatsAppMessageSchema = new Schema(
     status: {
       type: String,
       enum: ["draft", "scheduled", "sent", "cancelled"],
-      default: "sent"
+      default: "sent",
     },
-    seenBy: [{
-      employee: { type: Schema.Types.ObjectId, ref: "Employee" },
-    }],
+    seenBy: [
+      {
+        employee: { type: Schema.Types.ObjectId, ref: "Employee" },
+      },
+    ],
     isReply: { type: Boolean, default: false },
     repliedTo: {
       type: Schema.Types.ObjectId,
       ref: "WhatsAppMessage",
-      default: null
+      default: null,
     },
     replyContent: {
-      originalMessage: String,
-      originalSender: { type: Schema.Types.ObjectId, ref: "Employee" },
-      originalAttachments: [AttachmentSchema],
-      preview: String // Short preview of the original message
+      type: {
+        originalMessage: String,
+        originalSender: { type: Schema.Types.ObjectId, ref: "Employee" },
+        originalAttachments: [AttachmentSchema],
+        preview: String,
+      },
+      default: null,
     },
 
     // Files

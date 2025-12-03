@@ -82,6 +82,7 @@ const noticePeriodRouter = require("./routes/noticePeriodRoute");
 const hrPolicyRoute = require("./routes/hrPolicyRoutes");
 const companyProfile = require("./routes/companyProfile");
 const bugRoutes = require("./routes/bugRoutes");
+const hierarchyRoute = require("./routes/hierarchy"); // (not mounted here, imported to ensure build)
 
 const app = express();
 
@@ -231,6 +232,7 @@ app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
 app.use("/api/notice-period", requireAuth, noticePeriodRouter);
 app.use("/api/hr-policies", requireAuth, hrPolicyRoute);
 app.use("/api/bugs", bugRoutes);
+app.use("/api/hierarchy", requireAuth, hierarchyRoute);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -340,9 +342,6 @@ cron.schedule(
 
       const config = await AttendanceConfig.findOne({}).lean();
       if (config && config.markAbsentManually === true) {
-        console.log(
-          "[cron] markAbsentManually = true; skipping auto-absent marking."
-        );
         return;
       }
 
@@ -352,15 +351,8 @@ cron.schedule(
         isHoliday: true,
       }).lean();
       if (holiday) {
-        console.log(
-          `[cron] ${date} is a holiday; skipping auto-absent marking.`
-        );
         return;
       }
-
-      console.log(`[cron] Auto-filling 'Absent' for ${date} where needed`);
-
-      // Employees already recorded for that date
       const done = await Attendance.find({ date }).select("employee").lean();
       const doneIds = new Set(done.map((r) => String(r.employee)));
 
@@ -374,7 +366,6 @@ cron.schedule(
       const dayName = yesterday
         .toLocaleDateString("en-US", { weekday: "long" })
         .toLowerCase();
-      console.log(`[cron] Yesterday was: ${dayName}`);
 
       const ops = [];
 
@@ -444,11 +435,7 @@ cron.schedule(
       if (ops.length) {
         const result = await Attendance.bulkWrite(ops);
         const upserted = result?.upsertedCount || 0;
-        console.log(`[cron] Upserted ${upserted} records for ${date}`);
       } else {
-        console.log(
-          `[cron] Nothing to upsert for ${date} (already marked or non-working).`
-        );
       }
     } catch (err) {
       console.error("[cron] Error auto-filling attendance:", err);
@@ -535,8 +522,6 @@ const io = new Server(primaryServer, {
 app.set("io", io);
 
 io.on("connection", (socket) => {
-  console.log("🟢 Socket client connected:", socket.id);
-
   // Join employee room
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
@@ -544,7 +529,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`employee_${employeeId}`);
-    console.log(`👤 Employee ${employeeId} joined their room`);
   });
 
   socket.on("join_client_updates", (ownerId) => {
@@ -553,7 +537,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`client_updates_${ownerId}`);
-    console.log(`✅ User joined client updates for owner: ${ownerId}`);
   });
 
   socket.on("client_updated", async (data, callback) => {
@@ -565,9 +548,6 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Missing required data" });
         return;
       }
-
-      console.log(`📢 Client ${action}: ${client.clientName} (${client._id})`);
-
       // Broadcast to all team members of this owner
       io.to(`client_updates_${ownerId}`).emit(`client_${action}`, {
         client,
@@ -604,7 +584,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`manager_updates_${managerId}`);
-    console.log(`✅ Manager ${managerId} joined manager updates room`);
   });
 
   // In your backend socket setup
@@ -618,9 +597,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log(`🔔 Client assignment: ${clientName} -> ${employeeId || 'unassigned'}`);
-      console.log(`📍 Emitting to employee_${employeeId}`);
-
       if (employeeId) {
         io.to(`employee_${employeeId}`).emit("client_assignment_updated", {
           type: "CLIENT_ASSIGNED_TO_YOU",
@@ -633,8 +609,6 @@ io.on("connection", (socket) => {
           assignedTo: employeeId, // ✅ THIS IS CRITICAL - must match client-side check
           previousAssignee: previousAssignee // ✅ Add this too
         });
-
-        console.log(`✅ Emitted client_assignment_updated to employee_${employeeId}`);
       }
 
       // ✅ Notify the PREVIOUSLY assigned employee (if any)
@@ -650,8 +624,6 @@ io.on("connection", (socket) => {
           previousAssignee: previousAssignee, // ✅ Add this
           assignedTo: null // ✅ Important for unassignment
         });
-
-        console.log(`✅ Emitted unassignment to previous employee_${previousAssignee}`);
       }
 
       // ✅ Notify all managers/team leads
@@ -693,19 +665,16 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`assignment_client_${clientId}`);
-    console.log(`🏢 Joined assignment client room: ${clientId}`);
   });
 
   // Join manager room
   socket.on("join_assignment_managers", () => {
     socket.join("assignment_managers");
-    console.log(`👔 Joined assignment managers room`);
   });
 
   // Join team leads room
   socket.on("join_assignment_team_leads", () => {
     socket.join("assignment_team_leads");
-    console.log(`🎯 Joined assignment team leads room`);
   });
 
   // Join thread room
@@ -715,14 +684,11 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`thread_${threadId}`);
-    console.log(`🧵 Joined thread: ${threadId}`);
   });
 
   // 🔥 NEW: Handle attachment uploads in real-time
   socket.on("assignment_message_attachments_updated", async (data, callback) => {
     try {
-      console.log("📎 Processing attachment update:", data);
-
       const { messageId, attachments, action } = data;
 
       if (!messageId) {
@@ -762,8 +728,6 @@ io.on("connection", (socket) => {
         ? populatedMessage.client 
         : populatedMessage.client?._id;
 
-      console.log(`📤 Broadcasting attachment ${action} to ${allParticipants.size} participants`);
-
       // 1. Emit to all participants
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_message_attachments_updated", {
@@ -773,7 +737,6 @@ io.on("connection", (socket) => {
           message: populatedMessage,
           timestamp: new Date(),
         });
-        console.log(`📨 Sent attachment update to employee_${participantId}`);
       });
 
       // 2. Emit to thread room
@@ -818,9 +781,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
-      console.log("✅ Attachment update broadcast completed successfully");
-
     } catch (error) {
       console.error("❌ Error broadcasting attachment update:", error);
       if (callback) {
@@ -836,8 +796,6 @@ io.on("connection", (socket) => {
   // 🔥 NEW: Handle message edits with attachments
   socket.on("assignment_message_edited", async (data, callback) => {
     try {
-      console.log("✏️ Processing message edit:", data);
-
       const { messageId, updates } = data;
 
       if (!messageId) {
@@ -877,8 +835,6 @@ io.on("connection", (socket) => {
       const clientId = typeof populatedMessage.client === "string" 
         ? populatedMessage.client 
         : populatedMessage.client?._id;
-
-      console.log(`📤 Broadcasting message edit to ${allParticipants.size} participants`);
 
       // 1. Emit specific edit event
       allParticipants.forEach((participantId) => {
@@ -920,9 +876,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
-      console.log("✅ Message edit broadcast completed successfully");
-
     } catch (error) {
       console.error("❌ Error broadcasting message edit:", error);
       if (callback) {
@@ -938,8 +891,6 @@ io.on("connection", (socket) => {
   // Handle assignment message approval - UPDATED WITH ATTACHMENTS
   socket.on("assignment_message_approved", async (data, callback) => {
     try {
-      console.log("🔔 Processing assignment message approval:", data);
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -963,19 +914,6 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
-      // Log attachment info for debugging
-      console.log("📎 Approval - Message attachments:", {
-        messageId: populatedMessage._id,
-        attachmentsCount: populatedMessage.attachments?.length || 0,
-        attachments: populatedMessage.attachments?.map(a => ({
-          id: a._id,
-          name: a.originalName,
-          size: a.size
-        }))
-      });
-
-      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1004,8 +942,6 @@ io.on("connection", (socket) => {
           ? populatedMessage.sender
           : populatedMessage.sender?._id;
 
-      console.log(`📤 Broadcasting approval to ${actualReceiverIds.length} receivers`);
-
       // 1. Emit specific approval event to all participants
       const allParticipants = new Set([
         senderId,
@@ -1020,7 +956,6 @@ io.on("connection", (socket) => {
           message: populatedMessage,
           timestamp: new Date(),
         });
-        console.log(`📨 Sent approval to employee_${participantId}`);
       });
 
       // 2. Also emit general update event for compatibility
@@ -1074,9 +1009,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
-      console.log("✅ Approval broadcast completed successfully");
-
     } catch (error) {
       console.error("❌ Error broadcasting approval notification:", error);
       if (callback) {
@@ -1092,8 +1024,6 @@ io.on("connection", (socket) => {
   // Handle assignment message disapproval - UPDATED WITH ATTACHMENTS
   socket.on("assignment_message_disapproved", async (data, callback) => {
     try {
-      console.log("🔔 Processing assignment message disapproval:", data);
-
       const { message } = data;
 
       if (!message || !message._id) {
@@ -1117,18 +1047,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Log attachment info for debugging
-      console.log("📎 Disapproval - Message attachments:", {
-        messageId: populatedMessage._id,
-        attachmentsCount: populatedMessage.attachments?.length || 0,
-        attachments: populatedMessage.attachments?.map(a => ({
-          id: a._id,
-          name: a.originalName,
-          size: a.size
-        }))
-      });
-
-      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1157,8 +1075,6 @@ io.on("connection", (socket) => {
           ? populatedMessage.sender
           : populatedMessage.sender?._id;
 
-      console.log(`📤 Broadcasting disapproval to ${actualReceiverIds.length} receivers`);
-
       // 1. Emit specific disapproval event to all participants
       const allParticipants = new Set([
         senderId,
@@ -1173,7 +1089,6 @@ io.on("connection", (socket) => {
           message: populatedMessage,
           timestamp: new Date(),
         });
-        console.log(`📨 Sent disapproval to employee_${participantId}`);
       });
 
       // 2. Also emit general update event for compatibility
@@ -1227,9 +1142,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
-      console.log("✅ Disapproval broadcast completed successfully");
-
     } catch (error) {
       console.error("❌ Error broadcasting disapproval notification:", error);
       if (callback) {
@@ -1268,13 +1180,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Log attachment info for debugging
-      console.log("📎 Resubmission - Message attachments:", {
-        messageId: populatedMessage._id,
-        attachmentsCount: populatedMessage.attachments?.length || 0
-      });
-
-      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1406,18 +1311,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Log attachment info for debugging
-      console.log("📎 New Message - Attachments:", {
-        messageId: populatedMessage._id,
-        attachmentsCount: populatedMessage.attachments?.length || 0,
-        attachments: populatedMessage.attachments?.map(a => ({
-          id: a._id,
-          name: a.originalName,
-          size: a.size
-        }))
-      });
-
-      // Use the targeted emission function
       await emitToSpecificReceivers(
         io,
         populatedMessage,
@@ -1453,13 +1346,6 @@ io.on("connection", (socket) => {
         console.error("❌ assignment_message_updated: message is required");
         return;
       }
-
-      // Log attachment info for debugging
-      console.log("📎 Message Update - Attachments:", {
-        messageId: message._id,
-        action: action,
-        attachmentsCount: message.attachments?.length || 0
-      });
 
       // Handle receiver as array consistently
       let receiverIds = [];
@@ -1540,10 +1426,7 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Test socket events - for debugging
   socket.on("test_approval_event", (data) => {
-    console.log("🧪 Test approval event received:", data);
-    // Echo back to test socket connection
     socket.emit("test_approval_response", {
       success: true,
       message: "Test event received",
@@ -1561,16 +1444,13 @@ io.on("connection", (socket) => {
   });
 });
 io.on("connection", (socket) => {
-  console.log("🟢 Client connected:", socket.id);
 
-  // Employee joins their personal room
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
       console.error("❌ join_employee: employeeId is required");
       return;
     }
     socket.join(`employee_${employeeId}`);
-    console.log(`👤 Employee ${employeeId} joined their room`);
   });
 
   // Join client room for specific client chats
@@ -1580,7 +1460,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`client_${clientId}`);
-    console.log(`💬 Client ${clientId} room joined by ${socket.id}`);
   });
 
   // Join conversation room (for group chats)
@@ -1590,7 +1469,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`conversation_${conversationId}`);
-    console.log(`💬 Conversation ${conversationId} room joined by ${socket.id}`);
   });
 
   // 🎯 CRITICAL FIX: Handle WhatsApp message events specifically
@@ -1603,14 +1481,6 @@ io.on("connection", (socket) => {
         socket.emit("message_error", { error: "Missing required fields" });
         return;
       }
-
-      console.log("📤 WhatsApp message sent:", {
-        clientId,
-        senderId,
-        receivers,
-        messageId: message._id
-      });
-
       // Notify sender
       socket.emit("new_message", {
         message: message,
@@ -1626,7 +1496,6 @@ io.on("connection", (socket) => {
             type: "new_assignment",
             action: "received"
           });
-          console.log(`✅ Notified receiver: employee_${receiverId}`);
         });
       }
 
@@ -1653,14 +1522,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("✅ WhatsApp message approved:", {
-        messageId: message._id,
-        approvedBy,
-        receivers,
-        clientId
-      });
-
-      // Create the updated message object with approval status
       const updatedMessage = {
         ...message,
         approvalStatus: "approved"
@@ -1705,7 +1566,6 @@ io.on("connection", (socket) => {
           approvedBy: approvedBy,
           timestamp: new Date()
         });
-        console.log(`✅ Emitted approval to employee_${userId}`);
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1715,10 +1575,8 @@ io.on("connection", (socket) => {
           type: "message_updated",
           action: "approved"
         });
-        console.log(`✅ Emitted to client_${clientId}`);
       }
 
-      // Notify sender specifically
       socket.emit("new_message", {
         message: updatedMessage,
         type: "message_approved",
@@ -1741,13 +1599,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("📤 Forwarding approved message to managers:", {
-        messageId: message._id,
-        managers: managers,
-        forwardedBy: forwardedBy
-      });
-
-      // Mark this as a forwarded message
       const forwardedMessage = {
         ...message,
         isForwarded: true,
@@ -1765,7 +1616,6 @@ io.on("connection", (socket) => {
           originalMessageId: message._id,
           timestamp: new Date()
         });
-        console.log(`✅ Forwarded to manager: employee_${managerId}`);
       });
 
       // Notify the forwarder that forwarding was successful
@@ -1791,13 +1641,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("✏️ WhatsApp message edited:", {
-        messageId: message._id,
-        editedBy,
-        clientId
-      });
-
-      // Notify ALL involved users about edit
       const allInvolvedUsers = new Set();
 
       // Add sender
@@ -1829,7 +1672,6 @@ io.on("connection", (socket) => {
           editedBy: editedBy,
           timestamp: new Date()
         });
-        console.log(`✅ Emitted edit to employee_${userId}`);
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1839,7 +1681,6 @@ io.on("connection", (socket) => {
           type: "message_updated",
           action: "edited"
         });
-        console.log(`✅ Emitted to client_${clientId}`);
       }
 
     } catch (error) {
@@ -1858,13 +1699,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      console.log("📊 WhatsApp message status update:", {
-        messageId,
-        status,
-        userId
-      });
-
-      // Notify relevant users about status change
       socket.emit("message_status", {
         messageId: messageId,
         status: status
@@ -1960,15 +1794,6 @@ const emitWhatsAppMessage = (io, data) => {
     return;
   }
 
-  console.log("📢 Server emitting WhatsApp message:", {
-    messageId: message._id,
-    type,
-    action,
-    targetUsers: targetUsers?.length || 0,
-    clientId
-  });
-
-  // Emit to specific users if provided
   if (targetUsers && Array.isArray(targetUsers)) {
     targetUsers.forEach(userId => {
       io.to(`employee_${userId}`).emit("new_message", {
@@ -1977,7 +1802,6 @@ const emitWhatsAppMessage = (io, data) => {
         action: action,
         timestamp: new Date()
       });
-      console.log(`✅ Emitted to employee_${userId}`);
     });
   }
 
@@ -1988,7 +1812,6 @@ const emitWhatsAppMessage = (io, data) => {
       type: type,
       action: action
     });
-    console.log(`✅ Emitted to client_${clientId}`);
   }
 
   // If no specific users, emit to all connected clients (broadcast)
@@ -1998,7 +1821,6 @@ const emitWhatsAppMessage = (io, data) => {
       type: type,
       action: action
     });
-    console.log("📢 Broadcasted to all connected clients");
   }
 };
 
@@ -2010,12 +1832,6 @@ const emitForwardToManagers = (io, data) => {
     console.error("❌ emitForwardToManagers: message and managers array are required");
     return;
   }
-
-  console.log("📤 Server forwarding to managers:", {
-    messageId: message._id,
-    managersCount: managers.length,
-    forwardedBy
-  });
 
   const forwardedMessage = {
     ...message,
@@ -2033,7 +1849,6 @@ const emitForwardToManagers = (io, data) => {
       originalMessageId: message._id,
       timestamp: new Date()
     });
-    console.log(`✅ Forwarded to manager: employee_${managerId}`);
   });
 };
 
