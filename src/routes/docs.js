@@ -53,7 +53,17 @@ function fmtDate(d) {
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
+function generateReferenceNumber() {
+  const prefix = "MA01";
+  const now = new Date();
 
+  const dd = String(now.getDate()).padStart(2, "0");
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const yyyy = now.getFullYear();
+
+  const formatted = `${dd}${mm}${yyyy}`; // 19092025 format
+  return `${prefix}-${formatted}`;
+}
 // Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
@@ -192,6 +202,7 @@ async function tokenMap(emp, defaults = {}) {
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
     "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
+    "doc.referenceNo": generateReferenceNumber(),
     "doc.qualitiesLine":
       defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
     "dates.issue": fmtDate(new Date()),
