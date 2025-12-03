@@ -82,7 +82,7 @@ router.patch("/:id/send", ctrl.sendDraft);
 router.patch('/:id/edit-disapproved', 
   upload.array('files'),  // Handle file uploads
   ctrl.editDisapprovedMessage
-);router.patch("/:id/edit-pending", upload.array("files", 10), ctrl.editPendingMessage);
+);router.patch("/:id/edit-pending", upload.array("files", 50), ctrl.editPendingMessage);
 
 router.post("/:id/read", ctrl.markAsRead);
 router.post("/:id/unread", ctrl.markAsUnread);
@@ -98,7 +98,7 @@ router.get('/thread/:threadId', ctrl.getMessagesByThread);
 router.get("/:id/attachments", ctrl.listAttachments);
 router.post(
   "/:id/attachments",
-  upload.array("files", 10),
+  upload.array("files", 50),
   ctrl.uploadAttachments
 );
 router.delete("/:id/attachments/:attId", ctrl.deleteAttachment);

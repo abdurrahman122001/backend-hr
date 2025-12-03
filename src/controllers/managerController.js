@@ -367,6 +367,109 @@ exports.assignClient = async (req, res) => {
       });
     }
 
+    // 🔥 CRITICAL FIX: When assigning a client to an employee, share ALL existing messages with that employee
+    if (employeeId && employeeId !== String(me._id)) {
+      try {
+        // 1. Find ALL existing messages for this client
+        const existingMessages = await AssignmentMessage.find({
+          client: clientId,
+          isTrashed: false,
+          isSpam: false,
+          $or: [
+            { status: 'sent' },
+            { status: 'scheduled' }
+          ]
+        });
+
+        // 2. For each existing message, add the employee as a receiver if not already
+        const updatePromises = existingMessages.map(async (msg) => {
+          const currentReceivers = Array.isArray(msg.receiver) 
+            ? msg.receiver.map(r => r.toString())
+            : msg.receiver ? [msg.receiver.toString()] : [];
+          
+          // If employee is not already a receiver, add them
+          if (!currentReceivers.includes(employeeId)) {
+            const updatedReceivers = [...currentReceivers, employeeId];
+            
+            // Update the message to include the new employee as receiver
+            return AssignmentMessage.findByIdAndUpdate(
+              msg._id,
+              {
+                $set: { receiver: updatedReceivers },
+                $addToSet: { 
+                  readBy: { 
+                    employee: employeeId,
+                    readAt: new Date()
+                  }
+                }
+              },
+              { new: true }
+            );
+          }
+          return Promise.resolve(null);
+        });
+
+        // Wait for all updates to complete
+        const updatedMessages = await Promise.all(updatePromises.filter(p => p));
+        
+        console.log(`✅ Added employee ${employeeId} to ${updatedMessages.length} existing messages for client ${clientId}`);
+        
+        // 3. Fetch all updated messages for this client to send via socket
+        const clientMessages = await AssignmentMessage.find({
+          client: clientId,
+          isTrashed: false,
+          isSpam: false,
+          $or: [
+            { status: 'sent' },
+            { status: 'scheduled' }
+          ]
+        })
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+        ])
+        .sort({ createdAt: -1 })
+        .limit(50); // Limit to recent messages
+
+        // 4. Emit socket events for each message to the newly assigned employee
+        const io = req.app.get("io");
+        if (io) {
+          clientMessages.forEach((msg) => {
+            // Check if this employee is a receiver of this message
+            const msgReceivers = Array.isArray(msg.receiver) 
+              ? msg.receiver.map(r => r._id ? r._id.toString() : r.toString())
+              : msg.receiver ? [msg.receiver.toString()] : [];
+            
+            if (msgReceivers.includes(employeeId)) {
+              io.to(`employee_${employeeId}`).emit("new_assignment_message", msg);
+              console.log(`📨 Sent historical message ${msg._id} to employee ${employeeId}`);
+            }
+          });
+
+          // 5. Also send a special "client_assigned" event with all messages
+          io.to(`employee_${employeeId}`).emit("client_assigned_with_history", {
+            type: "CLIENT_ASSIGNED_WITH_HISTORY",
+            clientId,
+            clientName: client.clientName,
+            dba: client.dba || client.clientName,
+            assignedBy: {
+              _id: me._id,
+              name: me.name
+            },
+            assignedAt: new Date().toISOString(),
+            messageCount: clientMessages.length,
+            hasAccessToHistory: true
+          });
+        }
+
+      } catch (historyError) {
+        console.error("❌ Error sharing historical messages with new employee:", historyError);
+        // Don't fail the assignment if history sharing fails
+      }
+    }
+
     // 🔥 NEW: Emit socket events for real-time client assignment updates
     try {
       const io = req.app.get("io"); // Get io instance from app
@@ -383,7 +486,8 @@ exports.assignClient = async (req, res) => {
               _id: me._id,
               name: me.name
             },
-            assignedAt: new Date().toISOString()
+            assignedAt: new Date().toISOString(),
+            hasHistoricalMessages: true // Indicate they now have access to history
           });
 
           console.log(`✅ Notified employee ${employeeId} about new client assignment`);
@@ -441,40 +545,11 @@ exports.assignClient = async (req, res) => {
       // Don't fail the request if socket emission fails
     }
 
-    // 🔥 NEW: Also send historical messages to newly assigned employee
-    if (employeeId && employeeId !== String(me._id)) {
-      try {
-        const io = req.app.get("io");
-        if (io) {
-          // Get all messages for this client to notify the new assignee
-          const clientMessages = await AssignmentMessage.find({
-            client: clientId,
-            isTrashed: false,
-            isSpam: false,
-          })
-            .populate([
-              { path: "owner", select: "_id name companyEmail" },
-              { path: "sender", select: "_id name companyEmail role" },
-              { path: "receiver", select: "_id name companyEmail role" },
-              { path: "client", select: "_id clientName" },
-            ])
-            .sort({ createdAt: -1 })
-            .limit(50); // Limit to recent messages
-
-          // Emit each message to the newly assigned employee
-          clientMessages.forEach((msg) => {
-            io.to(`employee_${employeeId}`).emit("new_assignment_message", msg);
-          });
-
-          console.log(`✅ Notified employee ${employeeId} about ${clientMessages.length} historical messages for client ${clientId}`);
-        }
-      } catch (socketError) {
-        console.error("❌ Error emitting historical messages:", socketError);
-        // Don't fail the request if socket emission fails
-      }
-    }
-
-    res.json({ client, message });
+    res.json({ 
+      client, 
+      message,
+      historicalMessagesShared: employeeId ? true : false
+    });
   } catch (err) {
     console.error("assignClient error:", err);
     res.status(500).json({ error: "Assignment failed" });
