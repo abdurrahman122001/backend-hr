@@ -5,6 +5,23 @@ const DEFAULT_SHIFT_ID = new mongoose.Types.ObjectId(
   "6849ac46fa83715da425e2b5"
 );
 
+// Sub-schemas for Experience/Designation Journey
+const PositionSchema = new Schema({
+  title: { type: String, required: true },
+  startDate: { type: Date, required: true },
+  endDate: { type: Date },
+  isCurrentRole: { type: Boolean, default: false },
+  description: { type: String },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const ExperienceSchema = new Schema({
+  positions: [PositionSchema],
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
 const EmployeeSchema = new Schema(
   {
     owner: {
@@ -70,6 +87,9 @@ const EmployeeSchema = new Schema(
     designation: { type: String },
     joiningDate: { type: String },
     leavingDate: { type: String }, // Last working day / employment end date
+
+    // DESIGNATION JOURNEY / WORK EXPERIENCE
+    experiences: [ExperienceSchema],
 
     shifts: {
       type: [{ type: Schema.Types.ObjectId, ref: "Shift" }],
@@ -239,4 +259,20 @@ EmployeeSchema.statics.getBlockStatus = async function (user1Id, user2Id) {
     ),
   };
 };
+
+// Update timestamp for experiences when saving
+EmployeeSchema.pre('save', function(next) {
+  if (this.experiences && this.isModified('experiences')) {
+    this.experiences.forEach(exp => {
+      exp.updatedAt = new Date();
+      if (exp.positions) {
+        exp.positions.forEach(pos => {
+          pos.updatedAt = new Date();
+        });
+      }
+    });
+  }
+  next();
+});
+
 module.exports = model("Employee", EmployeeSchema);

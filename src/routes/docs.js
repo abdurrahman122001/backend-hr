@@ -111,11 +111,6 @@ async function fetchAndDecryptSalary(employeeId) {
       isActive: true,
     }).lean();
 
-    if (!salaryRecord) {
-      console.log("No active salary record found for employee:", employeeId);
-      return {};
-    }
-
     const decryptedSalary = {};
 
     // Decrypt all salary fields
@@ -186,6 +181,94 @@ const formatWithCommas = (val) => {
   if (isNaN(numVal)) return val || "—";
   return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
 };
+
+function getPositionsHistory(emp) {
+  const positions = [];
+    
+  // Check if employee has experiences data
+  if (emp?.experiences && Array.isArray(emp.experiences) && emp.experiences.length > 0) {    
+    // Flatten all positions from all experiences
+    emp.experiences.forEach((experience, expIndex) => {
+      
+      if (experience?.positions && Array.isArray(experience.positions) && experience.positions.length > 0) {        
+        experience.positions.forEach((position, posIndex) => {          
+          // Convert dates to proper format
+          let startDate = null;
+          let endDate = null;
+          
+          try {
+            if (position.startDate) {
+              startDate = new Date(position.startDate);
+              if (isNaN(startDate.getTime())) startDate = null;
+            }
+            if (position.endDate && position.endDate !== "Present") {
+              endDate = new Date(position.endDate);
+              if (isNaN(endDate.getTime())) endDate = null;
+            }
+          } catch (error) {
+            console.error("Error parsing dates:", error);
+          }
+          
+          positions.push({
+            title: position.title || "—",
+            startDate: startDate,
+            endDate: endDate,
+            isCurrentRole: position.isCurrentRole || false,
+            description: position.description || "",
+            tenure: formatTenure(startDate, endDate || new Date()),
+            duration: diffToYearsMonths(startDate, endDate || new Date()),
+            startDateFormatted: startDate ? fmtDate(startDate) : "—",
+            endDateFormatted: position.isCurrentRole ? "Present" : (endDate ? fmtDate(endDate) : "—"),
+          });
+        });
+      } else {
+      }
+    });
+  } else {
+    if (emp?.designation) {
+      const joinDate = emp?.joiningDate ? new Date(emp.joiningDate) : new Date();
+      const endDate = emp?.leavingDate ? new Date(emp.leavingDate) : new Date();
+      
+      positions.push({
+        title: emp.designation || "—",
+        startDate: joinDate,
+        endDate: endDate,
+        isCurrentRole: true,
+        description: "",
+        tenure: formatTenure(joinDate, endDate),
+        duration: diffToYearsMonths(joinDate, endDate),
+        startDateFormatted: joinDate ? fmtDate(joinDate) : "—",
+        endDateFormatted: emp.leavingDate ? fmtDate(endDate) : "Present",
+      });
+    }
+  }  
+  // Sort positions by start date (most recent first)
+  positions.sort((a, b) => {
+    if (!a.startDate) return 1;
+    if (!b.startDate) return -1;
+    return new Date(b.startDate) - new Date(a.startDate);
+  });
+  
+  return positions;
+}
+
+// Function to generate positions timeline text
+function generatePositionsTimeline(positions) {
+  if (!positions || positions.length === 0) {
+    return "No position history available.";
+  }
+  
+  const timelineItems = positions.map((pos, index) => {
+    const start = pos.startDateFormatted;
+    const end = pos.endDateFormatted;
+    const currentFlag = pos.isCurrentRole ? " (Current)" : "";
+    
+    return `${index + 1}. ${pos.title}${currentFlag}: From ${start} to ${end} (${pos.tenure})`;
+  });
+  
+  return timelineItems.join("\n");
+}
+
 async function tokenMap(emp, defaults = {}) {
   // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
@@ -195,8 +278,27 @@ async function tokenMap(emp, defaults = {}) {
 
   const tenureHuman = formatTenure(join, endDate);
   const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
-
-  return {
+  
+  // Get all positions history
+  const positionsHistory = getPositionsHistory(emp);  
+  const positionsTimeline = generatePositionsTimeline(positionsHistory);
+  
+  // Find current position
+  const currentPosition = positionsHistory.find(pos => pos.isCurrentRole === true) || 
+                          positionsHistory[0] || 
+                          { 
+                            title: emp?.designation || emp?.position || "—",
+                            startDateFormatted: join ? fmtDate(new Date(join)) : "—",
+                            endDateFormatted: emp?.leavingDate ? fmtDate(new Date(emp.leavingDate)) : "Present",
+                            tenure: tenureHuman,
+                            duration: diffToYearsMonths(join, endDate),
+                            description: ""
+                          };
+  
+  // Find previous positions (excluding current)
+  const previousPositions = positionsHistory.filter(pos => !pos.isCurrentRole);  
+  // Create base tokens object
+  const tokens = {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
@@ -256,8 +358,241 @@ async function tokenMap(emp, defaults = {}) {
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
 
-    "roles.timeline": "",
+    // Position timeline
+    "positions.timeline": positionsTimeline,
+    "positions.totalCount": positionsHistory.length,
+    "positions.previousCount": previousPositions.length,
   };
+
+  // Add current position variables
+  tokens["positions.current"] = currentPosition.title;
+  tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
+  tokens["positions.current.endDate"] = currentPosition.endDateFormatted;
+  tokens["positions.current.tenure"] = currentPosition.tenure;
+  tokens["positions.current.duration"] = `${currentPosition.duration.years} years ${currentPosition.duration.months} months`;
+  tokens["positions.current.description"] = currentPosition.description || "—";
+
+  // Add individual previous position variables (1-10)
+  previousPositions.slice(0, 10).forEach((position, index) => {
+    const positionNum = index + 1;
+    
+    tokens[`positions.previous${positionNum}.title`] = position.title;
+    tokens[`positions.previous${positionNum}.startDate`] = position.startDateFormatted;
+    tokens[`positions.previous${positionNum}.endDate`] = position.endDateFormatted;
+    tokens[`positions.previous${positionNum}.tenure`] = position.tenure;
+    tokens[`positions.previous${positionNum}.duration`] = `${position.duration.years} years ${position.duration.months} months`;
+    tokens[`positions.previous${positionNum}.description`] = position.description || "—";
+  });
+
+  // For positions beyond 10, provide empty values
+  for (let i = previousPositions.length; i < 10; i++) {
+    const positionNum = i + 1;
+    tokens[`positions.previous${positionNum}.title`] = "";
+    tokens[`positions.previous${positionNum}.startDate`] = "";
+    tokens[`positions.previous${positionNum}.endDate`] = "";
+    tokens[`positions.previous${positionNum}.tenure`] = "";
+    tokens[`positions.previous${positionNum}.duration`] = "";
+    tokens[`positions.previous${positionNum}.description`] = "";
+  }
+
+  // Add all previous titles as separate variables (not combined)
+  if (previousPositions.length > 0) {
+    tokens["positions.hasPrevious"] = "true";
+    tokens["positions.firstPrevious"] = previousPositions[0].title;
+    tokens["positions.lastPrevious"] = previousPositions[previousPositions.length - 1].title;
+  } else {
+    tokens["positions.hasPrevious"] = "false";
+    tokens["positions.firstPrevious"] = "";
+    tokens["positions.lastPrevious"] = "";
+  }
+
+  // Add positions in reverse chronological order (most recent first)
+  const reversePositions = [...previousPositions].reverse();
+  reversePositions.slice(0, 10).forEach((position, index) => {
+    const positionNum = index + 1;
+    tokens[`positions.chronological${positionNum}.title`] = position.title;
+    tokens[`positions.chronological${positionNum}.startDate`] = position.startDateFormatted;
+    tokens[`positions.chronological${positionNum}.endDate`] = position.endDateFormatted;
+  });
+
+  // Add formatted list for each previous position
+  previousPositions.forEach((position, index) => {
+    const positionNum = index + 1;
+    tokens[`positions.previous${positionNum}.formatted`] = 
+      `${position.title} (${position.startDateFormatted} to ${position.endDateFormatted})`;
+  });
+
+  // Add position sequences for narrative purposes
+  if (previousPositions.length >= 2) {
+    tokens["positions.sequence2"] = `${previousPositions[0].title} and ${previousPositions[1].title}`;
+  }
+  if (previousPositions.length >= 3) {
+    tokens["positions.sequence3"] = `${previousPositions[0].title}, ${previousPositions[1].title}, and ${previousPositions[2].title}`;
+  }
+  Object.keys(tokens)
+    .filter(key => key.startsWith('positions.'))
+    .forEach(key => {
+      console.log(`  ${key}: ${tokens[key]}`);
+    });
+
+  return tokens;
+}
+async function tokenMap(emp, defaults = {}) {
+  // Fetch and decrypt salary fields from Salary model
+  const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
+
+  const join = emp?.joiningDate;
+  const endDate = emp?.leavingDate || new Date();
+
+  const tenureHuman = formatTenure(join, endDate);
+  const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
+  
+  // Get all positions history
+  const positionsHistory = getPositionsHistory(emp);
+  const positionsTimeline = generatePositionsTimeline(positionsHistory);
+  
+  // Find current position
+  const currentPosition = positionsHistory.find(pos => pos.isCurrentRole === true) || 
+                          positionsHistory[0] || 
+                          { title: emp?.designation || emp?.position || "—" };
+  
+  // Find previous positions (excluding current)
+  const previousPositions = positionsHistory.filter(pos => !pos.isCurrentRole);
+  
+  // Create base tokens object
+  const tokens = {
+    "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
+    "company.address": defaults.companyAddress || "",
+    "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
+    "sign.name": defaults.signName || "ADEEL SHAIKH",
+    "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
+    "doc.referenceNo": generateReferenceNumber(),
+    "doc.qualitiesLine":
+      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+    "dates.issue": fmtDate(new Date()),
+    "dates.join": fmtDate(emp?.joiningDate),
+    "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
+    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
+    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
+
+    "employee.name": emp?.name || "—",
+    "employee.cnic": emp?.cnic || "—",
+    "employee.nationality": emp?.nationality || "—",
+    "employee.designation": emp?.designation || emp?.position || "—",
+    "employee.department": emp?.department || "—",
+    "employee.position": emp?.position || emp?.designation || "—",
+    "employee.email": emp?.email || "—",
+    "employee.phone": emp?.phone || "—",
+    "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
+
+    // Salary fields (decrypted from Salary model)
+    "salary.basic": formatWithCommas(decryptedSalary.basic),
+    "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
+    "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
+    "salary.conveyance": formatWithCommas(decryptedSalary.conveyanceAllowance),
+    "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
+    "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
+    "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
+    "salary.dislocation": formatWithCommas(
+      decryptedSalary.dislocationAllowance
+    ),
+    "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
+    "salary.bonus": formatWithCommas(decryptedSalary.bonus),
+    "salary.arrears": formatWithCommas(decryptedSalary.arrears),
+    "salary.auto": formatWithCommas(decryptedSalary.autoAllowance),
+    "salary.incentive": formatWithCommas(decryptedSalary.incentive),
+    "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
+    "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
+    "salary.gross": formatWithCommas(
+      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
+        ? decryptedSalary.grossSalary
+        : decryptedSalary.calculatedTotal
+    ),
+
+    "salary.total": formatWithCommas(
+      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
+        ? decryptedSalary.grossSalary
+        : decryptedSalary.calculatedTotal
+    ),
+
+    // simple pronoun defaults (change if you store an actual field)
+    "employee.pronounSubject": "he",
+    "employee.pronounObject": "him",
+    "employee.pronounPossessive": "his",
+
+    // Position timeline
+    "positions.timeline": positionsTimeline,
+    "positions.totalCount": positionsHistory.length,
+    "positions.previousCount": previousPositions.length,
+  };
+
+  // Add current position variables
+  tokens["positions.current"] = currentPosition.title;
+  tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
+  tokens["positions.current.endDate"] = currentPosition.endDateFormatted;
+  tokens["positions.current.tenure"] = currentPosition.tenure;
+  tokens["positions.current.duration"] = `${currentPosition.duration.years} years ${currentPosition.duration.months} months`;
+  tokens["positions.current.description"] = currentPosition.description || "—";
+
+  // Add individual previous position variables (1-10)
+  previousPositions.slice(0, 10).forEach((position, index) => {
+    const positionNum = index + 1;
+    
+    tokens[`positions.previous${positionNum}.title`] = position.title;
+    tokens[`positions.previous${positionNum}.startDate`] = position.startDateFormatted;
+    tokens[`positions.previous${positionNum}.endDate`] = position.endDateFormatted;
+    tokens[`positions.previous${positionNum}.tenure`] = position.tenure;
+    tokens[`positions.previous${positionNum}.duration`] = `${position.duration.years} years ${position.duration.months} months`;
+    tokens[`positions.previous${positionNum}.description`] = position.description || "—";
+  });
+
+  // For positions beyond 10, provide empty values
+  for (let i = previousPositions.length; i < 10; i++) {
+    const positionNum = i + 1;
+    tokens[`positions.previous${positionNum}.title`] = "";
+    tokens[`positions.previous${positionNum}.startDate`] = "";
+    tokens[`positions.previous${positionNum}.endDate`] = "";
+    tokens[`positions.previous${positionNum}.tenure`] = "";
+    tokens[`positions.previous${positionNum}.duration`] = "";
+    tokens[`positions.previous${positionNum}.description`] = "";
+  }
+
+  // Add all previous titles as separate variables (not combined)
+  if (previousPositions.length > 0) {
+    tokens["positions.hasPrevious"] = "true";
+    tokens["positions.firstPrevious"] = previousPositions[0].title;
+    tokens["positions.lastPrevious"] = previousPositions[previousPositions.length - 1].title;
+  } else {
+    tokens["positions.hasPrevious"] = "false";
+    tokens["positions.firstPrevious"] = "";
+    tokens["positions.lastPrevious"] = "";
+  }
+
+  // Add positions in reverse chronological order (most recent first)
+  const reversePositions = [...previousPositions].reverse();
+  reversePositions.slice(0, 10).forEach((position, index) => {
+    const positionNum = index + 1;
+    tokens[`positions.chronological${positionNum}.title`] = position.title;
+    tokens[`positions.chronological${positionNum}.startDate`] = position.startDateFormatted;
+    tokens[`positions.chronological${positionNum}.endDate`] = position.endDateFormatted;
+  });
+
+  // Add formatted list for each previous position
+  previousPositions.forEach((position, index) => {
+    const positionNum = index + 1;
+    tokens[`positions.previous${positionNum}.formatted`] = 
+      `${position.title} (${position.startDateFormatted} to ${position.endDateFormatted})`;
+  });
+
+  // Add position sequences for narrative purposes
+  if (previousPositions.length >= 2) {
+    tokens["positions.sequence2"] = `${previousPositions[0].title} and ${previousPositions[1].title}`;
+  }
+  if (previousPositions.length >= 3) {
+    tokens["positions.sequence3"] = `${previousPositions[0].title}, ${previousPositions[1].title}, and ${previousPositions[2].title}`;
+  }
+
+  return tokens;
 }
 
 /** supports {{ key }}, {{ key | upper }}, {{ key | lower }}, {{ key | title }}, {{ key | trim }} */

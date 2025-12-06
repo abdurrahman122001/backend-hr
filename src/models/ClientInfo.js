@@ -44,49 +44,56 @@ const ClientInfoSchema = new Schema(
     // 🔹 US-specific fields
     state: { type: String },
     ein: { type: String },
-    
+
     whatsappPinned: { type: Boolean, default: false },
     whatsappFavourite: { type: Boolean, default: false },
     whatsappMuted: { type: Boolean, default: false },
     whatsappArchived: { type: Boolean, default: false },
 
+    supervision: {
+      type: String,
+      enum: ["direct", "needs_approval"],
+      default: "direct",
+    },
+
     // 🔹 CLIENT'S COMPANY EMPLOYEES (NEW)
     companyEmployees: [
       {
-        name: { 
-          type: String, 
-          required: true, 
-          trim: true 
+
+        name: {
+          type: String,
+          required: true,
+          trim: true
         },
-        designation: { 
-          type: String, 
-          required: true, 
-          trim: true 
+        designation: {
+          type: String,
+          required: true,
+          trim: true
         },
-        email: { 
-          type: String, 
+        email: {
+          type: String,
           trim: true,
-          lowercase: true 
+          lowercase: true
         },
-        phone: { 
-          type: String, 
-          trim: true 
+        phone: {
+          type: String,
+          trim: true
         },
-        department: { 
-          type: String, 
-          trim: true 
+        department: {
+          type: String,
+          trim: true
         },
-        isPrimaryContact: { 
-          type: Boolean, 
-          default: false 
+        isPrimaryContact: {
+          type: Boolean,
+          default: false
         },
-        notes: { 
-          type: String, 
-          trim: true 
+        notes: {
+          type: String,
+          trim: true
         },
-        addedAt: { 
-          type: Date, 
-          default: Date.now 
+        addedAt: {
+          type: Date,
+          default: Date.now
         }
       }
     ],
@@ -98,6 +105,15 @@ const ClientInfoSchema = new Schema(
       default: null,
       index: true,
     },
+
+
+    readBy: [
+      {
+        employee: { type: Schema.Types.ObjectId, ref: "Employee" },
+        readAt: { type: Date, default: Date.now }
+      }
+    ],
+
 
     // 🔹 Metadata
     createdBy: {

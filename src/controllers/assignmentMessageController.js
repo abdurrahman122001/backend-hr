@@ -2,7 +2,7 @@ const AssignmentMessage = require("../models/AssignmentMessage");
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
-
+const ClientInfo = require("../models/ClientInfo");
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
   const base =
@@ -78,7 +78,6 @@ function getThreadIdForReply(originalMessage, newSubject, isForward = false) {
     return originalMessage.threadId;
   }
 
-  // Otherwise, create new thread
   const clientId =
     typeof originalMessage.client === "string"
       ? originalMessage.client
@@ -116,11 +115,7 @@ async function applyVisibility(q, req) {
 
   // 🚨 CRITICAL: Base visibility - user must ALWAYS be participant
   const participantFilter = {
-    $or: [
-      { sender: me },
-      { receiver: me },
-      { receiver: { $in: [me] } }
-    ]
+    $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
   // 🧑‍💼 MANAGER: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
@@ -128,8 +123,8 @@ async function applyVisibility(q, req) {
     const managerQuery = {
       $and: [
         { owner: ownerId }, // Within their organization
-        participantFilter    // AND they are participant
-      ]
+        participantFilter, // AND they are participant
+      ],
     };
 
     // For thread-based queries, maintain thread context but ensure participation
@@ -139,10 +134,7 @@ async function applyVisibility(q, req) {
       // Verify manager has access to this thread
       const threadAccess = await AssignmentMessage.findOne({
         threadId: q.threadId,
-        $and: [
-          { owner: ownerId },
-          participantFilter
-        ]
+        $and: [{ owner: ownerId }, participantFilter],
       });
 
       if (!threadAccess) {
@@ -159,8 +151,8 @@ async function applyVisibility(q, req) {
         status: "scheduled",
         $or: [
           { scheduledFor: { $lte: now } }, // Past scheduled messages they can see
-          { sender: me } // Or their own future scheduled messages
-        ]
+          { sender: me }, // Or their own future scheduled messages
+        ],
       };
     }
 
@@ -180,8 +172,8 @@ async function applyVisibility(q, req) {
     const teamLeadQuery = {
       $and: [
         { owner: ownerId }, // Within their organization
-        participantFilter    // AND they are participant
-      ]
+        participantFilter, // AND they are participant
+      ],
     };
 
     // For thread-based queries
@@ -191,10 +183,7 @@ async function applyVisibility(q, req) {
       // Verify team lead has access to this thread
       const threadAccess = await AssignmentMessage.findOne({
         threadId: q.threadId,
-        $and: [
-          { owner: ownerId },
-          participantFilter
-        ]
+        $and: [{ owner: ownerId }, participantFilter],
       });
 
       if (!threadAccess) {
@@ -217,17 +206,18 @@ async function applyVisibility(q, req) {
               // OR it's a message from employees under their supervision
               {
                 sender: {
-                  $in: await getEmployeesUnderSupervision(ownerId, "team_lead")
-                }
-              }
-            ]
-          }
-        ]
+                  $in: await getEmployeesUnderSupervision(ownerId, "team_lead"),
+                },
+              },
+            ],
+          },
+        ],
       };
 
       // Apply additional filters
       if (q.threadId) reviewQuery.$and.push({ threadId: q.threadId });
-      if (q.isTrashed !== undefined) reviewQuery.$and.push({ isTrashed: q.isTrashed });
+      if (q.isTrashed !== undefined)
+        reviewQuery.$and.push({ isTrashed: q.isTrashed });
       if (q.isSpam !== undefined) reviewQuery.$and.push({ isSpam: q.isSpam });
 
       return reviewQuery;
@@ -240,10 +230,7 @@ async function applyVisibility(q, req) {
         ...teamLeadQuery,
         isScheduled: true,
         status: "scheduled",
-        $or: [
-          { scheduledFor: { $lte: now } },
-          { sender: me }
-        ]
+        $or: [{ scheduledFor: { $lte: now } }, { sender: me }],
       };
     }
 
@@ -260,7 +247,7 @@ async function applyVisibility(q, req) {
 
   // 👷 NORMAL EMPLOYEE: STRICT participant-based visibility ONLY
   const employeeQuery = {
-    $and: [participantFilter]
+    $and: [participantFilter],
   };
 
   // For thread-based queries, verify access to the thread
@@ -269,7 +256,7 @@ async function applyVisibility(q, req) {
 
     const threadAccess = await AssignmentMessage.findOne({
       threadId: q.threadId,
-      $or: participantFilter.$or
+      $or: participantFilter.$or,
     });
 
     if (!threadAccess) {
@@ -288,10 +275,10 @@ async function applyVisibility(q, req) {
         {
           $or: [
             { scheduledFor: { $lte: now } }, // Past scheduled messages
-            { sender: me } // Or their own future scheduled messages
-          ]
-        }
-      ]
+            { sender: me }, // Or their own future scheduled messages
+          ],
+        },
+      ],
     };
   }
 
@@ -303,9 +290,9 @@ async function applyVisibility(q, req) {
       {
         isScheduled: true,
         status: "scheduled",
-        scheduledFor: { $lte: now } // Scheduled but time has passed
-      }
-    ]
+        scheduledFor: { $lte: now }, // Scheduled but time has passed
+      },
+    ],
   };
 
   employeeQuery.$and.push(baseConditions);
@@ -320,10 +307,16 @@ async function applyVisibility(q, req) {
   if (q.sender && isObjId(q.sender)) {
     employeeQuery.$and.push({ sender: q.sender });
   }
-  if (q.status && ["draft", "scheduled", "sent", "cancelled"].includes(q.status)) {
+  if (
+    q.status &&
+    ["draft", "scheduled", "sent", "cancelled"].includes(q.status)
+  ) {
     employeeQuery.$and.push({ status: q.status });
   }
-  if (q.approvalStatus && ["pending", "approved", "disapproved"].includes(q.approvalStatus)) {
+  if (
+    q.approvalStatus &&
+    ["pending", "approved", "disapproved"].includes(q.approvalStatus)
+  ) {
     employeeQuery.$and.push({ approvalStatus: q.approvalStatus });
   }
   if (q.isTrashed !== undefined) {
@@ -347,12 +340,14 @@ async function getEmployeesUnderSupervision(ownerId, supervisorRole) {
       ...(supervisorRole === "team_lead" && {
         $or: [
           { supervisionMode: "direct" },
-          { supervisionMode: "needs_approval" }
-        ]
-      })
-    }).select("_id").lean();
+          { supervisionMode: "needs_approval" },
+        ],
+      }),
+    })
+      .select("_id")
+      .lean();
 
-    return employees.map(emp => emp._id);
+    return employees.map((emp) => emp._id);
   } catch (error) {
     console.error("Error getting employees under supervision:", error);
     return [];
@@ -362,7 +357,11 @@ async function getEmployeesUnderSupervision(ownerId, supervisorRole) {
 function getIO(req) {
   return req.app.get("io");
 }
-async function emitToSpecificReceivers(io, message, eventName = "new_assignment_message") {
+async function emitToSpecificReceivers(
+  io,
+  message,
+  eventName = "new_assignment_message"
+) {
   try {
     const populatedMessage = await AssignmentMessage.findById(message._id)
       .populate("owner")
@@ -382,7 +381,7 @@ async function emitToSpecificReceivers(io, message, eventName = "new_assignment_
         ? populatedMessage.sender
         : populatedMessage.sender?._id
     );
-    if (senderId && senderId !== 'undefined') {
+    if (senderId && senderId !== "undefined") {
       actualRecipients.add(senderId);
     }
 
@@ -393,7 +392,7 @@ async function emitToSpecificReceivers(io, message, eventName = "new_assignment_
           typeof receiver === "string" ? receiver : receiver?._id
         );
         // 🔥 Only add if it's a valid receiver ID
-        if (receiverId && receiverId !== 'undefined') {
+        if (receiverId && receiverId !== "undefined") {
           actualRecipients.add(receiverId);
         }
       });
@@ -405,7 +404,6 @@ async function emitToSpecificReceivers(io, message, eventName = "new_assignment_
         io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
       }
     });
-
   } catch (error) {
     console.error("❌ Error in emitToSpecificReceivers:", error);
     throw error;
@@ -473,14 +471,14 @@ async function emitMessageUpdate(io, message, action) {
     // 🔥 REMOVED: Thread-based and role-based broadcasting for sensitive operations
     if (action === "approved" || action === "disapproved") {
       // Keep approval/disapproval logic but ensure it's properly filtered
-      const role = action === "approved" ? "assignment_managers" : "assignment_team_leads";
+      const role =
+        action === "approved" ? "assignment_managers" : "assignment_team_leads";
       io.to(role).emit(`assignment_message_${action}`, {
         message: populatedMessage,
         action: action,
         timestamp: new Date(),
       });
     }
-
   } catch (error) {
     console.error("❌ Error emitting message update:", error);
   }
@@ -913,7 +911,7 @@ exports.createMessage = async function createMessage(req, res) {
   try {
     const {
       owner: ownerBody,
-      client, // This is now optional
+      client,
       sender: senderBody,
       receiver: receiverBody,
       receivers: receiversBody,
@@ -924,34 +922,131 @@ exports.createMessage = async function createMessage(req, res) {
       replyTo,
       isForward = false,
       threadId: providedThreadId,
+      isFromClient,
+      isFromCompanyEmployee,
+      clientEmployeeName,
+      clientEmployeeEmail,
+      clientName,
+      clientEmployees: clientEmployeesBody,
+      companyEmployees: companyEmployeesBody,
+      cc: ccBody,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
     const sender = senderBody || req.employee?._id;
 
-    // Remove client validation - it's now optional
     if (!isObjId(owner) || !isObjId(sender)) {
       return res.status(400).json({
         error: "owner and sender are required (ObjectId strings)",
       });
     }
 
-    // Handle thread ID generation for direct messages (no client)
+    // Get sender role early to determine inheritance rules
+    const senderDoc = await Employee.findById(sender)
+      .select("_id role supervisor supervisionMode owner")
+      .lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+
+    // Handle thread ID generation
     let threadId = providedThreadId;
     let originalMessage = null;
+    let threadMessages = [];
 
-    if (replyTo) {
-      originalMessage = await AssignmentMessage.findById(replyTo);
+    // If we have a threadId, fetch all messages in the thread to check context
+    if (providedThreadId || replyTo) {
+      try {
+        // First try to get the thread messages
+        if (providedThreadId) {
+          threadMessages = await AssignmentMessage.find({
+            threadId: providedThreadId,
+          })
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .lean();
+        }
+
+        // If replyTo is provided, get that specific message
+        if (replyTo) {
+          originalMessage = await AssignmentMessage.findById(replyTo).lean();
+          if (originalMessage && !providedThreadId) {
+            threadId = originalMessage.threadId;
+            // Also get thread messages using the original message's threadId
+            threadMessages = await AssignmentMessage.find({
+              threadId: originalMessage.threadId,
+            })
+              .sort({ createdAt: -1 })
+              .limit(20)
+              .lean();
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching thread messages:", err);
+      }
     }
 
-    if (originalMessage) {
-      threadId = getThreadIdForReply(originalMessage, subject, isForward);
-    } else if (!threadId) {
-      // For direct messages without client, generate a different thread ID
-      if (client && isObjId(client)) {
+    // 🔥🔥🔥 CRITICAL FIX: Only managers can have client/company employee context
+    // For non-managers, always set these fields to false/null regardless of request
+    let inheritedIsFromClient = false;
+    let inheritedIsFromCompanyEmployee = false;
+    let inheritedClientEmployeeName = null;
+    let inheritedClientEmployeeEmail = null;
+    let inheritedClientName = null;
+
+    // ONLY managers can have client/company employee context
+    if (senderRole === "manager") {
+      // Check if context is explicitly provided in request
+      if (isFromClient || isFromCompanyEmployee) {
+        inheritedIsFromClient = isFromClient || false;
+        inheritedIsFromCompanyEmployee = isFromCompanyEmployee || false;
+        inheritedClientEmployeeName = clientEmployeeName || null;
+        inheritedClientEmployeeEmail = clientEmployeeEmail || null;
+        inheritedClientName = clientName || null;
+      }
+      // Managers can also inherit from thread if not explicitly set
+      else if (threadMessages.length > 0) {
+        const threadWithCompanyEmployee = threadMessages.find(
+          (msg) => msg.isFromCompanyEmployee || msg.isFromClient
+        );
+
+        if (threadWithCompanyEmployee) {
+          inheritedIsFromClient = threadWithCompanyEmployee.isFromClient;
+          inheritedIsFromCompanyEmployee =
+            threadWithCompanyEmployee.isFromCompanyEmployee;
+          inheritedClientEmployeeName =
+            threadWithCompanyEmployee.clientEmployeeName;
+          inheritedClientEmployeeEmail =
+            threadWithCompanyEmployee.clientEmployeeEmail;
+          inheritedClientName = threadWithCompanyEmployee.clientName;
+        }
+      }
+    } else {
+      inheritedIsFromClient = false;
+      inheritedIsFromCompanyEmployee = false;
+      inheritedClientEmployeeName = null;
+      inheritedClientEmployeeEmail = null;
+      inheritedClientName = null;
+    }
+
+    // Generate thread ID if not provided
+    if (!threadId) {
+      if (originalMessage) {
+        threadId = getThreadIdForReply(originalMessage, subject, isForward);
+      } else if (client && isObjId(client)) {
         threadId = generateThreadId(client, subject);
+      } else if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
+        const normalizedSubject = (subject || "external_message")
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, "_")
+          .substring(0, 50);
+
+        if (inheritedClientEmployeeEmail) {
+          threadId = `external_${inheritedClientEmployeeEmail}_${normalizedSubject}_${Date.now()}`;
+        } else if (inheritedClientName) {
+          threadId = `external_${inheritedClientName}_${normalizedSubject}_${Date.now()}`;
+        } else {
+          threadId = `external_${normalizedSubject}_${Date.now()}`;
+        }
       } else {
-        // 🔥 FIXED: Direct message thread ID - simplified to avoid errors
         const participants = [
           sender,
           ...normalizeIds(receiverBody),
@@ -979,44 +1074,62 @@ exports.createMessage = async function createMessage(req, res) {
 
     receivers = receivers.filter((id) => id !== String(sender));
 
-    const senderDoc = await Employee.findById(sender)
-      .select("_id role supervisor supervisionMode owner")
-      .lean();
-    const senderRole = normalizeRole(senderDoc?.role || "");
-
+    // 🔥 MODIFIED: Check client-level supervision instead of employee-level
     let approvalStatus;
-    const supervisionMode = String(
-      senderDoc?.supervisionMode || ""
-    ).toLowerCase();
-    const needsApproval = supervisionMode === "needs_approval";
-    const isDirect = supervisionMode === "direct";
-    const isDisabled = supervisionMode === "disabled" || !supervisionMode || supervisionMode === "";
-    // UPDATED APPROVAL LOGIC - FIXED SUPERVISION DISABLED CASE
+    let clientSupervisionMode = "direct"; // default
+
+    // Only check client supervision if client is specified
     if (client && isObjId(client)) {
-      // Only apply approval logic for client-based messages
-      if (needsApproval) {
-        approvalStatus = "pending";
-        // TLs will be added to receivers below in the existing logic
-      } else if (isDirect) {
+      // Get client supervision mode from ClientInfo model
+      const clientDoc = await ClientInfo.findById(client)
+        .select("supervision")
+        .lean();
+
+      clientSupervisionMode = clientDoc?.supervision || "direct"; // default to direct
+
+      if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
         approvalStatus = "approved";
-      } else if (isDisabled) {
-        // 🔥 CRITICAL FIX: When supervision is disabled, message should go directly to managers
+      } else if (clientSupervisionMode === "needs_approval") {
+        // Messages for this client need approval
+        approvalStatus = "pending";
+      } else if (clientSupervisionMode === "direct") {
+        // Direct supervision - no approval needed
+        approvalStatus = "approved";
+      } else {
+        // Default to approved for any other mode
         approvalStatus = "approved";
       }
     } else {
-      // Direct messages (no client) - always approved
+      // Direct messages (no client) are always approved
       approvalStatus = "approved";
     }
 
-    // Only handle client assignment if client is provided
+    let clientEmployees = [];
+    if (clientEmployeesBody) {
+      clientEmployees = normalizeIds(clientEmployeesBody);
+    } else if (companyEmployeesBody) {
+      clientEmployees = normalizeIds(companyEmployeesBody);
+    }
+
+    // 🔥 FIX: ONLY add client employees to receivers if sender is a manager
+    if (senderRole === "manager") {
+      clientEmployees.forEach((clientEmployeeId) => {
+        if (!receivers.includes(clientEmployeeId)) {
+          receivers.push(clientEmployeeId);
+        }
+      });
+    } else {
+      console.log(
+        `👤 ${senderRole} sending message - client employees NOT automatically added`
+      );
+    }
+
     let assignedTeamMemberId = null;
     if (client && isObjId(client)) {
-      const Client = require("../models/ClientInfo");
-      const clientDoc = await Client.findById(client)
+      const clientDoc = await ClientInfo.findById(client)
         .populate("assignedTo", "_id role")
         .lean();
 
-      // Include assignedTo employee if present
       if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
         assignedTeamMemberId = String(clientDoc.assignedTo._id);
         if (
@@ -1028,135 +1141,127 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // Your existing role-based logic (preserved)
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
-    // 🔥 CRITICAL FIX: MANAGER MESSAGE LOGIC
+
+    // 🔥 MODIFIED: Handle receiver logic based on CLIENT supervision mode
+    if (client && isObjId(client)) {
+      if (clientSupervisionMode === "needs_approval") {
+        // Needs approval: add TLs to receivers and set status to pending
+        if (tls.length > 0 && !receivers.some((r) => tls.includes(r))) {
+          receivers = [...receivers, ...tls.map((id) => String(id))];
+          approvalStatus = "pending";
+        }
+      } else if (clientSupervisionMode === "direct") {
+        // Direct supervision: add managers to receivers
+        if (
+          managers.length > 0 &&
+          !receivers.some((r) => managers.includes(r))
+        ) {
+          receivers = [...receivers, ...managers.map((id) => String(id))];
+          approvalStatus = "approved";
+        }
+      }
+      // For other supervision modes or if no TLs/managers found
+      // Keep the existing receiver list
+    }
+
+    // Handle sender role-based logic (managers, team leads) - these bypass client supervision
     if (senderRole === "manager") {
-      approvalStatus = null;
-      // Remove any automatically added managers or team leads
-      receivers = receivers.filter(receiverId => {
-        // Keep only explicitly specified receivers and assigned team member
+      approvalStatus = null; // Managers bypass approval
+      // Filter receivers based on explicit selection
+      receivers = receivers.filter((receiverId) => {
         const isExplicitReceiver =
           normalizeIds(receiverBody).includes(receiverId) ||
           normalizeIds(receiversBody).includes(receiverId);
-
         const isAssignedTeamMember = receiverId === assignedTeamMemberId;
+        const isClientEmployee = clientEmployees.includes(receiverId);
 
-        return isExplicitReceiver || isAssignedTeamMember;
+        return isExplicitReceiver || isAssignedTeamMember || isClientEmployee;
       });
 
-      // 🔥 ADD ONLY ONE TEAM LEAD (not all)
-      if (tls.length > 0 && client && isObjId(client)) {
-        // Use the first team lead, or you can implement more sophisticated logic
+      // If manager is sending as company employee in a thread, include TLs
+      if (
+        (inheritedIsFromCompanyEmployee || inheritedIsFromClient) &&
+        tls.length > 0
+      ) {
         const primaryTeamLead = tls[0];
         if (!receivers.includes(primaryTeamLead)) {
           receivers.push(primaryTeamLead);
         }
       }
-
     } else if (senderRole === "team_lead") {
-      approvalStatus = null;
-    } else if (needsApproval) {
-      // Only add TLs to receivers if this is a client-based message that needs approval
-      if (client && isObjId(client)) {
-        receivers = [...receivers, ...tls.map((id) => String(id))];
-      }
-      // approvalStatus already set to "pending" above for client messages
-    }else if (isDisabled) {
-      if (client && isObjId(client) && managers.length > 0) {
-        receivers = [...receivers, ...managers.map((id) => String(id))];
-      } else if (client && isObjId(client)) {
-        console.warn("⚠️ No managers found for supervision disabled case");
-      }
+      approvalStatus = null; // Team leads bypass approval
     }
 
+    // 🔥 MODIFIED: Handle reply logic with CLIENT supervision
     if (replyTo && originalMessage) {
+      if (client && isObjId(client)) {
+        // Get the client's supervision mode for the reply
+        const replyClientDoc = await ClientInfo.findById(client)
+          .select("supervision")
+          .lean();
+        const replyClientSupervision = replyClientDoc?.supervision || "direct";
 
-      // For employees under supervision, respect the supervision rules
-      if (senderRole === "employee") {
-        if (needsApproval) {
-
-          // 🔥 FIXED: Don't clear receivers automatically. Only add team leads if no receivers specified
-          if (receivers.length === 0) {
-            // Add only team leads for approval (not the original manager)
-            if (tls.length > 0) {
-              receivers = [...tls];
-              approvalStatus = "pending";
-            } else {
-              console.warn("⚠️ No team leads found for approval");
-            }
-          } else {
-            // If receivers exist (e.g., from thread participants), keep them but ensure approval
+        if (replyClientSupervision === "needs_approval") {
+          if (tls.length > 0 && !receivers.some((r) => tls.includes(r))) {
+            receivers = [...receivers, ...tls];
             approvalStatus = "pending";
           }
-        } else if (isDisabled) {
-          // For disabled supervision, use normal thread behavior
-          if (receivers.length === 0) {
-            // Try to maintain thread participants
-            let threadParticipants = new Set();
-
-            // Add original sender (if not current sender)
-            const originalSender = String(originalMessage.sender);
-            if (originalSender !== String(sender)) {
-              threadParticipants.add(originalSender);
-            }
-
-            // Add original receivers (if not current sender)
-            if (Array.isArray(originalMessage.receiver)) {
-              originalMessage.receiver.forEach((receiverId) => {
-                const receiverStr = String(receiverId);
-                if (receiverStr !== String(sender)) {
-                  threadParticipants.add(receiverStr);
-                }
-              });
-            }
-
-            if (threadParticipants.size > 0) {
-              receivers = Array.from(threadParticipants);
-            }
-          }
-        } 
+        }
       }
     }
 
-    // 🔥 FIXED: Fallback logic that respects supervision - UPDATED VERSION
+    // Ensure we have at least one receiver
     if (receivers.length === 0) {
       if (replyTo || providedThreadId) {
         let threadParticipants = new Set();
 
-        // Try to find participants from the original message if it's a reply
         if (replyTo && originalMessage) {
-          // Add original sender (if not current sender) ONLY if not under supervision that requires approval
           const originalSender = String(originalMessage.sender);
-          if (originalSender !== String(sender) && !(senderRole === "employee" && needsApproval)) {
+          if (
+            originalSender !== String(sender) &&
+            !(
+              senderRole === "employee" &&
+              clientSupervisionMode === "needs_approval"
+            )
+          ) {
             threadParticipants.add(originalSender);
           }
 
-          // Add original receivers (if not current sender) ONLY if not under supervision that requires approval
           if (Array.isArray(originalMessage.receiver)) {
             originalMessage.receiver.forEach((receiverId) => {
               const receiverStr = String(receiverId);
-              if (receiverStr !== String(sender) && !(senderRole === "employee" && needsApproval)) {
+              if (
+                receiverStr !== String(sender) &&
+                !(
+                  senderRole === "employee" &&
+                  clientSupervisionMode === "needs_approval"
+                )
+              ) {
                 threadParticipants.add(receiverStr);
               }
             });
           }
         }
 
-        // If we have a threadId but no replyTo, try to find other messages in the thread
-        if (threadParticipants.size === 0 && providedThreadId && !(senderRole === "employee" && needsApproval)) {
-          const threadMessages = await AssignmentMessage.find({
+        if (
+          threadParticipants.size === 0 &&
+          providedThreadId &&
+          !(
+            senderRole === "employee" &&
+            clientSupervisionMode === "needs_approval"
+          )
+        ) {
+          const threadMessagesForParticipants = await AssignmentMessage.find({
             threadId: providedThreadId,
           }).limit(10);
 
-          threadMessages.forEach((msg) => {
-            // Add sender if not current user
+          threadMessagesForParticipants.forEach((msg) => {
             const msgSender = String(msg.sender);
             if (msgSender !== String(sender)) {
               threadParticipants.add(msgSender);
             }
 
-            // Add receivers if not current user
             if (Array.isArray(msg.receiver)) {
               msg.receiver.forEach((receiverId) => {
                 const receiverStr = String(receiverId);
@@ -1168,63 +1273,70 @@ exports.createMessage = async function createMessage(req, res) {
           });
         }
 
-        // If we found participants from the thread, use them
         if (threadParticipants.size > 0) {
           receivers = Array.from(threadParticipants);
         }
       }
 
-      // If STILL no receivers after checking thread context
       if (receivers.length === 0) {
-        // 🔥 CRITICAL: For direct messages (no client) - NEVER auto-assign to managers!
-        if (!client) {
+        if (
+          !client &&
+          !inheritedIsFromClient &&
+          !inheritedIsFromCompanyEmployee
+        ) {
           return res.status(400).json({
             error:
               "For direct messages, you must specify at least one receiver",
           });
         }
 
-        // Only for client-based messages with no specified receivers
+        // 🔥 MODIFIED: Use CLIENT supervision mode instead of employee supervision
         if (senderRole === "employee") {
-          // 🔥 UPDATED SUPERVISION FLOW FOR EMPLOYEES WITH NO RECEIVERS:
-          if (needsApproval) {
-            // Send to team leads for approval (supervision: needs_approval)
-            receivers = [...tls];
-            approvalStatus = "pending";
-          } else if (isDirect) {
-            // Send to managers directly (supervision: direct)
-            if (managers.length > 0) {
-              receivers = [...managers];
-              approvalStatus = "approved"; // Already approved for direct supervision
+          if (
+            client &&
+            isObjId(client) &&
+            clientSupervisionMode === "needs_approval"
+          ) {
+            // Needs approval: send to TLs
+            if (tls.length > 0) {
+              receivers = [...tls];
+              approvalStatus = "pending";
             } else {
               return res.status(400).json({
-                error: "No managers available. Please specify at least one receiver for your message.",
+                error:
+                  "No team leads available for approval. Please specify at least one receiver for your message.",
               });
             }
-          } else if (isDisabled) {
-            // Send to managers directly (supervision: disabled)
+          } else if (
+            client &&
+            isObjId(client) &&
+            clientSupervisionMode === "direct"
+          ) {
+            // Direct supervision: send to managers
             if (managers.length > 0) {
               receivers = [...managers];
-              approvalStatus = "approved"; // No approval needed for disabled supervision
+              approvalStatus = "approved";
             } else {
               return res.status(400).json({
-                error: "No managers available. Please specify at least one receiver for your message.",
+                error:
+                  "No managers available. Please specify at least one receiver for your message.",
               });
             }
           } else {
+            // No client or other supervision mode
             return res.status(400).json({
               error: "Please specify at least one receiver for your message",
             });
           }
         } else if (senderRole === "team_lead") {
-          // Team leads should specify receivers
           return res.status(400).json({
-            error: "Team leads must specify at least one receiver for their messages",
+            error:
+              "Team leads must specify at least one receiver for their messages",
           });
         } else if (senderRole === "manager") {
-          // Managers should specify receivers
           return res.status(400).json({
-            error: "Managers must specify at least one receiver for their messages",
+            error:
+              "Managers must specify at least one receiver for their messages",
           });
         } else {
           return res.status(400).json({
@@ -1234,19 +1346,19 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // Final processing
+    // Remove duplicates and remove sender from receivers
     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
       (id) => id !== String(sender)
     );
 
-    // Final validation
     if (receivers.length === 0) {
       return res.status(400).json({
         error:
           "No valid receivers found. Please specify at least one recipient.",
       });
     }
-    // Scheduling logic (same as before)
+
+    // Handle scheduling
     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
     let status = "sent";
     let scheduledAt = null;
@@ -1265,7 +1377,50 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt = null;
     }
 
-    // Build message data - client is optional
+    // Process CC emails
+    let ccEmails = [];
+
+    if (ccBody) {
+      if (Array.isArray(ccBody)) {
+        ccEmails = ccBody
+          .filter((item) => {
+            if (typeof item === "string" && item.includes("@")) {
+              return true;
+            }
+            if (item && item.email && item.email.includes("@")) {
+              return true;
+            }
+            if (item && typeof item === "object" && item.email) {
+              return true;
+            }
+            return false;
+          })
+          .map((item) => {
+            if (typeof item === "string") {
+              return {
+                email: item.trim().toLowerCase(),
+                name: item.split("@")[0],
+              };
+            }
+            if (item && item.email) {
+              return {
+                email: item.email.trim().toLowerCase(),
+                name: item.name || item.email.split("@")[0],
+              };
+            }
+            return null;
+          })
+          .filter((item) => item !== null);
+      } else if (typeof ccBody === "string" && ccBody.includes("@")) {
+        ccEmails = [
+          {
+            email: ccBody.trim().toLowerCase(),
+            name: ccBody.split("@")[0],
+          },
+        ];
+      }
+    }
+
     const msgData = {
       owner,
       sender,
@@ -1281,13 +1436,25 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt: !isScheduled ? new Date() : undefined,
       threadId,
       replyTo: replyTo || undefined,
+      // 🔥 CRITICAL: Only managers can have these fields
+      isFromClient: inheritedIsFromClient,
+      isFromCompanyEmployee: inheritedIsFromCompanyEmployee,
+      clientEmployeeName: inheritedClientEmployeeName,
+      clientEmployeeEmail: inheritedClientEmployeeEmail,
+      clientName: inheritedClientName,
     };
 
-    // Only include client if provided
+    // Add client if present
     if (client && isObjId(client)) {
       msgData.client = client;
     }
 
+    // Add CC emails if present
+    if (ccEmails.length > 0) {
+      msgData.cc = ccEmails;
+    }
+
+    // Create the message
     const msg = await AssignmentMessage.create(msgData);
 
     const populated = await msg.populate([
@@ -1298,7 +1465,7 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // 🔥 FIXED: Only emit for non-scheduled messages and use targeted emission
+    // Emit socket event
     const io = getIO(req);
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
@@ -1306,8 +1473,9 @@ exports.createMessage = async function createMessage(req, res) {
 
     res.status(201).json(populated);
   } catch (e) {
-    console.error("Error in createMessage:", e);
+    console.error("❌ Error in createMessage:", e);
     if (e.name === "ValidationError") {
+      console.error("❌ Validation errors:", e.errors);
       return res.status(400).json({
         error: "Validation failed",
         details: Object.values(e.errors).map((err) => err.message),
@@ -1316,7 +1484,6 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 
 exports.getMessage = async function getMessage(req, res) {
   try {
@@ -1495,8 +1662,9 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
-        }`,
+      message: `Message ${
+        action === "send" ? "sent immediately" : "converted to draft"
+      }`,
       data: populated,
     });
   } catch (e) {
@@ -2573,7 +2741,10 @@ exports.getDraftCount = async function getDraftCount(req, res) {
     res.status(500).json({ error: "Failed to get draft count" });
   }
 };
-exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res) {
+exports.editDisapprovedMessage = async function editDisapprovedMessage(
+  req,
+  res
+) {
   try {
     const { id } = req.params;
 
@@ -2587,7 +2758,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
 
     // Try to parse JSON if request body is a string (can happen with FormData)
     let parsedBody = requestBody;
-    if (typeof requestBody === 'string' && requestBody.trim().startsWith('{')) {
+    if (typeof requestBody === "string" && requestBody.trim().startsWith("{")) {
       try {
         parsedBody = JSON.parse(requestBody);
       } catch (e) {
@@ -2597,15 +2768,16 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
     }
 
     // Extract subject and note with fallbacks
-    subject = parsedBody.subject || parsedBody.Subject || '';
-    note = parsedBody.note || parsedBody.Note || '';
+    subject = parsedBody.subject || parsedBody.Subject || "";
+    note = parsedBody.note || parsedBody.Note || "";
 
     // Handle removed attachments
     if (parsedBody.removedAttachments || parsedBody.removedattachments) {
-      const removedAttachmentsRaw = parsedBody.removedAttachments || parsedBody.removedattachments;
+      const removedAttachmentsRaw =
+        parsedBody.removedAttachments || parsedBody.removedattachments;
       try {
-        if (typeof removedAttachmentsRaw === 'string') {
-          if (removedAttachmentsRaw.trim().startsWith('[')) {
+        if (typeof removedAttachmentsRaw === "string") {
+          if (removedAttachmentsRaw.trim().startsWith("[")) {
             removedAttachments = JSON.parse(removedAttachmentsRaw);
           } else {
             removedAttachments = [removedAttachmentsRaw].filter(Boolean);
@@ -2616,7 +2788,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
           removedAttachments = [removedAttachmentsRaw].filter(Boolean);
         }
       } catch (e) {
-        console.error('Error parsing removedAttachments:', e);
+        console.error("Error parsing removedAttachments:", e);
         removedAttachments = [];
       }
     }
@@ -2628,33 +2800,36 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         files = req.files;
       } else if (req.files.files && Array.isArray(req.files.files)) {
         files = req.files.files;
-      } else if (req.files.attachments && Array.isArray(req.files.attachments)) {
+      } else if (
+        req.files.attachments &&
+        Array.isArray(req.files.attachments)
+      ) {
         files = req.files.attachments;
-      } else if (typeof req.files === 'object') {
+      } else if (typeof req.files === "object") {
         // If it's an object with file objects
         files = Object.values(req.files).flat();
       }
     }
 
     // Validation - check if id is valid
-    if (!id || id.trim() === '') {
-      return res.status(400).json({ 
-        error: "Message ID is required and must not be empty" 
+    if (!id || id.trim() === "") {
+      return res.status(400).json({
+        error: "Message ID is required and must not be empty",
       });
     }
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ 
-        error: "Invalid message ID format. Must be a valid MongoDB ObjectId" 
+      return res.status(400).json({
+        error: "Invalid message ID format. Must be a valid MongoDB ObjectId",
       });
     }
 
     // Find the message first to check its current status
     const msg = await AssignmentMessage.findById(id);
     if (!msg) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Message not found",
-        messageId: id
+        messageId: id,
       });
     }
 
@@ -2663,24 +2838,24 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
       return res.status(400).json({
         error: "Only disapproved messages can be edited for resubmission",
         currentStatus: msg.approvalStatus,
-        allowedStatus: "disapproved"
+        allowedStatus: "disapproved",
       });
     }
 
     // Check permissions
     const currentUserId = req.employee?._id;
     const messageSenderId = String(msg.sender);
-    
+
     if (!currentUserId) {
-      return res.status(401).json({ 
-        error: "Authentication required. No employee ID found." 
+      return res.status(401).json({
+        error: "Authentication required. No employee ID found.",
       });
     }
 
     const isSender = messageSenderId === String(currentUserId);
-    const userRole = req.employee?.role?.toLowerCase() || '';
-    const isTeamLead = userRole.includes('team') && userRole.includes('lead');
-    const isManager = userRole.includes('manager');
+    const userRole = req.employee?.role?.toLowerCase() || "";
+    const isTeamLead = userRole.includes("team") && userRole.includes("lead");
+    const isManager = userRole.includes("manager");
 
     // Allow sender or team leads to edit
     if (!isSender && !isTeamLead && !isManager) {
@@ -2688,23 +2863,28 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         error: "You don't have permission to edit this message",
         messageOwner: messageSenderId,
         currentUser: currentUserId,
-        userRole: req.employee?.role || 'unknown',
-        allowedRoles: ["sender", "team_lead", "manager"]
+        userRole: req.employee?.role || "unknown",
+        allowedRoles: ["sender", "team_lead", "manager"],
       });
     }
 
     // Check if any changes are provided
-    const hasSubjectChange = subject !== undefined && subject !== null && String(subject).trim() !== '';
-    const hasNoteChange = note !== undefined && note !== null && String(note).trim() !== '';
+    const hasSubjectChange =
+      subject !== undefined &&
+      subject !== null &&
+      String(subject).trim() !== "";
+    const hasNoteChange =
+      note !== undefined && note !== null && String(note).trim() !== "";
     const hasFileChanges = files.length > 0 || removedAttachments.length > 0;
 
     if (!hasSubjectChange && !hasNoteChange && !hasFileChanges) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "No changes provided",
-        instructions: "Please update at least one of: subject, note, or attachments.",
+        instructions:
+          "Please update at least one of: subject, note, or attachments.",
         currentSubject: msg.subject || "No subject",
         currentNoteLength: msg.note?.length || 0,
-        currentAttachmentsCount: msg.attachments?.length || 0
+        currentAttachmentsCount: msg.attachments?.length || 0,
       });
     }
 
@@ -2714,7 +2894,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
       updatedAt: new Date(),
       resubmittedAt: new Date(),
       lastEditedBy: currentUserId,
-      lastEditedAt: new Date()
+      lastEditedAt: new Date(),
     };
 
     // Only update subject if provided and different
@@ -2752,7 +2932,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
     // Handle removed attachments
     if (removedAttachments.length > 0) {
       updatedMsg.attachments = updatedMsg.attachments.filter(
-        attachment => !removedAttachments.includes(attachment._id.toString())
+        (attachment) => !removedAttachments.includes(attachment._id.toString())
       );
     }
 
@@ -2760,8 +2940,8 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
     if (files.length > 0) {
       const newAttachments = files.map((f) => ({
         filename: path.basename(f.filename || f.originalname),
-        originalName: f.originalname || f.filename || 'unnamed_file',
-        mimetype: f.mimetype || 'application/octet-stream',
+        originalName: f.originalname || f.filename || "unnamed_file",
+        mimetype: f.mimetype || "application/octet-stream",
         size: f.size || 0,
         url: buildPublicUrl(req, f.filename || f.originalname),
         uploadedAt: new Date(),
@@ -2784,7 +2964,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         {
           path: "lastEditedBy",
           select: "_id name companyEmail role",
-          model: "Employee"
+          model: "Employee",
         },
       ])
       .lean();
@@ -2794,19 +2974,20 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
     }
 
     // Ensure lastEditedBy has proper structure
-    if (populated.lastEditedBy && typeof populated.lastEditedBy === 'object') {
+    if (populated.lastEditedBy && typeof populated.lastEditedBy === "object") {
       populated.lastEditedBy = {
         _id: populated.lastEditedBy._id,
         name: populated.lastEditedBy.name || "Unknown User",
-        companyEmail: populated.lastEditedBy.companyEmail || "unknown@company.com",
-        role: populated.lastEditedBy.role || "employee"
+        companyEmail:
+          populated.lastEditedBy.companyEmail || "unknown@company.com",
+        role: populated.lastEditedBy.role || "employee",
       };
     } else {
       populated.lastEditedBy = {
         _id: currentUserId,
         name: req.employee.name || "Unknown User",
         companyEmail: req.employee.companyEmail || "unknown@company.com",
-        role: req.employee.role || "employee"
+        role: req.employee.role || "employee",
       };
     }
 
@@ -2855,7 +3036,10 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         });
 
         // Special notification to team leads
-        io.to("assignment_team_leads").emit("assignment_message_resubmitted", resubmitEvent);
+        io.to("assignment_team_leads").emit(
+          "assignment_message_resubmitted",
+          resubmitEvent
+        );
       }
     } catch (socketError) {
       console.error("❌ Socket.io event error:", socketError);
@@ -2870,7 +3054,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
         subjectChanged: hasSubjectChange,
         noteChanged: hasNoteChange,
         filesAdded: files.length,
-        attachmentsRemoved: removedAttachments.length
+        attachmentsRemoved: removedAttachments.length,
       },
       timestamp: new Date(),
     });
@@ -2887,16 +3071,16 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(req, res)
     }
 
     if (e.name === "CastError") {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Invalid data format",
-        details: e.message 
+        details: e.message,
       });
     }
 
     if (e.code === 11000) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Duplicate entry found",
-        details: e.message 
+        details: e.message,
       });
     }
 
@@ -2917,7 +3101,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
     // Fetch all messages with pagination
     const [allMsgs, total] = await Promise.all([
       AssignmentMessage.find()
-        .sort({ createdAt: -1 })  // Changed to -1 for newest first
+        .sort({ createdAt: -1 }) // Changed to -1 for newest first
         .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
@@ -2927,7 +3111,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
           { path: "attachments.uploadedBy", select: "name companyEmail" },
         ])
         .lean(),
-      AssignmentMessage.countDocuments()  // Get total count for pagination
+      AssignmentMessage.countDocuments(), // Get total count for pagination
     ]);
 
     // Filter for direct supervision messages
@@ -2937,9 +3121,9 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
 
     res.json({
       items: directMsgs,
-      total: total,  // ✅ Total count from database
+      total: total, // ✅ Total count from database
       page: pageNum,
-      pages: Math.ceil(total / lim),  // ✅ Pagination metadata
+      pages: Math.ceil(total / lim), // ✅ Pagination metadata
       limit: lim,
     });
   } catch (e) {
@@ -4242,7 +4426,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     let removedAttachments = [];
     let files = [];
 
-    if (req.headers['content-type']?.includes('multipart/form-data')) {
+    if (req.headers["content-type"]?.includes("multipart/form-data")) {
       // Handle FormData - use direct field access
       subject = req.body.subject;
       note = req.body.note;
@@ -4263,7 +4447,12 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         files = req.files;
       }
     } else {
-      ({ subject, note, receiver: receiverBody, receivers: receiversBody } = req.body);
+      ({
+        subject,
+        note,
+        receiver: receiverBody,
+        receivers: receiversBody,
+      } = req.body);
     }
 
     // Enhanced validation
@@ -4275,9 +4464,17 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
       return res.status(400).json({ error: "Invalid message ID format" });
     }
 
-    if (subject === undefined && note === undefined && !receiverBody && !receiversBody && files.length === 0 && removedAttachments.length === 0) {
+    if (
+      subject === undefined &&
+      note === undefined &&
+      !receiverBody &&
+      !receiversBody &&
+      files.length === 0 &&
+      removedAttachments.length === 0
+    ) {
       return res.status(400).json({
-        error: "No changes provided. Please update subject, note, receivers, or attachments."
+        error:
+          "No changes provided. Please update subject, note, receivers, or attachments.",
       });
     }
 
@@ -4315,10 +4512,11 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
 
     if (!isSender && !isTeamLead) {
       return res.status(403).json({
-        error: "You don't have permission to edit this pending message. Only the sender or team leads can edit pending messages.",
+        error:
+          "You don't have permission to edit this pending message. Only the sender or team leads can edit pending messages.",
         messageOwner: msg.sender,
         currentUser: currentUserId,
-        userRole: currentUserRole
+        userRole: currentUserRole,
       });
     }
 
@@ -4331,7 +4529,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         return res.status(403).json({
           error: "You can only edit pending messages within your organization",
           messageOwner: messageOwner,
-          yourOrganization: teamLeadOwner
+          yourOrganization: teamLeadOwner,
         });
       }
     }
@@ -4348,8 +4546,10 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     // Handle receiver updates if provided
     if (receiverBody || receiversBody) {
       let receivers = [];
-      if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-      if (receiversBody) receivers = receivers.concat(normalizeIds(receiversBody));
+      if (receiverBody)
+        receivers = receivers.concat(normalizeIds(receiverBody));
+      if (receiversBody)
+        receivers = receivers.concat(normalizeIds(receiversBody));
 
       receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
         (id) => id !== String(msg.sender)
@@ -4382,7 +4582,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     // Handle removed attachments
     if (removedAttachments.length > 0) {
       updatedMsg.attachments = updatedMsg.attachments.filter(
-        attachment => !removedAttachments.includes(attachment._id.toString())
+        (attachment) => !removedAttachments.includes(attachment._id.toString())
       );
     }
 
@@ -4405,14 +4605,16 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     await updatedMsg.save();
 
     // Populate the updated message
-    const populated = await AssignmentMessage.findById(updatedMsg._id).populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
-      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      { path: "lastEditedBy", select: "_id name companyEmail role" },
-    ]);
+    const populated = await AssignmentMessage.findById(updatedMsg._id).populate(
+      [
+        { path: "owner", select: "_id name companyEmail" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        { path: "lastEditedBy", select: "_id name companyEmail role" },
+      ]
+    );
 
     if (!populated) {
       throw new Error("Failed to populate updated message data");
@@ -4452,7 +4654,10 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         };
 
         authorizedParticipants.forEach((participantId) => {
-          io.to(`employee_${participantId}`).emit("assignment_message_updated", notificationData);
+          io.to(`employee_${participantId}`).emit(
+            "assignment_message_updated",
+            notificationData
+          );
         });
 
         if (isTeamLead && !isSender) {
@@ -4463,7 +4668,9 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
           });
         }
       } else {
-        console.warn("⚠️ Socket.io instance not available for real-time updates");
+        console.warn(
+          "⚠️ Socket.io instance not available for real-time updates"
+        );
       }
     } catch (socketError) {
       console.error("❌ Socket.io event error (non-critical):", socketError);
@@ -4472,9 +4679,10 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
 
     res.json({
       success: true,
-      message: isTeamLead && !isSender
-        ? "Pending message updated by team lead"
-        : "Pending message updated successfully",
+      message:
+        isTeamLead && !isSender
+          ? "Pending message updated by team lead"
+          : "Pending message updated successfully",
       data: populated,
       editedByTeamLead: isTeamLead && !isSender,
       timestamp: new Date(),
@@ -4516,48 +4724,50 @@ exports.markAsRead = async function markAsRead(req, res) {
     if (!message) {
       return res.status(404).json({
         success: false,
-        error: 'Message not found'
+        error: "Message not found",
       });
     }
 
     // Check if user is authorized to read this message
     const isAuthorized =
       message.sender.toString() === userId.toString() ||
-      message.receiver.some(receiver => receiver.toString() === userId.toString());
+      message.receiver.some(
+        (receiver) => receiver.toString() === userId.toString()
+      );
 
     if (!isAuthorized) {
       return res.status(403).json({
         success: false,
-        error: 'Not authorized to access this message'
+        error: "Not authorized to access this message",
       });
     }
 
     // Check if user has already read this message
-    const alreadyRead = message.readBy.some(read =>
-      read.employee.toString() === userId.toString()
+    const alreadyRead = message.readBy.some(
+      (read) => read.employee.toString() === userId.toString()
     );
 
     if (!alreadyRead) {
       message.readBy.push({
         employee: userId,
-        readAt: new Date()
+        readAt: new Date(),
       });
       await message.save();
     }
 
     res.json({
       success: true,
-      message: 'Marked as read',
+      message: "Marked as read",
       data: {
         messageId: message._id,
-        readBy: message.readBy
-      }
+        readBy: message.readBy,
+      },
     });
   } catch (error) {
-    console.error('Error marking message as read:', error);
+    console.error("Error marking message as read:", error);
     res.status(500).json({
       success: false,
-      error: 'Server error while marking message as read'
+      error: "Server error while marking message as read",
     });
   }
 };
@@ -4571,23 +4781,20 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     // Find all unread messages in this thread where user is receiver
     const unreadMessages = await AssignmentMessage.find({
       threadId: threadId,
-      'readBy.employee': { $ne: userId },
-      $or: [
-        { receiver: userId },
-        { receiver: { $in: [userId] } }
-      ],
-      isTrashed: false
+      "readBy.employee": { $ne: userId },
+      $or: [{ receiver: userId }, { receiver: { $in: [userId] } }],
+      isTrashed: false,
     });
 
     // Add user to readBy for all unread messages
-    const updatePromises = unreadMessages.map(msg =>
+    const updatePromises = unreadMessages.map((msg) =>
       AssignmentMessage.findByIdAndUpdate(msg._id, {
         $push: {
           readBy: {
             employee: userId,
-            readAt: new Date()
-          }
-        }
+            readAt: new Date(),
+          },
+        },
       })
     );
 
@@ -4596,13 +4803,13 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     res.json({
       success: true,
       message: `Marked ${unreadMessages.length} messages as read`,
-      readCount: unreadMessages.length
+      readCount: unreadMessages.length,
     });
   } catch (error) {
-    console.error('Error marking thread as read:', error);
+    console.error("Error marking thread as read:", error);
     res.status(500).json({
       success: false,
-      error: 'Failed to mark thread as read'
+      error: "Failed to mark thread as read",
     });
   }
 };
@@ -4618,42 +4825,44 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     if (!message) {
       return res.status(404).json({
         success: false,
-        error: 'Message not found'
+        error: "Message not found",
       });
     }
 
     // Check if user is authorized
     const isAuthorized =
       message.sender.toString() === userId.toString() ||
-      message.receiver.some(receiver => receiver.toString() === userId.toString());
+      message.receiver.some(
+        (receiver) => receiver.toString() === userId.toString()
+      );
 
     if (!isAuthorized) {
       return res.status(403).json({
         success: false,
-        error: 'Not authorized to access this message'
+        error: "Not authorized to access this message",
       });
     }
 
     // Remove user from readBy array
-    message.readBy = message.readBy.filter(read =>
-      read.employee.toString() !== userId.toString()
+    message.readBy = message.readBy.filter(
+      (read) => read.employee.toString() !== userId.toString()
     );
 
     await message.save();
 
     res.json({
       success: true,
-      message: 'Marked as unread',
+      message: "Marked as unread",
       data: {
         messageId: message._id,
-        readBy: message.readBy
-      }
+        readBy: message.readBy,
+      },
     });
   } catch (error) {
-    console.error('Error marking message as unread:', error);
+    console.error("Error marking message as unread:", error);
     res.status(500).json({
       success: false,
-      error: 'Server error while marking message as unread'
+      error: "Server error while marking message as unread",
     });
   }
 };
@@ -4665,23 +4874,23 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
 
     const unreadCount = await AssignmentMessage.countDocuments({
       receiver: userId, // Only count messages where user is receiver
-      'readBy.employee': { $ne: userId },
+      "readBy.employee": { $ne: userId },
       isTrashed: false,
       isSpam: false,
-      status: 'sent'
+      status: "sent",
     });
 
     res.json({
       success: true,
       data: {
-        unreadCount
-      }
+        unreadCount,
+      },
     });
   } catch (error) {
-    console.error('Error getting unread count:', error);
+    console.error("Error getting unread count:", error);
     res.status(500).json({
       success: false,
-      error: 'Server error while fetching unread count'
+      error: "Server error while fetching unread count",
     });
   }
 };
@@ -4695,7 +4904,7 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
     if (!messageIds || !Array.isArray(messageIds)) {
       return res.status(400).json({
         success: false,
-        error: 'Message IDs array is required'
+        error: "Message IDs array is required",
       });
     }
 
@@ -4703,19 +4912,16 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
     const result = await AssignmentMessage.updateMany(
       {
         _id: { $in: messageIds },
-        'readBy.employee': { $ne: userId },
-        $or: [
-          { sender: userId },
-          { receiver: userId }
-        ]
+        "readBy.employee": { $ne: userId },
+        $or: [{ sender: userId }, { receiver: userId }],
       },
       {
         $push: {
           readBy: {
             employee: userId,
-            readAt: new Date()
-          }
-        }
+            readAt: new Date(),
+          },
+        },
       }
     );
 
@@ -4723,14 +4929,14 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
       success: true,
       message: `${result.modifiedCount} messages marked as read`,
       data: {
-        modifiedCount: result.modifiedCount
-      }
+        modifiedCount: result.modifiedCount,
+      },
     });
   } catch (error) {
-    console.error('Error marking multiple messages as read:', error);
+    console.error("Error marking multiple messages as read:", error);
     res.status(500).json({
       success: false,
-      error: 'Server error while marking messages as read'
+      error: "Server error while marking messages as read",
     });
   }
 };

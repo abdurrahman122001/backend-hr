@@ -1,4 +1,3 @@
-// backend/src/routes/employees.js
 const express = require("express");
 const router = express.Router();
 const mongoose = require("mongoose");
@@ -7,24 +6,11 @@ const Employee = require("../models/Employees");
 const requireAuth = require("../middleware/auth");
 const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
-// ------------------------------
-// Helpers
-// ------------------------------
-/**
- * Resolve the effective tenant/owner id for the current user.
- * Priority: explicit user.owner -> user.createdBy -> user._id
- */
 
 function getEffectiveOwnerId(user) {
   return user?.owner || user?.createdBy || user?._id;
 }
 
-/**
- * Backward-compatible scope:
- * Match employees when EITHER
- *  - owner array contains ownerId OR userId
- *  - OR createdBy equals ownerId OR userId
- */
 function buildEmployeeScope(user, includeTrashed = false) {
   const ownerId = getEffectiveOwnerId(user);
   const userId = user?._id;
@@ -74,43 +60,6 @@ router.get("/", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: err.message });
   }
 });
-
-// Add new route for load more functionality
-router.get("/load-more", requireAuth, async (req, res) => {
-  try {
-    const { skip = 0, limit = 15, trashed = "false" } = req.query;
-    const includeTrashed = trashed === "true";
-    
-    const scope = buildEmployeeScope(req.user, includeTrashed);
-    const query = { ...scope };
-
-    const skipNum = parseInt(skip);
-    const limitNum = parseInt(limit);
-
-    const list = await Employee.find(query)
-      .sort({ name: 1 })
-      .skip(skipNum)
-      .limit(limitNum)
-      .lean();
-
-    const totalCount = await Employee.countDocuments(query);
-    const hasMore = skipNum + limitNum < totalCount;
-
-    res.json({ 
-      status: "success", 
-      data: list,
-      pagination: {
-        skip: skipNum,
-        limit: limitNum,
-        total: totalCount,
-        hasMore: hasMore
-      }
-    });
-  } catch (err) {
-    res.status(500).json({ status: "error", message: err.message });
-  }
-});
-
 
 router.get("/attendance", requireAuth, async (req, res) => {
   try {
@@ -186,6 +135,7 @@ router.post("/", requireAuth, async (req, res) => {
     bankAccount,
     companyEmail,
     shifts, // optional: array of ObjectIds
+    experiences, // NEW: Designation journey
   } = req.body;
 
   if (!name || !position || !department || !email) {
@@ -221,6 +171,7 @@ router.post("/", requireAuth, async (req, res) => {
       leaveEntitlement,
       photographUrl,
       shifts,
+      experiences: experiences || [], // NEW: Save experiences if provided
       isTrashed: false,
     });
 
@@ -286,6 +237,28 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
 
     const scope = buildEmployeeScope(req.user);
+    
+    // If updating experiences, handle them properly
+    if (req.body.experiences) {
+      req.body.experiences = req.body.experiences.map(exp => {
+        // Add timestamps to new experiences
+        if (!exp._id) {
+          exp.createdAt = new Date();
+          exp.updatedAt = new Date();
+          
+          // Add timestamps to positions
+          exp.positions = exp.positions.map(pos => {
+            if (!pos._id) {
+              pos.createdAt = new Date();
+              pos.updatedAt = new Date();
+            }
+            return pos;
+          });
+        }
+        return exp;
+      });
+    }
+
     const emp = await Employee.findOneAndUpdate(
       { _id: id, ...scope },
       req.body,
@@ -298,6 +271,86 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ error: "Employee not found or unauthorized" });
     }
     res.json(emp);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ------------------------------
+// PATCH /api/employees/:id/experiences
+// Update only experiences array
+// ------------------------------
+router.patch("/:id/experiences", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { experiences } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid employee id" });
+    }
+
+    if (!Array.isArray(experiences)) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Experiences must be an array" });
+    }
+
+    const scope = buildEmployeeScope(req.user);
+    
+    // Add timestamps to experiences
+    const experiencesWithTimestamps = experiences.map(exp => {
+      // Keep existing timestamps for existing experiences
+      if (exp._id) {
+        exp.updatedAt = new Date();
+        
+        // Update timestamps for existing positions
+        if (exp.positions) {
+          exp.positions = exp.positions.map(pos => {
+            if (pos._id) {
+              pos.updatedAt = new Date();
+            } else {
+              pos.createdAt = new Date();
+              pos.updatedAt = new Date();
+            }
+            return pos;
+          });
+        }
+      } else {
+        // New experience
+        exp.createdAt = new Date();
+        exp.updatedAt = new Date();
+        
+        // Add timestamps to positions
+        if (exp.positions) {
+          exp.positions = exp.positions.map(pos => {
+            pos.createdAt = new Date();
+            pos.updatedAt = new Date();
+            return pos;
+          });
+        }
+      }
+      return exp;
+    });
+
+    const emp = await Employee.findOneAndUpdate(
+      { _id: id, ...scope },
+      { experiences: experiencesWithTimestamps },
+      { new: true, runValidators: true }
+    );
+
+    if (!emp) {
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
+    }
+    
+    res.json({ 
+      status: "success", 
+      message: "Experiences updated successfully",
+      data: emp.experiences 
+    });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
@@ -482,7 +535,6 @@ router.get("/roles", requireAuth, async (req, res) => {
     res.status(500).json({ status: "error", message: error.message });
   }
 });
-
 
 // PATCH /api/employees/:id/role
 // Update employee role

@@ -1,10 +1,11 @@
+// controllers/bugController.js
 const Bug = require("../models/Bug");
 const Employee = require("../models/Employees");
 const fs = require("fs");
 const path = require("path");
 
 // ---------------------
-// CREATE BUG WITH IMAGES
+// CREATE BUG
 // ---------------------
 exports.createBug = async (req, res) => {
   try {
@@ -86,15 +87,15 @@ exports.createBug = async (req, res) => {
       });
     }
     console.error("❌ Error creating bug:", err);
-    
-    if (err.name === 'ValidationError') {
+
+    if (err.name === "ValidationError") {
       return res.status(400).json({
         status: "error",
         message: "Validation error",
-        errors: Object.values(err.errors).map(e => e.message)
+        errors: Object.values(err.errors).map((e) => e.message),
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while creating bug",
@@ -179,17 +180,116 @@ exports.getBugById = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Error fetching bug:", err);
-    
-    if (err.name === 'CastError') {
+
+    if (err.name === "CastError") {
       return res.status(400).json({
         status: "error",
         message: "Invalid bug ID",
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while fetching bug",
+    });
+  }
+};
+
+// ---------------------
+// UPDATE BUG
+// ---------------------
+exports.updateBug = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, priority } = req.body;
+
+    const bug = await Bug.findById(id);
+    if (!bug) {
+      // cleanup new uploads
+      if (req.files && req.files.length > 0) {
+        req.files.forEach((file) => {
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        });
+      }
+      return res.status(404).json({
+        status: "error",
+        message: "Bug not found",
+      });
+    }
+
+    // Check permissions - only reporter or R&D
+    const emp = await Employee.findById(req.employee._id).select("department");
+    const isReporter =
+      bug.reportedBy.toString() === req.employee._id.toString();
+    const isRAndD = emp?.department === "Research and Development";
+
+    if (!isReporter && !isRAndD) {
+      // cleanup new uploads
+      if (req.files && req.files.length > 0) {
+        req.files.forEach((file) => {
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+        });
+      }
+      return res.status(403).json({
+        status: "error",
+        message: "Not authorized to update this bug",
+      });
+    }
+
+    // Update fields if provided
+    if (typeof title === "string" && title.trim()) {
+      bug.title = title.trim();
+    }
+
+    if (typeof description === "string" && description.trim()) {
+      bug.description = description.trim();
+    }
+
+    if (priority && ["low", "medium", "high"].includes(priority)) {
+      bug.priority = priority;
+    }
+
+    // Append new images (do not delete existing)
+    if (req.files && req.files.length > 0) {
+      const newImages = req.files.map((file) => ({
+        filename: file.filename,
+        originalName: file.originalname,
+        path: file.filename,
+        mimetype: file.mimetype,
+        size: file.size,
+      }));
+
+      bug.images.push(...newImages);
+    }
+
+    await bug.save();
+    await bug.populate("reportedBy", "name companyEmail department");
+
+    return res.json({
+      status: "success",
+      message: "Bug updated successfully",
+      bug,
+    });
+  } catch (err) {
+    console.error("❌ Error updating bug:", err);
+
+    // cleanup new uploads on error
+    if (req.files && req.files.length > 0) {
+      req.files.forEach((file) => {
+        if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+      });
+    }
+
+    if (err.name === "CastError") {
+      return res.status(400).json({
+        status: "error",
+        message: "Invalid bug ID",
+      });
+    }
+
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while updating bug",
     });
   }
 };
@@ -211,7 +311,8 @@ exports.deleteImage = async (req, res) => {
 
     // Check permissions - only reporter or R&D can delete images
     const emp = await Employee.findById(req.employee._id).select("department");
-    const isReporter = bug.reportedBy.toString() === req.employee._id.toString();
+    const isReporter =
+      bug.reportedBy.toString() === req.employee._id.toString();
     const isRAndD = emp.department === "Research and Development";
 
     if (!isReporter && !isRAndD) {
@@ -312,14 +413,14 @@ exports.resolveBug = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Error resolving bug:", err);
-    
-    if (err.name === 'CastError') {
+
+    if (err.name === "CastError") {
       return res.status(400).json({
         status: "error",
         message: "Invalid bug ID",
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while resolving bug",
@@ -371,14 +472,14 @@ exports.approveBug = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Error approving bug:", err);
-    
-    if (err.name === 'CastError') {
+
+    if (err.name === "CastError") {
       return res.status(400).json({
         status: "error",
         message: "Invalid bug ID",
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while approving bug",
@@ -411,7 +512,8 @@ exports.updatePriority = async (req, res) => {
 
     // Check permissions - only reporter or R&D can update priority
     const emp = await Employee.findById(req.employee._id).select("department");
-    const isReporter = bug.reportedBy.toString() === req.employee._id.toString();
+    const isReporter =
+      bug.reportedBy.toString() === req.employee._id.toString();
     const isRAndD = emp.department === "Research and Development";
 
     if (!isReporter && !isRAndD) {
@@ -433,14 +535,14 @@ exports.updatePriority = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Priority update error:", err);
-    
-    if (err.name === 'CastError') {
+
+    if (err.name === "CastError") {
       return res.status(400).json({
         status: "error",
         message: "Invalid bug ID",
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while updating priority",
@@ -465,7 +567,8 @@ exports.deleteBug = async (req, res) => {
 
     // Check permissions - only reporter or R&D can delete
     const emp = await Employee.findById(req.employee._id).select("department");
-    const isReporter = bug.reportedBy.toString() === req.employee._id.toString();
+    const isReporter =
+      bug.reportedBy.toString() === req.employee._id.toString();
     const isRAndD = emp.department === "Research and Development";
 
     if (!isReporter && !isRAndD) {
@@ -493,14 +596,14 @@ exports.deleteBug = async (req, res) => {
     });
   } catch (err) {
     console.error("❌ Error deleting bug:", err);
-    
-    if (err.name === 'CastError') {
+
+    if (err.name === "CastError") {
       return res.status(400).json({
         status: "error",
         message: "Invalid bug ID",
       });
     }
-    
+
     return res.status(500).json({
       status: "error",
       message: "Server error while deleting bug",

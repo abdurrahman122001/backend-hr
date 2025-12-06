@@ -4,6 +4,7 @@ const router = express.Router();
 const requireAuth = require("../middleware/empAuth");
 const { uploadAssignments } = require("../middleware/upload");
 const managerCtrl = require("../controllers/managerController");
+const clientCtrl = require("../controllers/clientInfoController");
 
 // Roster (employees + clients for same owner)
 router.get("/roster", requireAuth, managerCtrl.getRoster);
@@ -15,6 +16,20 @@ router.get(
   requireAuth,
   managerCtrl.getEmployeeSupervisionStatus
 );
+// Client side supervision 
+router.patch(
+  "/client/:id/supervision",
+  requireAuth,
+  clientCtrl.updateClientSupervision
+);
+
+router.patch(
+  "/employee/:employeeId/supervision-all",
+  requireAuth,
+  clientCtrl.updateAllClientSupervisionForEmployee
+);
+
+
 router.post(
   "/assign",
   requireAuth,

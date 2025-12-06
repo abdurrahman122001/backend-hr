@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const requireAuth = require("../middleware/empAuth");
 const clientInfoCtrl = require("../controllers/clientInfoController");
+// Add to your routes
 
 // Manager/Team Lead creates client info
 router.post("/", requireAuth, clientInfoCtrl.createClientInfo);
@@ -18,9 +19,18 @@ router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
 // Delete specific client info (Owner/Manager/Team Lead/Creator)
 router.delete("/:id", requireAuth, clientInfoCtrl.deleteClientInfo);
 
+router.get("/has-new-clients", requireAuth, clientInfoCtrl.hasNewClients);
+router.post("/:id/read", requireAuth, clientInfoCtrl.markClientRead);
 // Get client by ID
 router.get("/:id", requireAuth, clientInfoCtrl.getClientById);
 
+router.get("/search/client-by-email", requireAuth, clientInfoCtrl.searchClientByEmail);
+router.get("/search/company-employee-by-email", requireAuth, clientInfoCtrl.searchCompanyEmployeeByEmail);
+router.get(
+  "/search/team-members",
+  requireAuth,
+  clientInfoCtrl.searchTeamMembers
+);
 // Manage company employees
 router.post("/:id/company-employees", requireAuth, clientInfoCtrl.addCompanyEmployee);
 router.delete("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.removeCompanyEmployee);

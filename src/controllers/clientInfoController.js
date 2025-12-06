@@ -50,6 +50,7 @@ exports.createClientInfo = async (req, res) => {
       createdBy: emp._id,
       companyEmployees: validatedEmployees,
     });
+    
 
     res.status(201).json(doc);
   } catch (err) {
@@ -447,5 +448,291 @@ exports.getWhatsAppFlags = async (req, res) => {
   } catch (err) {
     console.error("getWhatsAppFlags error:", err);
     res.status(500).json({ error: "Failed to fetch WhatsApp flags" });
+  }
+};
+
+exports.markClientRead = async (req, res) => {
+  try {
+    const employeeId = req.employee._id;
+    const { id } = req.params; // clientId
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    // If already read by this employee → do nothing
+    const alreadyRead = client.readBy.some(
+      r => String(r.employee) === String(employeeId)
+    );
+    if (!alreadyRead) {
+      client.readBy.push({ employee: employeeId, readAt: new Date() });
+      await client.save();
+    }
+
+    res.json({ success: true, readBy: client.readBy });
+  } catch (err) {
+    console.error("markClientRead error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// Check if user has any new/unread clients
+exports.hasNewClients = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("_id role owner");
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const role = String(emp.role || "").trim().toLowerCase();
+    
+    // 🚫 Managers never see new clients indicator
+    if (role === "manager") {
+      return res.json({ hasNewClients: false, unreadCount: 0 });
+    }
+
+    let query = {};
+
+    // Team Lead: All clients under their owner
+    if (role.includes("team lead") || role === "owner") {
+      if (!emp.owner) {
+        return res.status(400).json({ error: "Owner ID missing in profile" });
+      }
+      query = { owner: emp.owner };
+    } 
+    // Employee: Only their assigned clients
+    else {
+      query = { assignedTo: emp._id };
+    }
+
+    // Find clients that match the query
+    const clients = await ClientInfo.find(query).select("_id readBy");
+    
+    // Check if any client is unread (not in readBy array)
+    const hasUnread = clients.some(client => {
+      return !client.readBy?.some(read => 
+        String(read.employee) === String(emp._id)
+      );
+    });
+
+    const unreadCount = clients.filter(client => {
+      return !client.readBy?.some(read => 
+        String(read.employee) === String(emp._id)
+      );
+    }).length;
+
+    res.json({
+      hasNewClients: hasUnread,
+      unreadCount,
+      role: emp.role
+    });
+  } catch (err) {
+    console.error("hasNewClients error:", err);
+    res.status(500).json({ error: "Failed to check new clients" });
+  }
+};
+// client-info.controller.js
+
+// Search clients by email (for managers, team leads, and team members - only assigned clients)
+exports.searchClientByEmail = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ error: "Email query parameter is required" });
+    }
+
+    // Build query based on role
+    let query = { owner: emp.owner };
+    
+    // For non-managers, only search assigned clients
+    if (emp.role?.toLowerCase() !== "manager") {
+      query.assignedTo = emp._id;
+    }
+
+    // Add email search
+    query.clientEmail = { $regex: email, $options: "i" };
+
+    const clients = await ClientInfo.find(query)
+      .populate("assignedTo", "_id name companyEmail")
+      .limit(10);
+
+    res.json(clients);
+  } catch (err) {
+    console.error("searchClientByEmail error:", err);
+    res.status(500).json({ error: "Failed to search clients by email" });
+  }
+};
+
+// Search company employees by email (for all roles - only within assigned clients)
+exports.searchCompanyEmployeeByEmail = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ error: "Email query parameter is required" });
+    }
+
+    // Build query based on role
+    let query = { owner: emp.owner };
+    
+    // For non-managers, only search within assigned clients
+    if (emp.role?.toLowerCase() !== "manager") {
+      query.assignedTo = emp._id;
+    }
+
+    // Add email search for company employees
+    query["companyEmployees.email"] = { $regex: email, $options: "i" };
+
+    const clients = await ClientInfo.find(query)
+      .populate("assignedTo", "_id name companyEmail")
+      .limit(10);
+
+    const results = [];
+    clients.forEach(client => {
+      client.companyEmployees.forEach(employee => {
+        if (employee.email && employee.email.toLowerCase().includes(email.toLowerCase())) {
+          results.push({
+            client: {
+              _id: client._id,
+              clientName: client.clientName,
+              dba: client.dba,
+              assignedTo: client.assignedTo
+            },
+            employee: employee
+          });
+        }
+      });
+    });
+
+    res.json(results);
+  } catch (err) {
+    console.error("searchCompanyEmployeeByEmail error:", err);
+    res.status(500).json({ error: "Failed to search company employees by email" });
+  }
+};
+
+// Search team members (for all roles)
+exports.searchTeamMembers = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { search } = req.query;
+    if (!search) {
+      return res.status(400).json({ error: "Search query parameter is required" });
+    }
+
+    let employeesQuery = { owner: emp.owner, _id: { $ne: emp._id } };
+
+    // Add search conditions
+    const searchRegex = new RegExp(search, 'i');
+    employeesQuery.$or = [
+      { name: searchRegex },
+      { email: searchRegex },
+      { companyEmail: searchRegex }
+    ];
+
+    // Role-based filtering
+    if (emp.role?.toLowerCase() === "manager") {
+      // Manager can see all employees
+    } else if (emp.role?.toLowerCase() === "team lead" || emp.role?.toLowerCase() === "team_lead") {
+      // Team lead can see their team members
+      // First, get the team lead's team
+      const teamLeadTeam = await Employee.find({
+        owner: emp.owner,
+        teamLead: emp._id,
+        role: { $in: ["team member", "team member"] }
+      }).select("_id");
+      
+      const teamMemberIds = teamLeadTeam.map(member => member._id);
+      employeesQuery._id = { $in: teamMemberIds };
+    } else if (emp.role?.toLowerCase() === "team member") {
+      // Team member can only see themselves (already excluded) and their team lead
+      employeesQuery.$or = [
+        { _id: emp.teamLead }, // Their team lead
+        ...employeesQuery.$or
+      ];
+    }
+
+    const employees = await Employee.find(employeesQuery)
+      .select("_id name email companyEmail role designation")
+      .limit(10);
+
+    res.json(employees);
+  } catch (err) {
+    console.error("searchTeamMembers error:", err);
+    res.status(500).json({ error: "Failed to search team members" });
+  }
+};
+
+exports.updateClientSupervision = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+    if (!isManagerLike(me.role)) return res.status(403).json({ error: "Access denied" });
+
+    const { id } = req.params; // client id
+    const { supervision } = req.body;
+
+    if (!["direct", "needs_approval"].includes(supervision)) {
+      return res.status(400).json({ error: "Invalid supervision value" });
+    }
+
+    const updatedClient = await ClientInfo.findOneAndUpdate(
+      { _id: id, owner: me.owner },
+      { $set: { supervision } },
+      { new: true, runValidators: true }
+    ).select("_id clientName supervision assignedTo");
+
+    if (!updatedClient)
+      return res.status(404).json({ error: "Client not found" });
+
+    return res.json({
+      status: "success",
+      message: "Supervision updated",
+      client: updatedClient
+    });
+  } catch (err) {
+    console.error("updateClientSupervision error:", err);
+    res.status(500).json({ error: "Failed to update supervision" });
+  }
+};
+
+exports.updateAllClientSupervisionForEmployee = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    if (!me || !me.owner || !isManagerLike(me.role)) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    const { employeeId } = req.params;
+    const { supervision } = req.body;
+
+    if (!["direct", "needs_approval"].includes(supervision)) {
+      return res.status(400).json({ error: "Invalid supervision value" });
+    }
+
+    // Get affected clients
+    const clients = await ClientInfo.find({
+      assignedTo: employeeId,
+      owner: me.owner
+    }).select("_id supervision");
+
+    // Update all
+    await ClientInfo.updateMany(
+      { assignedTo: employeeId, owner: me.owner },
+      { supervision }
+    );
+
+    // Return affected
+    res.json({
+      updated: clients.map(c => c._id),
+      supervision
+    });
+  } catch (err) {
+    console.error("updateAllClientSupervision error:", err);
+    res.status(500).json({ error: "Failed to update supervision" });
   }
 };

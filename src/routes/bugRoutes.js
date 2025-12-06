@@ -1,3 +1,4 @@
+// routes/bugRoutes.js
 const express = require("express");
 const router = express.Router();
 
@@ -11,7 +12,7 @@ const { upload } = require("../utils/multer");
 router.post(
   "/create",
   requireEmployeeAuth,
-  upload.array("images", 10), // Allow up to 5 images
+  upload.array("images", 10), // Allow up to 10 images
   bugController.createBug
 );
 
@@ -25,7 +26,15 @@ router.get("/", requireEmployeeAuth, bugController.getBugs);
 // @access  Private (Employee)
 router.get("/:id", requireEmployeeAuth, bugController.getBugById);
 
-// REMOVED: Image API route since we're serving statically
+// @route   PUT /api/bugs/:id
+// @desc    Update bug (title, description, priority, add new images)
+// @access  Private (Employee - Reporter or R&D)
+router.put(
+  "/:id",
+  requireEmployeeAuth,
+  upload.array("images", 10),
+  bugController.updateBug
+);
 
 // @route   DELETE /api/bugs/:id/images/:imageId
 // @desc    Delete specific image from bug
