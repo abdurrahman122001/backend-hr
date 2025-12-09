@@ -30,7 +30,7 @@ async function applyVisibility(q, req) {
   }
 
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
-  
+
   // Base filter: user must be participant
   const participantFilter = {
     $or: [
@@ -75,10 +75,10 @@ async function emitToThreadParticipants(io, message, eventName = "new_thread_cha
 
     // Get all participants in this thread
     const participants = await ThreadChatMessage.getThreadParticipants(populatedMessage.threadId);
-    
+
     // Also add current message participants
     const currentParticipants = new Set();
-    
+
     // Add sender
     const senderId = String(
       typeof populatedMessage.sender === "string"
@@ -166,12 +166,12 @@ exports.createThreadChatMessage = async function (req, res) {
         .limit(10);
 
       const threadParticipants = new Set();
-      
+
       threadMessages.forEach(msg => {
         if (msg.sender && String(msg.sender) !== String(sender)) {
           threadParticipants.add(String(msg.sender));
         }
-        
+
         if (msg.receiver && Array.isArray(msg.receiver)) {
           msg.receiver.forEach(rec => {
             if (String(rec) !== String(sender)) {
@@ -270,9 +270,9 @@ exports.getThreadMessages = async function (req, res) {
     }
 
     // Build query
-    const q = { 
+    const q = {
       threadId,
-      isDeleted: false 
+      isDeleted: false
     };
 
     // Apply date filters
@@ -319,7 +319,7 @@ exports.getThreadMessages = async function (req, res) {
 
     // Mark messages as read for current user
     const currentUser = req.employee._id;
-    const unreadMessages = messages.filter(msg => 
+    const unreadMessages = messages.filter(msg =>
       !msg.readBy.some(read => read.employee.toString() === currentUser.toString())
     );
 
@@ -353,7 +353,11 @@ exports.getThreadMessages = async function (req, res) {
         threadId,
         subject: thread.subject,
         client: thread.client,
-        participants: await ThreadChatMessage.getThreadParticipants(threadId)
+        participants: await Employee.find(
+          { _id: { $in: await ThreadChatMessage.getThreadParticipants(threadId) } },
+          "_id name companyEmail role avatar"
+        )
+
       }
     });
 
@@ -412,6 +416,11 @@ exports.getThreadInfo = async function (req, res) {
       threadId,
       isDeleted: false
     });
+    const participantDetails = await Employee.find(
+  { _id: { $in: participants }},
+  "_id name companyEmail role avatar"
+);
+
 
     res.json({
       success: true,
@@ -426,7 +435,7 @@ exports.getThreadInfo = async function (req, res) {
           status: thread.status,
           approvalStatus: thread.approvalStatus
         },
-        participants,
+        participants: participantDetails,
         latestMessage,
         stats: {
           totalMessages,
@@ -677,13 +686,13 @@ exports.uploadAttachments = async function (req, res) {
 
     // Create attachment messages
     const attachmentMessages = [];
-    
+
     for (const file of files) {
       const messageData = {
         threadId,
         owner: req.employee.owner,
         sender: currentUser,
-        receiver: [thread.sender, ...thread.receiver].filter(id => 
+        receiver: [thread.sender, ...thread.receiver].filter(id =>
           id && String(id) !== String(currentUser)
         ),
         content: `Shared file: ${file.originalname}`,
@@ -701,7 +710,7 @@ exports.uploadAttachments = async function (req, res) {
 
       const message = await ThreadChatMessage.create(messageData);
       await message.markAsRead(currentUser);
-      
+
       const populated = await message.populate([
         { path: "sender", select: "_id name companyEmail role avatar" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" }

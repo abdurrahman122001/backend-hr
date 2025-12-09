@@ -522,6 +522,15 @@ const io = new Server(primaryServer, {
 app.set("io", io);
 
 io.on("connection", (socket) => {
+
+  const { userId, role } = socket.handshake.query;
+
+  if (userId) socket.join(`emp_${userId}`);
+
+  const lowerRole = (role || "").toLowerCase();
+  if (lowerRole === "manager" || lowerRole.includes("team")) {
+    socket.join("manager_room");
+  }
   // Join employee room
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
@@ -545,31 +554,31 @@ io.on("connection", (socket) => {
 
       if (!client || !ownerId) {
         console.error("❌ client_updated: client and ownerId are required");
-        if (callback) callback({ success: false, error: "Missing required data" });
+        if (callback)
+          callback({ success: false, error: "Missing required data" });
         return;
       }
       // Broadcast to all team members of this owner
       io.to(`client_updates_${ownerId}`).emit(`client_${action}`, {
         client,
         action,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
 
       // Also notify assignment managers
       io.to("assignment_managers").emit(`client_${action}`, {
         client,
         action,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       });
 
       if (callback) {
         callback({
           success: true,
           message: `Client ${action} broadcasted successfully`,
-          deliveredTo: `client_updates_${ownerId}`
+          deliveredTo: `client_updates_${ownerId}`,
         });
       }
-
     } catch (error) {
       console.error("❌ Error broadcasting client update:", error);
       if (callback) {
@@ -587,16 +596,24 @@ io.on("connection", (socket) => {
   });
 
   // In your backend socket setup
-  socket.on("client_assigned", async (data, callback) => {
+  socket.on("client_assignment_updated", async (data, callback) => {
     try {
-      const { clientId, employeeId, assignedTo, clientName, dba, assignedBy, previousAssignee } = data;
+      const {
+        clientId,
+        employeeId,
+        assignedTo,
+        clientName,
+        dba,
+        assignedBy,
+        previousAssignee,
+      } = data;
 
       if (!clientId) {
         console.error("❌ client_assigned: clientId is required");
-        if (callback) callback({ success: false, error: "clientId is required" });
+        if (callback)
+          callback({ success: false, error: "clientId is required" });
         return;
       }
-
       if (employeeId) {
         io.to(`employee_${employeeId}`).emit("client_assignment_updated", {
           type: "CLIENT_ASSIGNED_TO_YOU",
@@ -607,23 +624,26 @@ io.on("connection", (socket) => {
           assignedAt: new Date().toISOString(),
           action: "assigned",
           assignedTo: employeeId, // ✅ THIS IS CRITICAL - must match client-side check
-          previousAssignee: previousAssignee // ✅ Add this too
+          previousAssignee: previousAssignee, // ✅ Add this too
         });
       }
 
       // ✅ Notify the PREVIOUSLY assigned employee (if any)
       if (previousAssignee && previousAssignee.toString() !== employeeId) {
-        io.to(`employee_${previousAssignee}`).emit("client_assignment_updated", {
-          type: "CLIENT_UNASSIGNED_FROM_YOU",
-          clientId,
-          clientName,
-          dba,
-          assignedBy,
-          unassignedAt: new Date().toISOString(),
-          action: "unassigned",
-          previousAssignee: previousAssignee, // ✅ Add this
-          assignedTo: null // ✅ Important for unassignment
-        });
+        io.to(`employee_${previousAssignee}`).emit(
+          "client_assignment_updated",
+          {
+            type: "CLIENT_UNASSIGNED_FROM_YOU",
+            clientId,
+            clientName,
+            dba,
+            assignedBy,
+            unassignedAt: new Date().toISOString(),
+            action: "unassigned",
+            previousAssignee: previousAssignee, // ✅ Add this
+            assignedTo: null, // ✅ Important for unassignment
+          }
+        );
       }
 
       // ✅ Notify all managers/team leads
@@ -637,15 +657,18 @@ io.on("connection", (socket) => {
         assignedBy,
         previousAssignee,
         assignedAt: new Date().toISOString(),
-        action: employeeId ? "assigned" : "unassigned"
+        action: employeeId ? "assigned" : "unassigned",
       });
 
       // ✅ Broadcast general client update
-      io.to(`client_updates_${assignedBy?.owner || assignedBy}`).emit("client_updated", {
-        client: { _id: clientId, clientName, dba, assignedTo: employeeId },
-        action: "updated",
-        timestamp: new Date().toISOString()
-      });
+      io.to(`client_updates_${assignedBy?.owner || assignedBy}`).emit(
+        "client_updated",
+        {
+          client: { _id: clientId, clientName, dba, assignedTo: employeeId },
+          action: "updated",
+          timestamp: new Date().toISOString(),
+        }
+      );
 
       if (callback) {
         callback({
@@ -687,111 +710,139 @@ io.on("connection", (socket) => {
   });
 
   // 🔥 NEW: Handle attachment uploads in real-time
-  socket.on("assignment_message_attachments_updated", async (data, callback) => {
-    try {
-      const { messageId, attachments, action } = data;
+  socket.on(
+    "assignment_message_attachments_updated",
+    async (data, callback) => {
+      try {
+        const { messageId, attachments, action } = data;
 
-      if (!messageId) {
-        console.error("❌ assignment_message_attachments_updated: messageId is required");
-        if (callback) callback({ success: false, error: "messageId is required" });
-        return;
-      }
+        if (!messageId) {
+          console.error(
+            "❌ assignment_message_attachments_updated: messageId is required"
+          );
+          if (callback)
+            callback({ success: false, error: "messageId is required" });
+          return;
+        }
 
-      // Populate the message with all necessary data including attachments
-      const populatedMessage = await AssignmentMessage.findById(messageId)
-        .populate("owner")
-        .populate("sender")
-        .populate("receiver")
-        .populate("client")
-        .populate("attachments.uploadedBy");
+        // Populate the message with all necessary data including attachments
+        const populatedMessage = await AssignmentMessage.findById(messageId)
+          .populate("owner")
+          .populate("sender")
+          .populate("receiver")
+          .populate("client")
+          .populate("attachments.uploadedBy");
 
-      if (!populatedMessage) {
-        console.error("❌ Message not found for attachment update:", messageId);
-        if (callback) callback({ success: false, error: "Message not found" });
-        return;
-      }
+        if (!populatedMessage) {
+          console.error(
+            "❌ Message not found for attachment update:",
+            messageId
+          );
+          if (callback)
+            callback({ success: false, error: "Message not found" });
+          return;
+        }
 
-      // Get all participants
-      const senderId = typeof populatedMessage.sender === "string" 
-        ? populatedMessage.sender 
-        : populatedMessage.sender?._id;
+        // Get all participants
+        const senderId =
+          typeof populatedMessage.sender === "string"
+            ? populatedMessage.sender
+            : populatedMessage.sender?._id;
 
-      let receiverIds = [];
-      if (Array.isArray(populatedMessage.receiver)) {
-        receiverIds = populatedMessage.receiver
-          .map((receiver) => typeof receiver === "string" ? receiver : receiver?._id)
-          .filter(Boolean);
-      }
+        let receiverIds = [];
+        if (Array.isArray(populatedMessage.receiver)) {
+          receiverIds = populatedMessage.receiver
+            .map((receiver) =>
+              typeof receiver === "string" ? receiver : receiver?._id
+            )
+            .filter(Boolean);
+        }
 
-      const allParticipants = new Set([senderId, ...receiverIds].filter(Boolean));
-      const clientId = typeof populatedMessage.client === "string" 
-        ? populatedMessage.client 
-        : populatedMessage.client?._id;
+        const allParticipants = new Set(
+          [senderId, ...receiverIds].filter(Boolean)
+        );
+        const clientId =
+          typeof populatedMessage.client === "string"
+            ? populatedMessage.client
+            : populatedMessage.client?._id;
 
-      // 1. Emit to all participants
-      allParticipants.forEach((participantId) => {
-        io.to(`employee_${participantId}`).emit("assignment_message_attachments_updated", {
-          messageId: populatedMessage._id,
-          attachments: populatedMessage.attachments || [],
-          action: action, // 'added', 'removed', 'updated'
-          message: populatedMessage,
-          timestamp: new Date(),
+        // 1. Emit to all participants
+        allParticipants.forEach((participantId) => {
+          io.to(`employee_${participantId}`).emit(
+            "assignment_message_attachments_updated",
+            {
+              messageId: populatedMessage._id,
+              attachments: populatedMessage.attachments || [],
+              action: action, // 'added', 'removed', 'updated'
+              message: populatedMessage,
+              timestamp: new Date(),
+            }
+          );
         });
-      });
 
-      // 2. Emit to thread room
-      if (populatedMessage.threadId) {
-        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_attachments_updated", {
-          messageId: populatedMessage._id,
-          attachments: populatedMessage.attachments || [],
-          action: action,
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
-      }
+        // 2. Emit to thread room
+        if (populatedMessage.threadId) {
+          io.to(`thread_${populatedMessage.threadId}`).emit(
+            "assignment_message_attachments_updated",
+            {
+              messageId: populatedMessage._id,
+              attachments: populatedMessage.attachments || [],
+              action: action,
+              message: populatedMessage,
+              timestamp: new Date(),
+            }
+          );
+        }
 
-      // 3. Emit to client room if applicable
-      if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit("assignment_message_attachments_updated", {
-          messageId: populatedMessage._id,
-          attachments: populatedMessage.attachments || [],
-          action: action,
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
-      }
+        // 3. Emit to client room if applicable
+        if (clientId) {
+          io.to(`assignment_client_${clientId}`).emit(
+            "assignment_message_attachments_updated",
+            {
+              messageId: populatedMessage._id,
+              attachments: populatedMessage.attachments || [],
+              action: action,
+              message: populatedMessage,
+              timestamp: new Date(),
+            }
+          );
+        }
 
-      // 4. Also emit general message update for compatibility
-      allParticipants.forEach((participantId) => {
-        io.to(`employee_${participantId}`).emit("assignment_message_updated", {
-          message: populatedMessage,
-          action: "attachments_updated",
-          timestamp: new Date(),
+        // 4. Also emit general message update for compatibility
+        allParticipants.forEach((participantId) => {
+          io.to(`employee_${participantId}`).emit(
+            "assignment_message_updated",
+            {
+              message: populatedMessage,
+              action: "attachments_updated",
+              timestamp: new Date(),
+            }
+          );
         });
-      });
 
-      if (callback) {
-        callback({
-          success: true,
-          message: `Attachment ${action} broadcasted successfully`,
-          deliveredTo: {
-            participants: Array.from(allParticipants),
-            thread: populatedMessage.threadId,
-            client: clientId,
-          },
-        });
-      }
-    } catch (error) {
-      console.error("❌ Error broadcasting attachment update:", error);
-      if (callback) {
-        callback({
-          success: false,
-          error: error.message,
-          code: "SOCKET_ATTACHMENT_UPDATE_ERROR",
-        });
+        if (callback) {
+          callback({
+            success: true,
+            message: `Attachment ${action} broadcasted successfully`,
+            deliveredTo: {
+              participants: Array.from(allParticipants),
+              thread: populatedMessage.threadId,
+              client: clientId,
+            },
+          });
+        }
+      } catch (error) {
+        console.error("❌ Error broadcasting attachment update:", error);
+        if (callback) {
+          callback({
+            success: false,
+            error: error.message,
+            code: "SOCKET_ATTACHMENT_UPDATE_ERROR",
+          });
+        }
       }
     }
-  });
+  );
 
   // 🔥 NEW: Handle message edits with attachments
   socket.on("assignment_message_edited", async (data, callback) => {
@@ -800,7 +851,8 @@ io.on("connection", (socket) => {
 
       if (!messageId) {
         console.error("❌ assignment_message_edited: messageId is required");
-        if (callback) callback({ success: false, error: "messageId is required" });
+        if (callback)
+          callback({ success: false, error: "messageId is required" });
         return;
       }
 
@@ -820,21 +872,27 @@ io.on("connection", (socket) => {
       }
 
       // Get all participants
-      const senderId = typeof populatedMessage.sender === "string" 
-        ? populatedMessage.sender 
-        : populatedMessage.sender?._id;
+      const senderId =
+        typeof populatedMessage.sender === "string"
+          ? populatedMessage.sender
+          : populatedMessage.sender?._id;
 
       let receiverIds = [];
       if (Array.isArray(populatedMessage.receiver)) {
         receiverIds = populatedMessage.receiver
-          .map((receiver) => typeof receiver === "string" ? receiver : receiver?._id)
+          .map((receiver) =>
+            typeof receiver === "string" ? receiver : receiver?._id
+          )
           .filter(Boolean);
       }
 
-      const allParticipants = new Set([senderId, ...receiverIds].filter(Boolean));
-      const clientId = typeof populatedMessage.client === "string" 
-        ? populatedMessage.client 
-        : populatedMessage.client?._id;
+      const allParticipants = new Set(
+        [senderId, ...receiverIds].filter(Boolean)
+      );
+      const clientId =
+        typeof populatedMessage.client === "string"
+          ? populatedMessage.client
+          : populatedMessage.client?._id;
 
       // 1. Emit specific edit event
       allParticipants.forEach((participantId) => {
@@ -848,12 +906,15 @@ io.on("connection", (socket) => {
 
       // 2. Emit to thread room
       if (populatedMessage.threadId) {
-        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_edited", {
-          messageId: populatedMessage._id,
-          message: populatedMessage,
-          updates: updates,
-          timestamp: new Date(),
-        });
+        io.to(`thread_${populatedMessage.threadId}`).emit(
+          "assignment_message_edited",
+          {
+            messageId: populatedMessage._id,
+            message: populatedMessage,
+            updates: updates,
+            timestamp: new Date(),
+          }
+        );
       }
 
       // 3. Also emit general update for compatibility
@@ -914,6 +975,8 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
+
+      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -943,10 +1006,9 @@ io.on("connection", (socket) => {
           : populatedMessage.sender?._id;
 
       // 1. Emit specific approval event to all participants
-      const allParticipants = new Set([
-        senderId,
-        ...actualReceiverIds
-      ].filter(Boolean));
+      const allParticipants = new Set(
+        [senderId, ...actualReceiverIds].filter(Boolean)
+      );
 
       // Emit to all participants
       allParticipants.forEach((participantId) => {
@@ -977,22 +1039,28 @@ io.on("connection", (socket) => {
 
       // 4. Broadcast to client room if applicable
       if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit("assignment_message_approved", {
-          messageId: populatedMessage._id,
-          approvalStatus: "approved",
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
+        io.to(`assignment_client_${clientId}`).emit(
+          "assignment_message_approved",
+          {
+            messageId: populatedMessage._id,
+            approvalStatus: "approved",
+            message: populatedMessage,
+            timestamp: new Date(),
+          }
+        );
       }
 
       // 5. Broadcast to thread room
       if (populatedMessage.threadId) {
-        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_approved", {
-          messageId: populatedMessage._id,
-          approvalStatus: "approved",
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
+        io.to(`thread_${populatedMessage.threadId}`).emit(
+          "assignment_message_approved",
+          {
+            messageId: populatedMessage._id,
+            approvalStatus: "approved",
+            message: populatedMessage,
+            timestamp: new Date(),
+          }
+        );
       }
 
       // Send success callback
@@ -1042,11 +1110,14 @@ io.on("connection", (socket) => {
         .populate("attachments.uploadedBy"); // 🔥 IMPORTANT: Populate attachments
 
       if (!populatedMessage) {
-        console.error("❌ Disapproved assignment message not found:", message._id);
+        console.error(
+          "❌ Disapproved assignment message not found:",
+          message._id
+        );
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
+      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1076,19 +1147,21 @@ io.on("connection", (socket) => {
           : populatedMessage.sender?._id;
 
       // 1. Emit specific disapproval event to all participants
-      const allParticipants = new Set([
-        senderId,
-        ...actualReceiverIds
-      ].filter(Boolean));
+      const allParticipants = new Set(
+        [senderId, ...actualReceiverIds].filter(Boolean)
+      );
 
       // Emit to all participants
       allParticipants.forEach((participantId) => {
-        io.to(`employee_${participantId}`).emit("assignment_message_disapproved", {
-          messageId: populatedMessage._id,
-          approvalStatus: "disapproved",
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
+        io.to(`employee_${participantId}`).emit(
+          "assignment_message_disapproved",
+          {
+            messageId: populatedMessage._id,
+            approvalStatus: "disapproved",
+            message: populatedMessage,
+            timestamp: new Date(),
+          }
+        );
       });
 
       // 2. Also emit general update event for compatibility
@@ -1110,22 +1183,28 @@ io.on("connection", (socket) => {
 
       // 4. Broadcast to client room if applicable
       if (clientId) {
-        io.to(`assignment_client_${clientId}`).emit("assignment_message_disapproved", {
-          messageId: populatedMessage._id,
-          approvalStatus: "disapproved",
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
+        io.to(`assignment_client_${clientId}`).emit(
+          "assignment_message_disapproved",
+          {
+            messageId: populatedMessage._id,
+            approvalStatus: "disapproved",
+            message: populatedMessage,
+            timestamp: new Date(),
+          }
+        );
       }
 
       // 5. Broadcast to thread room
       if (populatedMessage.threadId) {
-        io.to(`thread_${populatedMessage.threadId}`).emit("assignment_message_disapproved", {
-          messageId: populatedMessage._id,
-          approvalStatus: "disapproved",
-          message: populatedMessage,
-          timestamp: new Date(),
-        });
+        io.to(`thread_${populatedMessage.threadId}`).emit(
+          "assignment_message_disapproved",
+          {
+            messageId: populatedMessage._id,
+            approvalStatus: "disapproved",
+            message: populatedMessage,
+            timestamp: new Date(),
+          }
+        );
       }
 
       // Send success callback
@@ -1175,11 +1254,15 @@ io.on("connection", (socket) => {
         .populate("attachments.uploadedBy"); // 🔥 IMPORTANT: Populate attachments
 
       if (!populatedMessage) {
-        console.error("❌ Resubmitted assignment message not found:", message._id);
+        console.error(
+          "❌ Resubmitted assignment message not found:",
+          message._id
+        );
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
 
+      // Get the client ID
       const clientId =
         typeof populatedMessage.client === "string"
           ? populatedMessage.client
@@ -1271,7 +1354,6 @@ io.on("connection", (socket) => {
           },
         });
       }
-
     } catch (error) {
       console.error("❌ Error broadcasting resubmission notification:", error);
       if (callback) {
@@ -1310,7 +1392,7 @@ io.on("connection", (socket) => {
         if (callback) callback({ success: false, error: "Message not found" });
         return;
       }
-
+      // Use the targeted emission function
       await emitToSpecificReceivers(
         io,
         populatedMessage,
@@ -1420,20 +1502,922 @@ io.on("connection", (socket) => {
           action,
         });
       }
-
     } catch (error) {
       console.error("❌ Error in assignment_message_updated:", error);
     }
   });
 
+  // Test socket events - for debugging
   socket.on("test_approval_event", (data) => {
     socket.emit("test_approval_response", {
       success: true,
       message: "Test event received",
       data: data,
-      timestamp: new Date()
+      timestamp: new Date(),
     });
   });
+  socket.on("join_thread_chat", (threadId) => {
+    if (!threadId) {
+      console.error("❌ join_thread_chat: threadId is required");
+      return;
+    }
+    socket.join(`thread_chat_${threadId}`);
+    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
+  });
+
+  socket.on("join_thread_chat", (threadId) => {
+    if (!threadId) {
+      console.error("❌ join_thread_chat: threadId is required");
+      return;
+    }
+    socket.join(`thread_chat_${threadId}`);
+    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
+  });
+
+  /**
+   * Request previous chat context for a thread
+   */
+  socket.on("get_thread_context", async (data, callback) => {
+    try {
+      const { threadId, limit = 50, beforeTimestamp, userId } = data;
+
+      if (!threadId) {
+        if (callback)
+          callback({ success: false, error: "threadId is required" });
+        return;
+      }
+
+      // Build query
+      const query = { threadId: threadId, isDeleted: false };
+
+      if (beforeTimestamp) {
+        query.createdAt = { $lt: new Date(beforeTimestamp) };
+      }
+
+      // Get thread messages with population
+      const threadMessages = await ThreadChatMessage.find(query)
+        .populate("sender", "name email avatar role")
+        .populate("receiver", "name email avatar role")
+        .populate("client", "clientName dba")
+        .populate("attachments.uploadedBy", "name email")
+        .populate("replyTo", "content sender createdAt")
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .lean();
+
+      // Get related assignment messages
+      const relatedAssignments = await AssignmentMessage.find({
+        threadId: threadId,
+        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) }, // Last 7 days
+      })
+        .populate("sender", "name email")
+        .populate("client", "clientName dba")
+        .select("messageType content createdAt status attachments")
+        .limit(10)
+        .lean();
+
+      // Get thread info from assignment messages
+      const threadInfo = await AssignmentMessage.findOne({ threadId: threadId })
+        .populate("client", "clientName dba")
+        .populate("owner", "name email")
+        .select("subject client owner createdAt")
+        .lean();
+
+      // Get thread participants
+      const participants = await ThreadChatMessage.getThreadParticipants(
+        threadId
+      );
+
+      // Format messages
+      const allMessages = [
+        ...threadMessages,
+        ...relatedAssignments.map((msg) => ({
+          ...msg,
+          _id: msg._id,
+          messageType: msg.messageType || "assignment",
+          isAssignment: true,
+        })),
+      ].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+      // Emit context to the specific user who requested it
+      socket.emit("thread_context_received", {
+        threadId,
+        messages: allMessages,
+        threadInfo: {
+          ...threadInfo,
+          participants: participants,
+          messageCount: allMessages.length,
+        },
+        relatedAssignments: relatedAssignments,
+        totalCount: allMessages.length,
+        timestamp: new Date().toISOString(),
+      });
+
+      // Also broadcast to thread room for any other participants
+      socket.to(`thread_chat_${threadId}`).emit("thread_context_updated", {
+        threadId,
+        contextLoaded: true,
+        loadedBy: userId,
+        messageCount: allMessages.length,
+        timestamp: new Date().toISOString(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: `Loaded ${allMessages.length} messages from thread context`,
+          data: {
+            messages: allMessages.slice(0, 10),
+            threadInfo: {
+              ...threadInfo,
+              participants: participants,
+            },
+            hasMore: allMessages.length > 10,
+          },
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error getting thread context:", error);
+      socket.emit("thread_error", {
+        error: "Failed to load thread context",
+        details: error.message,
+      });
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_CONTEXT_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Send a new message in thread chat
+   */
+  socket.on("send_thread_message", async (data, callback) => {
+    try {
+      const {
+        threadId,
+        content,
+        senderId,
+        ownerId,
+        clientId,
+        messageType = "text",
+        attachments = [],
+        replyTo = null,
+        receiver = [],
+      } = data;
+
+      if (!threadId || !content || !senderId || !ownerId) {
+        if (callback)
+          callback({
+            success: false,
+            error: "threadId, content, senderId, and ownerId are required",
+          });
+        return;
+      }
+
+      // Get sender info
+      const sender = await Employee.findById(senderId)
+        .select("name email avatar role")
+        .lean();
+
+      // Determine receivers if not provided
+      let messageReceivers = receiver;
+      if (!messageReceivers || messageReceivers.length === 0) {
+        // Get existing participants
+        const participants = await ThreadChatMessage.getThreadParticipants(
+          threadId
+        );
+        messageReceivers = participants.filter(
+          (id) => id.toString() !== senderId.toString()
+        );
+      }
+
+      // Create new thread message
+      const newMessage = new ThreadChatMessage({
+        threadId,
+        content,
+        owner: ownerId,
+        client: clientId,
+        sender: senderId,
+        receiver: messageReceivers,
+        messageType,
+        attachments,
+        replyTo,
+        readBy: [{ employee: senderId, readAt: new Date() }],
+      });
+
+      await newMessage.save();
+
+      // Populate the saved message
+      const populatedMessage = await ThreadChatMessage.findById(newMessage._id)
+        .populate("sender", "name email avatar role")
+        .populate("receiver", "name email avatar")
+        .populate("client", "clientName dba")
+        .populate("replyTo", "content sender createdAt")
+        .populate("attachments.uploadedBy", "name email")
+        .lean();
+
+      // Emit to thread room
+      io.to(`thread_chat_${threadId}`).emit("new_thread_message", {
+        message: populatedMessage,
+        threadId,
+        sender: sender,
+        timestamp: newMessage.createdAt,
+        participants: messageReceivers,
+      });
+
+      // Emit to individual participants
+      messageReceivers.forEach((receiverId) => {
+        if (String(receiverId) !== String(senderId)) {
+          io.to(`employee_${receiverId}`).emit("thread_message_received", {
+            threadId,
+            message: populatedMessage,
+            sender: sender,
+            isMentioned: content.includes(`@${receiverId}`),
+            timestamp: new Date(),
+          });
+        }
+      });
+
+      // Notify the sender
+      socket.emit("thread_message_sent", {
+        threadId,
+        message: populatedMessage,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Thread message sent successfully",
+          data: populatedMessage,
+          deliveredTo: {
+            threadRoom: `thread_chat_${threadId}`,
+            participants: messageReceivers,
+            sender: senderId,
+          },
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error sending thread message:", error);
+      socket.emit("thread_error", {
+        error: "Failed to send thread message",
+        details: error.message,
+      });
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_SEND_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Mark thread messages as read
+   */
+  socket.on("mark_thread_read", async (data) => {
+    try {
+      const { threadId, userId, messageIds = [] } = data;
+
+      if (!threadId || !userId) {
+        console.error("❌ mark_thread_read: threadId and userId are required");
+        return;
+      }
+
+      // Update read status for specific messages
+      if (messageIds.length > 0) {
+        await ThreadChatMessage.updateMany(
+          {
+            _id: { $in: messageIds },
+            "readBy.employee": { $ne: userId },
+          },
+          {
+            $push: {
+              readBy: {
+                employee: userId,
+                readAt: new Date(),
+              },
+            },
+          }
+        );
+      } else {
+        // Mark all unread messages in thread as read
+        const unreadMessages = await ThreadChatMessage.find({
+          threadId,
+          "readBy.employee": { $ne: userId },
+          isDeleted: false,
+        })
+          .select("_id")
+          .lean();
+
+        const unreadMessageIds = unreadMessages.map((msg) => msg._id);
+
+        await ThreadChatMessage.updateMany(
+          {
+            _id: { $in: unreadMessageIds },
+          },
+          {
+            $push: {
+              readBy: {
+                employee: userId,
+                readAt: new Date(),
+              },
+            },
+          }
+        );
+      }
+
+      // Get updated message IDs
+      const updatedMessages = await ThreadChatMessage.find({
+        threadId,
+        "readBy.employee": userId,
+        isDeleted: false,
+      })
+        .select("_id")
+        .lean();
+
+      // Notify other participants
+      socket.to(`thread_chat_${threadId}`).emit("thread_messages_read", {
+        threadId,
+        userId,
+        messageIds: updatedMessages.map((m) => m._id),
+        readAt: new Date(),
+      });
+    } catch (error) {
+      console.error("❌ Error marking thread as read:", error);
+    }
+  });
+
+  /**
+   * Edit a thread message
+   */
+  socket.on("edit_thread_message", async (data, callback) => {
+    try {
+      const { messageId, threadId, content, editedBy, attachments = [] } = data;
+
+      if (!messageId || !threadId || !content || !editedBy) {
+        if (callback)
+          callback({
+            success: false,
+            error: "messageId, threadId, content, and editedBy are required",
+          });
+        return;
+      }
+
+      // Find and edit the message
+      const message = await ThreadChatMessage.findById(messageId);
+      if (!message) {
+        throw new Error("Message not found");
+      }
+
+      // Use the edit method from schema
+      await message.edit(content, editedBy);
+
+      // Update attachments if provided
+      if (attachments.length > 0) {
+        message.attachments = attachments;
+        await message.save();
+      }
+
+      // Get updated message with population
+      const updatedMessage = await ThreadChatMessage.findById(messageId)
+        .populate("sender", "name email avatar")
+        .populate("editHistory.editedBy", "name email")
+        .populate("attachments.uploadedBy", "name email")
+        .lean();
+
+      // Broadcast edit to thread room
+      io.to(`thread_chat_${threadId}`).emit("thread_message_edited", {
+        messageId,
+        threadId,
+        message: updatedMessage,
+        editedBy,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Thread message edited successfully",
+          data: updatedMessage,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error editing thread message:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_EDIT_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Delete a thread message (soft delete)
+   */
+  socket.on("delete_thread_message", async (data, callback) => {
+    try {
+      const { messageId, threadId, deletedBy, reason = "User deleted" } = data;
+
+      if (!messageId || !threadId || !deletedBy) {
+        if (callback)
+          callback({
+            success: false,
+            error: "messageId, threadId, and deletedBy are required",
+          });
+        return;
+      }
+
+      // Soft delete
+      const deletedMessage = await ThreadChatMessage.findByIdAndUpdate(
+        messageId,
+        {
+          isDeleted: true,
+          deletedAt: new Date(),
+          deletedBy: deletedBy,
+          deleteReason: reason,
+          content: "[This message was deleted]",
+          attachments: [],
+        },
+        { new: true }
+      ).lean();
+
+      // Broadcast deletion to thread room
+      io.to(`thread_chat_${threadId}`).emit("thread_message_deleted", {
+        messageId,
+        threadId,
+        deletedBy,
+        reason,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Thread message deleted successfully",
+          data: deletedMessage,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error deleting thread message:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_DELETE_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Get thread summary/context for AI/assistants
+   */
+  socket.on("get_thread_summary", async (data, callback) => {
+    try {
+      const { threadId, maxMessages = 100, forAI = false } = data;
+
+      if (!threadId) {
+        if (callback)
+          callback({ success: false, error: "threadId is required" });
+        return;
+      }
+
+      // Get recent messages
+      const recentMessages = await ThreadChatMessage.find({
+        threadId,
+        isDeleted: false,
+      })
+        .populate("sender", "name role avatar")
+        .sort({ createdAt: -1 })
+        .limit(maxMessages)
+        .lean();
+
+      // Get thread participants
+      const participants = await ThreadChatMessage.getThreadParticipants(
+        threadId
+      );
+
+      // Get assignment info
+      const assignmentInfo = await AssignmentMessage.findOne({
+        threadId: threadId,
+      })
+        .populate("client", "clientName dba")
+        .lean();
+
+      // Generate summary
+      const summary = {
+        threadId,
+        totalMessages: recentMessages.length,
+        participants: participants.length,
+        participantNames: [
+          ...new Set(recentMessages.map((m) => m.sender?.name).filter(Boolean)),
+        ],
+        lastActivity: recentMessages[0]?.createdAt || new Date(),
+        keyTopics: extractKeyTopics(recentMessages),
+        client: assignmentInfo?.client,
+        withAttachments: recentMessages.filter((m) => m.attachments?.length > 0)
+          .length,
+        messageTypes: recentMessages.reduce((acc, msg) => {
+          acc[msg.messageType] = (acc[msg.messageType] || 0) + 1;
+          return acc;
+        }, {}),
+      };
+
+      // For AI context, provide more detailed data
+      if (forAI) {
+        summary.messages = recentMessages.map((msg) => ({
+          role: msg.sender?.role || "user",
+          name: msg.sender?.name,
+          content: msg.content,
+          timestamp: msg.createdAt,
+          type: msg.messageType,
+          hasAttachments: msg.attachments?.length > 0,
+        }));
+      }
+
+      socket.emit("thread_summary_received", {
+        threadId,
+        summary,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          data: summary,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error getting thread summary:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_SUMMARY_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Search within thread messages
+   */
+  socket.on("search_thread_messages", async (data, callback) => {
+    try {
+      const { threadId, query, userId, limit = 20 } = data;
+
+      if (!threadId || !query) {
+        if (callback)
+          callback({
+            success: false,
+            error: "threadId and query are required",
+          });
+        return;
+      }
+
+      const searchResults = await ThreadChatMessage.find({
+        threadId,
+        isDeleted: false,
+        $text: { $search: query },
+      })
+        .populate("sender", "name email avatar")
+        .populate("attachments.uploadedBy", "name email")
+        .sort({ score: { $meta: "textScore" } })
+        .limit(limit)
+        .lean();
+
+      socket.emit("thread_search_results", {
+        threadId,
+        query,
+        results: searchResults,
+        count: searchResults.length,
+        searchedBy: userId,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          data: {
+            results: searchResults,
+            count: searchResults.length,
+          },
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error searching thread messages:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_SEARCH_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Add reaction to thread message
+   */
+  socket.on("add_thread_reaction", async (data, callback) => {
+    try {
+      const { messageId, threadId, userId, emoji } = data;
+
+      if (!messageId || !threadId || !userId || !emoji) {
+        if (callback)
+          callback({
+            success: false,
+            error: "messageId, threadId, userId, and emoji are required",
+          });
+        return;
+      }
+
+      // Find message and add reaction
+      const message = await ThreadChatMessage.findById(messageId);
+      if (!message) {
+        throw new Error("Message not found");
+      }
+
+      await message.addReaction(userId, emoji);
+
+      // Get updated message with populated reactions
+      const updatedMessage = await ThreadChatMessage.findById(messageId)
+        .populate("reactions.employee", "name avatar")
+        .lean();
+
+      // Broadcast reaction to thread room
+      io.to(`thread_chat_${threadId}`).emit("thread_reaction_added", {
+        messageId,
+        threadId,
+        userId,
+        emoji,
+        reactions: updatedMessage.reactions,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Reaction added successfully",
+          data: updatedMessage.reactions,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error adding thread reaction:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_REACTION_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Remove reaction from thread message
+   */
+  socket.on("remove_thread_reaction", async (data, callback) => {
+    try {
+      const { messageId, threadId, userId } = data;
+
+      if (!messageId || !threadId || !userId) {
+        if (callback)
+          callback({
+            success: false,
+            error: "messageId, threadId, and userId are required",
+          });
+        return;
+      }
+
+      // Find message and remove reaction
+      const message = await ThreadChatMessage.findById(messageId);
+      if (!message) {
+        throw new Error("Message not found");
+      }
+
+      await message.removeReaction(userId);
+
+      // Get updated message with populated reactions
+      const updatedMessage = await ThreadChatMessage.findById(messageId)
+        .populate("reactions.employee", "name avatar")
+        .lean();
+
+      // Broadcast reaction removal to thread room
+      io.to(`thread_chat_${threadId}`).emit("thread_reaction_removed", {
+        messageId,
+        threadId,
+        userId,
+        reactions: updatedMessage.reactions,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Reaction removed successfully",
+          data: updatedMessage.reactions,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error removing thread reaction:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_REACTION_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Upload attachments for thread message
+   */
+  socket.on("upload_thread_attachments", async (data, callback) => {
+    try {
+      const { threadId, messageId, attachments, userId } = data;
+
+      if (!threadId || !attachments || !userId) {
+        if (callback)
+          callback({
+            success: false,
+            error: "threadId, attachments, and userId are required",
+          });
+        return;
+      }
+
+      let message;
+
+      if (messageId) {
+        // Add attachments to existing message
+        message = await ThreadChatMessage.findById(messageId);
+        if (!message) {
+          throw new Error("Message not found");
+        }
+
+        // Add new attachments
+        attachments.forEach((attachment) => {
+          attachment.uploadedBy = userId;
+          attachment.uploadedAt = new Date();
+          message.attachments.push(attachment);
+        });
+
+        await message.save();
+      } else {
+        // Create a new file message
+        message = new ThreadChatMessage({
+          threadId,
+          content: `Sent ${attachments.length} file(s)`,
+          owner: userId, // You might need to get owner from context
+          sender: userId,
+          receiver: [], // You'll need to determine receivers
+          messageType: "file",
+          attachments: attachments.map((attachment) => ({
+            ...attachment,
+            uploadedBy: userId,
+            uploadedAt: new Date(),
+          })),
+        });
+
+        await message.save();
+      }
+
+      // Populate the message
+      const populatedMessage = await ThreadChatMessage.findById(message._id)
+        .populate("sender", "name email avatar")
+        .populate("attachments.uploadedBy", "name email")
+        .lean();
+
+      // Broadcast to thread room
+      io.to(`thread_chat_${threadId}`).emit("thread_attachments_uploaded", {
+        threadId,
+        messageId: message._id,
+        message: populatedMessage,
+        attachments: populatedMessage.attachments,
+        uploadedBy: userId,
+        timestamp: new Date(),
+      });
+
+      if (callback) {
+        callback({
+          success: true,
+          message: "Attachments uploaded successfully",
+          data: populatedMessage,
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error uploading thread attachments:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_UPLOAD_ERROR",
+        });
+      }
+    }
+  });
+
+  /**
+   * Get thread participants
+   */
+  socket.on("get_thread_participants", async (data, callback) => {
+    try {
+      const { threadId } = data;
+
+      if (!threadId) {
+        if (callback)
+          callback({ success: false, error: "threadId is required" });
+        return;
+      }
+
+      const participants = await ThreadChatMessage.getThreadParticipants(
+        threadId
+      );
+
+      // Get participant details
+      const participantDetails = await Employee.find({
+        _id: { $in: participants },
+      })
+        .select("name email avatar role department")
+        .lean();
+
+      if (callback) {
+        callback({
+          success: true,
+          data: {
+            participants: participantDetails,
+            count: participantDetails.length,
+          },
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error getting thread participants:", error);
+
+      if (callback) {
+        callback({
+          success: false,
+          error: error.message,
+          code: "THREAD_PARTICIPANTS_ERROR",
+        });
+      }
+    }
+  });
+
+  // =============== HELPER FUNCTIONS ===============
+
+  /**
+   * Extract key topics from messages
+   */
+  function extractKeyTopics(messages) {
+    const topics = new Map();
+    const commonWords = new Set([
+      "the",
+      "and",
+      "for",
+      "this",
+      "that",
+      "with",
+      "have",
+      "from",
+      "will",
+      "just",
+      "like",
+    ]);
+
+    messages.forEach((msg) => {
+      if (msg.content && typeof msg.content === "string") {
+        const words = msg.content.toLowerCase().split(/\W+/);
+        words.forEach((word) => {
+          if (word.length > 3 && !commonWords.has(word)) {
+            topics.set(word, (topics.get(word) || 0) + 1);
+          }
+        });
+      }
+    });
+
+    return Array.from(topics.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([word, count]) => ({ word, count }));
+  }
 
   socket.on("disconnect", (reason) => {
     console.log("🔴 Socket client disconnected:", socket.id, "Reason:", reason);
@@ -1443,8 +2427,8 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-io.on("connection", (socket) => {
 
+io.on("connection", (socket) => {
   socket.on("join_employee", (employeeId) => {
     if (!employeeId) {
       console.error("❌ join_employee: employeeId is required");
@@ -1477,7 +2461,9 @@ io.on("connection", (socket) => {
       const { message, clientId, senderId, receivers } = data;
 
       if (!message || !clientId || !senderId) {
-        console.error("❌ whatsapp_send_message: message, clientId, and senderId are required");
+        console.error(
+          "❌ whatsapp_send_message: message, clientId, and senderId are required"
+        );
         socket.emit("message_error", { error: "Missing required fields" });
         return;
       }
@@ -1485,16 +2471,16 @@ io.on("connection", (socket) => {
       socket.emit("new_message", {
         message: message,
         type: "message_sent",
-        action: "sent"
+        action: "sent",
       });
 
       // Notify all receivers
       if (receivers && Array.isArray(receivers)) {
-        receivers.forEach(receiverId => {
+        receivers.forEach((receiverId) => {
           socket.to(`employee_${receiverId}`).emit("new_message", {
             message: message,
             type: "new_assignment",
-            action: "received"
+            action: "received",
           });
         });
       }
@@ -1503,9 +2489,8 @@ io.on("connection", (socket) => {
       socket.to(`client_${clientId}`).emit("new_message", {
         message: message,
         type: "new_message",
-        action: "client_received"
+        action: "client_received",
       });
-
     } catch (error) {
       console.error("❌ Error in whatsapp_send_message:", error);
       socket.emit("message_error", { error: "Failed to send message" });
@@ -1518,13 +2503,15 @@ io.on("connection", (socket) => {
       const { message, approvedBy, receivers, clientId } = data;
 
       if (!message || !approvedBy) {
-        console.error("❌ whatsapp_approve_message: message and approvedBy are required");
+        console.error(
+          "❌ whatsapp_approve_message: message and approvedBy are required"
+        );
         return;
       }
 
       const updatedMessage = {
         ...message,
-        approvalStatus: "approved"
+        approvalStatus: "approved",
       };
 
       // 🎯 Notify ALL involved users about approval
@@ -1537,8 +2524,9 @@ io.on("connection", (socket) => {
 
       // Add all receivers from original message
       if (message.receiver && Array.isArray(message.receiver)) {
-        message.receiver.forEach(receiver => {
-          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+        message.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "object" ? receiver._id : receiver;
           if (receiverId) {
             allInvolvedUsers.add(String(receiverId));
           }
@@ -1550,21 +2538,21 @@ io.on("connection", (socket) => {
 
       // Add any additional receivers from approval
       if (receivers && Array.isArray(receivers)) {
-        receivers.forEach(receiverId => {
+        receivers.forEach((receiverId) => {
           allInvolvedUsers.add(String(receiverId));
         });
       }
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-      
-      involvedUsersArray.forEach(userId => {
+
+      involvedUsersArray.forEach((userId) => {
         socket.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
           approvedBy: approvedBy,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
       });
 
@@ -1573,16 +2561,16 @@ io.on("connection", (socket) => {
         socket.to(`client_${clientId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
-          action: "approved"
+          action: "approved",
         });
       }
 
+      // Notify sender specifically
       socket.emit("new_message", {
         message: updatedMessage,
         type: "message_approved",
-        action: "approved"
+        action: "approved",
       });
-
     } catch (error) {
       console.error("❌ Error in whatsapp_approve_message:", error);
       socket.emit("message_error", { error: "Failed to approve message" });
@@ -1595,15 +2583,18 @@ io.on("connection", (socket) => {
       const { message, managers, forwardedBy, clientId } = data;
 
       if (!message || !managers || !Array.isArray(managers)) {
-        console.error("❌ whatsapp_forward_to_managers: message and managers array are required");
+        console.error(
+          "❌ whatsapp_forward_to_managers: message and managers array are required"
+        );
         return;
       }
 
+      // Mark this as a forwarded message
       const forwardedMessage = {
         ...message,
         isForwarded: true,
         forwardedBy: forwardedBy,
-        originalMessageId: message._id
+        originalMessageId: message._id,
       };
 
       // Notify each manager about the new forwarded message
@@ -1614,7 +2605,7 @@ io.on("connection", (socket) => {
           action: "forwarded_approved",
           forwardedBy: forwardedBy,
           originalMessageId: message._id,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
       });
 
@@ -1622,12 +2613,13 @@ io.on("connection", (socket) => {
       socket.emit("new_message", {
         message: forwardedMessage,
         type: "message_forwarded",
-        action: "forwarded_to_managers"
+        action: "forwarded_to_managers",
       });
-
     } catch (error) {
       console.error("❌ Error in whatsapp_forward_to_managers:", error);
-      socket.emit("message_error", { error: "Failed to forward message to managers" });
+      socket.emit("message_error", {
+        error: "Failed to forward message to managers",
+      });
     }
   });
 
@@ -1637,10 +2629,13 @@ io.on("connection", (socket) => {
       const { message, editedBy, clientId } = data;
 
       if (!message || !editedBy) {
-        console.error("❌ whatsapp_edit_message: message and editedBy are required");
+        console.error(
+          "❌ whatsapp_edit_message: message and editedBy are required"
+        );
         return;
       }
 
+      // Notify ALL involved users about edit
       const allInvolvedUsers = new Set();
 
       // Add sender
@@ -1650,8 +2645,9 @@ io.on("connection", (socket) => {
 
       // Add all receivers
       if (message.receiver && Array.isArray(message.receiver)) {
-        message.receiver.forEach(receiver => {
-          const receiverId = typeof receiver === 'object' ? receiver._id : receiver;
+        message.receiver.forEach((receiver) => {
+          const receiverId =
+            typeof receiver === "object" ? receiver._id : receiver;
           if (receiverId) {
             allInvolvedUsers.add(String(receiverId));
           }
@@ -1663,14 +2659,14 @@ io.on("connection", (socket) => {
 
       // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
-      
-      involvedUsersArray.forEach(userId => {
+
+      involvedUsersArray.forEach((userId) => {
         socket.to(`employee_${userId}`).emit("new_message", {
           message: message,
           type: "message_updated",
           action: "edited",
           editedBy: editedBy,
-          timestamp: new Date()
+          timestamp: new Date(),
         });
       });
 
@@ -1679,10 +2675,9 @@ io.on("connection", (socket) => {
         socket.to(`client_${clientId}`).emit("new_message", {
           message: message,
           type: "message_updated",
-          action: "edited"
+          action: "edited",
         });
       }
-
     } catch (error) {
       console.error("❌ Error in whatsapp_edit_message:", error);
       socket.emit("message_error", { error: "Failed to edit message" });
@@ -1695,20 +2690,22 @@ io.on("connection", (socket) => {
       const { messageId, status, userId, clientId } = data;
 
       if (!messageId || !status) {
-        console.error("❌ whatsapp_message_status: messageId and status are required");
+        console.error(
+          "❌ whatsapp_message_status: messageId and status are required"
+        );
         return;
       }
-
+      // Notify relevant users about status change
       socket.emit("message_status", {
         messageId: messageId,
-        status: status
+        status: status,
       });
 
       // If there's a specific user who triggered the status update, notify them
       if (userId) {
         socket.to(`employee_${userId}`).emit("message_status", {
           messageId: messageId,
-          status: status
+          status: status,
         });
       }
 
@@ -1716,13 +2713,14 @@ io.on("connection", (socket) => {
       if (clientId) {
         socket.to(`client_${clientId}`).emit("message_status", {
           messageId: messageId,
-          status: status
+          status: status,
         });
       }
-
     } catch (error) {
       console.error("❌ Error in whatsapp_message_status:", error);
-      socket.emit("message_error", { error: "Failed to update message status" });
+      socket.emit("message_error", {
+        error: "Failed to update message status",
+      });
     }
   });
 
@@ -1732,7 +2730,9 @@ io.on("connection", (socket) => {
       const { conversationId, message } = data;
 
       if (!conversationId || !message) {
-        console.error("❌ send_message: conversationId and message are required");
+        console.error(
+          "❌ send_message: conversationId and message are required"
+        );
         return;
       }
 
@@ -1766,7 +2766,9 @@ io.on("connection", (socket) => {
     const { conversationId, user, isSpace = false } = data;
 
     if (!conversationId || !user) {
-      console.error("❌ user_stopped_typing: conversationId and user are required");
+      console.error(
+        "❌ user_stopped_typing: conversationId and user are required"
+      );
       return;
     }
 
@@ -1785,81 +2787,8 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
-// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
-const emitWhatsAppMessage = (io, data) => {
-  const { message, type, action, targetUsers, clientId } = data;
-  
-  if (!message || !type) {
-    console.error("❌ emitWhatsAppMessage: message and type are required");
-    return;
-  }
-
-  if (targetUsers && Array.isArray(targetUsers)) {
-    targetUsers.forEach(userId => {
-      io.to(`employee_${userId}`).emit("new_message", {
-        message: message,
-        type: type,
-        action: action,
-        timestamp: new Date()
-      });
-    });
-  }
-
-  // Always emit to client room if clientId provided
-  if (clientId) {
-    io.to(`client_${clientId}`).emit("new_message", {
-      message: message,
-      type: type,
-      action: action
-    });
-  }
-
-  // If no specific users, emit to all connected clients (broadcast)
-  if (!targetUsers || targetUsers.length === 0) {
-    io.emit("new_message", {
-      message: message,
-      type: type,
-      action: action
-    });
-  }
-};
-
-// 🎯 CRITICAL FIX: Specific function for forwarding to managers
-const emitForwardToManagers = (io, data) => {
-  const { message, managers, forwardedBy, clientId } = data;
-  
-  if (!message || !managers || !Array.isArray(managers)) {
-    console.error("❌ emitForwardToManagers: message and managers array are required");
-    return;
-  }
-
-  const forwardedMessage = {
-    ...message,
-    isForwarded: true,
-    forwardedBy: forwardedBy,
-    originalMessageId: message._id
-  };
-
-  managers.forEach(managerId => {
-    io.to(`employee_${managerId}`).emit("new_message", {
-      message: forwardedMessage,
-      type: "new_approved_message",
-      action: "forwarded_approved",
-      forwardedBy: forwardedBy,
-      originalMessageId: message._id,
-      timestamp: new Date()
-    });
-  });
-};
-
-// Export the emission functions for use in controllers
-module.exports = {
-  emitWhatsAppMessage,
-  emitForwardToManagers
-};
 
 io.on("connection", (socket) => {
-
   socket.on("join_user", (userId) => {
     if (!userId) {
       console.error("❌ join_user: userId is required");
@@ -1926,7 +2855,6 @@ io.on("connection", (socket) => {
 
       // Also send to sender for confirmation
       socket.emit("space_message_sent", { success: true, message });
-
     } catch (error) {
       console.error("❌ Error in send_space_message:", error);
       socket.emit("message_error", { error: "Failed to send space message" });
@@ -1992,6 +2920,81 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+// 🎯 CRITICAL FIX: Add server-side emission functions for backend controllers
+const emitWhatsAppMessage = (io, data) => {
+  const { message, type, action, targetUsers, clientId } = data;
+
+  if (!message || !type) {
+    console.error("❌ emitWhatsAppMessage: message and type are required");
+    return;
+  }
+
+  // Emit to specific users if provided
+  if (targetUsers && Array.isArray(targetUsers)) {
+    targetUsers.forEach((userId) => {
+      io.to(`employee_${userId}`).emit("new_message", {
+        message: message,
+        type: type,
+        action: action,
+        timestamp: new Date(),
+      });
+    });
+  }
+
+  // Always emit to client room if clientId provided
+  if (clientId) {
+    io.to(`client_${clientId}`).emit("new_message", {
+      message: message,
+      type: type,
+      action: action,
+    });
+  }
+
+  // If no specific users, emit to all connected clients (broadcast)
+  if (!targetUsers || targetUsers.length === 0) {
+    io.emit("new_message", {
+      message: message,
+      type: type,
+      action: action,
+    });
+  }
+};
+
+// 🎯 CRITICAL FIX: Specific function for forwarding to managers
+const emitForwardToManagers = (io, data) => {
+  const { message, managers, forwardedBy, clientId } = data;
+
+  if (!message || !managers || !Array.isArray(managers)) {
+    console.error(
+      "❌ emitForwardToManagers: message and managers array are required"
+    );
+    return;
+  }
+
+  const forwardedMessage = {
+    ...message,
+    isForwarded: true,
+    forwardedBy: forwardedBy,
+    originalMessageId: message._id,
+  };
+
+  managers.forEach((managerId) => {
+    io.to(`employee_${managerId}`).emit("new_message", {
+      message: forwardedMessage,
+      type: "new_approved_message",
+      action: "forwarded_approved",
+      forwardedBy: forwardedBy,
+      originalMessageId: message._id,
+      timestamp: new Date(),
+    });
+  });
+};
+// In your socket.io initialization file
+// Export the emission functions for use in controllers
+module.exports = {
+  emitWhatsAppMessage,
+  emitForwardToManagers,
+};
 cron.schedule(
   "* * * * *", // Every minute
   async () => {
