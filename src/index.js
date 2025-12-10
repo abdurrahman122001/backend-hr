@@ -83,6 +83,8 @@ const hrPolicyRoute = require("./routes/hrPolicyRoutes");
 const companyProfile = require("./routes/companyProfile");
 const bugRoutes = require("./routes/bugRoutes");
 const hierarchyRoute = require("./routes/hierarchy"); // (not mounted here, imported to ensure build)
+const threadChatRoutes = require("./routes/threadChatRoutes");
+const ThreadChatMessage = require("./models/ThreadChatMessage");
 
 const app = express();
 
@@ -233,6 +235,7 @@ app.use("/api/notice-period", requireAuth, noticePeriodRouter);
 app.use("/api/hr-policies", requireAuth, hrPolicyRoute);
 app.use("/api/bugs", bugRoutes);
 app.use("/api/hierarchy", requireAuth, hierarchyRoute);
+app.use("/api/thread-chat", threadChatRoutes);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
