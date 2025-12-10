@@ -33,7 +33,6 @@ function getHoursDiff(checkIn, checkOut) {
  */
 
 function resolveOwnerId(user) {
-  // Prefer explicit tenant/company id (user.owner) → parent admin (createdBy) → self
   return user?.owner || user?.createdBy || user?._id;
 }
 
@@ -349,6 +348,16 @@ exports.markAttendance = async (req, res) => {
 
     // ========= Holiday (tenant-scoped, no employee) =========
     if (isHoliday) {
+      console.log(`[HOLIDAY] Marking Holiday -> ${date}`);
+
+      // 1️⃣ Delete ALL employee attendance for that date under this owner
+      await Attendance.deleteMany({
+        owner: ownerId,
+        employee: { $exists: true },
+        date,
+      });
+
+      // 2️⃣ Create/Update the GLOBAL holiday record
       const rec = await Attendance.findOneAndUpdate(
         { owner: ownerId, date, isHoliday: true },
         {
@@ -370,8 +379,14 @@ exports.markAttendance = async (req, res) => {
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
-      return res.json(rec);
+
+      console.log(`[HOLIDAY] Overriding all employee attendance for ${date}`);
+      return res.json({
+        message: "Holiday applied and all previous attendance removed.",
+        holiday: rec,
+      });
     }
+
 
     // ========= Employee (needed for logs) =========
     const employee = await ensureEmployeeAccessible(

@@ -13,6 +13,8 @@ const ClientInfoSchema = new Schema(
     // Core identity
     clientName: { type: String, required: true, trim: true },
     clientEmail: { type: String, required: true, trim: true, lowercase: true },
+    clientPhone: { type: String, trim: true },
+
     country: { type: String, required: true },
 
     // 🔹 Location and general info

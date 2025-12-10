@@ -147,7 +147,101 @@ async function findTLsAndManagersByOwner(ownerId) {
     employees: employees.map((x) => String(x._id)),
   };
 }
+/** ---------- CLIENT SUPERVISION HELPER FUNCTIONS ---------- **/
+async function getClientSupervision(clientId) {
+  if (!isObjId(clientId)) return "direct";
+  
+  const Client = require("../models/ClientInfo");
+  const client = await Client.findById(clientId).select("supervision").lean();
+  
+  return client?.supervision || "direct";
+}
 
+async function clientRequiresApproval(clientId) {
+  const supervision = await getClientSupervision(clientId);
+  return supervision === "needs_approval";
+}
+
+/** ---------- ENHANCED applyVisibility WITH CLIENT SUPERVISION ---------- **/
+async function applyVisibility(q, req) {
+  if (!req.employee?._id) return q;
+
+  const me = oid(String(req.employee._id));
+  if (!me) return q;
+
+  const currentUserRole = normalizeRole(req.employee?.role || "");
+  const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
+
+  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+  if (
+    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    ownerId
+  ) {
+    return { ...q, owner: ownerId };
+  }
+
+  // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are involved OR manager messages for supervision
+  if (currentUserRole === "team_lead") {
+    // Get all managers in the same organization
+    const { managers } = await findTLsAndManagersByOwner(ownerId);
+
+    return {
+      ...q,
+      $or: [
+        { sender: me },
+        { receiver: me },
+        { receiver: { $in: [me] } },
+        // Allow team leads to see manager messages
+        {
+          sender: { $in: managers.map((id) => oid(id)) },
+          owner: ownerId,
+        },
+        // 🔥 NEW: Allow team leads to see messages from clients requiring approval
+        {
+          approvalStatus: "pending",
+          owner: ownerId,
+        },
+      ],
+    };
+  }
+
+  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
+  const now = new Date();
+  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { ...q, $and: [{ $or: visOr }] };
+  }
+
+  return {
+    $or: [
+      {
+        ...q,
+        $and: [
+          {
+            $or: [
+              { isScheduled: { $ne: true } },
+              { isScheduled: true, status: "sent" },
+              {
+                isScheduled: true,
+                status: "scheduled",
+                scheduledFor: { $lte: now },
+              },
+            ],
+          },
+          { $or: visOr },
+        ],
+      },
+      {
+        ...q,
+        isScheduled: true,
+        status: "scheduled",
+        scheduledFor: { $gt: now },
+        sender: me,
+      },
+    ],
+  };
+}
 /** ---------- SCHEDULING UTILITIES ---------- **/
 function validateScheduleTime(scheduledFor) {
   if (!scheduledFor)
@@ -398,6 +492,7 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
+
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res
@@ -483,12 +578,37 @@ exports.listMessagesForManager = async function listMessagesForManager(
       ])
       .lean();
 
-    return res.json({ messages });
+    // 🔥 NEW: Get client supervision info for each message
+    const Client = require("../models/ClientInfo");
+    const messagesWithSupervision = await Promise.all(
+      messages.map(async (message) => {
+        if (message.client) {
+          const clientDoc = await Client.findById(message.client)
+            .select("supervision clientName")
+            .lean();
+          return {
+            ...message,
+            clientSupervision: clientDoc?.supervision || "direct",
+            clientName: clientDoc?.clientName || "Unknown",
+            requiresApproval: clientDoc?.supervision === "needs_approval",
+          };
+        }
+        return message;
+      })
+    );
+
+    return res.json({ 
+      messages: messagesWithSupervision,
+      total: messagesWithSupervision.length,
+      page,
+      limit 
+    });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -525,21 +645,22 @@ exports.createMessage = async function createMessage(req, res) {
     receivers = receivers.filter((id) => id !== String(sender));
 
     const senderDoc = await Employee.findById(sender)
-      .select("_id role supervisor supervisionMode owner")
+      .select("_id role supervisor owner")
       .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
 
     let approvalStatus;
-    const supervisionMode = String(
-      senderDoc?.supervisionMode || ""
-    ).toLowerCase();
-    const needsApproval = supervisionMode === "needs_approval";
-    const isDirect = supervisionMode === "direct";
 
+    // 🔥 CLIENT-BASED SUPERVISION: Get supervision mode from CLIENT, not employee
     const Client = require("../models/ClientInfo");
     const clientDoc = await Client.findById(client)
       .populate("assignedTo", "_id role")
       .lean();
+
+    // Use client's supervision setting, fallback to "direct" if not set
+    const clientSupervision = clientDoc?.supervision || "direct";
+    const needsApproval = clientSupervision === "needs_approval";
+    const isDirect = clientSupervision === "direct";
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
@@ -604,7 +725,7 @@ exports.createMessage = async function createMessage(req, res) {
         }
       }
     }
-    // 👷 EMPLOYEE LOGIC: Use assigned employee and supervision rules
+    // 👷 EMPLOYEE LOGIC: Use assigned employee and CLIENT-BASED supervision rules
     else if (senderRole === "employee") {
       // ✅ Include assignedTo employee if present (but only if not already included)
       if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
@@ -618,7 +739,7 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // 🔑 CORRECTED Approval status logic - MATCHING ASSIGNMENT CONTROLLER
+    // 🔑 CORRECTED Approval status logic - NOW CLIENT-BASED
     if (senderRole === "manager") {
       approvalStatus = null;
       // Managers don't need approval, but team leads are now included as receivers
@@ -626,11 +747,14 @@ exports.createMessage = async function createMessage(req, res) {
       approvalStatus = null;
       // Team leads don't need approval, and we send to managers + CRM
     } else if (needsApproval) {
-      // Needs approval - add team leads for review
+      // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
       approvalStatus = "pending";
-      receivers = [...receivers, ...tls.map((id) => String(id))];
+      // Add team leads only if the client requires approval
+      if (tls.length > 0) {
+        receivers = [...receivers, ...tls.map((id) => String(id))];
+      }
     } else if (isDirect) {
-      // DIRECT SUPERVISION - NO TEAM LEADS INVOLVED (KEY DIFFERENCE)
+      // 🔥 CLIENT-BASED: DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
       approvalStatus = "approved";
       // Don't add any team leads or managers - message goes directly to intended receivers
     }
@@ -639,11 +763,11 @@ exports.createMessage = async function createMessage(req, res) {
     if (receivers.length === 0) {
       if (senderRole === "employee") {
         if (isDirect) {
-          // For direct mode with no receivers, add managers for visibility
+          // For client with direct mode, add managers for visibility
           receivers = [...managers];
           approvalStatus = "approved";
         } else {
-          // For needs_approval mode with no receivers, add team leads
+          // For client with needs_approval mode, add team leads
           receivers = [...tls];
           approvalStatus = "pending";
         }
@@ -726,76 +850,11 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
-
-    // FIXED: Emit real-time events ONLY to relevant users
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
-
-      // Notify ONLY the actual receivers
-      receivers.forEach((receiverId) => {
-        io.to(`employee_${receiverId}`).emit("new_message", {
-          message: populated,
-          type: "new_assignment",
-        });
-      });
-
-      // Notify ONLY the sender
-      io.to(`employee_${sender}`).emit("new_message", {
-        message: populated,
-        type: "message_created",
-      });
-
-      // Special notification for team leads when manager sends message
-      if (senderRole === "manager") {
-        tls.forEach((teamLeadId) => {
-          if (receivers.includes(teamLeadId)) {
-            io.to(`employee_${teamLeadId}`).emit("new_message", {
-              message: populated,
-              type: "manager_message_visibility",
-              note: "You are included as a receiver for manager message visibility",
-            });
-          }
-        });
-
-        // Special notification for assigned employee when manager sends message
-        if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-          const assignedEmployeeId = String(clientDoc.assignedTo._id);
-          if (receivers.includes(assignedEmployeeId)) {
-            io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
-              message: populated,
-              type: "manager_direct_message",
-              note: "Manager has sent you a direct message",
-            });
-          }
-        }
-      }
-
-      // Special notification for managers when team lead sends message
-      if (senderRole === "team_lead") {
-        managers.forEach((managerId) => {
-          if (receivers.includes(managerId)) {
-            io.to(`employee_${managerId}`).emit("new_message", {
-              message: populated,
-              type: "team_lead_message_to_manager",
-              note: "Team Lead has sent you a message regarding client communication",
-            });
-          }
-        });
-
-        // Special notification for CRM when team lead sends message
-        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-        if (crmEmployeeId && receivers.includes(crmEmployeeId)) {
-          io.to(`employee_${crmEmployeeId}`).emit("new_message", {
-            message: populated,
-            type: "team_lead_message_to_crm",
-            note: "Team Lead has sent a message that requires CRM attention",
-          });
-        }
-      }
-    }
-
-    res.status(201).json({
+    // Add client supervision info to response
+    const responseWithSupervision = {
       ...populated.toObject(),
+      clientSupervision: clientSupervision,
+      requiresApproval: needsApproval,
       teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
       assignedEmployeeIncluded: senderRole === "manager" && clientDoc?.assignedTo ? true : false, // Indicate if assigned employee was added
       crmIncluded: senderRole === "team_lead", // Indicate if CRM was added
@@ -808,7 +867,76 @@ exports.createMessage = async function createMessage(req, res) {
         sentToAssignedEmployee: senderRole === "manager" && clientDoc?.assignedTo ? true : false,
         sentToCRM: senderRole === "team_lead"
       }
-    });
+    };
+
+    // FIXED: Emit real-time events ONLY to relevant users
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+
+      // Notify ONLY the actual receivers
+      receivers.forEach((receiverId) => {
+        io.to(`employee_${receiverId}`).emit("new_message", {
+          message: responseWithSupervision,
+          type: "new_assignment",
+        });
+      });
+
+      // Notify ONLY the sender
+      io.to(`employee_${sender}`).emit("new_message", {
+        message: responseWithSupervision,
+        type: "message_created",
+      });
+
+      // Special notification for team leads when manager sends message
+      if (senderRole === "manager") {
+        tls.forEach((teamLeadId) => {
+          if (receivers.includes(teamLeadId)) {
+            io.to(`employee_${teamLeadId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "manager_message_visibility",
+              note: "You are included as a receiver for manager message visibility",
+            });
+          }
+        });
+
+        // Special notification for assigned employee when manager sends message
+        if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
+          const assignedEmployeeId = String(clientDoc.assignedTo._id);
+          if (receivers.includes(assignedEmployeeId)) {
+            io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "manager_direct_message",
+              note: "Manager has sent you a direct message",
+            });
+          }
+        }
+      }
+
+      // Special notification for managers when team lead sends message
+      if (senderRole === "team_lead") {
+        managers.forEach((managerId) => {
+          if (receivers.includes(managerId)) {
+            io.to(`employee_${managerId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "team_lead_message_to_manager",
+              note: "Team Lead has sent you a message regarding client communication",
+            });
+          }
+        });
+
+        // Special notification for CRM when team lead sends message
+        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+        if (crmEmployeeId && receivers.includes(crmEmployeeId)) {
+          io.to(`employee_${crmEmployeeId}`).emit("new_message", {
+            message: responseWithSupervision,
+            type: "team_lead_message_to_crm",
+            note: "Team Lead has sent a message that requires CRM attention",
+          });
+        }
+      }
+    }
+
+    res.status(201).json(responseWithSupervision);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to create assignment message" });
@@ -1158,6 +1286,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
   }
 };
 // PATCH /api/assignment-messages/:id/approve
+// PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1170,6 +1299,19 @@ exports.approveMessage = async function approveMessage(req, res) {
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // 🔥 CHECK CLIENT SUPERVISION
+    const Client = require("../models/ClientInfo");
+    const client = await Client.findById(msg.client).select("supervision").lean();
+    const clientSupervision = client?.supervision || "direct";
+    
+    // Only allow approval if client has "needs_approval" supervision
+    if (clientSupervision !== "needs_approval") {
+      return res.status(400).json({ 
+        error: "This client uses direct supervision. Approval not required.",
+        clientSupervision: clientSupervision
+      });
+    }
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
@@ -1192,16 +1334,17 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
+    // Add client supervision info to the message
+    const updatedMessage = {
+      ...populatedMsg.toObject(),
+      approvalStatus: "approved",
+      clientSupervision: clientSupervision,
+      requiresApproval: clientSupervision === "needs_approval",
+    };
+
     // 🔥 CRITICAL FIX: Emit events to ALL relevant users
     if (req.app.get("io")) {
       const io = req.app.get("io");
-
-      // Create the updated message object for real-time emission
-      const updatedMessage = {
-        ...populatedMsg.toObject(),
-        approvalStatus: "approved",
-      };
-
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
       const allInvolvedUsers = new Set();
@@ -1236,7 +1379,6 @@ exports.approveMessage = async function approveMessage(req, res) {
           approvedBy: req.employee._id,
           timestamp: new Date(),
         });
-
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1273,6 +1415,8 @@ exports.approveMessage = async function approveMessage(req, res) {
           isForwarded: true,
           originalMessage: msg._id,
           forwardedBy: req.employee._id,
+          // Add client supervision info
+          clientSupervision: clientSupervision,
         };
 
         const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
@@ -1298,6 +1442,7 @@ exports.approveMessage = async function approveMessage(req, res) {
               action: "forwarded_approved",
               forwardedBy: req.employee._id,
               originalMessageId: msg._id,
+              clientSupervision: clientSupervision,
               // Include context about the reply chain
               replyContext: msg.isReply ? {
                 hasOriginalThread: true,
@@ -1309,10 +1454,11 @@ exports.approveMessage = async function approveMessage(req, res) {
         }
 
         return res.json({
-          ...populatedMsg.toObject(),
+          ...updatedMessage,
           forwardedToManagers: true,
           forwardedMessage: populatedForward,
           message: "Message approved and forwarded to managers",
+          clientSupervision: clientSupervision,
           // Include reply context in response
           replyContext: msg.isReply ? {
             includedReplyContent: true,
@@ -1323,15 +1469,15 @@ exports.approveMessage = async function approveMessage(req, res) {
     }
 
     return res.json({
-      ...populatedMsg.toObject(),
+      ...updatedMessage,
       message: "Message approved successfully",
+      clientSupervision: clientSupervision,
     });
   } catch (e) {
     console.error("❌ Error in approveMessage:", e);
     res.status(500).json({ error: "Failed to approve message" });
   }
 };
-
 // PATCH /api/assignment-messages/:id/disapprove
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
@@ -1343,6 +1489,19 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    // 🔥 CHECK CLIENT SUPERVISION
+    const Client = require("../models/ClientInfo");
+    const client = await Client.findById(msg.client).select("supervision").lean();
+    const clientSupervision = client?.supervision || "direct";
+    
+    // Only allow disapproval if client has "needs_approval" supervision
+    if (clientSupervision !== "needs_approval") {
+      return res.status(400).json({ 
+        error: "This client uses direct supervision. Disapproval not required.",
+        clientSupervision: clientSupervision
+      });
+    }
 
     const userRole = normalizeRole(req.employee?.role || "");
     if (userRole !== "team_lead") {
@@ -1363,16 +1522,17 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
     ]);
 
+    // Add client supervision info
+    const updatedMessage = {
+      ...populatedMsg.toObject(),
+      approvalStatus: "disapproved",
+      clientSupervision: clientSupervision,
+      requiresApproval: clientSupervision === "needs_approval",
+    };
+
     // 🔥 CRITICAL FIX: Emit events to ALL relevant users
     if (req.app.get("io")) {
       const io = req.app.get("io");
-
-      // Create the updated message object for real-time emission
-      const updatedMessage = {
-        ...populatedMsg.toObject(),
-        approvalStatus: "disapproved",
-      };
-
 
       // 🎯 CRITICAL: Emit to ALL users involved in this message
       const allInvolvedUsers = new Set();
@@ -1406,8 +1566,8 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
           action: "disapproved",
           disapprovedBy: req.employee._id,
           timestamp: new Date(),
+          clientSupervision: clientSupervision,
         });
-
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1421,15 +1581,15 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     }
 
     res.json({
-      ...populatedMsg.toObject(),
+      ...updatedMessage,
       message: "Message disapproved successfully",
+      clientSupervision: clientSupervision,
     });
   } catch (e) {
     console.error("❌ Error in disapproveMessage:", e);
     res.status(500).json({ error: "Failed to disapprove message" });
   }
 };
-
 // GET /api/assignment-messages/:id
 exports.getMessage = async function getMessage(req, res) {
   try {
@@ -1450,6 +1610,7 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 // PATCH /api/assignment-messages/:id/edit - ENHANCED APPROVAL WORKFLOW
+// PATCH /api/assignment-messages/:id/edit - ENHANCED APPROVAL WORKFLOW
 exports.editMessage = async function editMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1469,13 +1630,19 @@ exports.editMessage = async function editMessage(req, res) {
     const currentUserId = String(req.employee._id);
     const currentUserRole = normalizeRole(req.employee?.role || "");
 
+    // 🔥 CHECK CLIENT SUPERVISION
+    const Client = require("../models/ClientInfo");
+    const client = await Client.findById(msg.client).select("supervision").lean();
+    const clientSupervision = client?.supervision || "direct";
+    const clientRequiresApproval = clientSupervision === "needs_approval";
+
     // 🔥 CRITICAL FIX 1: Use normalized role comparison
     const isTeamLead = currentUserRole === "team_lead";
 
     // 🔥 CRITICAL FIX 2: Proper sender ID comparison
     const isSender = msg.sender && String(msg.sender._id) === currentUserId;
 
-    // 🔥 CRITICAL FIX 3: Enhanced permission check
+    // 🔥 CRITICAL FIX 3: Enhanced permission check with client supervision
     if (!isSender && !isTeamLead) {
       return res.status(403).json({
         error:
@@ -1483,8 +1650,15 @@ exports.editMessage = async function editMessage(req, res) {
       });
     }
 
-    // Team leads can only edit messages pending their approval or disapproved messages
+    // Team leads can only edit messages if client requires approval
     if (isTeamLead && !isSender) {
+      if (!clientRequiresApproval) {
+        return res.status(403).json({
+          error: "This client uses direct supervision. Team leads cannot edit messages.",
+          clientSupervision: clientSupervision
+        });
+      }
+      
       if (
         msg.approvalStatus !== "pending" &&
         msg.approvalStatus !== "disapproved"
@@ -1516,6 +1690,7 @@ exports.editMessage = async function editMessage(req, res) {
         editedBy: req.employee._id,
         previousApprovalStatus: msg.approvalStatus,
         editedByRole: currentUserRole,
+        clientSupervisionAtEdit: clientSupervision,
       });
 
       // Limit edit history to last 10 edits to prevent excessive growth
@@ -1535,18 +1710,22 @@ exports.editMessage = async function editMessage(req, res) {
       msg.editedBy = req.employee._id;
     }
 
-    // 🔥 ENHANCED APPROVAL WORKFLOW LOGIC
+    // 🔥 ENHANCED APPROVAL WORKFLOW LOGIC WITH CLIENT SUPERVISION
     if (hasContentChanges) {
-      if (isTeamLead && !isSender) {
-        // Team Lead editing someone else's message - AUTO APPROVE
+      if (isTeamLead && !isSender && clientRequiresApproval) {
+        // Team Lead editing someone else's message for client that requires approval - AUTO APPROVE
         msg.approvalStatus = "approved";
       } else if (isSender) {
         // Original sender editing their own message
         if (msg.approvalStatus === "disapproved") {          
-          msg.approvalStatus = "pending";
+          // If client requires approval, set to pending. Otherwise, keep as approved
+          msg.approvalStatus = clientRequiresApproval ? "pending" : "approved";
         } else if (msg.approvalStatus === "approved") {
           // If already approved and sender edits, keep it approved
           msg.approvalStatus = "approved";
+        } else if (!msg.approvalStatus && clientRequiresApproval) {
+          // If no approval status but client requires approval, set to pending
+          msg.approvalStatus = "pending";
         }
         // If pending, remains pending
       } else if (isTeamLead && isSender) {
@@ -1585,16 +1764,19 @@ exports.editMessage = async function editMessage(req, res) {
       editedAt: msg.editedAt,
       editedBy: populated.editedBy,
       editHistory: msg.editHistory || [],
+      clientSupervision: clientSupervision,
+      requiresApproval: clientRequiresApproval,
     };
 
     // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
-    // 🔥 CRITICAL: PRESERVE REPLYTO AND THREAD INFO LIKE IN APPROVE FUNCTION
+    // Only forward if client requires approval
     let forwardedMessage = null;
     if (
       hasContentChanges &&
       isTeamLead &&
       !isSender &&
-      msg.approvalStatus === "approved"
+      msg.approvalStatus === "approved" &&
+      clientRequiresApproval
     ) {
 
       const senderRole = normalizeRole(msg.sender?.role || "");
@@ -1629,6 +1811,8 @@ exports.editMessage = async function editMessage(req, res) {
               scheduledFor: msg.scheduledFor,
               scheduledAt: msg.scheduledAt,
               scheduledBy: msg.scheduledBy,
+              // Add client supervision info
+              clientSupervision: clientSupervision,
             };
 
             const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
@@ -1694,8 +1878,8 @@ exports.editMessage = async function editMessage(req, res) {
           action: "edited",
           editedBy: req.employee._id,
           timestamp: new Date(),
+          clientSupervision: clientSupervision,
         });
-
       });
 
       // Also emit to the client room for real-time chat updates
@@ -1720,6 +1904,7 @@ exports.editMessage = async function editMessage(req, res) {
               forwardedBy: req.employee._id,
               originalMessageId: msg._id,
               source: "team_lead_edit",
+              clientSupervision: clientSupervision,
               // Include reply context
               replyContext: msg.isReply ? {
                 hasOriginalThread: true,
@@ -1741,20 +1926,22 @@ exports.editMessage = async function editMessage(req, res) {
             type: "message_updated",
             action: "auto_approved",
             approvedBy: req.employee._id,
+            clientSupervision: clientSupervision,
           });
         });
 
         // If auto-approved by Team Lead, also notify managers (if not already forwarded)
-        if (isTeamLead && !isSender && !forwardedMessage) {
+        if (isTeamLead && !isSender && !forwardedMessage && clientRequiresApproval) {
           const { managers } = await findTLsAndManagersByOwner(msg.owner);
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
               message: responseData,
               type: "new_approved_message",
+              clientSupervision: clientSupervision,
             });
           });
         }
-      } else if (msg.approvalStatus === "pending") {
+      } else if (msg.approvalStatus === "pending" && clientRequiresApproval) {
 
         // Notify ALL involved users about pending status
         involvedUsersArray.forEach((userId) => {
@@ -1762,6 +1949,7 @@ exports.editMessage = async function editMessage(req, res) {
             message: responseData,
             type: "message_updated",
             action: "pending_approval",
+            clientSupervision: clientSupervision,
           });
         });
 
@@ -1773,6 +1961,7 @@ exports.editMessage = async function editMessage(req, res) {
             io.to(`employee_${teamLeadId}`).emit("new_message", {
               message: responseData,
               type: "message_needs_approval",
+              clientSupervision: clientSupervision,
             });
           }
         });
@@ -1788,10 +1977,12 @@ exports.editMessage = async function editMessage(req, res) {
       } else {
         responseMessage = "Message updated and automatically approved";
       }
-    } else if (msg.approvalStatus === "pending") {
+    } else if (msg.approvalStatus === "pending" && clientRequiresApproval) {
       responseMessage = "Message updated and sent for approval";
     } else if (msg.approvalStatus === "approved" && isSender) {
       responseMessage = "Message updated (already approved)";
+    } else if (!clientRequiresApproval) {
+      responseMessage = "Message updated (direct supervision - no approval needed)";
     }
 
     // Build final response
@@ -1800,6 +1991,8 @@ exports.editMessage = async function editMessage(req, res) {
       data: responseData,
       approvalStatus: msg.approvalStatus,
       editedBy: currentUserRole,
+      clientSupervision: clientSupervision,
+      requiresApproval: clientRequiresApproval,
     };
 
     // Add forwarding info to response if applicable
