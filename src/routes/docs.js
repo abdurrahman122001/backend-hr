@@ -5,8 +5,9 @@ const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
 
 const Employee = require("../models/Employees");
-const Salary = require("../models/Salaries"); // Import the Salary model
+const Salary = require("../models/Salaries");
 const DocTemplate = require("../models/DocTemplate");
+const ReferenceCounter = require("../models/ReferenceCounter");
 const { decrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
@@ -21,13 +22,24 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
-// replaces your current fmtDate()
+// Format date as ddmmyyyy (19092025)
+function formatDateDDMMYYYY(date = new Date()) {
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return "";
+  
+  const day = String(d.getDate()).padStart(2, "0");
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const year = d.getFullYear();
+  
+  return `${day}${month}${year}`;
+}
+
+// Format date as Month day, year (September 19, 2025)
 function fmtDate(d) {
   if (!d) return "—";
   const dt = new Date(d);
   if (isNaN(dt.getTime())) return "—";
 
-  // Prefer reliable locale formatting
   try {
     return dt.toLocaleDateString("en-US", {
       year: "numeric",
@@ -35,35 +47,106 @@ function fmtDate(d) {
       day: "numeric",
     });
   } catch {
-    // Fallback without Intl
     const months = [
-      "January",
-      "February",
-      "March",
-      "April",
-      "May",
-      "June",
-      "July",
-      "August",
-      "September",
-      "October",
-      "November",
-      "December",
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December"
     ];
     return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
   }
 }
-function generateReferenceNumber() {
-  const prefix = "MA01";
+
+// Get current year-month in MMyyyy format (092025)
+function getCurrentYearMonth() {
   const now = new Date();
-
-  const dd = String(now.getDate()).padStart(2, "0");
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const yyyy = now.getFullYear();
-
-  const formatted = `${dd}${mm}${yyyy}`; // 19092025 format
-  return `${prefix}-${formatted}`;
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const year = now.getFullYear();
+  return `${month}${year}`;
 }
+
+// Get document type code (2-3 letters)
+function getDocTypeCode(docType) {
+  const typeCodes = {
+    "experience_letter": "EL",    // Experience Letter
+    "salary_certificate": "SC",   // Salary Certificate
+    "nda": "NDA",                 // NDA
+    "contract": "CT"              // Contract
+  };
+  return typeCodes[docType] || "DOC";
+}
+
+// Get document full name for display
+function getDocTypeName(docType) {
+  const typeNames = {
+    "experience_letter": "Experience Letter",
+    "salary_certificate": "Salary Certificate",
+    "nda": "Non-Disclosure Agreement",
+    "contract": "Employment Contract"
+  };
+  return typeNames[docType] || "Document";
+}
+
+// Auto-incrementing reference number generator in format: MA02-EL-19092025
+async function generateReferenceNumber(docType = "experience_letter") {
+  try {
+    const docCode = getDocTypeCode(docType);
+    const yearMonth = getCurrentYearMonth(); // Format: 092025
+    const currentDate = formatDateDDMMYYYY(); // Format: 19092025
+    
+    // Find or create counter for this document type and month
+    let counter = await ReferenceCounter.findOneAndUpdate(
+      { 
+        docType: docType,
+        yearMonth: yearMonth
+      },
+      { 
+        $inc: { sequence: 1 },
+        $set: { lastGenerated: new Date() }
+      },
+      { 
+        upsert: true,
+        new: true,
+        setDefaultsOnInsert: true
+      }
+    );
+
+    // Format sequence with leading zeros (01, 02, etc.)
+    const sequenceStr = String(counter.sequence).padStart(2, "0");
+    
+    // Final format: MA02-EL-19092025
+    return `MA${sequenceStr}-${docCode}-${currentDate}`;
+  } catch (error) {
+    console.error("Error generating reference number:", error);
+    // Fallback format
+    const now = new Date();
+    const currentDate = formatDateDDMMYYYY(now);
+    return `MA01-${getDocTypeCode(docType)}-${currentDate}`;
+  }
+}
+
+// Function to get current reference without incrementing (for preview)
+async function getCurrentReferenceNumber(docType = "experience_letter") {
+  try {
+    const docCode = getDocTypeCode(docType);
+    const yearMonth = getCurrentYearMonth();
+    const currentDate = formatDateDDMMYYYY();
+    
+    const counter = await ReferenceCounter.findOne({ 
+      docType: docType,
+      yearMonth: yearMonth
+    });
+
+    const sequence = counter ? counter.sequence : 0;
+    const sequenceStr = String(sequence + 1).padStart(2, "0");
+    
+    // Format: MA02-EL-19092025
+    return `MA${sequenceStr}-${docCode}-${currentDate}`;
+  } catch (error) {
+    console.error("Error getting current reference:", error);
+    const currentDate = formatDateDDMMYYYY();
+    return `MA01-${getDocTypeCode(docType)}-${currentDate}`;
+  }
+}
+
 // Month-aware Y/M difference (no rounding up at month edges)
 function diffToYearsMonths(start, end) {
   if (!start || !end) return { years: 0, months: 0, totalMonths: 0 };
@@ -176,23 +259,20 @@ async function fetchAndDecryptSalary(employeeId) {
     return {};
   }
 }
+
 const formatWithCommas = (val) => {
   const numVal = parseFloat(val);
   if (isNaN(numVal)) return val || "—";
-  return numVal.toLocaleString("en-PK"); // use "en-IN" if you prefer 2,30,000 format
+  return numVal.toLocaleString("en-PK");
 };
 
 function getPositionsHistory(emp) {
   const positions = [];
     
-  // Check if employee has experiences data
   if (emp?.experiences && Array.isArray(emp.experiences) && emp.experiences.length > 0) {    
-    // Flatten all positions from all experiences
     emp.experiences.forEach((experience, expIndex) => {
-      
       if (experience?.positions && Array.isArray(experience.positions) && experience.positions.length > 0) {        
         experience.positions.forEach((position, posIndex) => {          
-          // Convert dates to proper format
           let startDate = null;
           let endDate = null;
           
@@ -221,7 +301,6 @@ function getPositionsHistory(emp) {
             endDateFormatted: position.isCurrentRole ? "Present" : (endDate ? fmtDate(endDate) : "—"),
           });
         });
-      } else {
       }
     });
   } else {
@@ -241,8 +320,8 @@ function getPositionsHistory(emp) {
         endDateFormatted: emp.leavingDate ? fmtDate(endDate) : "Present",
       });
     }
-  }  
-  // Sort positions by start date (most recent first)
+  }
+  
   positions.sort((a, b) => {
     if (!a.startDate) return 1;
     if (!b.startDate) return -1;
@@ -269,175 +348,8 @@ function generatePositionsTimeline(positions) {
   return timelineItems.join("\n");
 }
 
-async function tokenMap(emp, defaults = {}) {
-  // Fetch and decrypt salary fields from Salary model
-  const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
-
-  const join = emp?.joiningDate;
-  const endDate = emp?.leavingDate || new Date();
-
-  const tenureHuman = formatTenure(join, endDate);
-  const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
-  
-  // Get all positions history
-  const positionsHistory = getPositionsHistory(emp);  
-  const positionsTimeline = generatePositionsTimeline(positionsHistory);
-  
-  // Find current position
-  const currentPosition = positionsHistory.find(pos => pos.isCurrentRole === true) || 
-                          positionsHistory[0] || 
-                          { 
-                            title: emp?.designation || emp?.position || "—",
-                            startDateFormatted: join ? fmtDate(new Date(join)) : "—",
-                            endDateFormatted: emp?.leavingDate ? fmtDate(new Date(emp.leavingDate)) : "Present",
-                            tenure: tenureHuman,
-                            duration: diffToYearsMonths(join, endDate),
-                            description: ""
-                          };
-  
-  // Find previous positions (excluding current)
-  const previousPositions = positionsHistory.filter(pos => !pos.isCurrentRole);  
-  // Create base tokens object
-  const tokens = {
-    "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
-    "company.address": defaults.companyAddress || "",
-    "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
-    "sign.name": defaults.signName || "ADEEL SHAIKH",
-    "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
-    "doc.referenceNo": generateReferenceNumber(),
-    "doc.qualitiesLine":
-      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
-    "dates.issue": fmtDate(new Date()),
-    "dates.join": fmtDate(emp?.joiningDate),
-    "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
-    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
-    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
-
-    "employee.name": emp?.name || "—",
-    "employee.cnic": emp?.cnic || "—",
-    "employee.nationality": emp?.nationality || "—",
-    "employee.designation": emp?.designation || emp?.position || "—",
-    "employee.department": emp?.department || "—",
-    "employee.position": emp?.position || emp?.designation || "—",
-    "employee.email": emp?.email || "—",
-    "employee.phone": emp?.phone || "—",
-    "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
-
-    // Salary fields (decrypted from Salary model)
-    "salary.basic": formatWithCommas(decryptedSalary.basic),
-    "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
-    "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
-    "salary.conveyance": formatWithCommas(decryptedSalary.conveyanceAllowance),
-    "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
-    "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
-    "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
-    "salary.dislocation": formatWithCommas(
-      decryptedSalary.dislocationAllowance
-    ),
-    "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
-    "salary.bonus": formatWithCommas(decryptedSalary.bonus),
-    "salary.arrears": formatWithCommas(decryptedSalary.arrears),
-    "salary.auto": formatWithCommas(decryptedSalary.autoAllowance),
-    "salary.incentive": formatWithCommas(decryptedSalary.incentive),
-    "salary.fuel": formatWithCommas(decryptedSalary.fuelAllowance),
-    "salary.other": formatWithCommas(decryptedSalary.othersAllowances),
-    "salary.gross": formatWithCommas(
-      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
-        ? decryptedSalary.grossSalary
-        : decryptedSalary.calculatedTotal
-    ),
-
-    "salary.total": formatWithCommas(
-      decryptedSalary.grossSalary && decryptedSalary.grossSalary !== "0"
-        ? decryptedSalary.grossSalary
-        : decryptedSalary.calculatedTotal
-    ),
-
-    // simple pronoun defaults (change if you store an actual field)
-    "employee.pronounSubject": "he",
-    "employee.pronounObject": "him",
-    "employee.pronounPossessive": "his",
-
-    // Position timeline
-    "positions.timeline": positionsTimeline,
-    "positions.totalCount": positionsHistory.length,
-    "positions.previousCount": previousPositions.length,
-  };
-
-  // Add current position variables
-  tokens["positions.current"] = currentPosition.title;
-  tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
-  tokens["positions.current.endDate"] = currentPosition.endDateFormatted;
-  tokens["positions.current.tenure"] = currentPosition.tenure;
-  tokens["positions.current.duration"] = `${currentPosition.duration.years} years ${currentPosition.duration.months} months`;
-  tokens["positions.current.description"] = currentPosition.description || "—";
-
-  // Add individual previous position variables (1-10)
-  previousPositions.slice(0, 10).forEach((position, index) => {
-    const positionNum = index + 1;
-    
-    tokens[`positions.previous${positionNum}.title`] = position.title;
-    tokens[`positions.previous${positionNum}.startDate`] = position.startDateFormatted;
-    tokens[`positions.previous${positionNum}.endDate`] = position.endDateFormatted;
-    tokens[`positions.previous${positionNum}.tenure`] = position.tenure;
-    tokens[`positions.previous${positionNum}.duration`] = `${position.duration.years} years ${position.duration.months} months`;
-    tokens[`positions.previous${positionNum}.description`] = position.description || "—";
-  });
-
-  // For positions beyond 10, provide empty values
-  for (let i = previousPositions.length; i < 10; i++) {
-    const positionNum = i + 1;
-    tokens[`positions.previous${positionNum}.title`] = "";
-    tokens[`positions.previous${positionNum}.startDate`] = "";
-    tokens[`positions.previous${positionNum}.endDate`] = "";
-    tokens[`positions.previous${positionNum}.tenure`] = "";
-    tokens[`positions.previous${positionNum}.duration`] = "";
-    tokens[`positions.previous${positionNum}.description`] = "";
-  }
-
-  // Add all previous titles as separate variables (not combined)
-  if (previousPositions.length > 0) {
-    tokens["positions.hasPrevious"] = "true";
-    tokens["positions.firstPrevious"] = previousPositions[0].title;
-    tokens["positions.lastPrevious"] = previousPositions[previousPositions.length - 1].title;
-  } else {
-    tokens["positions.hasPrevious"] = "false";
-    tokens["positions.firstPrevious"] = "";
-    tokens["positions.lastPrevious"] = "";
-  }
-
-  // Add positions in reverse chronological order (most recent first)
-  const reversePositions = [...previousPositions].reverse();
-  reversePositions.slice(0, 10).forEach((position, index) => {
-    const positionNum = index + 1;
-    tokens[`positions.chronological${positionNum}.title`] = position.title;
-    tokens[`positions.chronological${positionNum}.startDate`] = position.startDateFormatted;
-    tokens[`positions.chronological${positionNum}.endDate`] = position.endDateFormatted;
-  });
-
-  // Add formatted list for each previous position
-  previousPositions.forEach((position, index) => {
-    const positionNum = index + 1;
-    tokens[`positions.previous${positionNum}.formatted`] = 
-      `${position.title} (${position.startDateFormatted} to ${position.endDateFormatted})`;
-  });
-
-  // Add position sequences for narrative purposes
-  if (previousPositions.length >= 2) {
-    tokens["positions.sequence2"] = `${previousPositions[0].title} and ${previousPositions[1].title}`;
-  }
-  if (previousPositions.length >= 3) {
-    tokens["positions.sequence3"] = `${previousPositions[0].title}, ${previousPositions[1].title}, and ${previousPositions[2].title}`;
-  }
-  Object.keys(tokens)
-    .filter(key => key.startsWith('positions.'))
-    .forEach(key => {
-      console.log(`  ${key}: ${tokens[key]}`);
-    });
-
-  return tokens;
-}
-async function tokenMap(emp, defaults = {}) {
+// Updated tokenMap function to accept docType parameter
+async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
   // Fetch and decrypt salary fields from Salary model
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
 
@@ -459,6 +371,13 @@ async function tokenMap(emp, defaults = {}) {
   // Find previous positions (excluding current)
   const previousPositions = positionsHistory.filter(pos => !pos.isCurrentRole);
   
+  // Generate reference numbers
+  const referenceNumber = await generateReferenceNumber(docType);
+  const nextReferenceNumber = await getCurrentReferenceNumber(docType);
+  const currentDate = formatDateDDMMYYYY();
+  const docTypeCode = getDocTypeCode(docType);
+  const docTypeName = getDocTypeName(docType);
+  
   // Create base tokens object
   const tokens = {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
@@ -466,14 +385,23 @@ async function tokenMap(emp, defaults = {}) {
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
     "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
-    "doc.referenceNo": generateReferenceNumber(),
-    "doc.qualitiesLine":
-      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+    
+    // Document reference numbers (auto-incrementing in format: MA02-EL-19092025)
+    "doc.referenceNo": referenceNumber,
+    "doc.nextReferenceNo": nextReferenceNumber, // Shows what the NEXT one will be
+    "doc.typeCode": docTypeCode, // EL, SC, NDA, CT
+    "doc.typeName": docTypeName, // Full document name
+    "doc.qualitiesLine": defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+    
+    // Dates in different formats
     "dates.issue": fmtDate(new Date()),
+    "dates.today": fmtDate(new Date()),
+    "dates.currentYear": new Date().getFullYear(),
+    "dates.ddmmyyyy": currentDate, // Format: 19092025
     "dates.join": fmtDate(emp?.joiningDate),
     "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
-    "tenure.human": tenureHuman, // e.g., "1 year 4 months", "4 months"
-    "tenure.monthsTotal": tenureMonthsTotal, // e.g., 16
+    "tenure.human": tenureHuman,
+    "tenure.monthsTotal": tenureMonthsTotal,
 
     "employee.name": emp?.name || "—",
     "employee.cnic": emp?.cnic || "—",
@@ -493,9 +421,7 @@ async function tokenMap(emp, defaults = {}) {
     "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
     "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
     "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
-    "salary.dislocation": formatWithCommas(
-      decryptedSalary.dislocationAllowance
-    ),
+    "salary.dislocation": formatWithCommas(decryptedSalary.dislocationAllowance),
     "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
     "salary.bonus": formatWithCommas(decryptedSalary.bonus),
     "salary.arrears": formatWithCommas(decryptedSalary.arrears),
@@ -515,7 +441,7 @@ async function tokenMap(emp, defaults = {}) {
         : decryptedSalary.calculatedTotal
     ),
 
-    // simple pronoun defaults (change if you store an actual field)
+    // simple pronoun defaults
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
@@ -527,12 +453,15 @@ async function tokenMap(emp, defaults = {}) {
   };
 
   // Add current position variables
-  tokens["positions.current"] = currentPosition.title;
-  tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
-  tokens["positions.current.endDate"] = currentPosition.endDateFormatted;
-  tokens["positions.current.tenure"] = currentPosition.tenure;
-  tokens["positions.current.duration"] = `${currentPosition.duration.years} years ${currentPosition.duration.months} months`;
-  tokens["positions.current.description"] = currentPosition.description || "—";
+  if (currentPosition.startDateFormatted) {
+    tokens["positions.current"] = currentPosition.title;
+    tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
+    tokens["positions.current.endDate"] = currentPosition.endDateFormatted || "Present";
+    tokens["positions.current.tenure"] = currentPosition.tenure || "—";
+    tokens["positions.current.duration"] = currentPosition.duration ? 
+      `${currentPosition.duration.years} years ${currentPosition.duration.months} months` : "—";
+    tokens["positions.current.description"] = currentPosition.description || "—";
+  }
 
   // Add individual previous position variables (1-10)
   previousPositions.slice(0, 10).forEach((position, index) => {
@@ -557,7 +486,7 @@ async function tokenMap(emp, defaults = {}) {
     tokens[`positions.previous${positionNum}.description`] = "";
   }
 
-  // Add all previous titles as separate variables (not combined)
+  // Add all previous titles as separate variables
   if (previousPositions.length > 0) {
     tokens["positions.hasPrevious"] = "true";
     tokens["positions.firstPrevious"] = previousPositions[0].title;
@@ -566,30 +495,6 @@ async function tokenMap(emp, defaults = {}) {
     tokens["positions.hasPrevious"] = "false";
     tokens["positions.firstPrevious"] = "";
     tokens["positions.lastPrevious"] = "";
-  }
-
-  // Add positions in reverse chronological order (most recent first)
-  const reversePositions = [...previousPositions].reverse();
-  reversePositions.slice(0, 10).forEach((position, index) => {
-    const positionNum = index + 1;
-    tokens[`positions.chronological${positionNum}.title`] = position.title;
-    tokens[`positions.chronological${positionNum}.startDate`] = position.startDateFormatted;
-    tokens[`positions.chronological${positionNum}.endDate`] = position.endDateFormatted;
-  });
-
-  // Add formatted list for each previous position
-  previousPositions.forEach((position, index) => {
-    const positionNum = index + 1;
-    tokens[`positions.previous${positionNum}.formatted`] = 
-      `${position.title} (${position.startDateFormatted} to ${position.endDateFormatted})`;
-  });
-
-  // Add position sequences for narrative purposes
-  if (previousPositions.length >= 2) {
-    tokens["positions.sequence2"] = `${previousPositions[0].title} and ${previousPositions[1].title}`;
-  }
-  if (previousPositions.length >= 3) {
-    tokens["positions.sequence3"] = `${previousPositions[0].title}, ${previousPositions[1].title}, and ${previousPositions[2].title}`;
   }
 
   return tokens;
@@ -694,6 +599,7 @@ function extractAllPages(canvas = {}) {
 
   return pages;
 }
+
 // routes/docs.js - Updated generateSinglePageHTML function
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
@@ -808,7 +714,7 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   if (!tpl) throw new Error("Template not found");
 
   const defaults = tpl.defaultValues || {};
-  const tokens = await tokenMap(emp, defaults);
+  const tokens = await tokenMap(emp, defaults, docType); // Pass docType to tokenMap
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
@@ -1010,6 +916,63 @@ router.get("/contract/:employeeId", async (req, res) => {
   }
 });
 
+// New endpoint: Preview reference number without incrementing
+router.get("/reference-preview/:docType", async (req, res) => {
+  try {
+    const docType = normType(req.params.docType);
+    const referenceNumber = await getCurrentReferenceNumber(docType);
+    
+    res.json({
+      ok: true,
+      referenceNumber,
+      docType,
+      preview: true
+    });
+  } catch (err) {
+    console.error("reference-preview error:", err);
+    res.status(500).json({ message: "Failed to generate preview" });
+  }
+});
+
+// Get recent reference numbers for a document type
+router.get("/reference-history/:docType", async (req, res) => {
+  try {
+    const docType = normType(req.params.docType);
+    const limit = parseInt(req.query.limit) || 10;
+    
+    const counters = await ReferenceCounter.find({ docType: docType })
+      .sort({ yearMonth: -1, sequence: -1 })
+      .limit(limit)
+      .lean();
+
+    const history = counters.map(counter => {
+      const sequenceStr = String(counter.sequence).padStart(2, "0");
+      const docCode = getDocTypeCode(docType);
+      // Convert yearMonth (092025) to date format
+      const month = counter.yearMonth.substring(0, 2);
+      const year = counter.yearMonth.substring(2);
+      const date = `01${month}${year}`; // Using 01 as day since we only track month
+      
+      return {
+        referenceNumber: `MA${sequenceStr}-${docCode}-${date}`,
+        generatedAt: counter.lastGenerated,
+        sequence: counter.sequence,
+        yearMonth: counter.yearMonth
+      };
+    });
+
+    res.json({
+      ok: true,
+      history,
+      docType,
+      docName: getDocTypeName(docType)
+    });
+  } catch (err) {
+    console.error("reference-history error:", err);
+    res.status(500).json({ message: "Failed to fetch reference history" });
+  }
+});
+
 /* ─────────────────────────────────────────────────────────────
    GLOBAL TEMPLATES — BY TYPE
 ──────────────────────────────────────────────────────────────── */
@@ -1019,7 +982,13 @@ router.get("/doc-templates/:type", async (req, res) => {
     const tpl = await DocTemplate.findOne({ type }).lean();
     if (!tpl) return res.status(200).json({ data: null });
     res.json({
-      data: { canvas: tpl.canvas, defaultValues: tpl.defaultValues || {} },
+      data: { 
+        canvas: tpl.canvas, 
+        defaultValues: tpl.defaultValues || {},
+        type: tpl.type,
+        docTypeName: getDocTypeName(tpl.type),
+        docTypeCode: getDocTypeCode(tpl.type)
+      },
     });
   } catch {
     res.status(500).json({ message: "Failed to load by type" });
@@ -1040,7 +1009,13 @@ router.post("/doc-templates/:type", async (req, res) => {
 
     res.json({
       ok: true,
-      data: { canvas: up.canvas, defaultValues: up.defaultValues || {} },
+      data: { 
+        canvas: up.canvas, 
+        defaultValues: up.defaultValues || {},
+        type: up.type,
+        docTypeName: getDocTypeName(up.type),
+        docTypeCode: getDocTypeCode(up.type)
+      },
     });
   } catch {
     res.status(500).json({ message: "Failed to save by type" });
@@ -1062,6 +1037,8 @@ router.get("/templates", async (req, res) => {
     const data = rows.map((r) => ({
       _id: String(r._id),
       type: r.type,
+      typeName: getDocTypeName(r.type),
+      typeCode: getDocTypeCode(r.type),
       name: r.canvas?.name || "Untitled Document",
       updatedAt: r.updatedAt,
     }));
@@ -1079,6 +1056,8 @@ router.get("/templates/:id", async (req, res) => {
       data: {
         _id: String(tpl._id),
         type: tpl.type,
+        typeName: getDocTypeName(tpl.type),
+        typeCode: getDocTypeCode(tpl.type),
         canvas: tpl.canvas,
         defaultValues: tpl.defaultValues || {},
         updatedAt: tpl.updatedAt,
@@ -1102,7 +1081,12 @@ router.post("/templates", async (req, res) => {
       canvas,
       defaultValues: defaultValues || {},
     });
-    res.status(201).json({ ok: true, id: String(doc._id) });
+    res.status(201).json({ 
+      ok: true, 
+      id: String(doc._id),
+      typeName: getDocTypeName(doc.type),
+      typeCode: getDocTypeCode(doc.type)
+    });
   } catch {
     res.status(500).json({ message: "Failed to create template" });
   }
@@ -1122,13 +1106,15 @@ router.put("/templates/:id", async (req, res) => {
       { new: true }
     ).lean();
     if (!up) return res.status(404).json({ message: "Template not found" });
-    res.json({ ok: true });
+    res.json({ 
+      ok: true,
+      typeName: getDocTypeName(up.type),
+      typeCode: getDocTypeCode(up.type)
+    });
   } catch {
     res.status(500).json({ message: "Failed to update template" });
   }
 });
-
-
 
 router.delete("/templates/:id", async (req, res) => {
   try {

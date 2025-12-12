@@ -276,15 +276,17 @@ router.post("/confirm-code", async (req, res) => {
 router.post("/logout", requireAuth, async (req, res) => {
   try {
     await EmployeeSession.findOneAndUpdate(
-      { employeeId: req.employee._id, active: true },
+      { employeeId: req.employee.id || req.employee._id, active: true },
       { logoutTime: new Date(), active: false }
     );
+
     return res.json({ status: "success", message: "Logged out successfully" });
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json({ error: "Server error during logout" });
   }
 });
+
 
 router.get("/me", requireAuth, authCtrl.getMe);
 
