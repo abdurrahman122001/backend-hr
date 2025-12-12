@@ -7,8 +7,8 @@ const DEFAULT_SHIFT_ID = new mongoose.Types.ObjectId(
 
 // Sub-schemas for Experience/Designation Journey
 const PositionSchema = new Schema({
-  title: { type: String, required: true },
-  startDate: { type: Date, required: true },
+  title: { type: String, required: false },
+  startDate: { type: Date, required: false },
   endDate: { type: Date },
   isCurrentRole: { type: Boolean, default: false },
   description: { type: String },
