@@ -69,7 +69,7 @@ function getDocTypeCode(docType) {
     "experience_letter": "EL",    // Experience Letter
     "salary_certificate": "SC",   // Salary Certificate
     "nda": "NDA",                 // NDA
-    "contract": "CR"              // Contract - CHANGED FROM "CR" TO "CT"
+    "contract": "EC"              // Contract - CHANGED FROM "CR" TO "CT"
   };
   return typeCodes[docType] || "DOC";
 }
