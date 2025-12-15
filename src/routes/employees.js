@@ -14,26 +14,29 @@ function getEffectiveOwnerId(user) {
 function buildEmployeeScope(user, includeTrashed = false) {
   const ownerId = getEffectiveOwnerId(user);
   const userId = user?._id;
-  const scope = {
+
+  const ownershipScope = {
     $or: [
-      { owner: { $in: [ownerId, userId] } },
-      { createdBy: { $in: [ownerId, userId] } },
+      { owner: userId },
+      { owner: ownerId },
+      { createdBy: userId },
+      { createdBy: ownerId },
     ],
   };
-  
-  // Exclude trashed items by default
-  if (!includeTrashed) {
-    // Handle both cases: isTrashed = false OR isTrashed doesn't exist (for backward compatibility)
-    scope.$or = [
-      { isTrashed: false },
-      { isTrashed: { $exists: false } }
-    ];
-  } else {
-    // When including trashed, only show items where isTrashed is explicitly true
-    scope.isTrashed = true;
-  }
-  
-  return scope;
+
+  // Trash handling
+  const trashScope = includeTrashed
+    ? { isTrashed: true }
+    : {
+        $or: [
+          { isTrashed: false },
+          { isTrashed: { $exists: false } },
+        ],
+      };
+
+  return {
+    $and: [ownershipScope, trashScope],
+  };
 }
 
 // ------------------------------

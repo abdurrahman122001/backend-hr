@@ -304,7 +304,8 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       return res.status(400).json({ error: "Invalid employee ID format" });
     }
 
-    const employee = await Employee.findById(req.params.id);
+    const employee = await Employee.findById(req.params.id)
+    .populate("shifts", "_id name start end timezone");
     if (!employee) {
       return res.status(404).json({ error: "Employee not found" });
     }

@@ -54,73 +54,86 @@ function calcNet(slip) {
   return totalAllow - totalDed;
 }
 
-// routes/salarySlips.js - GET route
 router.get("/", requireAuth, async (req, res) => {
   try {
     let { month, year, limit = 10, skip = 0 } = req.query;
-    
-    let query = {};
-    
-    // Add month/year filtering if provided
+
+    limit = parseInt(limit);
+    skip = parseInt(skip);
+
+    const baseMatch = {};
     if (month && year) {
-      query.month = month;
-      query.year = year;
+      baseMatch.month = month;
+      baseMatch.year = year;
     }
-    
-    // Role-based access control
+
+    let employeeScope = {};
+
     if (req.user.role === "super-admin") {
-      // Super admin can see all
-    } else if (req.user.role === "admin" && req.user.createdBy) {
-      // Admin can see slips for employees created by their super admin
-      query.owner = req.user.createdBy;
+      employeeScope = { "employee.owner": req.user._id };
+    } else if (req.user.role === "admin" || req.user.role === "hr") {
+      employeeScope = { "employee.owner": req.user.createdBy };
     } else {
-      // Regular user can only see their own slips
-      query.owner = req.user._id;
+      employeeScope = { "employee._id": req.user._id };
     }
-    
-    const slips = await SalarySlip.find(query)
-      .populate("employee")
-      .limit(parseInt(limit))
-      .skip(parseInt(skip))
-      .sort({ createdAt: -1 });
-    
-    // Convert each slip to ensure manuallyEditedFields is properly formatted
-    const formattedSlips = slips.map(slip => {
-      const slipObj = slip.toObject();
-      
-      // Ensure manuallyEditedFields is properly converted
-      if (slipObj.manuallyEditedFields && slipObj.manuallyEditedFields instanceof Map) {
-        slipObj.manuallyEditedFields = Object.fromEntries(slipObj.manuallyEditedFields);
-      } else if (!slipObj.manuallyEditedFields) {
-        slipObj.manuallyEditedFields = {};
-      }
-      
-      return slipObj;
-    });
-    
+
+    const pipeline = [
+      { $match: baseMatch },
+      {
+        $lookup: {
+          from: "employees",
+          localField: "employee",
+          foreignField: "_id",
+          as: "employee"
+        }
+      },
+      { $unwind: "$employee" },
+      { $match: employeeScope },
+      { $sort: { createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit }
+    ];
+
+    const slips = await SalarySlip.aggregate(pipeline);
+
+    const countPipeline = [
+      { $match: baseMatch },
+      {
+        $lookup: {
+          from: "employees",
+          localField: "employee",
+          foreignField: "_id",
+          as: "employee"
+        }
+      },
+      { $unwind: "$employee" },
+      { $match: employeeScope },
+      { $count: "total" }
+    ];
+
+    const countResult = await SalarySlip.aggregate(countPipeline);
+    const total = countResult[0]?.total || 0;
+
     res.json({
       status: "success",
-      slips: formattedSlips,
-      total: await SalarySlip.countDocuments(query)
+      slips,
+      total
     });
-    
   } catch (err) {
-    console.error("Error fetching salary slips:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
+
 // ---------- CREATE salary slip ----------
 router.post("/", requireAuth, async (req, res) => {
   try {
     const { employeeId, slipData } = req.body;
 
     if (!employeeId || !slipData) {
-      return res
-        .status(400)
-        .json({
-          status: "error",
-          message: "employeeId and slipData are required.",
-        });
+      return res.status(400).json({
+        status: "error",
+        message: "employeeId and slipData are required.",
+      });
     }
 
     // Role-based: Only allow if user is allowed to create for this employee
@@ -134,25 +147,21 @@ router.post("/", requireAuth, async (req, res) => {
     }
     const allowed = await Employee.findOne(userFilter);
     if (!allowed) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Not allowed to create salary slip for this employee.",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Not allowed to create salary slip for this employee.",
+      });
     }
 
     const slip = await createSalarySlip(employeeId, slipData);
     res.json({ status: "success", slip });
   } catch (err) {
     console.error("Error creating salary slip:", err);
-    res
-      .status(500)
-      .json({
-        status: "error",
-        message: "Failed to create salary slip",
-        details: err.message,
-      });
+    res.status(500).json({
+      status: "error",
+      message: "Failed to create salary slip",
+      details: err.message,
+    });
   }
 });
 // routes/salarySlips.js - PATCH route
@@ -225,7 +234,10 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
 
     // Handle nested deduction objects
-    if (req.body.loanDeductions && typeof req.body.loanDeductions === "object") {
+    if (
+      req.body.loanDeductions &&
+      typeof req.body.loanDeductions === "object"
+    ) {
       for (const [subKey, subVal] of Object.entries(req.body.loanDeductions)) {
         try {
           updates[`loanDeductions.${subKey}`] = await encrypt(
@@ -243,10 +255,18 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
 
     // Handle manuallyEditedFields update
-    if (req.body.manuallyEditedFields && typeof req.body.manuallyEditedFields === 'object') {
+    if (
+      req.body.manuallyEditedFields &&
+      typeof req.body.manuallyEditedFields === "object"
+    ) {
       // Update each field in the manuallyEditedFields map
-      for (const [field, isEdited] of Object.entries(req.body.manuallyEditedFields)) {
-        if (isEdited && (allowedFields.includes(field) || field.startsWith('loanDeductions.'))) {
+      for (const [field, isEdited] of Object.entries(
+        req.body.manuallyEditedFields
+      )) {
+        if (
+          isEdited &&
+          (allowedFields.includes(field) || field.startsWith("loanDeductions."))
+        ) {
           updates[`manuallyEditedFields.${field}`] = true;
         }
       }
@@ -270,19 +290,27 @@ router.patch("/:id", requireAuth, async (req, res) => {
     if (!updatedSlip) {
       return res
         .status(404)
-        .json({ status: "error", message: "Salary slip not found after update." });
+        .json({
+          status: "error",
+          message: "Salary slip not found after update.",
+        });
     }
 
     // Convert to plain object and ensure manuallyEditedFields is properly formatted
     const slipObj = updatedSlip.toObject();
-    
+
     // Ensure manuallyEditedFields is properly converted for frontend
-    if (slipObj.manuallyEditedFields && slipObj.manuallyEditedFields instanceof Map) {
-      slipObj.manuallyEditedFields = Object.fromEntries(slipObj.manuallyEditedFields);
+    if (
+      slipObj.manuallyEditedFields &&
+      slipObj.manuallyEditedFields instanceof Map
+    ) {
+      slipObj.manuallyEditedFields = Object.fromEntries(
+        slipObj.manuallyEditedFields
+      );
     } else if (!slipObj.manuallyEditedFields) {
       slipObj.manuallyEditedFields = {};
     }
-    
+
     // Calculate net salary
     slipObj.netSalary = calcNet(slipObj);
 
@@ -313,12 +341,10 @@ router.get("/:id/download", requireAuth, async (req, res) => {
       ownerAllowed = String(slip.employee.owner) === String(req.user._id);
     }
     if (!ownerAllowed) {
-      return res
-        .status(403)
-        .json({
-          status: "error",
-          message: "Not allowed to download this slip.",
-        });
+      return res.status(403).json({
+        status: "error",
+        message: "Not allowed to download this slip.",
+      });
     }
 
     // Setup PDF
@@ -358,9 +384,10 @@ router.get("/:id/download", requireAuth, async (req, res) => {
       .text(`Department: ${slip.employee.department || "N/A"}`, 320, y0)
       .text(`Designation: ${slip.employee.designation || "N/A"}`, 40, y0 + 15)
       .text(
-        `Joining Date: ${slip.employee.joiningDate
-          ? slip.employee.joiningDate.toISOString().slice(0, 10)
-          : "N/A"
+        `Joining Date: ${
+          slip.employee.joiningDate
+            ? slip.employee.joiningDate.toISOString().slice(0, 10)
+            : "N/A"
         }`,
         320,
         y0 + 15

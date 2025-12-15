@@ -63,13 +63,13 @@ function getCurrentYearMonth() {
   return `${month}${year}`;
 }
 
-// Get document type code (2-3 letters)
+// Get document type code (2-3 letters) - FIXED: Changed CR to CT
 function getDocTypeCode(docType) {
   const typeCodes = {
     "experience_letter": "EL",    // Experience Letter
     "salary_certificate": "SC",   // Salary Certificate
     "nda": "NDA",                 // NDA
-    "contract": "CT"              // Contract
+    "contract": "CR"              // Contract - CHANGED FROM "CR" TO "CT"
   };
   return typeCodes[docType] || "DOC";
 }
@@ -119,7 +119,8 @@ async function generateReferenceNumber(docType = "experience_letter") {
     // Fallback format
     const now = new Date();
     const currentDate = formatDateDDMMYYYY(now);
-    return `MA01-${getDocTypeCode(docType)}-${currentDate}`;
+    const docCode = getDocTypeCode(docType);
+    return `MA01-${docCode}-${currentDate}`;
   }
 }
 
@@ -143,7 +144,8 @@ async function getCurrentReferenceNumber(docType = "experience_letter") {
   } catch (error) {
     console.error("Error getting current reference:", error);
     const currentDate = formatDateDDMMYYYY();
-    return `MA01-${getDocTypeCode(docType)}-${currentDate}`;
+    const docCode = getDocTypeCode(docType);
+    return `MA01-${docCode}-${currentDate}`;
   }
 }
 
@@ -714,7 +716,9 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
   if (!tpl) throw new Error("Template not found");
 
   const defaults = tpl.defaultValues || {};
-  const tokens = await tokenMap(emp, defaults, docType); // Pass docType to tokenMap
+  // FIXED: Pass the normalized docType to tokenMap
+  const normalizedDocType = normType(docType);
+  const tokens = await tokenMap(emp, defaults, normalizedDocType);
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 

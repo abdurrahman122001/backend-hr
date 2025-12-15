@@ -68,7 +68,7 @@ exports.getAllEmployees = async (req, res) => {
     const ownerId = getEffectiveOwnerId(req.user);
     const list = await Employee.find({ owner: { $in: [ownerId] } })
       .sort({ name: 1 })
-      .populate("shifts", "name")
+      .populate("shifts", "name start end timezone")
       .lean();
     res.json(list);
   } catch (err) {
@@ -82,7 +82,7 @@ exports.list = async (req, res) => {
     const ownerId = getEffectiveOwnerId(req.user);
     const emps = await Employee.find({ owner: { $in: [ownerId] } })
       .select("-owner")
-      .populate("shifts", "name")
+      .populate("shifts", "name start end timezone")
       .sort({ name: 1 })
       .lean();
     res.json({ status: "success", data: emps });

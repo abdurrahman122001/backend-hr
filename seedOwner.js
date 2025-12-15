@@ -1,40 +1,36 @@
 require("dotenv").config();
 const mongoose = require("mongoose");
-const bcrypt = require("bcryptjs");
-const User = require("./src/models/Users"); // adjust path
+const User = require("./src/models/Users");
 
 async function seedOwner() {
   try {
-    // Connect using MONGODB_URI from .env
     await mongoose.connect(process.env.MONGODB_URI);
+    console.log("Connected DB:", mongoose.connection.name);
 
-    // Set your actual password here
-    const plainPassword = "Owner@123"; // 👈 you can change this
-    const hashedPassword = await bcrypt.hash(plainPassword, 10);
+    const plainPassword = "Owner@123";
 
     const newOwner = {
       username: "owner2",
       email: "newowner@example.com",
-      password: hashedPassword,
+      password: plainPassword, // ✅ let schema hash it
       role: "super-admin",
-      createdBy: null, // or use another admin's _id
+      createdBy: null,
     };
 
-    // Prevent duplicate by email
     const existing = await User.findOne({ email: newOwner.email });
     if (existing) {
       console.log("⚠️ Owner already exists:", existing.email);
-    } else {
-      const created = await User.create(newOwner);
-      console.log("✅ New super-admin owner seeded");
-      console.log("👉 Email:", created.email);
-      console.log("👉 Password:", plainPassword); // show actual password
+      return;
     }
 
-    mongoose.connection.close();
+    const created = await User.create(newOwner);
+    console.log("✅ New super-admin owner seeded");
+    console.log("👉 Email:", created.email);
+    console.log("👉 Password:", plainPassword);
   } catch (err) {
-    console.error("❌ Error seeding owner:", err);
-    mongoose.connection.close();
+    console.error("❌ Error seeding owner:", err.message);
+  } finally {
+    await mongoose.connection.close();
   }
 }
 
