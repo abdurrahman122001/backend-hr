@@ -19,6 +19,10 @@ const referenceCounterSchema = new mongoose.Schema({
   lastGenerated: {
     type: Date,
     default: Date.now
+  },
+  lastGeneratedDate: {
+    type: String, // Format: "2025-09-19" for date comparison
+    index: true
   }
 }, {
   timestamps: true
@@ -26,5 +30,6 @@ const referenceCounterSchema = new mongoose.Schema({
 
 // Compound index for efficient lookups
 referenceCounterSchema.index({ docType: 1, yearMonth: 1 }, { unique: true });
+referenceCounterSchema.index({ lastGeneratedDate: 1 });
 
 module.exports = mongoose.model("ReferenceCounter", referenceCounterSchema);

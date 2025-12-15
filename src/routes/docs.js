@@ -34,6 +34,18 @@ function formatDateDDMMYYYY(date = new Date()) {
   return `${day}${month}${year}`;
 }
 
+// Format date as YYYY-MM-DD for date comparison
+function formatDateYYYYMMDD(date = new Date()) {
+  const d = new Date(date);
+  if (isNaN(d.getTime())) return "";
+  
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  
+  return `${year}-${month}-${day}`;
+}
+
 // Format date as Month day, year (September 19, 2025)
 function fmtDate(d) {
   if (!d) return "—";
@@ -63,6 +75,12 @@ function getCurrentYearMonth() {
   return `${month}${year}`;
 }
 
+// Get current date in YYYY-MM-DD format for comparison
+function getCurrentDateString() {
+  const now = new Date();
+  return formatDateYYYYMMDD(now);
+}
+
 // Get document type code (2-3 letters) - FIXED: Changed CR to CT
 function getDocTypeCode(docType) {
   const typeCodes = {
@@ -85,42 +103,89 @@ function getDocTypeName(docType) {
   return typeNames[docType] || "Document";
 }
 
-// Auto-incrementing reference number generator in format: MA02-EL-19092025
+// Auto-incrementing reference number generator with daily reset
 async function generateReferenceNumber(docType = "experience_letter") {
   try {
     const docCode = getDocTypeCode(docType);
     const yearMonth = getCurrentYearMonth(); // Format: 092025
-    const currentDate = formatDateDDMMYYYY(); // Format: 19092025
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(); // Format: 19092025
+    const currentDate = getCurrentDateString(); // Format: 2025-09-19
     
-    // Find or create counter for this document type and month
-    let counter = await ReferenceCounter.findOneAndUpdate(
-      { 
-        docType: docType,
-        yearMonth: yearMonth
-      },
-      { 
-        $inc: { sequence: 1 },
-        $set: { lastGenerated: new Date() }
-      },
-      { 
-        upsert: true,
-        new: true,
-        setDefaultsOnInsert: true
+    // First, try to find existing counter
+    let counter = await ReferenceCounter.findOne({
+      docType: docType,
+      yearMonth: yearMonth
+    });
+
+    // Check if we need to reset the sequence
+    let shouldReset = false;
+    
+    if (counter) {
+      // Check if last generated was on a different calendar date
+      const lastGeneratedDate = counter.lastGenerated ? 
+        formatDateYYYYMMDD(counter.lastGenerated) : null;
+      
+      if (lastGeneratedDate && lastGeneratedDate !== currentDate) {
+        // Date has changed, reset sequence to 1
+        shouldReset = true;
       }
-    );
+    } else {
+      // No counter exists for this month, create new
+      shouldReset = true;
+    }
+
+    if (shouldReset) {
+      // Create new counter with sequence 1 or update existing with reset
+      counter = await ReferenceCounter.findOneAndUpdate(
+        { 
+          docType: docType,
+          yearMonth: yearMonth
+        },
+        { 
+          $set: { 
+            sequence: 1,
+            lastGenerated: new Date(),
+            lastGeneratedDate: currentDate // Store the date for future comparison
+          }
+        },
+        { 
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true
+        }
+      );
+    } else {
+      // Increment existing sequence
+      counter = await ReferenceCounter.findOneAndUpdate(
+        { 
+          docType: docType,
+          yearMonth: yearMonth
+        },
+        { 
+          $inc: { sequence: 1 },
+          $set: { 
+            lastGenerated: new Date(),
+            lastGeneratedDate: currentDate
+          }
+        },
+        { 
+          new: true
+        }
+      );
+    }
 
     // Format sequence with leading zeros (01, 02, etc.)
     const sequenceStr = String(counter.sequence).padStart(2, "0");
     
     // Final format: MA02-EL-19092025
-    return `MA${sequenceStr}-${docCode}-${currentDate}`;
+    return `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
   } catch (error) {
     console.error("Error generating reference number:", error);
     // Fallback format
     const now = new Date();
-    const currentDate = formatDateDDMMYYYY(now);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(now);
     const docCode = getDocTypeCode(docType);
-    return `MA01-${docCode}-${currentDate}`;
+    return `MA01-${docCode}-${currentDateDDMMYYYY}`;
   }
 }
 
@@ -129,23 +194,39 @@ async function getCurrentReferenceNumber(docType = "experience_letter") {
   try {
     const docCode = getDocTypeCode(docType);
     const yearMonth = getCurrentYearMonth();
-    const currentDate = formatDateDDMMYYYY();
+    const currentDateDDMMYYYY = formatDateDDMMYYYY();
+    const currentDate = getCurrentDateString();
     
     const counter = await ReferenceCounter.findOne({ 
       docType: docType,
       yearMonth: yearMonth
     });
 
-    const sequence = counter ? counter.sequence : 0;
-    const sequenceStr = String(sequence + 1).padStart(2, "0");
+    let sequence = 1; // Default to 1 if no counter exists
+    
+    if (counter) {
+      // Check if we should reset based on date
+      const lastGeneratedDate = counter.lastGeneratedDate ? 
+        formatDateYYYYMMDD(counter.lastGeneratedDate) : null;
+      
+      if (lastGeneratedDate && lastGeneratedDate === currentDate) {
+        // Same date, use next sequence number
+        sequence = counter.sequence + 1;
+      } else {
+        // Different date or no date stored, reset to 1
+        sequence = 1;
+      }
+    }
+    
+    const sequenceStr = String(sequence).padStart(2, "0");
     
     // Format: MA02-EL-19092025
-    return `MA${sequenceStr}-${docCode}-${currentDate}`;
+    return `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
   } catch (error) {
     console.error("Error getting current reference:", error);
-    const currentDate = formatDateDDMMYYYY();
+    const currentDateDDMMYYYY = formatDateDDMMYYYY();
     const docCode = getDocTypeCode(docType);
-    return `MA01-${docCode}-${currentDate}`;
+    return `MA01-${docCode}-${currentDateDDMMYYYY}`;
   }
 }
 
