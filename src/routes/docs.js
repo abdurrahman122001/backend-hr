@@ -1007,7 +1007,6 @@ async function generateDocumentPDF(
     await browser.close();
   }
 }
-
 /* ──────────────────────────────────────────────────────────────────────────────
    BULK DOCUMENT DOWNLOAD API
 ────────────────────────────────────────────────────────────────────────────── */
@@ -1090,6 +1089,85 @@ router.post("/bulk/:docType", async (req, res) => {
       });
     }
 
+    // Generate bulk reference numbers for all employees
+    const timezone = await getUserTimezone(req.ownerId);
+    const docCode = getDocTypeCode(normalizedDocType);
+    const yearMonth = getCurrentYearMonth(timezone);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
+    const currentDate = getCurrentDateString(timezone);
+
+    // Get or create counter for bulk generation
+    let counter = await ReferenceCounter.findOne({
+      docType: normalizedDocType,
+      yearMonth: yearMonth,
+      owner: req.ownerId,
+    });
+
+    let shouldReset = false;
+
+    if (counter) {
+      const lastGeneratedDate = counter.lastGenerated
+        ? formatDateYYYYMMDD(counter.lastGenerated, timezone)
+        : null;
+
+      if (lastGeneratedDate && lastGeneratedDate !== currentDate) {
+        shouldReset = true;
+      }
+    } else {
+      shouldReset = true;
+    }
+
+    // Start sequence for bulk generation
+    let startSequence = 1;
+
+    if (shouldReset) {
+      counter = await ReferenceCounter.findOneAndUpdate(
+        {
+          docType: normalizedDocType,
+          yearMonth: yearMonth,
+          owner: req.ownerId,
+        },
+        {
+          $set: {
+            sequence: employees.length, // Set to total employees count
+            lastGenerated: new Date(),
+            lastGeneratedDate: currentDate,
+            timezone: timezone,
+            owner: req.ownerId,
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+          setDefaultsOnInsert: true,
+        }
+      );
+      startSequence = 1;
+    } else {
+      // Get current sequence and update for all employees
+      const currentSequence = counter.sequence || 0;
+      startSequence = currentSequence + 1;
+
+      counter = await ReferenceCounter.findOneAndUpdate(
+        {
+          docType: normalizedDocType,
+          yearMonth: yearMonth,
+          owner: req.ownerId,
+        },
+        {
+          $inc: { sequence: employees.length },
+          $set: {
+            lastGenerated: new Date(),
+            lastGeneratedDate: currentDate,
+            timezone: timezone,
+          },
+        },
+        {
+          new: true,
+        }
+      );
+    }
+
     // Launch browser once for all employees
     const browser = await puppeteer.launch({
       args: ["--no-sandbox", "--disable-setuid-sandbox"],
@@ -1098,16 +1176,33 @@ router.post("/bulk/:docType", async (req, res) => {
     try {
       const mergedPdf = await PDFDocument.create();
 
-      // Process each employee
-      for (const emp of employees) {
-        console.log(`Processing employee: ${emp.name} (${emp._id})`);
+      // Process each employee with sequential reference numbers
+      for (let i = 0; i < employees.length; i++) {
+        const emp = employees[i];
+        const sequenceNumber = startSequence + i;
+        const sequenceStr = String(sequenceNumber).padStart(2, "0");
 
+        console.log(
+          `Processing employee ${i + 1}/${employees.length}: ${
+            emp.name
+          } (Reference: MA${sequenceStr})`
+        );
+
+        // Create custom tokens for this employee with proper reference number
         const tokens = await tokenMap(
           emp,
           defaults,
           normalizedDocType,
           req.ownerId
         );
+
+        // Override the reference number with sequential one
+        tokens[
+          "doc.referenceNo"
+        ] = `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
+        tokens["doc.nextReferenceNo"] = `MA${String(
+          sequenceNumber + 1
+        ).padStart(2, "0")}-${docCode}-${currentDateDDMMYYYY}`;
 
         // For each page in the template, generate for this employee
         for (const page of pages) {
@@ -1139,11 +1234,6 @@ router.post("/bulk/:docType", async (req, res) => {
           mergedPdf.addPage(copiedPage);
           await p.close();
         }
-
-        // REMOVED: Blank page between employees - documents will now flow immediately
-        // if (employees.indexOf(emp) < employees.length - 1) {
-        //   const blankPage = mergedPdf.addPage([pages[0].widthPx, pages[0].heightPx]);
-        // }
       }
 
       const mergedPdfBytes = await mergedPdf.save();
@@ -1159,7 +1249,15 @@ router.post("/bulk/:docType", async (req, res) => {
       );
 
       console.log(
-        `Bulk ${docType} PDF generated successfully for ${employees.length} employees`
+        `Bulk ${docType} PDF generated successfully for ${
+          employees.length
+        } employees with reference numbers MA${String(startSequence).padStart(
+          2,
+          "0"
+        )} to MA${String(startSequence + employees.length - 1).padStart(
+          2,
+          "0"
+        )}`
       );
       res.status(200).end(pdfBuffer);
     } finally {
