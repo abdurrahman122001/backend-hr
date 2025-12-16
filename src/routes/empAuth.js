@@ -151,7 +151,7 @@ router.post("/login", async (req, res) => {
 
     // Send to admin
     await sendMail({
-      to: "nashfintechnologies@gmail.com",
+      to: "qaziabdurrahman12@gmail.com",
       subject: "Employee login verification requested",
       text: `Employee: ${emp.companyEmail}\nTime: ${when}\nIP: ${loginIp}\nCode: ${code}`,
       html: `<p><b>New device login verification requested</b></p>

@@ -185,7 +185,7 @@ app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", requireAuth, companyProfile);
-app.use("/api/docs", docsRouter);
+app.use("/api/docs", requireAuth, docsRouter);
 app.use("/api/employee-salary", employeeSalaryRouter);
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);

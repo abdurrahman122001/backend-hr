@@ -1,35 +1,28 @@
-// models/ReferenceCounter.js
 const mongoose = require("mongoose");
 
-const referenceCounterSchema = new mongoose.Schema({
-  docType: {
-    type: String,
-    required: true,
-    index: true
+const ReferenceCounterSchema = new mongoose.Schema(
+  {
+    docType: { type: String, required: true },
+    yearMonth: { type: String, required: true }, // Format: 092025
+    sequence: { type: Number, default: 1 },
+    lastGenerated: { type: Date, default: Date.now },
+    lastGeneratedDate: { type: String }, // YYYY-MM-DD format for date comparison
+    timezone: { type: String, default: "UTC" },
+    owner: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+    },
   },
-  yearMonth: {
-    type: String, // Format: "092025" for September 2025
-    required: true,
-    index: true
-  },
-  sequence: {
-    type: Number,
-    default: 0
-  },
-  lastGenerated: {
-    type: Date,
-    default: Date.now
-  },
-  lastGeneratedDate: {
-    type: String, // Format: "2025-09-19" for date comparison
-    index: true
+  {
+    timestamps: true,
   }
-}, {
-  timestamps: true
-});
+);
 
-// Compound index for efficient lookups
-referenceCounterSchema.index({ docType: 1, yearMonth: 1 }, { unique: true });
-referenceCounterSchema.index({ lastGeneratedDate: 1 });
+// Compound index for unique counters per user per month per document type
+ReferenceCounterSchema.index(
+  { docType: 1, yearMonth: 1, owner: 1 },
+  { unique: true }
+);
 
-module.exports = mongoose.model("ReferenceCounter", referenceCounterSchema);
+module.exports = mongoose.model("ReferenceCounter", ReferenceCounterSchema);

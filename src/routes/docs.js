@@ -1,4 +1,3 @@
-// routes/docs.js
 const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
@@ -8,6 +7,7 @@ const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries");
 const DocTemplate = require("../models/DocTemplate");
 const ReferenceCounter = require("../models/ReferenceCounter");
+const Settings = require("../models/Settings");
 const { decrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
@@ -22,72 +22,208 @@ const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
 
-// Format date as ddmmyyyy (19092025)
-function formatDateDDMMYYYY(date = new Date()) {
-  const d = new Date(date);
-  if (isNaN(d.getTime())) return "";
-  
-  const day = String(d.getDate()).padStart(2, "0");
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const year = d.getFullYear();
-  
-  return `${day}${month}${year}`;
+// Middleware to extract owner ID from request
+const extractOwnerId = (req, res, next) => {
+  req.ownerId =
+    req.user?._id || req._id || req.body?.ownerId || req.query?.ownerId;
+  if (!req.ownerId) {
+    return res.status(401).json({ message: "Owner ID is required" });
+  }
+  next();
+};
+
+// Apply middleware to all document routes
+router.use(extractOwnerId);
+
+// Get timezone from database for a specific owner
+async function getUserTimezone(ownerId) {
+  try {
+    if (!ownerId) return "UTC";
+
+    const settings = await Settings.findOne({ owner: ownerId }).lean();
+
+    if (settings) {
+      if (settings.useSystemTimezone || !settings.timezone) {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone;
+      }
+      return settings.timezone || "UTC";
+    }
+
+    return "UTC";
+  } catch (error) {
+    console.error("Error fetching user timezone:", error);
+    return "UTC";
+  }
 }
 
-// Format date as YYYY-MM-DD for date comparison
-function formatDateYYYYMMDD(date = new Date()) {
-  const d = new Date(date);
-  if (isNaN(d.getTime())) return "";
-  
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  
-  return `${year}-${month}-${day}`;
+// Format date with specific timezone
+function formatDateWithTimezone(date, timezone = "UTC", format = "en-US") {
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
+
+    return d.toLocaleDateString(format, {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: timezone,
+    });
+  } catch (error) {
+    console.error("Error formatting date with timezone:", error);
+    return new Date(date).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  }
 }
 
-// Format date as Month day, year (September 19, 2025)
-function fmtDate(d) {
+// Format date as ddmmyyyy (19092025) with timezone
+function formatDateDDMMYYYY(date = new Date(), timezone = "UTC") {
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
+
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: timezone,
+      day: "2-digit",
+      month: "2-digit",
+      year: "numeric",
+    });
+
+    const parts = formatter.formatToParts(d);
+    const day = parts.find((p) => p.type === "day").value;
+    const month = parts.find((p) => p.type === "month").value;
+    const year = parts.find((p) => p.type === "year").value;
+
+    return `${day}${month}${year}`;
+  } catch (error) {
+    console.error("Error formatting date DDMMYYYY with timezone:", error);
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
+
+    const day = String(d.getUTCDate()).padStart(2, "0");
+    const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const year = d.getUTCFullYear();
+
+    return `${day}${month}${year}`;
+  }
+}
+
+// Format date as YYYY-MM-DD for date comparison with timezone
+function formatDateYYYYMMDD(date = new Date(), timezone = "UTC") {
+  try {
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
+
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+
+    const parts = formatter.formatToParts(d);
+    const year = parts.find((p) => p.type === "year").value;
+    const month = parts.find((p) => p.type === "month").value;
+    const day = parts.find((p) => p.type === "day").value;
+
+    return `${year}-${month}-${day}`;
+  } catch (error) {
+    console.error("Error formatting date YYYYMMDD with timezone:", error);
+    const d = new Date(date);
+    if (isNaN(d.getTime())) return "";
+
+    const year = d.getUTCFullYear();
+    const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const day = String(d.getUTCDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  }
+}
+
+// Format date as Month day, year (September 19, 2025) with timezone
+function fmtDate(d, timezone = "UTC") {
   if (!d) return "—";
-  const dt = new Date(d);
-  if (isNaN(dt.getTime())) return "—";
 
   try {
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return "—";
+
     return dt.toLocaleDateString("en-US", {
       year: "numeric",
       month: "long",
       day: "numeric",
+      timeZone: timezone,
     });
-  } catch {
+  } catch (error) {
+    console.error("Error in fmtDate with timezone:", error);
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return "—";
+
     const months = [
-      "January", "February", "March", "April", "May", "June",
-      "July", "August", "September", "October", "November", "December"
+      "January",
+      "February",
+      "March",
+      "April",
+      "May",
+      "June",
+      "July",
+      "August",
+      "September",
+      "October",
+      "November",
+      "December",
     ];
-    return `${months[dt.getMonth()]} ${dt.getDate()}, ${dt.getFullYear()}`;
+
+    const offset =
+      timezone === "UTC" ? 0 : new Date().getTimezoneOffset() / -60;
+
+    const adjustedDate = new Date(dt.getTime() + offset * 60 * 60 * 1000);
+
+    return `${
+      months[adjustedDate.getMonth()]
+    } ${adjustedDate.getDate()}, ${adjustedDate.getFullYear()}`;
   }
 }
 
-// Get current year-month in MMyyyy format (092025)
-function getCurrentYearMonth() {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const year = now.getFullYear();
-  return `${month}${year}`;
+// Get current year-month in MMyyyy format (092025) with timezone
+function getCurrentYearMonth(timezone = "UTC") {
+  try {
+    const now = new Date();
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: timezone,
+      month: "2-digit",
+      year: "numeric",
+    });
+
+    const parts = formatter.formatToParts(now);
+    const month = parts.find((p) => p.type === "month").value;
+    const year = parts.find((p) => p.type === "year").value;
+
+    return `${month}${year}`;
+  } catch (error) {
+    console.error("Error getting current year-month with timezone:", error);
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const year = now.getFullYear();
+    return `${month}${year}`;
+  }
 }
 
-// Get current date in YYYY-MM-DD format for comparison
-function getCurrentDateString() {
-  const now = new Date();
-  return formatDateYYYYMMDD(now);
+// Get current date in YYYY-MM-DD format for comparison with timezone
+function getCurrentDateString(timezone = "UTC") {
+  return formatDateYYYYMMDD(new Date(), timezone);
 }
 
-// Get document type code (2-3 letters) - FIXED: Changed CR to CT
+// Get document type code (2-3 letters)
 function getDocTypeCode(docType) {
   const typeCodes = {
-    "experience_letter": "EL",    // Experience Letter
-    "salary_certificate": "SC",   // Salary Certificate
-    "nda": "NDA",                 // NDA
-    "contract": "EC"              // Contract - CHANGED FROM "CR" TO "CT"
+    experience_letter: "EL",
+    salary_certificate: "SC",
+    nda: "NDA",
+    contract: "EC",
   };
   return typeCodes[docType] || "DOC";
 }
@@ -95,136 +231,136 @@ function getDocTypeCode(docType) {
 // Get document full name for display
 function getDocTypeName(docType) {
   const typeNames = {
-    "experience_letter": "Experience Letter",
-    "salary_certificate": "Salary Certificate",
-    "nda": "Non-Disclosure Agreement",
-    "contract": "Employment Contract"
+    experience_letter: "Experience Letter",
+    salary_certificate: "Salary Certificate",
+    nda: "Non-Disclosure Agreement",
+    contract: "Employment Contract",
   };
   return typeNames[docType] || "Document";
 }
 
-// Auto-incrementing reference number generator with daily reset
-async function generateReferenceNumber(docType = "experience_letter") {
+// Auto-incrementing reference number generator with daily reset and timezone
+async function generateReferenceNumber(docType = "experience_letter", ownerId) {
   try {
+    const timezone = await getUserTimezone(ownerId);
     const docCode = getDocTypeCode(docType);
-    const yearMonth = getCurrentYearMonth(); // Format: 092025
-    const currentDateDDMMYYYY = formatDateDDMMYYYY(); // Format: 19092025
-    const currentDate = getCurrentDateString(); // Format: 2025-09-19
-    
-    // First, try to find existing counter
+    const yearMonth = getCurrentYearMonth(timezone);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
+    const currentDate = getCurrentDateString(timezone);
+
     let counter = await ReferenceCounter.findOne({
       docType: docType,
-      yearMonth: yearMonth
+      yearMonth: yearMonth,
+      owner: ownerId,
     });
 
-    // Check if we need to reset the sequence
     let shouldReset = false;
-    
+
     if (counter) {
-      // Check if last generated was on a different calendar date
-      const lastGeneratedDate = counter.lastGenerated ? 
-        formatDateYYYYMMDD(counter.lastGenerated) : null;
-      
+      const lastGeneratedDate = counter.lastGenerated
+        ? formatDateYYYYMMDD(counter.lastGenerated, timezone)
+        : null;
+
       if (lastGeneratedDate && lastGeneratedDate !== currentDate) {
-        // Date has changed, reset sequence to 1
         shouldReset = true;
       }
     } else {
-      // No counter exists for this month, create new
       shouldReset = true;
     }
 
     if (shouldReset) {
-      // Create new counter with sequence 1 or update existing with reset
       counter = await ReferenceCounter.findOneAndUpdate(
-        { 
+        {
           docType: docType,
-          yearMonth: yearMonth
+          yearMonth: yearMonth,
+          owner: ownerId,
         },
-        { 
-          $set: { 
+        {
+          $set: {
             sequence: 1,
             lastGenerated: new Date(),
-            lastGeneratedDate: currentDate // Store the date for future comparison
-          }
+            lastGeneratedDate: currentDate,
+            timezone: timezone,
+            owner: ownerId,
+          },
         },
-        { 
+        {
           upsert: true,
           new: true,
-          setDefaultsOnInsert: true
+          setDefaultsOnInsert: true,
         }
       );
     } else {
-      // Increment existing sequence
       counter = await ReferenceCounter.findOneAndUpdate(
-        { 
+        {
           docType: docType,
-          yearMonth: yearMonth
+          yearMonth: yearMonth,
+          owner: ownerId,
         },
-        { 
+        {
           $inc: { sequence: 1 },
-          $set: { 
+          $set: {
             lastGenerated: new Date(),
-            lastGeneratedDate: currentDate
-          }
+            lastGeneratedDate: currentDate,
+            timezone: timezone,
+          },
         },
-        { 
-          new: true
+        {
+          new: true,
         }
       );
     }
 
-    // Format sequence with leading zeros (01, 02, etc.)
     const sequenceStr = String(counter.sequence).padStart(2, "0");
-    
-    // Final format: MA02-EL-19092025
     return `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
   } catch (error) {
     console.error("Error generating reference number:", error);
-    // Fallback format
     const now = new Date();
-    const currentDateDDMMYYYY = formatDateDDMMYYYY(now);
+    const timezone = await getUserTimezone(ownerId);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(now, timezone);
     const docCode = getDocTypeCode(docType);
     return `MA01-${docCode}-${currentDateDDMMYYYY}`;
   }
 }
 
 // Function to get current reference without incrementing (for preview)
-async function getCurrentReferenceNumber(docType = "experience_letter") {
+async function getCurrentReferenceNumber(
+  docType = "experience_letter",
+  ownerId
+) {
   try {
+    const timezone = await getUserTimezone(ownerId);
     const docCode = getDocTypeCode(docType);
-    const yearMonth = getCurrentYearMonth();
-    const currentDateDDMMYYYY = formatDateDDMMYYYY();
-    const currentDate = getCurrentDateString();
-    
-    const counter = await ReferenceCounter.findOne({ 
+    const yearMonth = getCurrentYearMonth(timezone);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
+    const currentDate = getCurrentDateString(timezone);
+
+    const counter = await ReferenceCounter.findOne({
       docType: docType,
-      yearMonth: yearMonth
+      yearMonth: yearMonth,
+      owner: ownerId,
     });
 
-    let sequence = 1; // Default to 1 if no counter exists
-    
+    let sequence = 1;
+
     if (counter) {
-      // Check if we should reset based on date
-      const lastGeneratedDate = counter.lastGeneratedDate ? 
-        formatDateYYYYMMDD(counter.lastGeneratedDate) : null;
-      
+      const lastGeneratedDate = counter.lastGeneratedDate
+        ? formatDateYYYYMMDD(counter.lastGeneratedDate, timezone)
+        : null;
+
       if (lastGeneratedDate && lastGeneratedDate === currentDate) {
-        // Same date, use next sequence number
         sequence = counter.sequence + 1;
       } else {
-        // Different date or no date stored, reset to 1
         sequence = 1;
       }
     }
-    
+
     const sequenceStr = String(sequence).padStart(2, "0");
-    
-    // Format: MA02-EL-19092025
     return `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
   } catch (error) {
     console.error("Error getting current reference:", error);
-    const currentDateDDMMYYYY = formatDateDDMMYYYY();
+    const timezone = await getUserTimezone(ownerId);
+    const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const docCode = getDocTypeCode(docType);
     return `MA01-${docCode}-${currentDateDDMMYYYY}`;
   }
@@ -239,11 +375,9 @@ function diffToYearsMonths(start, end) {
     return { years: 0, months: 0, totalMonths: 0 };
   }
 
-  // total month diff
   let totalMonths =
     (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
 
-  // If end's day is before start's day, we haven't completed this month yet
   if (e.getDate() < s.getDate()) totalMonths -= 1;
 
   if (totalMonths < 0) totalMonths = 0;
@@ -262,16 +396,11 @@ function formatTenure(start, end) {
   return parts.join(" ");
 }
 
-function defaultsFromTemplate(tpl) {
-  return tpl?.defaultValues || {};
-}
-
 // Function to fetch and decrypt salary fields from Salary model
 async function fetchAndDecryptSalary(employeeId) {
   if (!employeeId) return {};
 
   try {
-    // Find the active salary record for this employee
     const salaryRecord = await Salary.findOne({
       employee: employeeId,
       isActive: true,
@@ -279,7 +408,6 @@ async function fetchAndDecryptSalary(employeeId) {
 
     const decryptedSalary = {};
 
-    // Decrypt all salary fields
     const salaryFields = [
       "basic",
       "dearnessAllowance",
@@ -312,7 +440,6 @@ async function fetchAndDecryptSalary(employeeId) {
       }
     }
 
-    // Calculate total if needed (using the decrypted values)
     if (decryptedSalary.basic && decryptedSalary.basic !== "—") {
       try {
         const basic = parseFloat(decryptedSalary.basic) || 0;
@@ -351,14 +478,22 @@ const formatWithCommas = (val) => {
 
 function getPositionsHistory(emp) {
   const positions = [];
-    
-  if (emp?.experiences && Array.isArray(emp.experiences) && emp.experiences.length > 0) {    
+
+  if (
+    emp?.experiences &&
+    Array.isArray(emp.experiences) &&
+    emp.experiences.length > 0
+  ) {
     emp.experiences.forEach((experience, expIndex) => {
-      if (experience?.positions && Array.isArray(experience.positions) && experience.positions.length > 0) {        
-        experience.positions.forEach((position, posIndex) => {          
+      if (
+        experience?.positions &&
+        Array.isArray(experience.positions) &&
+        experience.positions.length > 0
+      ) {
+        experience.positions.forEach((position, posIndex) => {
           let startDate = null;
           let endDate = null;
-          
+
           try {
             if (position.startDate) {
               startDate = new Date(position.startDate);
@@ -371,7 +506,7 @@ function getPositionsHistory(emp) {
           } catch (error) {
             console.error("Error parsing dates:", error);
           }
-          
+
           positions.push({
             title: position.title || "—",
             startDate: startDate,
@@ -381,16 +516,22 @@ function getPositionsHistory(emp) {
             tenure: formatTenure(startDate, endDate || new Date()),
             duration: diffToYearsMonths(startDate, endDate || new Date()),
             startDateFormatted: startDate ? fmtDate(startDate) : "—",
-            endDateFormatted: position.isCurrentRole ? "Present" : (endDate ? fmtDate(endDate) : "—"),
+            endDateFormatted: position.isCurrentRole
+              ? "Present"
+              : endDate
+              ? fmtDate(endDate)
+              : "—",
           });
         });
       }
     });
   } else {
     if (emp?.designation) {
-      const joinDate = emp?.joiningDate ? new Date(emp.joiningDate) : new Date();
+      const joinDate = emp?.joiningDate
+        ? new Date(emp.joiningDate)
+        : new Date();
       const endDate = emp?.leavingDate ? new Date(emp.leavingDate) : new Date();
-      
+
       positions.push({
         title: emp.designation || "—",
         startDate: joinDate,
@@ -404,13 +545,13 @@ function getPositionsHistory(emp) {
       });
     }
   }
-  
+
   positions.sort((a, b) => {
     if (!a.startDate) return 1;
     if (!b.startDate) return -1;
     return new Date(b.startDate) - new Date(a.startDate);
   });
-  
+
   return positions;
 }
 
@@ -419,21 +560,27 @@ function generatePositionsTimeline(positions) {
   if (!positions || positions.length === 0) {
     return "No position history available.";
   }
-  
+
   const timelineItems = positions.map((pos, index) => {
     const start = pos.startDateFormatted;
     const end = pos.endDateFormatted;
     const currentFlag = pos.isCurrentRole ? " (Current)" : "";
-    
-    return `${index + 1}. ${pos.title}${currentFlag}: From ${start} to ${end} (${pos.tenure})`;
+
+    return `${index + 1}. ${
+      pos.title
+    }${currentFlag}: From ${start} to ${end} (${pos.tenure})`;
   });
-  
+
   return timelineItems.join("\n");
 }
 
-// Updated tokenMap function to accept docType parameter
-async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
-  // Fetch and decrypt salary fields from Salary model
+// Updated tokenMap function
+async function tokenMap(
+  emp,
+  defaults = {},
+  docType = "experience_letter",
+  ownerId
+) {
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
 
   const join = emp?.joiningDate;
@@ -441,48 +588,50 @@ async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
 
   const tenureHuman = formatTenure(join, endDate);
   const { totalMonths: tenureMonthsTotal } = diffToYearsMonths(join, endDate);
-  
-  // Get all positions history
+
+  const timezone = await getUserTimezone(ownerId);
+
   const positionsHistory = getPositionsHistory(emp);
   const positionsTimeline = generatePositionsTimeline(positionsHistory);
-  
-  // Find current position
-  const currentPosition = positionsHistory.find(pos => pos.isCurrentRole === true) || 
-                          positionsHistory[0] || 
-                          { title: emp?.designation || emp?.position || "—" };
-  
-  // Find previous positions (excluding current)
-  const previousPositions = positionsHistory.filter(pos => !pos.isCurrentRole);
-  
-  // Generate reference numbers
-  const referenceNumber = await generateReferenceNumber(docType);
-  const nextReferenceNumber = await getCurrentReferenceNumber(docType);
-  const currentDate = formatDateDDMMYYYY();
+
+  const currentPosition = positionsHistory.find(
+    (pos) => pos.isCurrentRole === true
+  ) ||
+    positionsHistory[0] || { title: emp?.designation || emp?.position || "—" };
+
+  const previousPositions = positionsHistory.filter(
+    (pos) => !pos.isCurrentRole
+  );
+
+  const referenceNumber = await generateReferenceNumber(docType, ownerId);
+  const nextReferenceNumber = await getCurrentReferenceNumber(docType, ownerId);
+  const currentDate = formatDateDDMMYYYY(new Date(), timezone);
   const docTypeCode = getDocTypeCode(docType);
   const docTypeName = getDocTypeName(docType);
-  
-  // Create base tokens object
+
   const tokens = {
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
     "sign.name": defaults.signName || "ADEEL SHAIKH",
     "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
-    
-    // Document reference numbers (auto-incrementing in format: MA02-EL-19092025)
+
     "doc.referenceNo": referenceNumber,
-    "doc.nextReferenceNo": nextReferenceNumber, // Shows what the NEXT one will be
-    "doc.typeCode": docTypeCode, // EL, SC, NDA, CT
-    "doc.typeName": docTypeName, // Full document name
-    "doc.qualitiesLine": defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
-    
-    // Dates in different formats
-    "dates.issue": fmtDate(new Date()),
-    "dates.today": fmtDate(new Date()),
+    "doc.nextReferenceNo": nextReferenceNumber,
+    "doc.typeCode": docTypeCode,
+    "doc.typeName": docTypeName,
+    "doc.qualitiesLine":
+      defaults.qualitiesLine || "…hardworking, punctual, precise, and honest.",
+
+    "dates.issue": fmtDate(new Date(), timezone),
+    "dates.today": fmtDate(new Date(), timezone),
     "dates.currentYear": new Date().getFullYear(),
-    "dates.ddmmyyyy": currentDate, // Format: 19092025
-    "dates.join": fmtDate(emp?.joiningDate),
-    "dates.end": emp?.leavingDate ? fmtDate(emp.leavingDate) : "present",
+    "dates.ddmmyyyy": currentDate,
+    "dates.join": fmtDate(emp?.joiningDate, timezone),
+    "dates.end": emp?.leavingDate
+      ? fmtDate(emp.leavingDate, timezone)
+      : "present",
+    "dates.timezone": timezone,
     "tenure.human": tenureHuman,
     "tenure.monthsTotal": tenureMonthsTotal,
 
@@ -496,7 +645,6 @@ async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
 
-    // Salary fields (decrypted from Salary model)
     "salary.basic": formatWithCommas(decryptedSalary.basic),
     "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
     "salary.houseRent": formatWithCommas(decryptedSalary.houseRentAllowance),
@@ -504,7 +652,9 @@ async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
     "salary.medical": formatWithCommas(decryptedSalary.medicalAllowance),
     "salary.utilities": formatWithCommas(decryptedSalary.utilityAllowance),
     "salary.overtime": formatWithCommas(decryptedSalary.overtimeCompensation),
-    "salary.dislocation": formatWithCommas(decryptedSalary.dislocationAllowance),
+    "salary.dislocation": formatWithCommas(
+      decryptedSalary.dislocationAllowance
+    ),
     "salary.leaveEncashment": formatWithCommas(decryptedSalary.leaveEncashment),
     "salary.bonus": formatWithCommas(decryptedSalary.bonus),
     "salary.arrears": formatWithCommas(decryptedSalary.arrears),
@@ -524,41 +674,44 @@ async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
         : decryptedSalary.calculatedTotal
     ),
 
-    // simple pronoun defaults
     "employee.pronounSubject": "he",
     "employee.pronounObject": "him",
     "employee.pronounPossessive": "his",
 
-    // Position timeline
     "positions.timeline": positionsTimeline,
     "positions.totalCount": positionsHistory.length,
     "positions.previousCount": previousPositions.length,
   };
 
-  // Add current position variables
   if (currentPosition.startDateFormatted) {
     tokens["positions.current"] = currentPosition.title;
     tokens["positions.current.startDate"] = currentPosition.startDateFormatted;
-    tokens["positions.current.endDate"] = currentPosition.endDateFormatted || "Present";
+    tokens["positions.current.endDate"] =
+      currentPosition.endDateFormatted || "Present";
     tokens["positions.current.tenure"] = currentPosition.tenure || "—";
-    tokens["positions.current.duration"] = currentPosition.duration ? 
-      `${currentPosition.duration.years} years ${currentPosition.duration.months} months` : "—";
-    tokens["positions.current.description"] = currentPosition.description || "—";
+    tokens["positions.current.duration"] = currentPosition.duration
+      ? `${currentPosition.duration.years} years ${currentPosition.duration.months} months`
+      : "—";
+    tokens["positions.current.description"] =
+      currentPosition.description || "—";
   }
 
-  // Add individual previous position variables (1-10)
   previousPositions.slice(0, 10).forEach((position, index) => {
     const positionNum = index + 1;
-    
+
     tokens[`positions.previous${positionNum}.title`] = position.title;
-    tokens[`positions.previous${positionNum}.startDate`] = position.startDateFormatted;
-    tokens[`positions.previous${positionNum}.endDate`] = position.endDateFormatted;
+    tokens[`positions.previous${positionNum}.startDate`] =
+      position.startDateFormatted;
+    tokens[`positions.previous${positionNum}.endDate`] =
+      position.endDateFormatted;
     tokens[`positions.previous${positionNum}.tenure`] = position.tenure;
-    tokens[`positions.previous${positionNum}.duration`] = `${position.duration.years} years ${position.duration.months} months`;
-    tokens[`positions.previous${positionNum}.description`] = position.description || "—";
+    tokens[
+      `positions.previous${positionNum}.duration`
+    ] = `${position.duration.years} years ${position.duration.months} months`;
+    tokens[`positions.previous${positionNum}.description`] =
+      position.description || "—";
   });
 
-  // For positions beyond 10, provide empty values
   for (let i = previousPositions.length; i < 10; i++) {
     const positionNum = i + 1;
     tokens[`positions.previous${positionNum}.title`] = "";
@@ -569,11 +722,11 @@ async function tokenMap(emp, defaults = {}, docType = "experience_letter") {
     tokens[`positions.previous${positionNum}.description`] = "";
   }
 
-  // Add all previous titles as separate variables
   if (previousPositions.length > 0) {
     tokens["positions.hasPrevious"] = "true";
     tokens["positions.firstPrevious"] = previousPositions[0].title;
-    tokens["positions.lastPrevious"] = previousPositions[previousPositions.length - 1].title;
+    tokens["positions.lastPrevious"] =
+      previousPositions[previousPositions.length - 1].title;
   } else {
     tokens["positions.hasPrevious"] = "false";
     tokens["positions.firstPrevious"] = "";
@@ -616,7 +769,6 @@ const escCss = (s) => String(s ?? "").replace(/"/g, '\\"');
 function extractAllPages(canvas = {}) {
   const pages = [];
 
-  // Check for new structure (pages array directly in canvas)
   if (Array.isArray(canvas.pages) && canvas.pages.length > 0) {
     canvas.pages.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -639,7 +791,6 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Fallback to old structure
   if (Array.isArray(canvas) && canvas.length > 0) {
     canvas.forEach((p, index) => {
       const widthPx = num(p?.pageFormat?.width, 794);
@@ -662,7 +813,6 @@ function extractAllPages(canvas = {}) {
     return pages;
   }
 
-  // Single page fallback
   const widthPx = num(canvas?.pageFormat?.width, 794);
   const heightPx = num(canvas?.pageFormat?.height, 1123);
   const header = num(canvas?.headerHeight, 0);
@@ -683,7 +833,6 @@ function extractAllPages(canvas = {}) {
   return pages;
 }
 
-// routes/docs.js - Updated generateSinglePageHTML function
 function generateSinglePageHTML(page, tokens, totalPages) {
   const elsHTML = page.elements
     .map((el) => {
@@ -703,13 +852,11 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const columnGap = num(el.columnGap, 20);
       const html = applyTokens(el.content || "", tokens);
 
-      // CSS for multi-column layout
       const columnStyle =
         columns > 1
           ? `column-count: ${columns}; column-gap: ${columnGap}px;`
           : "";
 
-      // FIXED: Proper justify alignment with text-justify
       const alignStyle =
         align === "justify"
           ? "text-align: justify; text-justify: inter-word;"
@@ -746,7 +893,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     print-color-adjust: exact;
   }
 
-  /* Key fix: translate page content down by header height */
   .page {
     width: ${page.widthPx}px;
     height: ${page.heightPx - (page.header + page.footer)}px;
@@ -759,7 +905,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     transform: translateY(${page.header}px);
   }
 
-  /* Multi-column support */
   .el {
     -webkit-column-count: inherit;
     -moz-column-count: inherit;
@@ -769,7 +914,6 @@ function generateSinglePageHTML(page, tokens, totalPages) {
     column-gap: inherit;
   }
 
-  /* Justify alignment support */
   .el[style*="text-align: justify"] {
     text-align: justify;
     text-justify: inter-word;
@@ -787,19 +931,36 @@ function generateSinglePageHTML(page, tokens, totalPages) {
 </html>`;
 }
 
-async function generateDocumentPDF(employeeId, docType, templateId = "") {
+async function generateDocumentPDF(
+  employeeId,
+  docType,
+  templateId = "",
+  ownerId
+) {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
 
-  const tpl = templateId
-    ? await DocTemplate.findById(templateId).lean()
-    : await DocTemplate.findOne({ type: normType(docType) }).lean();
+  // Find template - prioritize user's template, fall back to global
+  let tpl;
+  if (templateId) {
+    tpl = await DocTemplate.findOne({
+      _id: templateId,
+      $or: [{ owner: ownerId }, { isGlobal: true }],
+    }).lean();
+  } else {
+    tpl = await DocTemplate.findOne({
+      type: normType(docType),
+      $or: [{ owner: ownerId }, { isGlobal: true }],
+    })
+      .sort({ isGlobal: 1 })
+      .lean(); // Prefer user templates over global
+  }
+
   if (!tpl) throw new Error("Template not found");
 
   const defaults = tpl.defaultValues || {};
-  // FIXED: Pass the normalized docType to tokenMap
   const normalizedDocType = normType(docType);
-  const tokens = await tokenMap(emp, defaults, normalizedDocType);
+  const tokens = await tokenMap(emp, defaults, normalizedDocType, ownerId);
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
@@ -818,7 +979,6 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
       await p.setContent(html, { waitUntil: "networkidle0" });
       await p.emulateMediaType("screen");
 
-      // ✅ Convert header/footer px → mm (used as PDF margins)
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
@@ -849,6 +1009,175 @@ async function generateDocumentPDF(employeeId, docType, templateId = "") {
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
+   BULK DOCUMENT DOWNLOAD API
+────────────────────────────────────────────────────────────────────────────── */
+
+// Bulk document download - combines multiple employee documents into one PDF
+router.post("/bulk/:docType", async (req, res) => {
+  try {
+    const { docType } = req.params;
+    const { employeeIds, key } = req.body || {};
+
+    if (
+      !employeeIds ||
+      !Array.isArray(employeeIds) ||
+      employeeIds.length === 0
+    ) {
+      return res.status(400).json({
+        message: "employeeIds array is required with at least one employee ID",
+      });
+    }
+
+    // Validate document type
+    const validDocTypes = [
+      "nda",
+      "contract",
+      "salary-certificate",
+      "experience-letter",
+    ];
+    if (!validDocTypes.includes(docType)) {
+      return res.status(400).json({
+        message: `Invalid document type. Valid types are: ${validDocTypes.join(
+          ", "
+        )}`,
+      });
+    }
+
+    // For contract and salary-certificate, key is required
+    if ((docType === "contract" || docType === "salary-certificate") && !key) {
+      return res.status(400).json({
+        message: `Decryption key is required for ${docType}`,
+      });
+    }
+
+    console.log(
+      `Processing bulk ${docType} download for ${employeeIds.length} employees`
+    );
+
+    // Get all employees at once
+    const employees = await Employee.find({
+      _id: { $in: employeeIds },
+      owner: req.ownerId,
+    }).lean();
+
+    if (employees.length === 0) {
+      return res.status(404).json({
+        message: "No employees found with the provided IDs",
+      });
+    }
+
+    // Find template
+    let tpl;
+    const normalizedDocType = normType(docType);
+    tpl = await DocTemplate.findOne({
+      type: normalizedDocType,
+      $or: [{ owner: req.ownerId }, { isGlobal: true }],
+    })
+      .sort({ isGlobal: 1 })
+      .lean();
+
+    if (!tpl) {
+      return res.status(404).json({
+        message: `Template not found for ${docType}`,
+      });
+    }
+
+    const defaults = tpl.defaultValues || {};
+    const pages = extractAllPages(tpl.canvas || {});
+    if (pages.length === 0) {
+      return res.status(400).json({
+        message: "No pages found in template",
+      });
+    }
+
+    // Launch browser once for all employees
+    const browser = await puppeteer.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+
+    try {
+      const mergedPdf = await PDFDocument.create();
+
+      // Process each employee
+      for (const emp of employees) {
+        console.log(`Processing employee: ${emp.name} (${emp._id})`);
+
+        const tokens = await tokenMap(
+          emp,
+          defaults,
+          normalizedDocType,
+          req.ownerId
+        );
+
+        // For each page in the template, generate for this employee
+        for (const page of pages) {
+          const p = await browser.newPage();
+          await p.setViewport({ width: page.widthPx, height: page.heightPx });
+
+          const html = generateSinglePageHTML(page, tokens, pages.length);
+          await p.setContent(html, { waitUntil: "networkidle0" });
+          await p.emulateMediaType("screen");
+
+          const headerMm = pxToMm(page.header);
+          const footerMm = pxToMm(page.footer);
+
+          const pdfBuffer = await p.pdf({
+            printBackground: true,
+            preferCSSPageSize: true,
+            width: `${pxToMm(page.widthPx)}mm`,
+            height: `${pxToMm(page.heightPx)}mm`,
+            margin: {
+              top: `${headerMm}mm`,
+              bottom: `${footerMm}mm`,
+              left: "0mm",
+              right: "0mm",
+            },
+          });
+
+          const tempPdf = await PDFDocument.load(pdfBuffer);
+          const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
+          mergedPdf.addPage(copiedPage);
+          await p.close();
+        }
+
+        // REMOVED: Blank page between employees - documents will now flow immediately
+        // if (employees.indexOf(emp) < employees.length - 1) {
+        //   const blankPage = mergedPdf.addPage([pages[0].widthPx, pages[0].heightPx]);
+        // }
+      }
+
+      const mergedPdfBytes = await mergedPdf.save();
+      const pdfBuffer = Buffer.from(mergedPdfBytes);
+
+      // Set response headers
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="bulk-${docType}-${
+          new Date().toISOString().split("T")[0]
+        }.pdf"`
+      );
+
+      console.log(
+        `Bulk ${docType} PDF generated successfully for ${employees.length} employees`
+      );
+      res.status(200).end(pdfBuffer);
+    } finally {
+      await browser.close();
+    }
+  } catch (err) {
+    console.error(`Error in bulk ${req.params.docType} download:`, err);
+
+    if (!res.headersSent) {
+      res.status(500).json({
+        message:
+          err.message || `Failed to generate bulk ${req.params.docType} PDF`,
+      });
+    }
+  }
+});
+
+/* ──────────────────────────────────────────────────────────────────────────────
    PDF ENDPOINTS FOR ALL DOCUMENT TYPES
 ────────────────────────────────────────────────────────────────────────────── */
 
@@ -861,7 +1190,8 @@ router.get("/experience-letter/:employeeId", async (req, res) => {
     const pdf = await generateDocumentPDF(
       employeeId,
       "experience_letter",
-      templateId
+      templateId,
+      req.ownerId
     );
 
     res.setHeader("Content-Type", "application/pdf");
@@ -886,7 +1216,12 @@ router.get("/nda/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "nda", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "nda",
+      templateId,
+      req.ownerId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="NDA.pdf"');
@@ -910,7 +1245,8 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
     const pdf = await generateDocumentPDF(
       employeeId,
       "salary_certificate",
-      templateId
+      templateId,
+      req.ownerId
     );
 
     res.setHeader("Content-Type", "application/pdf");
@@ -929,7 +1265,7 @@ router.get("/salary-certificate/:employeeId", async (req, res) => {
   }
 });
 
-// Salary Certificate (POST - same style as contract POST)
+// Salary Certificate (POST)
 router.post("/salary-certificate/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
@@ -939,7 +1275,8 @@ router.post("/salary-certificate/:employeeId", async (req, res) => {
     const pdf = await generateDocumentPDF(
       employeeId,
       "salary_certificate",
-      templateId
+      templateId,
+      req.ownerId
     );
 
     res.setHeader("Content-Type", "application/pdf");
@@ -965,7 +1302,12 @@ router.post("/contract/:employeeId", async (req, res) => {
     const { key } = req.body || {};
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "contract",
+      templateId,
+      req.ownerId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
@@ -980,13 +1322,18 @@ router.post("/contract/:employeeId", async (req, res) => {
   }
 });
 
-// Also support GET for contract without decryption
+// GET for contract
 router.get("/contract/:employeeId", async (req, res) => {
   try {
     const { employeeId } = req.params;
     const templateId = String(req.query.templateId || "");
 
-    const pdf = await generateDocumentPDF(employeeId, "contract", templateId);
+    const pdf = await generateDocumentPDF(
+      employeeId,
+      "contract",
+      templateId,
+      req.ownerId
+    );
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
@@ -1001,17 +1348,20 @@ router.get("/contract/:employeeId", async (req, res) => {
   }
 });
 
-// New endpoint: Preview reference number without incrementing
+// Preview reference number without incrementing
 router.get("/reference-preview/:docType", async (req, res) => {
   try {
     const docType = normType(req.params.docType);
-    const referenceNumber = await getCurrentReferenceNumber(docType);
-    
+    const referenceNumber = await getCurrentReferenceNumber(
+      docType,
+      req.ownerId
+    );
+
     res.json({
       ok: true,
       referenceNumber,
       docType,
-      preview: true
+      preview: true,
     });
   } catch (err) {
     console.error("reference-preview error:", err);
@@ -1024,25 +1374,28 @@ router.get("/reference-history/:docType", async (req, res) => {
   try {
     const docType = normType(req.params.docType);
     const limit = parseInt(req.query.limit) || 10;
-    
-    const counters = await ReferenceCounter.find({ docType: docType })
+
+    const counters = await ReferenceCounter.find({
+      docType: docType,
+      owner: req.ownerId,
+    })
       .sort({ yearMonth: -1, sequence: -1 })
       .limit(limit)
       .lean();
 
-    const history = counters.map(counter => {
+    const history = counters.map((counter) => {
       const sequenceStr = String(counter.sequence).padStart(2, "0");
       const docCode = getDocTypeCode(docType);
-      // Convert yearMonth (092025) to date format
       const month = counter.yearMonth.substring(0, 2);
       const year = counter.yearMonth.substring(2);
-      const date = `01${month}${year}`; // Using 01 as day since we only track month
-      
+      const date = `01${month}${year}`;
+
       return {
         referenceNumber: `MA${sequenceStr}-${docCode}-${date}`,
         generatedAt: counter.lastGenerated,
         sequence: counter.sequence,
-        yearMonth: counter.yearMonth
+        yearMonth: counter.yearMonth,
+        timezone: counter.timezone || "UTC",
       };
     });
 
@@ -1050,7 +1403,8 @@ router.get("/reference-history/:docType", async (req, res) => {
       ok: true,
       history,
       docType,
-      docName: getDocTypeName(docType)
+      docName: getDocTypeName(docType),
+      ownerId: req.ownerId,
     });
   } catch (err) {
     console.error("reference-history error:", err);
@@ -1059,23 +1413,42 @@ router.get("/reference-history/:docType", async (req, res) => {
 });
 
 /* ─────────────────────────────────────────────────────────────
-   GLOBAL TEMPLATES — BY TYPE
+   OWNER-SPECIFIC TEMPLATES — BY TYPE
 ──────────────────────────────────────────────────────────────── */
 router.get("/doc-templates/:type", async (req, res) => {
   try {
     const type = normType(req.params.type);
-    const tpl = await DocTemplate.findOne({ type }).lean();
+
+    // First try to get user's template
+    let tpl = await DocTemplate.findOne({
+      type: type,
+      owner: req.ownerId,
+    }).lean();
+
+    // If user doesn't have a template, get global template
+    if (!tpl) {
+      tpl = await DocTemplate.findOne({
+        type: type,
+        isGlobal: true,
+      }).lean();
+    }
+
     if (!tpl) return res.status(200).json({ data: null });
+
     res.json({
-      data: { 
-        canvas: tpl.canvas, 
+      data: {
+        canvas: tpl.canvas,
         defaultValues: tpl.defaultValues || {},
         type: tpl.type,
         docTypeName: getDocTypeName(tpl.type),
-        docTypeCode: getDocTypeCode(tpl.type)
+        docTypeCode: getDocTypeCode(tpl.type),
+        owner: tpl.owner,
+        isGlobal: tpl.isGlobal || false,
+        name: tpl.name || "Untitled Template",
       },
     });
-  } catch {
+  } catch (err) {
+    console.error("Error loading doc template:", err);
     res.status(500).json({ message: "Failed to load by type" });
   }
 });
@@ -1083,40 +1456,89 @@ router.get("/doc-templates/:type", async (req, res) => {
 router.post("/doc-templates/:type", async (req, res) => {
   try {
     const type = normType(req.params.type);
-    const { canvas, defaultValues } = req.body || {};
+    const { canvas, defaultValues, name, isGlobal } = req.body || {};
+
     if (!canvas) return res.status(400).json({ message: "canvas is required" });
 
-    const up = await DocTemplate.findOneAndUpdate(
-      { type },
-      { $set: { canvas, defaultValues: defaultValues || {} } },
-      { upsert: true, new: true }
-    ).lean();
+    // Check if a template already exists for this user and type
+    const existingTemplate = await DocTemplate.findOne({
+      type: type,
+      owner: req.ownerId,
+    });
+
+    let up;
+    if (existingTemplate) {
+      // Update existing template
+      up = await DocTemplate.findOneAndUpdate(
+        {
+          _id: existingTemplate._id,
+          owner: req.ownerId,
+        },
+        {
+          $set: {
+            canvas,
+            defaultValues: defaultValues || {},
+            name: name || "Untitled Template",
+            isGlobal: isGlobal || false,
+          },
+        },
+        {
+          new: true,
+        }
+      ).lean();
+    } else {
+      // Create new template
+      up = await DocTemplate.create({
+        type: type,
+        canvas,
+        defaultValues: defaultValues || {},
+        name: name || "Untitled Template",
+        owner: req.ownerId,
+        isGlobal: isGlobal || false,
+      });
+    }
 
     res.json({
       ok: true,
-      data: { 
-        canvas: up.canvas, 
+      data: {
+        canvas: up.canvas,
         defaultValues: up.defaultValues || {},
         type: up.type,
         docTypeName: getDocTypeName(up.type),
-        docTypeCode: getDocTypeCode(up.type)
+        docTypeCode: getDocTypeCode(up.type),
+        owner: up.owner,
+        isGlobal: up.isGlobal || false,
+        name: up.name || "Untitled Template",
       },
     });
-  } catch {
+  } catch (err) {
+    console.error("Error saving doc template:", err);
+
+    // Check for duplicate key error specifically
+    if (err.code === 11000) {
+      return res.status(400).json({
+        message:
+          "A template with this type already exists. Please update the existing template instead.",
+        code: "DUPLICATE_TEMPLATE",
+      });
+    }
+
     res.status(500).json({ message: "Failed to save by type" });
   }
 });
 
 /* ─────────────────────────────────────────────────────────────
-   RECENT TEMPLATES — ID-BASED CRUD
+   OWNER-SPECIFIC TEMPLATES — ID-BASED CRUD
 ──────────────────────────────────────────────────────────────── */
 router.get("/templates", async (req, res) => {
   try {
     const rows = await DocTemplate.find(
-      {},
-      { canvas: 1, type: 1, updatedAt: 1 }
+      {
+        $or: [{ owner: req.ownerId }, { isGlobal: true }],
+      },
+      { canvas: 1, type: 1, updatedAt: 1, owner: 1, isGlobal: 1, name: 1 }
     )
-      .sort({ updatedAt: -1 })
+      .sort({ isGlobal: 1, updatedAt: -1 })
       .lean();
 
     const data = rows.map((r) => ({
@@ -1124,19 +1546,29 @@ router.get("/templates", async (req, res) => {
       type: r.type,
       typeName: getDocTypeName(r.type),
       typeCode: getDocTypeCode(r.type),
-      name: r.canvas?.name || "Untitled Document",
+      name: r.name || r.canvas?.name || "Untitled Document",
       updatedAt: r.updatedAt,
+      owner: r.owner,
+      isOwner: String(r.owner) === String(req.ownerId),
+      isGlobal: r.isGlobal || false,
     }));
+
     res.json({ data });
-  } catch {
+  } catch (err) {
+    console.error("Error fetching templates:", err);
     res.status(500).json({ message: "Failed to fetch templates" });
   }
 });
 
 router.get("/templates/:id", async (req, res) => {
   try {
-    const tpl = await DocTemplate.findById(req.params.id).lean();
+    const tpl = await DocTemplate.findOne({
+      _id: req.params.id,
+      $or: [{ owner: req.ownerId }, { isGlobal: true }],
+    }).lean();
+
     if (!tpl) return res.status(404).json({ message: "Template not found" });
+
     res.json({
       data: {
         _id: String(tpl._id),
@@ -1146,68 +1578,142 @@ router.get("/templates/:id", async (req, res) => {
         canvas: tpl.canvas,
         defaultValues: tpl.defaultValues || {},
         updatedAt: tpl.updatedAt,
+        owner: tpl.owner,
+        isOwner: String(tpl.owner) === String(req.ownerId),
+        isGlobal: tpl.isGlobal || false,
+        name: tpl.name || "Untitled Template",
       },
     });
-  } catch {
+  } catch (err) {
+    console.error("Error loading template:", err);
     res.status(500).json({ message: "Failed to load template" });
   }
 });
 
+// Use POST /templates instead of POST /doc-templates/:type
 router.post("/templates", async (req, res) => {
   try {
-    const { type, canvas, defaultValues } = req.body || {};
+    const { type, canvas, defaultValues, name, isGlobal } = req.body || {};
+
     if (!type || !canvas) {
       return res
         .status(400)
         .json({ message: "`type` and `canvas` are required" });
     }
+
+    // Add a suffix to make it unique per user
+    const uniqueType = `${type}_${req.ownerId.substring(0, 8)}`;
+
     const doc = await DocTemplate.create({
-      type,
+      type: uniqueType, // Use unique type
       canvas,
       defaultValues: defaultValues || {},
+      name: name || "Untitled Template",
+      owner: req.ownerId,
+      isGlobal: isGlobal || false,
     });
-    res.status(201).json({ 
-      ok: true, 
+
+    res.status(201).json({
+      ok: true,
       id: String(doc._id),
-      typeName: getDocTypeName(doc.type),
-      typeCode: getDocTypeCode(doc.type)
+      typeName: getDocTypeName(type), // Return original type name for display
+      typeCode: getDocTypeCode(type),
+      owner: doc.owner,
+      isGlobal: doc.isGlobal,
     });
-  } catch {
+  } catch (err) {
+    console.error("Error creating template:", err);
     res.status(500).json({ message: "Failed to create template" });
   }
 });
-
 router.put("/templates/:id", async (req, res) => {
   try {
-    const { canvas, defaultValues, type } = req.body || {};
+    const { canvas, defaultValues, type, name, isGlobal } = req.body || {};
     const set = {};
+
     if (type) set.type = type;
     if (canvas) set.canvas = canvas;
     if (defaultValues) set.defaultValues = defaultValues;
+    if (name !== undefined) set.name = name;
+    if (isGlobal !== undefined) set.isGlobal = isGlobal;
 
-    const up = await DocTemplate.findByIdAndUpdate(
-      req.params.id,
+    const up = await DocTemplate.findOneAndUpdate(
+      {
+        _id: req.params.id,
+        owner: req.ownerId, // Only owner can update their templates
+      },
       { $set: set },
       { new: true }
     ).lean();
-    if (!up) return res.status(404).json({ message: "Template not found" });
-    res.json({ 
+
+    if (!up)
+      return res
+        .status(404)
+        .json({ message: "Template not found or not authorized" });
+
+    res.json({
       ok: true,
       typeName: getDocTypeName(up.type),
-      typeCode: getDocTypeCode(up.type)
+      typeCode: getDocTypeCode(up.type),
+      owner: up.owner,
+      isGlobal: up.isGlobal,
     });
-  } catch {
+  } catch (err) {
+    console.error("Error updating template:", err);
     res.status(500).json({ message: "Failed to update template" });
   }
 });
 
 router.delete("/templates/:id", async (req, res) => {
   try {
-    const del = await DocTemplate.findByIdAndDelete(req.params.id).lean();
-    if (!del) return res.status(404).json({ message: "Template not found" });
+    const del = await DocTemplate.findOneAndDelete({
+      _id: req.params.id,
+      owner: req.ownerId, // Only owner can delete their templates
+    }).lean();
+
+    if (!del)
+      return res
+        .status(404)
+        .json({ message: "Template not found or not authorized" });
+
     res.json({ ok: true });
-  } catch {
+  } catch (err) {
+    console.error("Error deleting template:", err);
     res.status(500).json({ message: "Failed to delete template" });
+  }
+});
+
+// Duplicate a template (create a copy)
+router.post("/templates/:id/duplicate", async (req, res) => {
+  try {
+    const original = await DocTemplate.findOne({
+      _id: req.params.id,
+      $or: [{ owner: req.ownerId }, { isGlobal: true }],
+    }).lean();
+
+    if (!original)
+      return res.status(404).json({ message: "Template not found" });
+
+    const newTemplate = await DocTemplate.create({
+      type: original.type,
+      canvas: original.canvas,
+      defaultValues: original.defaultValues || {},
+      name: `${original.name || "Untitled Template"} (Copy)`,
+      owner: req.ownerId,
+      isGlobal: false, // Duplicates are always user-specific
+    });
+
+    res.status(201).json({
+      ok: true,
+      id: String(newTemplate._id),
+      typeName: getDocTypeName(newTemplate.type),
+      typeCode: getDocTypeCode(newTemplate.type),
+      owner: newTemplate.owner,
+      isGlobal: newTemplate.isGlobal,
+    });
+  } catch (err) {
+    console.error("Error duplicating template:", err);
+    res.status(500).json({ message: "Failed to duplicate template" });
   }
 });
 
