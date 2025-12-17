@@ -15,7 +15,6 @@ const isManagerLike = (role) => {
     r === "teamlead"
   );
 };
-
 exports.getRoster = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select(
@@ -32,6 +31,7 @@ exports.getRoster = async (req, res) => {
     const [employees, clients] = await Promise.all([
       Employee.find({
         owner: me.owner,
+        status: "active", // Only show active employees
         $or: [
           { department: "Operations" },
           { role: { $in: ["Employee", "Manager", "Team Lead"] } },
@@ -43,7 +43,9 @@ exports.getRoster = async (req, res) => {
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
       ClientInfo.find({ owner: me.owner })
-        .select("_id clientName legalBusinessName industry taxStatus companyLocation assignedTo")
+        .select(
+          "_id clientName legalBusinessName industry taxStatus companyLocation assignedTo"
+        )
         .populate("assignedTo", "_id name companyEmail")
         .sort({ createdAt: -1 }),
     ]);
@@ -54,15 +56,18 @@ exports.getRoster = async (req, res) => {
     res.status(500).json({ error: "Failed to load roster" });
   }
 };
-
 // GET /manager/employee/roster
 exports.getEmployeeRoster = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
     if (!me.owner)
-      return res.status(400).json({ error: "Your profile is missing owner id" });
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const { name } = req.query; // optional name search
 
@@ -75,7 +80,8 @@ exports.getEmployeeRoster = async (req, res) => {
     // --- Employees Query ---
     const employees = await Employee.find({
       owner: me.owner,
-      _id: { $ne: me._id },
+      status: "active", // Only show active employees
+      _id: { $ne: me._id }, // Exclude the current user
       $or: [
         { department: "Operations" },
         { role: { $in: ["Employee", "Manager", "Team Lead"] } },
@@ -101,7 +107,9 @@ exports.getEmployeeRoster = async (req, res) => {
     }
 
     const clients = await ClientInfo.find(clientQuery)
-      .select("_id clientName dba industry taxStatus companyLocation assignedTo")
+      .select(
+        "_id clientName dba industry taxStatus companyLocation assignedTo"
+      )
       .populate("assignedTo", "_id name companyEmail")
       .sort({ clientName: 1 });
 
@@ -111,14 +119,17 @@ exports.getEmployeeRoster = async (req, res) => {
     res.status(500).json({ error: "Failed to load roster" });
   }
 };
-
 exports.getMentionedEmployees = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    const me = await Employee.findById(req.employee._id).select(
+      "_id owner role"
+    );
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
     if (!me.owner)
-      return res.status(400).json({ error: "Your profile is missing owner id" });
+      return res
+        .status(400)
+        .json({ error: "Your profile is missing owner id" });
 
     const { name } = req.query; // optional name search
 
@@ -156,7 +167,6 @@ exports.getMentionedEmployees = async (req, res) => {
     res.status(500).json({ error: "Failed to load roster" });
   }
 };
-
 
 // PATCH /manager/employee/:id/supervision  { supervisionMode }
 exports.updateEmployeeSupervision = async (req, res) => {
@@ -246,7 +256,7 @@ exports.assignClient = async (req, res) => {
     // Get the client before update to know previous assignment
     const clientBeforeUpdate = await ClientInfo.findOne({
       _id: clientId,
-      owner: me.owner
+      owner: me.owner,
     }).populate("assignedTo", "_id name companyEmail");
 
     if (!clientBeforeUpdate)
@@ -254,8 +264,11 @@ exports.assignClient = async (req, res) => {
         .status(404)
         .json({ error: "Client not found or not under your owner" });
 
-    const previousEmployeeId = clientBeforeUpdate.assignedTo ?
-      (clientBeforeUpdate.assignedTo._id || clientBeforeUpdate.assignedTo).toString() : null;
+    const previousEmployeeId = clientBeforeUpdate.assignedTo
+      ? (
+          clientBeforeUpdate.assignedTo._id || clientBeforeUpdate.assignedTo
+        ).toString()
+      : null;
 
     // Update the client assignment
     const client = await ClientInfo.findOneAndUpdate(
@@ -307,17 +320,16 @@ exports.assignClient = async (req, res) => {
           client: clientId,
           isTrashed: false,
           isSpam: false,
-          $or: [
-            { status: 'sent' },
-            { status: 'scheduled' }
-          ]
+          $or: [{ status: "sent" }, { status: "scheduled" }],
         });
 
         // 2. For each existing message, add the employee as a receiver if not already
         const updatePromises = existingMessages.map(async (msg) => {
           const currentReceivers = Array.isArray(msg.receiver)
-            ? msg.receiver.map(r => r.toString())
-            : msg.receiver ? [msg.receiver.toString()] : [];
+            ? msg.receiver.map((r) => r.toString())
+            : msg.receiver
+            ? [msg.receiver.toString()]
+            : [];
 
           // If employee is not already a receiver, add them
           if (!currentReceivers.includes(employeeId)) {
@@ -331,9 +343,9 @@ exports.assignClient = async (req, res) => {
                 $addToSet: {
                   readBy: {
                     employee: employeeId,
-                    readAt: new Date()
-                  }
-                }
+                    readAt: new Date(),
+                  },
+                },
               },
               { new: true }
             );
@@ -342,19 +354,20 @@ exports.assignClient = async (req, res) => {
         });
 
         // Wait for all updates to complete
-        const updatedMessages = await Promise.all(updatePromises.filter(p => p));
+        const updatedMessages = await Promise.all(
+          updatePromises.filter((p) => p)
+        );
 
-        console.log(`✅ Added employee ${employeeId} to ${updatedMessages.length} existing messages for client ${clientId}`);
+        console.log(
+          `✅ Added employee ${employeeId} to ${updatedMessages.length} existing messages for client ${clientId}`
+        );
 
         // 3. Fetch all updated messages for this client to send via socket
         const clientMessages = await AssignmentMessage.find({
           client: clientId,
           isTrashed: false,
           isSpam: false,
-          $or: [
-            { status: 'sent' },
-            { status: 'scheduled' }
-          ]
+          $or: [{ status: "sent" }, { status: "scheduled" }],
         })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
@@ -371,12 +384,21 @@ exports.assignClient = async (req, res) => {
           clientMessages.forEach((msg) => {
             // Check if this employee is a receiver of this message
             const msgReceivers = Array.isArray(msg.receiver)
-              ? msg.receiver.map(r => r._id ? r._id.toString() : r.toString())
-              : msg.receiver ? [msg.receiver.toString()] : [];
+              ? msg.receiver.map((r) =>
+                  r._id ? r._id.toString() : r.toString()
+                )
+              : msg.receiver
+              ? [msg.receiver.toString()]
+              : [];
 
             if (msgReceivers.includes(employeeId)) {
-              io.to(`employee_${employeeId}`).emit("new_assignment_message", msg);
-              console.log(`📨 Sent historical message ${msg._id} to employee ${employeeId}`);
+              io.to(`employee_${employeeId}`).emit(
+                "new_assignment_message",
+                msg
+              );
+              console.log(
+                `📨 Sent historical message ${msg._id} to employee ${employeeId}`
+              );
             }
           });
 
@@ -388,16 +410,18 @@ exports.assignClient = async (req, res) => {
             dba: client.dba || client.clientName,
             assignedBy: {
               _id: me._id,
-              name: me.name
+              name: me.name,
             },
             assignedAt: new Date().toISOString(),
             messageCount: clientMessages.length,
-            hasAccessToHistory: true
+            hasAccessToHistory: true,
           });
         }
-
       } catch (historyError) {
-        console.error("❌ Error sharing historical messages with new employee:", historyError);
+        console.error(
+          "❌ Error sharing historical messages with new employee:",
+          historyError
+        );
         // Don't fail the assignment if history sharing fails
       }
     }
@@ -416,10 +440,10 @@ exports.assignClient = async (req, res) => {
             dba: client.dba || client.clientName,
             assignedBy: {
               _id: me._id,
-              name: me.name
+              name: me.name,
             },
             assignedAt: new Date().toISOString(),
-            hasHistoricalMessages: true // Indicate they now have access to history
+            hasHistoricalMessages: true, // Indicate they now have access to history
           });
         }
 
@@ -428,19 +452,23 @@ exports.assignClient = async (req, res) => {
             { _id: clientId },
             { $pull: { readBy: { employee: previousEmployeeId } } }
           );
-          console.log(`🧹 Removed ${previousEmployeeId} from readBy of client ${clientId}`);
+          console.log(
+            `🧹 Removed ${previousEmployeeId} from readBy of client ${clientId}`
+          );
         }
 
         // 2. Notify the previously assigned employee that they lost the client (if any)
         if (previousEmployeeId && previousEmployeeId !== employeeId) {
-          io.to(`employee_${previousEmployeeId}`).emit("client_assignment_updated", {
-            type: "CLIENT_UNASSIGNED_FROM_YOU",
-            clientId,
-            clientName: client.clientName,
-            dba: client.dba || client.clientName,
-            assignedAt: new Date().toISOString()
-          });
-
+          io.to(`employee_${previousEmployeeId}`).emit(
+            "client_assignment_updated",
+            {
+              type: "CLIENT_UNASSIGNED_FROM_YOU",
+              clientId,
+              clientName: client.clientName,
+              dba: client.dba || client.clientName,
+              assignedAt: new Date().toISOString(),
+            }
+          );
         }
 
         // 3. Notify all managers/team leads about the assignment change
@@ -453,26 +481,29 @@ exports.assignClient = async (req, res) => {
           dba: client.dba || client.clientName,
           assignedBy: {
             _id: me._id,
-            name: me.name
+            name: me.name,
           },
-          assignedAt: new Date().toISOString()
+          assignedAt: new Date().toISOString(),
         });
 
         // 4. Also emit to assignment client room for real-time updates in the chat
         if (clientId) {
-          io.to(`assignment_client_${clientId}`).emit("client_assignment_updated", {
-            type: "CLIENT_ASSIGNMENT_CHANGED",
-            clientId,
-            employeeId,
-            assignedTo: client.assignedTo,
-            clientName: client.clientName,
-            dba: client.dba || client.clientName,
-            assignedBy: {
-              _id: me._id,
-              name: me.name
-            },
-            assignedAt: new Date().toISOString()
-          });
+          io.to(`assignment_client_${clientId}`).emit(
+            "client_assignment_updated",
+            {
+              type: "CLIENT_ASSIGNMENT_CHANGED",
+              clientId,
+              employeeId,
+              assignedTo: client.assignedTo,
+              clientName: client.clientName,
+              dba: client.dba || client.clientName,
+              assignedBy: {
+                _id: me._id,
+                name: me.name,
+              },
+              assignedAt: new Date().toISOString(),
+            }
+          );
         }
       }
     } catch (socketError) {
@@ -483,7 +514,7 @@ exports.assignClient = async (req, res) => {
     res.json({
       client,
       message,
-      historicalMessagesShared: employeeId ? true : false
+      historicalMessagesShared: employeeId ? true : false,
     });
   } catch (err) {
     console.error("assignClient error:", err);

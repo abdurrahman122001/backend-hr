@@ -66,7 +66,7 @@ router.post("/login", async (req, res) => {
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
     // ❌ Block login for offboarded employees
-    if (emp.status && emp.status.toLowerCase() === "offboarded") {
+    if (emp.status && emp.status.toLowerCase() === "offboarded" || emp.status.toLowerCase() === "review") {
       return res.status(403).json({
         error: "Account Disabled",
         message:

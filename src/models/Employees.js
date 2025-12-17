@@ -197,7 +197,7 @@ const EmployeeSchema = new Schema(
     // EMPLOYMENT STATUS FIELDS - UPDATED
     status: {
       type: String,
-      enum: ["active", "pending", "Offered", "Onboarding", "resigned", "offboarded", "terminated"],
+      enum: ["active", "pending", "Offered", "Onboarding", "review", "resigned", "offboarded", "terminated"],
       default: "pending",
     },
     resignationDate: { type: String }, // Date when employee resigned

@@ -119,7 +119,7 @@ exports.getBugs = async (req, res) => {
     let bugs;
 
     // R&D can see all bugs, others only see their own
-    if (emp.department === "Research and Development") {
+    if (emp.department === "Research & Development") {
       bugs = await Bug.find()
         .populate("reportedBy", "name companyEmail department")
         .sort({ createdAt: -1 });
