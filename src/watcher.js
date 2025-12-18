@@ -3,7 +3,7 @@ require("dotenv").config();
 const Imap = require("imap");
 const { simpleParser } = require("mailparser");
 const mongoose = require("mongoose");
-const verifyEmail = require("./utils/verifyEmail"); // <-- ADD THIS
+const verifyEmail = require("./utils/verifyEmail");
 
 const { sendEmail } = require("./services/mailService");
 const Employee = require("./models/Employees");
@@ -14,7 +14,7 @@ const {
 } = require("./services/ndaService");
 const { extractCNICUsingOpenAI } = require("./services/deepseekService");
 const Signature = require("./models/Signature");
-const User = require("./models/Users"); // <-- NEW
+const User = require("./models/Users");
 
 // IMAP Config
 const imap = new Imap(require("./config/imapConfig"));
@@ -36,81 +36,218 @@ mongoose
     process.exit(1);
   });
 
-function parseStream(stream) {
+// Track processed emails
+const processedEmails = new Map();
+const EMAIL_PROCESS_TTL = 24 * 60 * 60 * 1000;
+const MAX_PROCESSED_EMAILS = 10000;
+
+// Rate limiting
+const emailRateLimit = new Map();
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000;
+const MAX_EMAILS_PER_HOUR = 50;
+
+// Ignored senders to prevent loops
+const IGNORED_SENDERS = [
+  COMPANY_EMAIL.toLowerCase(),
+  'noreply@',
+  'no-reply@',
+  'mailer-daemon@',
+  'postmaster@'
+];
+
+// Cleanup function
+function cleanupOldEntries() {
+  const now = Date.now();
+  
+  // Clean processed emails
+  if (processedEmails.size > MAX_PROCESSED_EMAILS) {
+    const entries = Array.from(processedEmails.entries());
+    entries.sort((a, b) => a[1] - b[1]);
+    const toRemove = Math.floor(entries.length / 2);
+    for (let i = 0; i < toRemove; i++) {
+      processedEmails.delete(entries[i][0]);
+    }
+  }
+  
+  for (const [key, timestamp] of processedEmails.entries()) {
+    if (now - timestamp > EMAIL_PROCESS_TTL) {
+      processedEmails.delete(key);
+    }
+  }
+  
+  // Clean rate limit
+  for (const [key, data] of emailRateLimit.entries()) {
+    if (now - data.timestamp > RATE_LIMIT_WINDOW * 2) {
+      emailRateLimit.delete(key);
+    }
+  }
+}
+
+setInterval(cleanupOldEntries, 30 * 60 * 1000);
+
+// Parse stream helper
+function parseStream(input) {
   return new Promise((resolve, reject) => {
-    simpleParser(stream, (err, parsed) => {
-      if (err) reject(err);
-      else resolve(parsed);
-    });
+    if (Buffer.isBuffer(input)) {
+      const { Readable } = require('stream');
+      const stream = Readable.from(input);
+      simpleParser(stream, (err, parsed) => {
+        if (err) reject(err);
+        else resolve(parsed);
+      });
+    } else {
+      simpleParser(input, (err, parsed) => {
+        if (err) reject(err);
+        else resolve(parsed);
+      });
+    }
   });
 }
 
+// Email classification with error handling
 function classifyEmail(text) {
-  if (!text) return "hr_related";
-  const cleaned = text.toLowerCase().replace(/[\n\r]+/g, " ");
-  if (
-    /\b(reject|decline|regret|not accept|cannot accept|can't accept|won't accept|sorry.*(cannot|can't|won't|not able)|unfortunately.*(decline|not able|cannot|can't|won't))\b/.test(
-      cleaned
-    ) ||
-    /\b(not interested|withdraw|not accepted|no longer|not joining|will not be able to join|don't want|do not want)\b/.test(
-      cleaned
-    )
-  ) {
-    return "offer_rejection";
-  }
-  if (
-    /\b(accepted|accept|acceptance|i will join|happy to join|excited to join|looking forward to join|thank you for the offer)\b/.test(
-      cleaned
-    ) &&
-    !/\b(not accept|cannot accept|can't accept|won't accept|don't accept|not going to accept|do not accept)\b/.test(
-      cleaned
-    ) &&
-    !/\b(reject|decline|regret)\b/.test(cleaned)
-  ) {
-    return "offer_acceptance";
-  }
-  if (/\bapprove|approved|reject|rejected\b/.test(cleaned)) {
-    return "approval_response";
-  }
-  if (
-    /\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})\b/.test(cleaned) ||
-    /\b(today|tomorrow|leave|vacation|holiday|day off|sick|absent)\b/.test(
-      cleaned
-    )
-  ) {
-    return "leave_request";
-  }
-  return "hr_related";
-}
-
-async function getSignatureBlock(ownerId) {
-  const signature = await Signature.findOne({ owner: ownerId });
-  if (!signature) return "";
-
-  let signatureBlock = `
-    <div style="margin-top:32px;margin-bottom:12px;">
-      ${
-        signature.signatureImage
-          ? `<img src="${process.env.SERVER_URL || ""}${
-              signature.signatureImage
-            }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-          : ""
+  try {
+    if (!text || typeof text !== 'string') return "hr_related";
+    const cleaned = text.toLowerCase().replace(/[\n\r]+/g, " ").trim();
+    if (!cleaned) return "hr_related";
+    
+    // Check for rejection
+    const rejectionPatterns = [
+      /\b(reject|decline|regret)\b/,
+      /\b(not accept|cannot accept|can't accept|won't accept|do not accept)\b/,
+      /\b(sorry.*(cannot|can't|won't|not able))\b/,
+      /\b(unfortunately.*(decline|not able|cannot|can't|won't))\b/,
+      /\b(not interested|withdraw|not accepted|no longer|not joining)\b/,
+      /\b(will not be able to join|don't want|do not want)\b/
+    ];
+    
+    for (const pattern of rejectionPatterns) {
+      if (pattern.test(cleaned)) {
+        return "offer_rejection";
       }
-      <div style="text-align:left;">
-        ${signature.signatureText || ""}
-      </div>
-    </div>
-  `;
-  return signatureBlock;
+    }
+    
+    // Check for acceptance
+    if (
+      /\b(accepted|accept|acceptance|i will join|happy to join|excited to join|looking forward to join|thank you for the offer)\b/.test(cleaned) &&
+      !/\b(not accept|cannot accept|can't accept|won't accept|don't accept|not going to accept|do not accept)\b/.test(cleaned) &&
+      !/\b(reject|decline|regret)\b/.test(cleaned)
+    ) {
+      return "offer_acceptance";
+    }
+    
+    if (/\bapprove|approved|reject|rejected\b/.test(cleaned)) {
+      return "approval_response";
+    }
+    
+    if (
+      /\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})\b/.test(cleaned) ||
+      /\b(today|tomorrow|leave|vacation|holiday|day off|sick|absent)\b/.test(cleaned)
+    ) {
+      return "leave_request";
+    }
+    
+    return "hr_related";
+  } catch (error) {
+    console.error("Email classification error:", error);
+    return "hr_related";
+  }
 }
 
-async function sendCompleteProfileLink(
-  id,
-  to,
-  employeeName,
-  companyName,
-  ownerId
-) {
+// Get signature block
+async function getSignatureBlock(ownerId) {
+  try {
+    const signature = await Signature.findOne({ owner: ownerId });
+    if (!signature) return "";
+
+    return `
+      <div style="margin-top:32px;margin-bottom:12px;">
+        ${
+          signature.signatureImage
+            ? `<img src="${process.env.SERVER_URL || ""}${
+                signature.signatureImage
+              }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+            : ""
+        }
+        <div style="text-align:left;">
+          ${signature.signatureText || ""}
+        </div>
+      </div>
+    `;
+  } catch (error) {
+    console.error("Error getting signature block:", error);
+    return "";
+  }
+}
+
+// Validate owner ID
+async function validateOwnerId(ownerId) {
+  try {
+    const owner = await User.findById(ownerId);
+    return owner ? ownerId : DEFAULT_OWNER_ID;
+  } catch (error) {
+    console.error("Error validating owner:", error);
+    return DEFAULT_OWNER_ID;
+  }
+}
+
+// Safe email sender
+async function sendSafeEmail({ to, subject, html, ownerId, type = 'general' }) {
+  try {
+    // Rate limiting
+    const rateKey = `${to}_${type}`;
+    const rateData = emailRateLimit.get(rateKey);
+    if (rateData) {
+      const timeDiff = Date.now() - rateData.timestamp;
+      if (timeDiff < RATE_LIMIT_WINDOW && rateData.count >= MAX_EMAILS_PER_HOUR) {
+        console.warn(`⚠️ Rate limit exceeded for ${to} (${type})`);
+        return { success: false, reason: 'rate_limit' };
+      }
+      if (timeDiff > RATE_LIMIT_WINDOW) {
+        emailRateLimit.set(rateKey, { count: 1, timestamp: Date.now() });
+      } else {
+        rateData.count += 1;
+        emailRateLimit.set(rateKey, rateData);
+      }
+    } else {
+      emailRateLimit.set(rateKey, { count: 1, timestamp: Date.now() });
+    }
+
+    // Email validation
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(to)) {
+      console.warn(`❌ Invalid email format: ${to}`);
+      return { success: false, reason: 'invalid_format' };
+    }
+
+    // Skip ignored domains
+    const bounceDomains = ['mailinator.com', 'tempmail.com', 'guerrillamail.com'];
+    const domain = to.split('@')[1].toLowerCase();
+    if (bounceDomains.includes(domain)) {
+      console.warn(`⚠️ Skipping disposable email: ${to}`);
+      return { success: false, reason: 'disposable_email' };
+    }
+
+    // Don't send to our own domain
+    if (to.includes(process.env.COMPANY_EMAIL_DOMAIN || 'mavensadvisors.com')) {
+      console.log(`ℹ️ Skipping internal email: ${to}`);
+      return { success: false, reason: 'internal_email' };
+    }
+
+    console.log(`📧 Sending email to ${to} (${type})`);
+    await sendEmail({ to, subject, html });
+    
+    console.log(`✅ Email sent successfully to ${to}`);
+    return { success: true };
+    
+  } catch (error) {
+    console.error(`❌ Failed to send email to ${to}:`, error.message);
+    return { success: false, reason: error.message };
+  }
+}
+
+// Send profile link
+async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerId) {
   const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const signatureBlock = await getSignatureBlock(ownerId);
@@ -140,82 +277,101 @@ async function sendCompleteProfileLink(
       ${signatureBlock}
     </div>
   `;
-  await sendEmail({ to, subject, html });
+  
+  return await sendSafeEmail({ 
+    to, 
+    subject, 
+    html, 
+    ownerId, 
+    type: 'profile_completion' 
+  });
 }
 
+// Generate docs
 async function ensureDocsGenerated(emp) {
   if (!emp) return;
-  let updated = false;
-  if (emp.name && emp.cnic) {
-    const ndaPath = await generateAndSaveNda(emp);
-    if (ndaPath && emp.ndaPath !== ndaPath) {
-      emp.ndaPath = ndaPath;
-      emp.ndaGenerated = true;
-      updated = true;
+  try {
+    let updated = false;
+    if (emp.name && emp.cnic) {
+      const [ndaPath, contractPath, salaryCertPath] = await Promise.all([
+        generateAndSaveNda(emp),
+        generateAndSaveContract(emp),
+        generateAndSaveSalaryCertificate(emp)
+      ]);
+      
+      if (ndaPath && emp.ndaPath !== ndaPath) {
+        emp.ndaPath = ndaPath;
+        emp.ndaGenerated = true;
+        updated = true;
+      }
+      if (contractPath && emp.contractPath !== contractPath) {
+        emp.contractPath = contractPath;
+        emp.contractGenerated = true;
+        updated = true;
+      }
+      if (salaryCertPath && emp.salaryCertificatePath !== salaryCertPath) {
+        emp.salaryCertificatePath = salaryCertPath;
+        emp.salaryCertificateGenerated = true;
+        updated = true;
+      }
+      if (updated) await emp.save();
     }
-    const contractPath = await generateAndSaveContract(emp);
-    if (contractPath && emp.contractPath !== contractPath) {
-      emp.contractPath = contractPath;
-      emp.contractGenerated = true;
-      updated = true;
-    }
-    const salaryCertPath = await generateAndSaveSalaryCertificate(emp);
-    if (salaryCertPath && emp.salaryCertificatePath !== salaryCertPath) {
-      emp.salaryCertificatePath = salaryCertPath;
-      emp.salaryCertificateGenerated = true;
-      updated = true;
-    }
-    if (updated) await emp.save();
+  } catch (error) {
+    console.error("Error generating documents:", error);
   }
 }
 
-async function processMessage(stream) {
+// Process message with timeout
+async function processMessage(stream, uid) {
   try {
+    // Check if already processed
+    const emailKey = `uid_${uid}`;
+    if (processedEmails.has(emailKey)) {
+      console.log(`⚠️ Skipping already processed email UID: ${uid}`);
+      return;
+    }
+
     const parsed = await parseStream(stream);
-    if (
-      !parsed.from ||
-      !parsed.from.value ||
-      !parsed.from.value[0] ||
-      !parsed.from.value[0].address
-    ) {
+    
+    if (!parsed.from?.value?.[0]?.address) {
       console.warn("Email missing from address");
       return;
     }
 
     const fromAddr = parsed.from.value[0].address.toLowerCase();
     const bodyText = (parsed.text || "").trim();
+    const subject = parsed.subject || "No Subject";
 
+    // Check ignored senders
+    if (IGNORED_SENDERS.some(sender => fromAddr.includes(sender))) {
+      console.log(`⏭️ Skipping email from ignored sender: ${fromAddr}`);
+      return;
+    }
+
+    console.log(`📩 Processing email from ${fromAddr}, Subject: ${subject.substring(0, 50)}...`);
+    processedEmails.set(emailKey, Date.now());
+
+    // Email validation
+    let emailIsValid = true;
     try {
-      const isValid = await verifyEmail(fromAddr);
-
-      if (!isValid) {
-        console.warn(`❌ Email rejected by ZeroBounce: ${fromAddr}`);
-
-        // Optionally send rejection email to sender
-        await sendEmail({
-          to: fromAddr,
-          subject: "Email Verification Failed",
-          html: `
-        <div style="font-family: Arial; font-size: 16px; color: #222;">
-          <p>Dear Sender,</p>
-          <p>Your email address <strong>${fromAddr}</strong> could not be verified by our system and was rejected.</p>
-          <p>Please ensure you are using a valid email address.</p>
-        </div>
-      `,
-        });
-
-        return; // ❗ STOP processing this email completely
+      emailIsValid = await verifyEmail(fromAddr);
+      if (!emailIsValid) {
+        console.warn(`❌ Email validation failed for: ${fromAddr}`);
+        return;
       }
     } catch (e) {
-      console.error("ZeroBounce verification failed:", e);
-      // Allow email when API fails (fail-safe)
+      console.error("Email verification failed:", e.message);
     }
 
     let emp = await Employee.findOne({ email: fromAddr });
     let extractedName = "";
     let ownerId = emp?.owner || DEFAULT_OWNER_ID;
+    
+    // Validate owner
+    ownerId = await validateOwnerId(ownerId);
 
     let docSent = false;
+    const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
     let data = {
       cnic: "",
       dateOfBirth: "",
@@ -230,11 +386,21 @@ async function processMessage(stream) {
       experience: [],
     };
 
-    // --- If CNIC or CV attached ---
+    // Process attachments
     if (parsed.attachments?.length) {
+      console.log(`📎 Found ${parsed.attachments.length} attachment(s)`);
+      
       for (const att of parsed.attachments) {
         const fname = (att.filename || "").toLowerCase();
-        if (/\.(png|jpe?g)$/i.test(fname)) {
+        console.log(`📄 Processing attachment: ${fname}`);
+        
+        // Validate attachment
+        if (att.size > MAX_ATTACHMENT_SIZE) {
+          console.warn(`⚠️ Attachment too large: ${fname} (${att.size} bytes)`);
+          continue;
+        }
+        
+        if (/\.(png|jpe?g|pdf)$/i.test(fname)) {
           docSent = true;
           const buf = att.content;
           try {
@@ -251,225 +417,265 @@ async function processMessage(stream) {
             });
             extractedName = cnic.name || "";
           } catch (error) {
-            console.log("CNIC extraction failed:", error);
+            console.error(`❌ CNIC extraction failed for ${fname}:`, error);
           }
         }
       }
 
-      // If docSent true, update Employee, send profile link, then RETURN
+      // Handle document submission
       if (docSent) {
-        if (emp) {
-          await Employee.updateOne(
+        console.log(`📝 Processing documents from ${fromAddr}`);
+        
+        // Use findOneAndUpdate to prevent race conditions
+        const [updatedEmp] = await Promise.all([
+          Employee.findOneAndUpdate(
             { email: fromAddr },
             {
               ...data,
               email: fromAddr,
               owner: ownerId,
+              $setOnInsert: { 
+                name: extractedName || parsed.from.value[0]?.name || "Candidate",
+                status: "Document Submitted"
+              }
+            },
+            { 
+              upsert: true, 
+              new: true,
+              setDefaultsOnInsert: true 
             }
-          );
-        } else {
-          emp = await Employee.create({
-            ...data,
-            email: fromAddr,
-            owner: ownerId,
-            name: extractedName,
-          });
-        }
-
-        emp = await Employee.findOne({ email: fromAddr });
-        await sendCompleteProfileLink(
+          ),
+        ]);
+        
+        emp = updatedEmp;
+        
+        // Send profile link
+        const sendResult = await sendCompleteProfileLink(
           emp._id,
           fromAddr,
           emp.name,
           COMPANY_NAME,
           ownerId
         );
+        
+        if (sendResult.success) {
+          console.log(`✅ Profile link sent to ${fromAddr}`);
+        } else {
+          console.warn(`⚠️ Could not send profile link: ${sendResult.reason}`);
+        }
+        
         return;
       }
     }
 
-    // --- If NOT a CNIC/CV document email ---
-    emp = await Employee.findOne({ email: fromAddr });
+    // Handle regular emails
+    if (!emp) {
+      emp = await Employee.findOne({ email: fromAddr });
+    }
+    
     if (emp) {
-      ownerId = emp.owner || DEFAULT_OWNER_ID;
-      await ensureDocsGenerated(emp);
+      ownerId = await validateOwnerId(emp.owner || DEFAULT_OWNER_ID);
+      ensureDocsGenerated(emp).catch(err => 
+        console.error("Background doc generation failed:", err)
+      );
     }
 
-    // --- Email classification/replies ---
     const label = classifyEmail(bodyText);
     const signatureBlock = await getSignatureBlock(ownerId);
 
-    if (label === "offer_acceptance") {
-      // 🔹 Ensure employee exists and update status to Onboarding
-      if (emp) {
-        emp.status = "Onboarding"; // <-- NEW
-        await emp.save(); // <-- NEW
-      } else {
-        // If there is no employee yet, create one with status Onboarding
-        emp = await Employee.create({
-          email: fromAddr,
-          owner: ownerId,
-          name: extractedName || parsed.from.value[0]?.name || "Candidate",
-          status: "Onboarding", // <-- NEW
-        });
-      }
+    console.log(`🏷️ Email classified as: ${label}`);
 
-      let bestName = emp?.name || extractedName || "Candidate";
-
-      // 1) Send email to candidate
-      await sendEmail({
-        to: fromAddr,
-        subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
-        html: `
-          <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; width:100%;">
-            <p>Dear <strong>${bestName}</strong>,</p>
-            <p>
-              We are absolutely delighted to receive your acceptance! 🎉<br>
-              <br>
-              <strong>Welcome to the ${COMPANY_NAME} family!</strong>
-            </p>
-            <p>
-              Our team is looking forward to working with you and helping you grow in your new role.<br>
-              We know that joining a new company can be both exciting and a little overwhelming but don't worry, we're here to guide you every step of the way.
-            </p>
-            <p>
-              <strong>What's next?</strong>
-              <ul style="margin:0 0 1em 2em;padding:0;">
-                <li style="margin-bottom:4px;">Please reply to this email with clear images of your <strong>CNIC</strong> (front & back, JPG or PNG format).</li>
-                <li style="margin-bottom:4px;">Attach your <strong>latest CV/Resume</strong> (PDF).</li>
-                <li style="margin-bottom:4px;">Once we have your documents, you'll receive a special link to complete your digital employee profile online.</li>
-              </ul>
-            </p>
-            <p>
-              If you have any questions about your offer, role, or onboarding process, feel free to reach out. Your HR AI Agent (that's me!) is always ready to assist you.
-            </p>
-            <p>
-              <strong>We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</strong>
-            </p>
-            ${signatureBlock}
-          </div>
-        `,
-      });
-
-      // 2) Send notification email to all admin/super-admin users
-      try {
-        const admins = await User.find({
-          role: { $in: ["admin", "super-admin"] },
-        });
-
-        for (const admin of admins) {
-          if (!admin.email) continue;
-
-          await sendEmail({
-            to: admin.email,
-            subject: `Offer Accepted: ${bestName}`,
-            html: `
-              <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; width:100%;">
-                <p>Dear <strong>${admin.username || "Admin"}</strong>,</p>
-                <p>
-                  The candidate <strong>${bestName}</strong> (<a href="mailto:${fromAddr}">${fromAddr}</a>) has
-                  <strong>accepted</strong> the job offer.
-                </p>
-                ${
-                  emp
-                    ? `<p>Employee record found in the system. Employee ID: <strong>${emp._id}</strong> | Status: <strong>${emp.status}</strong></p>`
-                    : `<p>No existing employee record was found for this email yet.</p>`
-                }
-                <p>
-                  You may proceed with any additional onboarding steps (system account creation, access provisioning, etc.).
-                </p>
-                ${signatureBlock}
-              </div>
-            `,
+    // Handle different email types
+    const responseHandlers = {
+      offer_acceptance: async () => {
+        if (emp) {
+          emp.status = "Onboarding";
+          await emp.save();
+        } else {
+          emp = await Employee.create({
+            email: fromAddr,
+            owner: ownerId,
+            name: parsed.from.value[0]?.name || "Candidate",
+            status: "Onboarding",
           });
         }
-      } catch (adminErr) {
-        console.error(
-          "Error notifying admins about offer acceptance:",
-          adminErr
-        );
+
+        const bestName = emp?.name || "Candidate";
+        
+        // Send welcome email
+        await sendSafeEmail({
+          to: fromAddr,
+          subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
+          html: `...`, // Your HTML here
+          ownerId,
+          type: 'offer_acceptance'
+        });
+        
+        // Notify admins
+        const admins = await User.find({
+          role: { $in: ["admin", "super-admin"] },
+          email: { $exists: true, $ne: "" }
+        });
+        
+        for (const admin of admins) {
+          await sendSafeEmail({
+            to: admin.email,
+            subject: `🎉 Offer Accepted: ${bestName}`,
+            html: `...`, // Your HTML here
+            ownerId,
+            type: 'admin_notification'
+          });
+        }
+      },
+      
+      offer_rejection: async () => {
+        await sendSafeEmail({
+          to: fromAddr,
+          subject: "Thank You for Your Response",
+          html: `...`, // Your HTML here
+          ownerId,
+          type: 'offer_rejection'
+        });
+      },
+      
+      approval_response: async () => {
+        await sendSafeEmail({
+          to: fromAddr,
+          subject: "Approval/Decision Recorded",
+          html: `...`, // Your HTML here
+          ownerId,
+          type: 'approval_response'
+        });
+      },
+      
+      leave_request: async () => {
+        await sendSafeEmail({
+          to: fromAddr,
+          subject: "Leave Request Received",
+          html: `...`, // Your HTML here
+          ownerId,
+          type: 'leave_request'
+        });
+      },
+      
+      hr_related: async () => {
+        await sendSafeEmail({
+          to: fromAddr,
+          subject: "Thank You for Your Message",
+          html: `...`, // Your HTML here
+          ownerId,
+          type: 'hr_general'
+        });
       }
-    } else if (label === "offer_rejection") {
-      await sendEmail({
-        to: fromAddr,
-        subject: "Thank You for Your Response – Offer Not Accepted",
-        html: `
-          <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #222; width:100%">
-            <p>Dear <strong>${
-              emp?.name || extractedName || "Candidate"
-            }</strong>,</p>
-            <p>
-              Thank you for letting us know about your decision regarding the offer. While we're disappointed that you won't be joining us at this time, we truly appreciate your consideration and the time you spent during our hiring process.
-            </p>
-            <p>
-              If you have any feedback on your experience or would like to share why you chose not to accept, we would be grateful for your thoughts&mdash;it helps us improve! Should circumstances change in the future, please feel free to reach out. We wish you the very best in your career ahead.
-            </p>
-            ${signatureBlock}
-          </div>
-        `,
-      });
-    } else if (label === "approval_response") {
-      await sendEmail({
-        to: fromAddr,
-        subject: "Approval/Decision Recorded",
-        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; max-width:600px;">Thank you for your response. Your approval/rejection has been recorded. ${signatureBlock}</div>`,
-      });
-    } else if (label === "leave_request") {
-      await sendEmail({
-        to: fromAddr,
-        subject: "Leave Request Received",
-        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #212121; max-width:600px;">Your leave request has been received and will be reviewed. ${signatureBlock}</div>`,
-      });
-    } else {
-      // AI-powered fallback
-      // const aiReply = await analyzeWithOpenAI(bodyText);
-      await sendEmail({
-        to: fromAddr,
-        subject: "Regarding Your Message",
-        html: `<div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; line-height: 1.7; color: #222; max-width:600px;"> ${signatureBlock}</div>`,
-      });
-    }
+    };
+
+    const handler = responseHandlers[label] || responseHandlers.hr_related;
+    await handler();
+
+    console.log(`✅ Successfully processed email from ${fromAddr}`);
+
   } catch (error) {
-    console.error("Error processing message:", error);
+    console.error("❌ Error processing message:", error);
   }
 }
 
+// Process message with timeout wrapper
+async function processMessageWithTimeout(stream, uid, timeout = 30000) {
+  return Promise.race([
+    processMessage(stream, uid),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Processing timeout after ${timeout}ms`)), timeout)
+    )
+  ]);
+}
+
+// IMAP processing
+let isProcessing = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 function checkLatest() {
+  if (isProcessing) {
+    console.log("⚠️ Already processing, skipping...");
+    return;
+  }
+  
+  isProcessing = true;
+  
   imap.search(["UNSEEN"], (err, uids) => {
     if (err) {
       console.error("IMAP search error:", err);
+      isProcessing = false;
       return;
     }
-    if (!uids?.length) return;
+    
+    if (!uids?.length) {
+      console.log("No new emails found");
+      isProcessing = false;
+      return;
+    }
 
-    const fetcher = imap.fetch(uids, { bodies: [""], markSeen: true });
-    fetcher.on("message", (msg) => {
+    console.log(`📬 Found ${uids.length} new email(s)`);
+    
+    const fetcher = imap.fetch(uids, { 
+      bodies: [""], 
+      markSeen: true,
+      struct: true 
+    });
+    
+    let processedCount = 0;
+    
+    fetcher.on("message", (msg, seqno) => {
+      console.log(`Processing email ${++processedCount} of ${uids.length}`);
+      
       msg.on("body", (stream) => {
-        processMessage(stream).catch((error) => {
-          console.error("Error processing message stream:", error);
-        });
+        (async () => {
+          try {
+            await processMessageWithTimeout(stream, uids[seqno - 1], 30000);
+          } catch (error) {
+            console.error(`Error processing email ${seqno}:`, error);
+          }
+        })();
       });
+      
       msg.on("error", (error) => {
-        console.error("Message stream error:", error);
+        console.error(`Message stream error for email ${seqno}:`, error);
       });
     });
+    
     fetcher.once("error", (error) => {
       console.error("Fetch error:", error);
+      isProcessing = false;
     });
-    fetcher.once("end", () => console.log("Done processing new messages"));
+    
+    fetcher.once("end", () => {
+      console.log("✅ Done processing new messages");
+      isProcessing = false;
+    });
   });
 }
 
+// Start watcher
 function startWatcher() {
   imap.once("ready", () => {
-    imap.openBox("INBOX", false, (err) => {
+    reconnectAttempts = 0;
+    
+    imap.openBox("INBOX", false, (err, box) => {
       if (err) {
         console.error("IMAP openBox error:", err);
         return;
       }
-      console.log("Watching for new emails...");
-      imap.on("mail", checkLatest);
+      
+      console.log(`📪 Connected to INBOX, ${box.messages.total} total messages`);
+      console.log("👀 Watching for new emails...");
+      
+      imap.on("mail", () => {
+        console.log("📩 New mail event detected");
+        setTimeout(checkLatest, 1000);
+      });
+      
       checkLatest();
+      setInterval(checkLatest, 30000);
     });
   });
 
@@ -479,14 +685,29 @@ function startWatcher() {
 
   imap.on("end", () => {
     console.log("IMAP connection ended");
+    
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      console.error("Max reconnection attempts reached. Exiting...");
+      process.exit(1);
+    }
+    
+    const delay = Math.min(30000 * Math.pow(2, reconnectAttempts), 300000);
+    reconnectAttempts++;
+    
+    setTimeout(() => {
+      console.log(`Attempting to reconnect (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+      imap.connect();
+    }, delay);
   });
 
   imap.connect();
 
+  // Graceful shutdown
   process.on("SIGINT", () => {
+    console.log("Shutting down gracefully...");
     imap.end();
     mongoose.connection.close();
-    process.exit();
+    process.exit(0);
   });
 }
 

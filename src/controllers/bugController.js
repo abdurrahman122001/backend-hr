@@ -119,7 +119,7 @@ exports.getBugs = async (req, res) => {
     let bugs;
 
     // R&D can see all bugs, others only see their own
-    if (emp.department === "Research & Development") {
+    if (emp.department === "Research & Development" || emp.department === "Research and Development") {
       bugs = await Bug.find()
         .populate("reportedBy", "name companyEmail department")
         .sort({ createdAt: -1 });
@@ -165,7 +165,7 @@ exports.getBugById = async (req, res) => {
     // Check if user has permission to view this bug
     const emp = await Employee.findById(req.employee._id).select("department");
     if (
-      emp.department !== "Research and Development" &&
+      emp.department !== "Research and Development" || emp.department !== "Research & Development" &&
       bug.reportedBy._id.toString() !== req.employee._id.toString()
     ) {
       return res.status(403).json({

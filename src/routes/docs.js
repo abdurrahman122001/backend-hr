@@ -2,6 +2,8 @@ const express = require("express");
 const router = express.Router();
 const puppeteer = require("puppeteer");
 const { PDFDocument } = require("pdf-lib");
+const path = require("path");
+const fs = require("fs");
 
 const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries");
@@ -21,6 +23,72 @@ const TYPE_ALIASES = {
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
+
+// Ensure uploads directory exists
+const UPLOAD_DIR = path.join(process.cwd(), "uploads");
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+// Ensure documents subdirectory exists
+const DOCUMENTS_DIR = path.join(UPLOAD_DIR, "documents");
+if (!fs.existsSync(DOCUMENTS_DIR)) {
+  fs.mkdirSync(DOCUMENTS_DIR, { recursive: true });
+}
+
+// Function to save document to uploads folder
+const saveDocumentToFile = async (
+  pdfBuffer,
+  employeeId,
+  docType,
+  ownerId,
+  referenceNumber
+) => {
+  try {
+    // Create owner-specific directory
+    const ownerDir = path.join(DOCUMENTS_DIR, String(ownerId));
+    if (!fs.existsSync(ownerDir)) {
+      fs.mkdirSync(ownerDir, { recursive: true });
+    }
+
+    // Create document type directory
+    const typeDir = path.join(ownerDir, docType);
+    if (!fs.existsSync(typeDir)) {
+      fs.mkdirSync(typeDir, { recursive: true });
+    }
+
+    // Generate filename
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const safeEmployeeId = String(employeeId).replace(/[^a-zA-Z0-9]/g, "_");
+    const safeReference = (referenceNumber || "").replace(
+      /[^a-zA-Z0-9-_]/g,
+      "_"
+    );
+
+    const filename = `${safeReference || timestamp}_${safeEmployeeId}.pdf`;
+    const filepath = path.join(typeDir, filename);
+
+    // Save the file
+    await fs.promises.writeFile(filepath, pdfBuffer);
+
+    // Return the relative path for database storage
+    const relativePath = path.relative(process.cwd(), filepath);
+
+    return {
+      success: true,
+      filepath: relativePath,
+      filename: filename,
+      fullPath: filepath,
+      url: `/uploads/documents/${ownerId}/${docType}/${filename}`,
+    };
+  } catch (error) {
+    console.error("Error saving document to file:", error);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+};
 
 // Middleware to extract owner ID from request
 const extractOwnerId = (req, res, next) => {
@@ -1007,8 +1075,105 @@ async function generateDocumentPDF(
     await browser.close();
   }
 }
+
 /* ──────────────────────────────────────────────────────────────────────────────
-   BULK DOCUMENT DOWNLOAD API
+   PDF ENDPOINTS FOR ALL DOCUMENT TYPES WITH FILE SAVING
+────────────────────────────────────────────────────────────────────────────── */
+
+// Helper function to handle document generation and saving
+const generateAndSaveDocument = async (req, res, docType) => {
+  try {
+    const { employeeId } = req.params;
+    const templateId = String(req.query.templateId || "");
+    const { key } = req.body || {};
+
+    // Generate the PDF
+    const pdfBuffer = await generateDocumentPDF(
+      employeeId,
+      docType,
+      templateId,
+      req.ownerId
+    );
+
+    // Get reference number for saving
+    const normalizedDocType = normType(docType);
+    const referenceNumber = await generateReferenceNumber(
+      normalizedDocType,
+      req.ownerId
+    );
+
+    // Save to file system
+    const saveResult = await saveDocumentToFile(
+      pdfBuffer,
+      employeeId,
+      normalizedDocType,
+      req.ownerId,
+      referenceNumber
+    );
+
+    if (!saveResult.success) {
+      console.error("Failed to save document:", saveResult.error);
+      // Still send the PDF even if saving fails
+    } else {
+      console.log(`Document saved to: ${saveResult.filepath}`);
+      console.log(`Document URL: ${saveResult.url}`);
+
+      // TODO: Optionally save document info to database
+      // You could create a DocumentLog model to track generated documents
+    }
+
+    // Set response headers
+    const docTypeName = getDocTypeName(normalizedDocType);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${docTypeName}_${referenceNumber}.pdf"`
+    );
+
+    // Send the PDF
+    res.status(200).end(pdfBuffer);
+  } catch (err) {
+    console.error(`${docType} pdf error:`, err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        message: err.message || `Failed to generate ${docType} PDF`,
+      });
+    }
+  }
+};
+
+// Experience Letter
+router.get("/experience-letter/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "experience_letter");
+});
+
+// NDA
+router.get("/nda/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "nda");
+});
+
+// Salary Certificate
+router.get("/salary-certificate/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "salary_certificate");
+});
+
+// Salary Certificate (POST)
+router.post("/salary-certificate/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "salary_certificate");
+});
+
+// Contract (POST)
+router.post("/contract/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "contract");
+});
+
+// Contract (GET)
+router.get("/contract/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "contract");
+});
+
+/* ──────────────────────────────────────────────────────────────────────────────
+   BULK DOCUMENT DOWNLOAD API WITH FILE SAVING
 ────────────────────────────────────────────────────────────────────────────── */
 
 // Bulk document download - combines multiple employee documents into one PDF
@@ -1175,17 +1340,20 @@ router.post("/bulk/:docType", async (req, res) => {
 
     try {
       const mergedPdf = await PDFDocument.create();
+      const allReferenceNumbers = [];
 
       // Process each employee with sequential reference numbers
       for (let i = 0; i < employees.length; i++) {
         const emp = employees[i];
         const sequenceNumber = startSequence + i;
         const sequenceStr = String(sequenceNumber).padStart(2, "0");
+        const referenceNumber = `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
+        allReferenceNumbers.push(referenceNumber);
 
         console.log(
           `Processing employee ${i + 1}/${employees.length}: ${
             emp.name
-          } (Reference: MA${sequenceStr})`
+          } (Reference: ${referenceNumber})`
         );
 
         // Create custom tokens for this employee with proper reference number
@@ -1197,9 +1365,7 @@ router.post("/bulk/:docType", async (req, res) => {
         );
 
         // Override the reference number with sequential one
-        tokens[
-          "doc.referenceNo"
-        ] = `MA${sequenceStr}-${docCode}-${currentDateDDMMYYYY}`;
+        tokens["doc.referenceNo"] = referenceNumber;
         tokens["doc.nextReferenceNo"] = `MA${String(
           sequenceNumber + 1
         ).padStart(2, "0")}-${docCode}-${currentDateDDMMYYYY}`;
@@ -1234,10 +1400,46 @@ router.post("/bulk/:docType", async (req, res) => {
           mergedPdf.addPage(copiedPage);
           await p.close();
         }
+
+        // Save individual document for each employee
+        const individualPdf = await generateDocumentPDF(
+          emp._id,
+          normalizedDocType,
+          tpl._id,
+          req.ownerId
+        );
+
+        const saveResult = await saveDocumentToFile(
+          individualPdf,
+          emp._id,
+          normalizedDocType,
+          req.ownerId,
+          referenceNumber
+        );
+
+        if (saveResult.success) {
+          console.log(
+            `Individual document saved for ${emp.name}: ${saveResult.filepath}`
+          );
+        }
       }
 
       const mergedPdfBytes = await mergedPdf.save();
       const pdfBuffer = Buffer.from(mergedPdfBytes);
+
+      // Save bulk document as well
+      const bulkReference = `BULK_${docCode}_${currentDateDDMMYYYY}`;
+      const bulkSaveResult = await saveDocumentToFile(
+        pdfBuffer,
+        "bulk",
+        normalizedDocType,
+        req.ownerId,
+        bulkReference
+      );
+
+      if (bulkSaveResult.success) {
+        console.log(`Bulk document saved: ${bulkSaveResult.filepath}`);
+      }
 
       // Set response headers
       res.setHeader("Content-Type", "application/pdf");
@@ -1275,176 +1477,9 @@ router.post("/bulk/:docType", async (req, res) => {
   }
 });
 
-/* ──────────────────────────────────────────────────────────────────────────────
-   PDF ENDPOINTS FOR ALL DOCUMENT TYPES
-────────────────────────────────────────────────────────────────────────────── */
-
-// Experience Letter
-router.get("/experience-letter/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "experience_letter",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="ExperienceLetter.pdf"'
-    );
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("experience-letter pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// NDA
-router.get("/nda/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "nda",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="NDA.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("nda pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Salary Certificate
-router.get("/salary-certificate/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "salary_certificate",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="SalaryCertificate.pdf"'
-    );
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("salary-certificate pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Salary Certificate (POST)
-router.post("/salary-certificate/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const { key } = req.body || {};
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "salary_certificate",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="SalaryCertificate.pdf"'
-    );
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("salary-certificate pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// Contract (with optional decryption key support)
-router.post("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const { key } = req.body || {};
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "contract",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
-
-// GET for contract
-router.get("/contract/:employeeId", async (req, res) => {
-  try {
-    const { employeeId } = req.params;
-    const templateId = String(req.query.templateId || "");
-
-    const pdf = await generateDocumentPDF(
-      employeeId,
-      "contract",
-      templateId,
-      req.ownerId
-    );
-
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", 'attachment; filename="Contract.pdf"');
-    res.status(200).end(pdf);
-  } catch (err) {
-    console.error("contract pdf error:", err);
-    if (!res.headersSent) {
-      res
-        .status(500)
-        .json({ message: err.message || "Failed to generate PDF" });
-    }
-  }
-});
+/* ─────────────────────────────────────────────────────────────
+   ADDITIONAL ENDPOINTS (KEEPING ORIGINAL)
+──────────────────────────────────────────────────────────────── */
 
 // Preview reference number without incrementing
 router.get("/reference-preview/:docType", async (req, res) => {
@@ -1724,6 +1759,7 @@ router.post("/templates", async (req, res) => {
     res.status(500).json({ message: "Failed to create template" });
   }
 });
+
 router.put("/templates/:id", async (req, res) => {
   try {
     const { canvas, defaultValues, type, name, isGlobal } = req.body || {};
@@ -1812,6 +1848,119 @@ router.post("/templates/:id/duplicate", async (req, res) => {
   } catch (err) {
     console.error("Error duplicating template:", err);
     res.status(500).json({ message: "Failed to duplicate template" });
+  }
+});
+
+// List saved documents for an owner
+router.get("/saved-documents", async (req, res) => {
+  try {
+    const ownerDir = path.join(DOCUMENTS_DIR, String(req.ownerId));
+    if (!fs.existsSync(ownerDir)) {
+      return res.json({ documents: [] });
+    }
+
+    const documents = [];
+    const docTypes = fs.readdirSync(ownerDir);
+
+    for (const docType of docTypes) {
+      const typeDir = path.join(ownerDir, docType);
+      if (fs.statSync(typeDir).isDirectory()) {
+        const files = fs.readdirSync(typeDir);
+
+        for (const file of files) {
+          const filepath = path.join(typeDir, file);
+          const stats = fs.statSync(filepath);
+
+          documents.push({
+            filename: file,
+            docType: docType,
+            filepath: path.relative(process.cwd(), filepath),
+            url: `/uploads/documents/${req.ownerId}/${docType}/${file}`,
+            size: stats.size,
+            createdAt: stats.birthtime || stats.ctime,
+            modifiedAt: stats.mtime,
+          });
+        }
+      }
+    }
+
+    // Sort by creation date, newest first
+    documents.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.json({
+      ok: true,
+      documents,
+      count: documents.length,
+      ownerId: req.ownerId,
+    });
+  } catch (error) {
+    console.error("Error listing saved documents:", error);
+    res.status(500).json({ message: "Failed to list saved documents" });
+  }
+});
+
+// Get document by filename
+router.get("/document/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { docType } = req.query;
+
+    if (!docType) {
+      return res
+        .status(400)
+        .json({ message: "docType query parameter is required" });
+    }
+
+    const filepath = path.join(
+      DOCUMENTS_DIR,
+      String(req.ownerId),
+      docType,
+      filename
+    );
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    res.sendFile(filepath);
+  } catch (error) {
+    console.error("Error retrieving document:", error);
+    res.status(500).json({ message: "Failed to retrieve document" });
+  }
+});
+
+// Delete a saved document
+router.delete("/document/:filename", async (req, res) => {
+  try {
+    const { filename } = req.params;
+    const { docType } = req.query;
+
+    if (!docType) {
+      return res
+        .status(400)
+        .json({ message: "docType query parameter is required" });
+    }
+
+    const filepath = path.join(
+      DOCUMENTS_DIR,
+      String(req.ownerId),
+      docType,
+      filename
+    );
+
+    if (!fs.existsSync(filepath)) {
+      return res.status(404).json({ message: "Document not found" });
+    }
+
+    fs.unlinkSync(filepath);
+
+    res.json({
+      ok: true,
+      message: "Document deleted successfully",
+    });
+  } catch (error) {
+    console.error("Error deleting document:", error);
+    res.status(500).json({ message: "Failed to delete document" });
   }
 });
 
