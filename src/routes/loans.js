@@ -210,21 +210,17 @@ async function removeAllLoanCalculationsFromSlips(employeeId, ownerId) {
     await slip.save();
   }
 }
-
-// -----------------------------------------------------------------------------
-// Payment schedule recalculation when editing an installment
-// -----------------------------------------------------------------------------
+// Update the recalculatePaymentSchedule function to properly handle custom amounts
 async function recalculatePaymentSchedule(
   loan,
   updatedInstallmentIndex,
-  newTotalPayment
+  updateData
 ) {
-  if (typeof newTotalPayment !== "number" || newTotalPayment < 0) {
-    throw new Error("Invalid newTotalPayment value");
-  }
+  // Validate inputs
   if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) {
     throw new Error("Invalid payment schedule");
   }
+
   if (
     updatedInstallmentIndex < 0 ||
     updatedInstallmentIndex >= loan.paymentSchedule.length
@@ -233,59 +229,164 @@ async function recalculatePaymentSchedule(
   }
 
   const decryptedLoanAmount = Number(await decrypt(loan.loanAmount)) || 0;
+  const yearlyRate = Number(loan.markupValue) || 0;
+  const monthlyRate = yearlyRate / 100 / 12;
+  const markupType = loan.markupType || "reducing";
+
   let remainingPrincipal = decryptedLoanAmount;
   let totalMarkup = 0;
   const newSchedule = [];
 
-  for (let i = 0; i < loan.paymentSchedule.length; i++) {
+  // Copy and decrypt the existing schedule up to the updated row
+  for (let i = 0; i < updatedInstallmentIndex; i++) {
     const entry = loan.paymentSchedule[i];
 
-    let principal = Number(await decrypt(entry.principal)) || 0;
-    let markupAmount = Number(await decrypt(entry.markupAmount)) || 0;
-    let totalPayment = Number(await decrypt(entry.totalPayment)) || 0;
-    let outstanding = Number(await decrypt(entry.outstanding)) || 0;
+    const principal = Number(await decrypt(entry.principal)) || 0;
+    const markupAmount = Number(await decrypt(entry.markupAmount)) || 0;
+    const totalPayment = Number(await decrypt(entry.totalPayment)) || 0;
 
-    if (i < updatedInstallmentIndex) {
-      remainingPrincipal -= principal;
-      totalMarkup += markupAmount;
-      newSchedule.push({ ...entry });
-      continue;
+    remainingPrincipal -= principal;
+    totalMarkup += markupAmount;
+
+    // Keep the original entry but ensure it's properly formatted
+    newSchedule.push({ ...entry });
+  }
+
+  // Handle the updated row based on what was changed
+  const updatedEntry = loan.paymentSchedule[updatedInstallmentIndex];
+  let principal, markupAmount, totalPayment, outstanding;
+  let newMarkupPercentage = yearlyRate;
+
+  if (updateData.principal !== undefined) {
+    // Principal was edited
+    principal = Math.max(0, Number(updateData.principal) || 0);
+
+    if (markupType === "fixed") {
+      // For fixed interest, markup is constant
+      markupAmount = (decryptedLoanAmount * (yearlyRate / 100)) / 12;
+    } else if (markupType === "reducing" || markupType === "interestOnly") {
+      // For reducing/interestOnly, calculate interest on remaining balance
+      markupAmount = remainingPrincipal * monthlyRate;
+    } else if (markupType === "custom") {
+      // Custom - no interest
+      markupAmount = 0;
     }
 
-    if (i === updatedInstallmentIndex) {
-      principal = newTotalPayment - markupAmount;
-      if (principal < 0)
-        throw new Error("Total payment cannot be less than markup amount");
-      remainingPrincipal -= principal;
-      totalPayment = newTotalPayment;
-      outstanding = Math.max(0, remainingPrincipal);
-      totalMarkup += markupAmount;
+    totalPayment = principal + markupAmount;
+    remainingPrincipal -= principal;
+    outstanding = Math.max(0, remainingPrincipal);
+  } else if (updateData.markupPercentage !== undefined) {
+    // Interest percentage was edited for this specific row
+    newMarkupPercentage = Math.max(0, Number(updateData.markupPercentage) || 0);
+    const rowMonthlyRate = newMarkupPercentage / 100 / 12;
 
-      newSchedule.push({
-        ...entry,
-        principal: await encrypt(principal.toString()),
-        totalPayment: await encrypt(totalPayment.toString()),
-        outstanding: await encrypt(outstanding.toString()),
-      });
-      continue;
+    principal = Number(await decrypt(updatedEntry.principal)) || 0;
+    markupAmount = remainingPrincipal * rowMonthlyRate;
+    totalPayment = principal + markupAmount;
+    remainingPrincipal -= principal;
+    outstanding = Math.max(0, remainingPrincipal);
+  } else if (updateData.totalPayment !== undefined) {
+    // Total payment was edited
+    const newTotalPayment = Math.max(0, Number(updateData.totalPayment) || 0);
+
+    if (markupType === "fixed") {
+      markupAmount = (decryptedLoanAmount * (yearlyRate / 100)) / 12;
+      principal = Math.max(0, newTotalPayment - markupAmount);
+    } else if (markupType === "reducing" || markupType === "interestOnly") {
+      markupAmount = remainingPrincipal * monthlyRate;
+      principal = Math.max(0, newTotalPayment - markupAmount);
+    } else if (markupType === "custom") {
+      markupAmount = 0;
+      principal = newTotalPayment;
     }
 
-    const remainingInstallments = loan.paymentSchedule.length - i;
-    if (remainingInstallments <= 0) break;
+    totalPayment = newTotalPayment;
+    remainingPrincipal -= principal;
+    outstanding = Math.max(0, remainingPrincipal);
+  } else if (updateData.customAmount !== undefined) {
+    // Custom amount edited (for custom type)
+    if (markupType !== "custom") {
+      throw new Error("Custom amount can only be updated for custom loan type");
+    }
 
-    const newPrincipal = remainingPrincipal / remainingInstallments;
-    const newMarkupAmount = (newPrincipal * Number(loan.markupValue)) / 100;
-    const futureTotalPayment = newPrincipal + newMarkupAmount;
+    principal = Math.max(0, Number(updateData.customAmount) || 0);
+    markupAmount = 0;
+    totalPayment = principal;
+    remainingPrincipal -= principal;
+    outstanding = Math.max(0, remainingPrincipal);
+  } else {
+    throw new Error("No valid update data provided");
+  }
+
+  // Add the updated row
+  const updatedRow = {
+    ...updatedEntry,
+    principal: await encrypt(principal.toString()),
+    markupPercentage: await encrypt(newMarkupPercentage.toString()),
+    markupAmount: await encrypt(markupAmount.toString()),
+    totalPayment: await encrypt(totalPayment.toString()),
+    outstanding: await encrypt(outstanding.toString()),
+  };
+
+  // Only add customAmount field for custom loan type
+  if (markupType === "custom") {
+    updatedRow.customAmount = await encrypt(principal.toString());
+    updatedRow.note = "Custom Deduction";
+  }
+
+  newSchedule.push(updatedRow);
+  totalMarkup += markupAmount;
+
+  // Recalculate remaining rows
+  const remainingRows =
+    loan.paymentSchedule.length - updatedInstallmentIndex - 1;
+
+  for (
+    let i = updatedInstallmentIndex + 1;
+    i < loan.paymentSchedule.length;
+    i++
+  ) {
+    const entry = loan.paymentSchedule[i];
+    const installmentsLeft = loan.paymentSchedule.length - i;
+
+    let newPrincipal, newMarkupAmount, newTotalPayment;
+
+    if (markupType === "fixed") {
+      const monthlyInterest = (decryptedLoanAmount * (yearlyRate / 100)) / 12;
+      newPrincipal = remainingPrincipal / installmentsLeft;
+      newMarkupAmount = monthlyInterest;
+      newTotalPayment = newPrincipal + newMarkupAmount;
+    } else if (markupType === "reducing" || markupType === "interestOnly") {
+      newPrincipal = remainingPrincipal / installmentsLeft;
+      newMarkupAmount = remainingPrincipal * monthlyRate;
+      newTotalPayment = newPrincipal + newMarkupAmount;
+    } else if (markupType === "custom") {
+      newPrincipal = remainingPrincipal / installmentsLeft;
+      newMarkupAmount = 0;
+      newTotalPayment = newPrincipal;
+    }
+
+    // Ensure we don't have negative principal
+    newPrincipal = Math.max(0, newPrincipal);
     remainingPrincipal -= newPrincipal;
     totalMarkup += newMarkupAmount;
 
-    newSchedule.push({
+    const newRow = {
       ...entry,
       principal: await encrypt(newPrincipal.toString()),
+      markupPercentage: await encrypt(yearlyRate.toString()),
       markupAmount: await encrypt(newMarkupAmount.toString()),
-      totalPayment: await encrypt(futureTotalPayment.toString()),
+      totalPayment: await encrypt(newTotalPayment.toString()),
       outstanding: await encrypt(Math.max(0, remainingPrincipal).toString()),
-    });
+    };
+
+    // Only add customAmount field for custom loan type
+    if (markupType === "custom") {
+      newRow.customAmount = await encrypt(newPrincipal.toString());
+      newRow.note = "Custom Deduction";
+    }
+
+    newSchedule.push(newRow);
   }
 
   return {
@@ -296,12 +397,6 @@ async function recalculatePaymentSchedule(
     ),
   };
 }
-
-// -----------------------------------------------------------------------------
-// Routes
-// -----------------------------------------------------------------------------
-
-// Employees list (id + name)
 router.get("/employees", async (_req, res) => {
   try {
     const employees = await Employee.find().select("_id name");
@@ -739,60 +834,81 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
       .json({ error: "Failed to calculate benefits", details: err.message });
   }
 });
-// Update one installment + recompute slips for changed months
-router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
-  try {
-    const { loanId, installmentNo } = req.params;
-    const { totalPayment } = req.body;
+router.patch(
+  "/loan/:loanId/installment/:installmentNo",
+  decryptWithKey, // only needed for recalculation, NOT for response
+  async (req, res) => {
+    try {
+      const { loanId, installmentNo } = req.params;
+      const { principal, markupPercentage, totalPayment } = req.body;
 
-    if (!Types.ObjectId.isValid(loanId))
-      return res.status(400).json({ error: "Invalid loan ID" });
-    if (!Number.isInteger(Number(installmentNo)) || Number(installmentNo) < 1)
-      return res.status(400).json({ error: "Invalid installment number" });
-    if (typeof totalPayment !== "number" || totalPayment < 0)
-      return res.status(400).json({ error: "Invalid total payment amount" });
+      if (!Types.ObjectId.isValid(loanId)) {
+        return res.status(400).json({ error: "Invalid loan ID" });
+      }
 
-    const loan = await LoanDetail.findById(loanId);
-    if (!loan) return res.status(404).json({ error: "Loan not found" });
+      const installmentIndex = Number(installmentNo) - 1;
+      if (installmentIndex < 0) {
+        return res.status(400).json({ error: "Invalid installment number" });
+      }
 
-    const idx = Number(installmentNo) - 1;
-    if (!loan.paymentSchedule || idx >= loan.paymentSchedule.length)
-      return res.status(400).json({ error: "Installment not found" });
+      const loan = await LoanDetail.findById(loanId);
+      if (!loan) {
+        return res.status(404).json({ error: "Loan not found" });
+      }
 
-    const { paymentSchedule, totalMarkup, totalToBePaid } =
-      await recalculatePaymentSchedule(loan, idx, totalPayment);
+      if (
+        !loan.paymentSchedule ||
+        installmentIndex >= loan.paymentSchedule.length
+      ) {
+        return res.status(404).json({ error: "Installment not found" });
+      }
 
-    loan.paymentSchedule = paymentSchedule;
-    loan.totalMarkup = totalMarkup;
-    loan.totalToBePaid = totalToBePaid;
-    await loan.save();
+      let updateData = {};
+      let fieldUpdated = "";
 
-    const ownerId = resolveOwnerId(req.user);
-    // Recompute affected months only (from edited row onward)
-    const changed = new Set();
-    for (let i = idx; i < loan.paymentSchedule.length; i++) {
-      changed.add(
-        `${loan.paymentSchedule[i].month}-${loan.paymentSchedule[i].year}`
-      );
+      if (principal !== undefined) {
+        updateData.principal = Number(principal);
+        fieldUpdated = "principal";
+      } else if (markupPercentage !== undefined) {
+        updateData.markupPercentage = Number(markupPercentage);
+        fieldUpdated = "markupPercentage";
+      } else if (totalPayment !== undefined) {
+        updateData.totalPayment = Number(totalPayment);
+        fieldUpdated = "totalPayment";
+      } else {
+        return res.status(400).json({ error: "No valid field provided" });
+      }
+
+      const { paymentSchedule, totalMarkup, totalToBePaid } =
+        await recalculatePaymentSchedule(loan, installmentIndex, updateData);
+
+      loan.paymentSchedule = paymentSchedule;
+      loan.totalMarkup = totalMarkup;
+      loan.totalToBePaid = totalToBePaid;
+
+      await loan.save();
+
+      return res.json({
+        message: "Installment updated successfully",
+        updatedField: fieldUpdated,
+
+        // 🔐 ALWAYS ENCRYPTED RESPONSE
+        loan: {
+          _id: loan._id,
+          paymentSchedule: loan.paymentSchedule,
+          totalMarkup: loan.totalMarkup,
+          totalToBePaid: loan.totalToBePaid,
+        },
+      });
+    } catch (err) {
+      console.error("Installment update error:", err);
+      return res.status(500).json({
+        error: "Failed to update installment",
+        details: err.message,
+      });
     }
-    for (const key of changed) {
-      const [m, y] = key.split("-");
-      await recomputeSingleMonthOtherLoans(
-        loan.employee,
-        m,
-        Number(y),
-        ownerId
-      );
-    }
-
-    res.json({ message: "Installment updated successfully", loan });
-  } catch (err) {
-    console.error("Error updating installment:", err);
-    res
-      .status(500)
-      .json({ error: "Failed to update installment", details: err.message });
   }
-});
+);
 
 // Apply a constant tail from `startIndex` (1-based installment no) onward
 // Body: { startIndex: number, amount: number }
@@ -957,6 +1073,14 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
         Number(y),
         ownerId
       );
+    }
+
+    // Also perform a full recompute for this employee to guarantee no slips
+    // were missed by the targeted updates above.
+    try {
+      await recomputeOtherLoansForExistingSlips(loan.employee, ownerId);
+    } catch (e) {
+      console.error("Error reconciling slips after apply-tail:", e);
     }
 
     res.json({ message: "Tail applied successfully", loan });
