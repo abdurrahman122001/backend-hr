@@ -339,8 +339,10 @@ exports.listMessages = async function listMessages(req, res) {
       isScheduled,
       scheduledBefore,
       scheduledAfter,
-      limit = 50,
+      limit = 5, // 🎯 CHANGE: Default limit to 5
       page = 1,
+      cursor,
+      direction = "after",
       between: betweenRaw,
       filter,
       approvalStatus,
@@ -354,10 +356,7 @@ exports.listMessages = async function listMessages(req, res) {
     if (isObjId(client)) q.client = client;
 
     // Status filter
-    if (
-      status &&
-      ["draft", "scheduled", "sent", "cancelled"].includes(status)
-    ) {
+    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
     } else {
@@ -366,10 +365,7 @@ exports.listMessages = async function listMessages(req, res) {
     }
 
     // Approval status filter
-    if (
-      approvalStatus &&
-      ["pending", "approved", "disapproved"].includes(approvalStatus)
-    ) {
+    if (approvalStatus && ["pending", "approved", "disapproved"].includes(approvalStatus)) {
       q.approvalStatus = approvalStatus;
     }
 
@@ -393,13 +389,11 @@ exports.listMessages = async function listMessages(req, res) {
     }
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // 🔥 CRITICAL FIX: Remove the restrictive team lead query logic
-    // Let applyVisibility handle team lead visibility properly
+    // Use normal user visibility rules for everyone
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
     const me = oid(String(req.employee._id));
 
-    // Use normal user visibility rules for everyone - applyVisibility will handle role-based restrictions
     const between = normalizeIds(betweenRaw);
     if (between.length === 2) {
       const [a, b] = between;
@@ -410,73 +404,96 @@ exports.listMessages = async function listMessages(req, res) {
         { sender: b, receiver: a },
       ];
     } else if (isObjId(participant)) {
-      // FIX: Handle array receiver properly
       q.$or = [
         { sender: participant },
-        { receiver: participant }, // single receiver
-        { receiver: { $in: [participant] } }, // array receiver
+        { receiver: participant },
+        { receiver: { $in: [participant] } },
       ];
     } else {
       if (isObjId(sender)) q.sender = sender;
       if (isObjId(receiver)) {
-        // FIX: Handle both single receiver and array receiver
         q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
       }
     }
 
     // Must have at least one scope
-    if (
-      !q.owner &&
-      !q.client &&
-      !q.sender &&
-      !q.receiver &&
-      !q.$or &&
-      !q.status &&
-      q.isScheduled === undefined &&
-      !q.approvalStatus
-    ) {
+    if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or && !q.status && q.isScheduled === undefined && !q.approvalStatus) {
       return res.status(400).json({
-        error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
+        error: "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
       });
     }
 
-    // Apply visibility rules for ALL users including team leads
+    // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
-    // Rest of the function remains the same...
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    // 🎯 NEW: Cursor-based pagination logic
+    if (cursor && isObjId(cursor)) {
+      const cursorMessage = await WhatsAppMessage.findById(cursor).select('createdAt').lean();
+      
+      if (cursorMessage) {
+        if (direction === "before") {
+          qFinal.createdAt = { $lt: cursorMessage.createdAt };
+        } else {
+          qFinal.createdAt = { $gt: cursorMessage.createdAt };
+        }
+      }
+    }
 
-    const [items, total] = await Promise.all([
-      WhatsAppMessage.find(qFinal)
-        .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * lim)
-        .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
-          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-          { path: "repliedTo", select: "_id note message sender attachments" },
-          {
-            path: "replyContent.originalSender",
-            select: "_id name companyEmail",
-          },
-        ])
-        .lean(),
-      WhatsAppMessage.countDocuments(qFinal),
-    ]);
+    const sortOrder = direction === "before" ? { createdAt: -1 } : { createdAt: -1 };
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 50);
+
+    // 🎯 Fetch with limit + 1 for pagination check
+    const items = await WhatsAppMessage.find(qFinal)
+      .sort(sortOrder)
+      .limit(lim + 1)
+      .populate([
+        { path: "owner", select: "_id name companyEmail" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        { path: "scheduledBy", select: "_id name companyEmail" },
+        { path: "repliedTo", select: "_id note message sender attachments" },
+        {
+          path: "replyContent.originalSender",
+          select: "_id name companyEmail",
+        },
+      ])
+      .lean();
+
+    // 🎯 NEW: Pagination metadata
+    let hasMore = false;
+    let nextCursor = null;
+    let prevCursor = null;
+    
+    if (items.length > lim) {
+      hasMore = true;
+      items.pop(); // Remove the extra one
+    }
+    
+    if (items.length > 0) {
+      if (direction === "before") {
+        nextCursor = items[items.length - 1]?._id || null;
+        prevCursor = items[0]?._id || null;
+      } else {
+        nextCursor = items[0]?._id || null;
+        prevCursor = items[items.length - 1]?._id || null;
+      }
+    }
+
+    // For initial load, reverse to show newest at bottom
+    if (!cursor || direction === "after") {
+      items.reverse();
+    }
 
     // CRITICAL FIX: Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
-      receiver: Array.isArray(item.receiver)
-        ? item.receiver
-        : [item.receiver].filter(Boolean),
+      receiver: Array.isArray(item.receiver) ? item.receiver : [item.receiver].filter(Boolean),
     }));
+
+    const total = await WhatsAppMessage.countDocuments(qFinal);
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
 
     res.json({
       items: normalizedItems,
@@ -484,6 +501,12 @@ exports.listMessages = async function listMessages(req, res) {
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
+      pagination: {
+        hasMore,
+        nextCursor,
+        prevCursor,
+        direction
+      },
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
     });
@@ -493,26 +516,19 @@ exports.listMessages = async function listMessages(req, res) {
   }
 };
 
-exports.listMessagesForManager = async function listMessagesForManager(
-  req,
-  res
-) {
+exports.listMessagesForManager = async function listMessagesForManager(req, res) {
   try {
-    const clientId =
-      req.params.clientId || req.query.clientId || req.query.client || null;
-
+    const clientId = req.params.clientId || req.query.clientId || req.query.client || null;
     const owner = req.query.owner || req.employee?.owner || null;
-
     const sender = req.query.sender || null;
     const receiver = req.query.receiver || req.query.toEmployee || null;
     const participant = req.query.participant || req.query.employee || null;
     const betweenRaw = req.query.between;
 
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(
-      Math.max(parseInt(req.query.limit, 10) || 100, 1),
-      200
-    );
+    // 🎯 NEW: Add pagination parameters with LIMIT 5 as default
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 5, 1), 50);
+    const cursor = req.query.cursor;
+    const direction = req.query.direction || "after";
 
     const q = {};
     if (isObjId(owner)) q.owner = owner;
@@ -524,16 +540,9 @@ exports.listMessagesForManager = async function listMessagesForManager(
 
     // FIXED: Handle status filter for drafts to exclude scheduled messages
     const status = req.query.status;
-    if (
-      status &&
-      ["draft", "scheduled", "sent", "cancelled"].includes(status)
-    ) {
+    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
       q.status = status;
-
-      // CRITICAL FIX: When querying for drafts, ensure we exclude scheduled messages
-      if (status === "draft") {
-        q.isScheduled = false;
-      }
+      if (status === "draft") q.isScheduled = false;
     }
 
     const between = normalizeIds(betweenRaw);
@@ -553,17 +562,41 @@ exports.listMessagesForManager = async function listMessagesForManager(
     // FIXED: Remove overly restrictive validation
     if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or) {
       return res.status(400).json({
-        error:
-          "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
+        error: "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
       });
     }
 
     const qFinal = await applyVisibility(q, req);
 
+    // 🎯 FIXED: Proper cursor-based pagination logic
+    if (cursor && isObjId(cursor)) {
+      const cursorMessage = await WhatsAppMessage.findById(cursor).select('createdAt').lean();
+      
+      if (cursorMessage) {
+        if (direction === "before") {
+          // For loading OLDER messages (scroll up) - get messages BEFORE cursor
+          qFinal.createdAt = { $lt: cursorMessage.createdAt };
+        } else if (direction === "after") {
+          // For loading NEWER messages (scroll down or real-time) - get messages AFTER cursor
+          qFinal.createdAt = { $gt: cursorMessage.createdAt };
+        }
+      }
+    }
+
+    // 🎯 FIXED: Correct sort order based on direction
+    let sortOrder;
+    if (direction === "before") {
+      // When loading OLDER messages, we want descending (newest first) because we're going backwards
+      sortOrder = { createdAt: -1 };
+    } else {
+      // When loading NEWER messages (initial load), we want descending (newest first)
+      sortOrder = { createdAt: -1 };
+    }
+    
+    // 🎯 Fetch messages with limit + 1 to check if there are more
     const messages = await WhatsAppMessage.find(qFinal)
-      .sort({ createdAt: 1 })
-      .skip((page - 1) * limit)
-      .limit(limit)
+      .sort(sortOrder)
+      .limit(limit + 1) // Get one extra to check if there are more
       .populate([
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
@@ -578,10 +611,42 @@ exports.listMessagesForManager = async function listMessagesForManager(
       ])
       .lean();
 
-    // 🔥 NEW: Get client supervision info for each message
+    // 🎯 NEW: Check if there are more messages
+    let hasMore = false;
+    let nextCursor = null;
+    let prevCursor = null;
+    
+    if (messages.length > limit) {
+      hasMore = true;
+      messages.pop(); // Remove the extra one
+    }
+    
+    // 🎯 Set cursor for next/prev pagination
+    if (messages.length > 0) {
+      if (direction === "before") {
+        // For loading older messages:
+        // nextCursor = oldest message in this batch (for loading even older)
+        nextCursor = messages[messages.length - 1]?._id || null;
+        // prevCursor = newest message in this batch (for loading newer)
+        prevCursor = messages[0]?._id || null;
+      } else {
+        // For loading newer messages (initial load):
+        // nextCursor = newest message in this batch (for loading even newer)
+        nextCursor = messages[0]?._id || null;
+        // prevCursor = oldest message in this batch (for loading older)
+        prevCursor = messages[messages.length - 1]?._id || null;
+      }
+    }
+
+    // 🎯 FIXED: Only reverse for frontend display, not for cursor logic
+    // The frontend needs messages in chronological order (oldest to newest)
+    // But our query gets them in reverse chronological order (newest to oldest)
+    const displayMessages = [...messages].reverse();
+
+    // 🔥 Get client supervision info for each message
     const Client = require("../models/ClientInfo");
     const messagesWithSupervision = await Promise.all(
-      messages.map(async (message) => {
+      displayMessages.map(async (message) => {
         if (message.client) {
           const clientDoc = await Client.findById(message.client)
             .select("supervision clientName")
@@ -599,9 +664,13 @@ exports.listMessagesForManager = async function listMessagesForManager(
 
     return res.json({ 
       messages: messagesWithSupervision,
-      total: messagesWithSupervision.length,
-      page,
-      limit 
+      pagination: {
+        hasMore,
+        nextCursor,
+        prevCursor,
+        limit,
+        direction
+      }
     });
   } catch (e) {
     console.error(e);
