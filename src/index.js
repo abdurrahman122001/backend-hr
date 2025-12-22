@@ -135,6 +135,7 @@ const ALLOWED_ORIGINS = [
   "https://innand.com",
   "http://www.innand.com",
   "https://complete-profile.virsme.com",
+  "https://attendance.virsme.com",
   "https://www.innand.com",
   "http://localhost:8080",
   "http://localhost:8081",

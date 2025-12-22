@@ -1,3 +1,4 @@
+// models/Bug.js
 const mongoose = require("mongoose");
 
 const bugSchema = new mongoose.Schema(
@@ -5,12 +6,12 @@ const bugSchema = new mongoose.Schema(
     title: {
       type: String,
       required: true,
-      trim: true
+      trim: true,
     },
     description: {
       type: String,
       required: true,
-      trim: true
+      trim: true,
     },
     priority: {
       type: String,
@@ -34,28 +35,28 @@ const bugSchema = new mongoose.Schema(
     images: [{
       filename: {
         type: String,
-        required: true
+        required: true,
       },
       originalName: {
         type: String,
-        required: true
+        required: true,
       },
       path: {
         type: String,
-        required: true
+        required: true,
       },
       mimetype: {
         type: String,
-        required: true
+        required: true,
       },
       size: {
         type: Number,
-        required: true
+        required: true,
       },
       uploadDate: {
         type: Date,
-        default: Date.now
-      }
+        default: Date.now,
+      },
     }],
     approvalRequired: {
       type: Boolean,
@@ -65,11 +66,15 @@ const bugSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    rewardAdded: {
+      type: Boolean,
+      default: false,
+    },
   },
   { 
     timestamps: true,
     toJSON: { virtuals: true },
-    toObject: { virtuals: true }
+    toObject: { virtuals: true },
   }
 );
 

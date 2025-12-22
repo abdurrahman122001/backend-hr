@@ -13,13 +13,13 @@ const PositionSchema = new Schema({
   isCurrentRole: { type: Boolean, default: false },
   description: { type: String },
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
 });
 
 const ExperienceSchema = new Schema({
   positions: [PositionSchema],
   createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now }
+  updatedAt: { type: Date, default: Date.now },
 });
 
 const EmployeeSchema = new Schema(
@@ -85,6 +85,11 @@ const EmployeeSchema = new Schema(
     // EMPLOYMENT DETAILS
     department: { type: String },
     designation: { type: String },
+    balance: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     joiningDate: { type: String },
     leavingDate: { type: String }, // Last working day / employment end date
 
@@ -129,46 +134,6 @@ const EmployeeSchema = new Schema(
       usedUnpaid: { type: Number, default: 0 },
     },
 
-    // COMPENSATION DETAILS (all fields now STRING for encryption)
-    compensation: {
-      basic: { type: String, default: "" },
-      dearnessAllowance: { type: String, default: "" },
-      houseRentAllowance: { type: String, default: "" },
-      conveyanceAllowance: { type: String, default: "" },
-      medicalAllowance: { type: String, default: "" },
-      utilityAllowance: { type: String, default: "" },
-      overtimeComp: { type: String, default: "" },
-      dislocationAllowance: { type: String, default: "" },
-      leaveEncashment: { type: String, default: "" },
-      bonus: { type: String, default: "" },
-      arrears: { type: String, default: "" },
-      autoAllowance: { type: String, default: "" },
-      incentive: { type: String, default: "" },
-      fuelAllowance: { type: String, default: "" },
-      others: { type: String, default: "" },
-      grossSalary: { type: String, default: "" },
-    },
-
-    // DEDUCTIONS (all fields now STRING for encryption)
-    deductions: {
-      leaveDeductions: { type: String, default: "" },
-      lateDeductions: { type: String, default: "" },
-      eobi: { type: String, default: "" },
-      sessi: { type: String, default: "" },
-      providentFund: { type: String, default: "" },
-      gratuityFund: { type: String, default: "" },
-      loanDeductions: {
-        vehicleLoan: { type: String, default: "" },
-        otherLoans: { type: String, default: "" },
-      },
-      advanceSalary: { type: String, default: "" },
-      medicalInsurance: { type: String, default: "" },
-      lifeInsurance: { type: String, default: "" },
-      penalties: { type: String, default: "" },
-      others: { type: String, default: "" },
-      tax: { type: String, default: "" },
-    },
-
     // User link (for future use)
     userAccount: {
       type: Schema.Types.ObjectId,
@@ -197,7 +162,16 @@ const EmployeeSchema = new Schema(
     // EMPLOYMENT STATUS FIELDS - UPDATED
     status: {
       type: String,
-      enum: ["active", "pending", "Offered", "Onboarding", "review", "resigned", "offboarded", "terminated"],
+      enum: [
+        "active",
+        "pending",
+        "Offered",
+        "Onboarding",
+        "review",
+        "resigned",
+        "offboarded",
+        "terminated",
+      ],
       default: "pending",
     },
     resignationDate: { type: String }, // Date when employee resigned
@@ -261,12 +235,12 @@ EmployeeSchema.statics.getBlockStatus = async function (user1Id, user2Id) {
 };
 
 // Update timestamp for experiences when saving
-EmployeeSchema.pre('save', function(next) {
-  if (this.experiences && this.isModified('experiences')) {
-    this.experiences.forEach(exp => {
+EmployeeSchema.pre("save", function (next) {
+  if (this.experiences && this.isModified("experiences")) {
+    this.experiences.forEach((exp) => {
       exp.updatedAt = new Date();
       if (exp.positions) {
-        exp.positions.forEach(pos => {
+        exp.positions.forEach((pos) => {
           pos.updatedAt = new Date();
         });
       }

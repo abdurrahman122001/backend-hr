@@ -67,10 +67,11 @@ exports.createBug = async (req, res) => {
       reportedBy: req.employee._id,
       department: emp.department,
       images: images,
+      rewardAdded: false, // Initially no reward added
     });
 
     // Populate reporter info for response
-    await bug.populate("reportedBy", "name companyEmail department");
+    await bug.populate("reportedBy", "name companyEmail department balance");
 
     return res.status(201).json({
       status: "success",
@@ -121,11 +122,11 @@ exports.getBugs = async (req, res) => {
     // R&D can see all bugs, others only see their own
     if (emp.department === "Research & Development" || emp.department === "Research and Development") {
       bugs = await Bug.find()
-        .populate("reportedBy", "name companyEmail department")
+        .populate("reportedBy", "name companyEmail department balance")
         .sort({ createdAt: -1 });
     } else {
       bugs = await Bug.find({ reportedBy: req.employee._id })
-        .populate("reportedBy", "name companyEmail department")
+        .populate("reportedBy", "name companyEmail department balance")
         .sort({ createdAt: -1 });
     }
 
@@ -152,7 +153,7 @@ exports.getBugById = async (req, res) => {
 
     const bug = await Bug.findById(id).populate(
       "reportedBy",
-      "name companyEmail department"
+      "name companyEmail department balance"
     );
 
     if (!bug) {
@@ -165,7 +166,8 @@ exports.getBugById = async (req, res) => {
     // Check if user has permission to view this bug
     const emp = await Employee.findById(req.employee._id).select("department");
     if (
-      emp.department !== "Research and Development" || emp.department !== "Research & Development" &&
+      emp.department !== "Research and Development" && 
+      emp.department !== "Research & Development" &&
       bug.reportedBy._id.toString() !== req.employee._id.toString()
     ) {
       return res.status(403).json({
@@ -221,7 +223,7 @@ exports.updateBug = async (req, res) => {
     const emp = await Employee.findById(req.employee._id).select("department");
     const isReporter =
       bug.reportedBy.toString() === req.employee._id.toString();
-    const isRAndD = emp?.department === "Research and Development";
+    const isRAndD = emp?.department === "Research and Development" || emp?.department === "Research & Development";
 
     if (!isReporter && !isRAndD) {
       // cleanup new uploads
@@ -263,7 +265,7 @@ exports.updateBug = async (req, res) => {
     }
 
     await bug.save();
-    await bug.populate("reportedBy", "name companyEmail department");
+    await bug.populate("reportedBy", "name companyEmail department balance");
 
     return res.json({
       status: "success",
@@ -313,7 +315,7 @@ exports.deleteImage = async (req, res) => {
     const emp = await Employee.findById(req.employee._id).select("department");
     const isReporter =
       bug.reportedBy.toString() === req.employee._id.toString();
-    const isRAndD = emp.department === "Research and Development";
+    const isRAndD = emp.department === "Research and Development" || emp.department === "Research & Development";
 
     if (!isReporter && !isRAndD) {
       return res.status(403).json({
@@ -381,24 +383,31 @@ exports.resolveBug = async (req, res) => {
       bug.status = "resolved";
       bug.approvalRequired = false;
       bug.approvedByReporter = true;
+      
+      // Add reward if not already added
+      if (!bug.rewardAdded) {
+        await addRewardToReporter(bug.reportedBy);
+        bug.rewardAdded = true;
+      }
+      
       await bug.save();
 
-      await bug.populate("reportedBy", "name companyEmail department");
+      await bug.populate("reportedBy", "name companyEmail department balance");
 
       return res.json({
         status: "success",
-        message: "Bug resolved by reporter",
+        message: "Bug resolved by reporter. Reward of 100 points added.",
         bug,
       });
     }
 
     // R&D department resolves → requires reporter approval
-    if (emp.department === "Research and Development") {
+    if (emp.department === "Research and Development" || emp.department === "Research & Development") {
       bug.status = "pending_approval";
       bug.approvalRequired = true;
       await bug.save();
 
-      await bug.populate("reportedBy", "name companyEmail department");
+      await bug.populate("reportedBy", "name companyEmail department balance");
 
       return res.json({
         status: "success",
@@ -461,13 +470,20 @@ exports.approveBug = async (req, res) => {
     bug.status = "resolved";
     bug.approvalRequired = false;
     bug.approvedByReporter = true;
+    
+    // Add reward if not already added
+    if (!bug.rewardAdded) {
+      await addRewardToReporter(bug.reportedBy);
+      bug.rewardAdded = true;
+    }
+    
     await bug.save();
 
-    await bug.populate("reportedBy", "name companyEmail department");
+    await bug.populate("reportedBy", "name companyEmail department balance");
 
     return res.json({
       status: "success",
-      message: "Bug approved and marked as resolved",
+      message: "Bug approved and marked as resolved. Reward of 100 points added.",
       bug,
     });
   } catch (err) {
@@ -514,7 +530,7 @@ exports.updatePriority = async (req, res) => {
     const emp = await Employee.findById(req.employee._id).select("department");
     const isReporter =
       bug.reportedBy.toString() === req.employee._id.toString();
-    const isRAndD = emp.department === "Research and Development";
+    const isRAndD = emp.department === "Research and Development" || emp.department === "Research & Development";
 
     if (!isReporter && !isRAndD) {
       return res.status(403).json({
@@ -526,7 +542,7 @@ exports.updatePriority = async (req, res) => {
     bug.priority = priority;
     await bug.save();
 
-    await bug.populate("reportedBy", "name companyEmail department");
+    await bug.populate("reportedBy", "name companyEmail department balance");
 
     return res.json({
       status: "success",
@@ -569,7 +585,7 @@ exports.deleteBug = async (req, res) => {
     const emp = await Employee.findById(req.employee._id).select("department");
     const isReporter =
       bug.reportedBy.toString() === req.employee._id.toString();
-    const isRAndD = emp.department === "Research and Development";
+    const isRAndD = emp.department === "Research and Development" || emp.department === "Research & Development";
 
     if (!isReporter && !isRAndD) {
       return res.status(403).json({
@@ -607,6 +623,100 @@ exports.deleteBug = async (req, res) => {
     return res.status(500).json({
       status: "error",
       message: "Server error while deleting bug",
+    });
+  }
+};
+
+// ---------------------
+// HELPER FUNCTION: Add Reward
+// ---------------------
+const addRewardToReporter = async (reporterId) => {
+  try {
+    const rewardAmount = 100;
+    
+    const reporter = await Employee.findById(reporterId);
+    if (!reporter) {
+      console.error("Reporter not found for reward");
+      return;
+    }
+
+    // Update balance
+    reporter.balance += rewardAmount;
+    await reporter.save();
+    
+    console.log(`✅ Added ${rewardAmount} points to ${reporter.name}. New balance: ${reporter.balance}`);
+    
+    return reporter;
+  } catch (error) {
+    console.error("❌ Error adding reward:", error);
+    throw error;
+  }
+};
+
+// ---------------------
+// GET EMPLOYEE BALANCE
+// ---------------------
+exports.getEmployeeBalance = async (req, res) => {
+  try {
+    const employee = await Employee.findById(req.employee._id).select("name companyEmail department balance");
+    
+    if (!employee) {
+      return res.status(404).json({
+        status: "error",
+        message: "Employee not found",
+      });
+    }
+
+    return res.json({
+      status: "success",
+      balance: employee.balance,
+      employee: {
+        name: employee.name,
+        companyEmail: employee.companyEmail,
+        department: employee.department,
+      },
+    });
+  } catch (err) {
+    console.error("❌ Error fetching balance:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while fetching balance",
+    });
+  }
+};
+
+// ---------------------
+// GET ALL EMPLOYEES WITH BALANCES (Admin/R&D only)
+// ---------------------
+exports.getAllEmployeeBalances = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("department");
+    
+    // Only R&D can see all balances
+    if (emp.department !== "Research and Development" && emp.department !== "Research & Development") {
+      return res.status(403).json({
+        status: "error",
+        message: "Not authorized to view all employee balances",
+      });
+    }
+
+    const employees = await Employee.find()
+      .select("name companyEmail department designation balance")
+      .sort({ balance: -1 }); // Sort by highest balance first
+
+    const totalRewards = employees.reduce((sum, emp) => sum + emp.balance, 0);
+
+    return res.json({
+      status: "success",
+      totalEmployees: employees.length,
+      totalRewardsDistributed: totalRewards,
+      employees,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching employee balances:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while fetching employee balances",
     });
   }
 };

@@ -65,4 +65,14 @@ router.patch("/:id/priority", requireEmployeeAuth, bugController.updatePriority)
 // @access  Private (Employee - Reporter or R&D)
 router.delete("/:id", requireEmployeeAuth, bugController.deleteBug);
 
+// @route   GET /api/bugs/balance/my
+// @desc    Get current employee's balance
+// @access  Private (Employee)
+router.get("/balance/my", requireEmployeeAuth, bugController.getEmployeeBalance);
+
+// @route   GET /api/bugs/balance/all
+// @desc    Get all employees' balances (R&D only)
+// @access  Private (Employee - R&D only)
+router.get("/balance/all", requireEmployeeAuth, bugController.getAllEmployeeBalances);
+
 module.exports = router;
