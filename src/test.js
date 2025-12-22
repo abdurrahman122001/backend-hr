@@ -129,6 +129,7 @@ const ALLOWED_ORIGINS = [
   "https://apis.innand.com",
   "http://employee.virsme.com",
   "https://employee.virsme.com",
+  "https://attendance.virsme.com",
   "http://hr.virsme.com",
   "https://hr.virsme.com",
   "http://innand.com",

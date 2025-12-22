@@ -408,6 +408,47 @@ exports.markAttendance = async (req, res) => {
     }).lean();
     if (oldRec) {
       await reverseOldBonus(oldRec);
+      // If the previous record consumed paid leave (leaveType === 'Paid'), and
+      // the new incoming marking is NOT going to be a Paid Leave, then roll
+      // back the usedPaid counter by the previously consumed paid days.
+      try {
+        if (oldRec.leaveType === "Paid") {
+          // determine how many paid days were consumed by the old record
+          let daysToRevert = 0;
+          if (typeof oldRec.effectivePaidDays === "number") {
+            daysToRevert = oldRec.effectivePaidDays;
+          } else if (oldRec.proportionate && typeof oldRec.proportionateValue === "number") {
+            daysToRevert = oldRec.proportionateValue;
+          } else if (oldRec.status === "Half Day") {
+            daysToRevert = 0.5;
+          } else {
+            daysToRevert = 1;
+          }
+
+          // decide whether the incoming request will mark as Paid Leave
+          let willBePaid = false;
+          if (status === "Leave") {
+            // explicit flag in body overrides
+            if (typeof req.body.forcePaid !== "undefined") {
+              willBePaid = req.body.forcePaid === true;
+            } else if (leaveType === "Paid") {
+              willBePaid = true;
+            }
+          } else if ((status === "Absent" || status === "Half Day") && leaveType === "Paid") {
+            willBePaid = true;
+          }
+
+          if (!willBePaid && daysToRevert > 0) {
+            const empDoc = await Employee.findById(employeeId).lean();
+            const currentUsed = empDoc?.leaveEntitlement?.usedPaid || 0;
+            const newUsed = Math.max(0, Number((currentUsed - daysToRevert).toFixed(2)));
+            await Employee.updateOne({ _id: employeeId }, { $set: { "leaveEntitlement.usedPaid": newUsed } });
+            console.log(`[REVERSAL] [${employee.name}] Rolled back usedPaid by ${daysToRevert} -> New usedPaid=${newUsed}`);
+          }
+        }
+      } catch (e) {
+        console.error("Error while reversing previous paid-leave usage:", e);
+      }
       console.log(
         `[ATTENDANCE] [${employee.name}] Previous -> Status=${oldRec.status
         }, LeaveType=${oldRec.leaveType || "-"}`
@@ -840,14 +881,51 @@ exports.markAttendance = async (req, res) => {
       (oldRec.leaveType === "Unpaid" || !oldRec.leaveType) &&
       !(status === "Absent" && (leaveType === "Unpaid" || !leaveType))
     ) {
+      // Determine how many days were charged previously (handle sandwich)
+      const dayMs = 24 * 60 * 60 * 1000;
+      const dsR = new Set();
+      const wsR = new Set();
+      (payroll.nonWorkingDays || []).forEach((raw) => {
+        if (!raw) return;
+        const s = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dsR.add(s);
+        if (/^[0-6]$/.test(s)) return wsR.add(Number(s));
+        const key = s.toLowerCase();
+        if (key in nameToDay) return wsR.add(nameToDay[key]);
+        const nd = new Date(s);
+        if (!isNaN(nd)) dsR.add(ymd(nd));
+      });
+
+      let nextNonWorkingCountRev = 0;
+      for (
+        let d = new Date(new Date(date).getTime() + dayMs);
+        ;
+        d = new Date(d.getTime() + dayMs)
+      ) {
+        const iso = ymd(d);
+        const weekday = d.getDay();
+        if (dsR.has(iso) || wsR.has(weekday)) {
+          nextNonWorkingCountRev += 1;
+          continue;
+        }
+        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
+        if (holidayRec) {
+          nextNonWorkingCountRev += 1;
+          continue;
+        }
+        break;
+      }
+
+      const daysToReverse = nextNonWorkingCountRev > 0 ? 1 + nextNonWorkingCountRev : 1;
+
       if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
       let prevDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
-      const deductionToReverse = Math.round(perDay);
+      const deductionToReverse = Math.round(perDay * daysToReverse);
       let newDeduction = Math.max(0, prevDeduction - deductionToReverse);
       slip.leaveDeductions = await encrypt(newDeduction.toString());
       await slip.save();
 
-      // reverse unpaid counter, credit one paid
+      // reverse unpaid counter by full charged days
       const empDoc = await Employee.findById(employeeId).lean();
       if (
         empDoc &&
@@ -855,25 +933,86 @@ exports.markAttendance = async (req, res) => {
         typeof empDoc.leaveEntitlement.usedUnpaid === "number"
       ) {
         const oldUsed = empDoc.leaveEntitlement.usedUnpaid || 0;
-        const newUsed = Math.max(0, oldUsed - 1);
+        const newUsed = Math.max(0, Number((oldUsed - daysToReverse).toFixed(2)));
         await Employee.updateOne(
           { _id: employeeId },
           { $set: { "leaveEntitlement.usedUnpaid": newUsed } }
         );
       }
-      await Employee.updateOne(
-        { _id: employeeId },
-        { $inc: { "leaveEntitlement.usedPaid": 1 } }
-      );
+
+      // Determine whether the incoming marking will itself consume paid leave.
+      // If so, do NOT credit usedPaid here (it will be applied later by the leave flow).
+      let incomingWillBePaid = false;
+      try {
+        if (status === "Leave") {
+          const freshEmpForDecision = await Employee.findById(employeeId).lean();
+          const ent2 = freshEmpForDecision?.leaveEntitlement || {};
+          const bonus2 = ent2?.bonus || 0;
+          const total2 = (ent2.total || 0) + bonus2;
+          const usedPaid2 = ent2.usedPaid || 0;
+          const balance2 = total2 - usedPaid2;
+          if (req.body.forcePaid === true || balance2 > 0) incomingWillBePaid = true;
+        } else if (status === "Absent" && leaveType === "Paid") {
+          incomingWillBePaid = true;
+        }
+      } catch (e) {
+        console.error("Error while deciding incoming paid state:", e);
+      }
+
+      if (!incomingWillBePaid) {
+        // preserve legacy behavior: credit one paid leave when switching away
+        await Employee.updateOne(
+          { _id: employeeId },
+          { $inc: { "leaveEntitlement.usedPaid": 1 } }
+        );
+      }
+
       console.log(
-        `[DEDUCTION-REVERSAL] [${employee.name}] Reversed=${deductionToReverse}, New leaveDeductions=${newDeduction}, Credited 1 paid leave`
+        `[DEDUCTION-REVERSAL] [${employee.name}] Reversed=${deductionToReverse}, New leaveDeductions=${newDeduction}, Reverted UnpaidDays=${daysToReverse}`
       );
     }
 
     // ========= ABSENT =========
     if (status === "Absent") {
-      const isFriday = attendanceDate.getDay() === 5; // 5 = Friday
-      const effectiveDays = isFriday ? 3 : 1;
+      // dynamic sandwich: if the following day(s) are non-working/holiday,
+      // count consecutive next non-working days and include them in effectiveDays
+      const dayMs = 24 * 60 * 60 * 1000;
+      // build sets from payroll.nonWorkingDays (reuse parsing logic)
+      const ds2 = new Set();
+      const ws2 = new Set();
+      (payroll.nonWorkingDays || []).forEach((raw) => {
+        if (!raw) return;
+        const s = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds2.add(s);
+        if (/^[0-6]$/.test(s)) return ws2.add(Number(s));
+        const key = s.toLowerCase();
+        if (key in nameToDay) return ws2.add(nameToDay[key]);
+        const nd = new Date(s);
+        if (!isNaN(nd)) return ds2.add(ymd(nd));
+      });
+
+      let nextNonWorkingCount = 0;
+      for (
+        let d = new Date(attendanceDate.getTime() + dayMs);
+        ;
+        d = new Date(d.getTime() + dayMs)
+      ) {
+        const iso = ymd(d);
+        const weekday = d.getDay();
+        if (ds2.has(iso) || ws2.has(weekday)) {
+          nextNonWorkingCount += 1;
+          continue;
+        }
+        // check for tenant-scoped holiday record
+        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
+        if (holidayRec) {
+          nextNonWorkingCount += 1;
+          continue;
+        }
+        break;
+      }
+
+      const effectiveDays = nextNonWorkingCount > 0 ? 1 + nextNonWorkingCount : 1;
 
       const freshEmp = await Employee.findById(employeeId).lean();
       const ent = freshEmp?.leaveEntitlement || {};
@@ -884,15 +1023,13 @@ exports.markAttendance = async (req, res) => {
       const balance = +(totalEnt - usedPaid);
 
       console.log(
-        `[LEAVE] [${employee.name
-        }] Absent -> Entitled=${totalEnt}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, Balance=${balance}, Requested=${leaveType || "Unpaid"
-        }, Friday=${isFriday ? "YES" : "NO"}, DaysToCharge=${effectiveDays}`
+        `[LEAVE] [${employee.name}] Absent -> Entitled=${totalEnt}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, Balance=${balance}, Requested=${leaveType || "Unpaid"}, SandwichNextDays=${nextNonWorkingCount}, DaysToCharge=${effectiveDays}`
       );
 
-      // --- Friday special handling (3 days) ---
-      if (isFriday) {
+      // --- Sandwich handling (today + consecutive next non-working/holiday days) ---
+      if (nextNonWorkingCount > 0) {
         if (leaveType === "Paid") {
-          // Use proportional helper for 3 days.
+          // Use proportional helper for effectiveDays.
           const result = await updateLeaveEntitlementForEmployeeProportional(
             employeeId,
             effectiveDays,
@@ -907,16 +1044,13 @@ exports.markAttendance = async (req, res) => {
           );
 
           if (unpaidDays > 0) {
-            if (!slip.leaveDeductions)
-              slip.leaveDeductions = await encrypt("0");
+            if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
             const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
             const add = Math.round(perDay * unpaidDays);
             slip.leaveDeductions = await encrypt(String(prev + add));
             await slip.save();
             console.log(
-              `[DEDUCTION] [${employee.name
-              }] Friday Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid=${unpaidDays}, Deduction=${add}, New leaveDeductions=${prev + add
-              }`
+              `[DEDUCTION] [${employee.name}] Sandwich Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid=${unpaidDays}, Deduction=${add}, New leaveDeductions=${prev + add}`
             );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
@@ -924,7 +1058,7 @@ exports.markAttendance = async (req, res) => {
             );
           } else {
             console.log(
-              `[DEDUCTION] [${employee.name}] Friday Absent fully covered by paid -> Paid=${paidDays}, Unpaid=0, NO deduction`
+              `[DEDUCTION] [${employee.name}] Sandwich Absent fully covered by paid -> Paid=${paidDays}, Unpaid=0, NO deduction`
             );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
@@ -939,7 +1073,7 @@ exports.markAttendance = async (req, res) => {
           }
           return res.json(rec);
         } else {
-          // Unpaid for 3 days
+          // Unpaid for effectiveDays
           await updateLeaveEntitlementForEmployee(
             employeeId,
             effectiveDays,
@@ -952,9 +1086,7 @@ exports.markAttendance = async (req, res) => {
           slip.leaveDeductions = await encrypt(String(prev + add));
           await slip.save();
           console.log(
-            `[DEDUCTION] [${employee.name
-            }] Friday Absent(Unpaid) -> Days=${effectiveDays}, Deduction=${add}, New leaveDeductions=${prev + add
-            }`
+            `[DEDUCTION] [${employee.name}] Sandwich Absent(Unpaid) -> Days=${effectiveDays}, Deduction=${add}, New leaveDeductions=${prev + add}`
           );
           await Attendance.findOneAndUpdate(
             { owner: ownerId, employee: employeeId, date },
@@ -1034,8 +1166,42 @@ exports.markAttendance = async (req, res) => {
 
     // ========= LEAVE =========
     if (status === "Leave") {
-      const isFriday = attendanceDate.getDay() === 5; // 5 = Friday
-      const effectiveDays = isFriday ? 3 : 1;
+      // dynamic sandwich: count consecutive next non-working/holiday days
+      const dayMs = 24 * 60 * 60 * 1000;
+      const ds3 = new Set();
+      const ws3 = new Set();
+      (payroll.nonWorkingDays || []).forEach((raw) => {
+        if (!raw) return;
+        const s = String(raw).trim();
+        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds3.add(s);
+        if (/^[0-6]$/.test(s)) return ws3.add(Number(s));
+        const key = s.toLowerCase();
+        if (key in nameToDay) return ws3.add(nameToDay[key]);
+        const nd = new Date(s);
+        if (!isNaN(nd)) return ds3.add(ymd(nd));
+      });
+
+      let nextNonWorkingCountForLeave = 0;
+      for (
+        let d = new Date(attendanceDate.getTime() + dayMs);
+        ;
+        d = new Date(d.getTime() + dayMs)
+      ) {
+        const iso = ymd(d);
+        const weekday = d.getDay();
+        if (ds3.has(iso) || ws3.has(weekday)) {
+          nextNonWorkingCountForLeave += 1;
+          continue;
+        }
+        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
+        if (holidayRec) {
+          nextNonWorkingCountForLeave += 1;
+          continue;
+        }
+        break;
+      }
+
+      const effectiveDays = nextNonWorkingCountForLeave > 0 ? 1 + nextNonWorkingCountForLeave : 1;
 
       const freshEmp = await Employee.findById(employeeId).lean();
       const ent = freshEmp?.leaveEntitlement || {};
@@ -1047,8 +1213,7 @@ exports.markAttendance = async (req, res) => {
 
       console.log(
         `[LEAVE] [${employee.name}] Leave -> Entitled=${totalBal}, UsedPaid=${usedPaid}, UsedUnpaid=${usedUnpaid}, ` +
-        `Balance=${balance}, Friday=${isFriday ? "YES" : "NO"
-        }, DaysToCharge=${effectiveDays}`
+        `Balance=${balance}, SandwichNextDays=${nextNonWorkingCountForLeave}, DaysToCharge=${effectiveDays}`
       );
 
       // Proportionate case: some paid available but less than needed (e.g., Fri=3 but balance 1 or 2)

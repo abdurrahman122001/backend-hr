@@ -4793,39 +4793,52 @@ exports.searchMessages = async function searchMessages(req, res) {
 exports.getClientThreads = async function getClientThreads(req, res) {
   try {
     const { clientId } = req.params;
-    const { limit = 50, page = 1 } = req.query;
+    let { limit = 50, page = 1 } = req.query;
 
     if (!isObjId(clientId)) {
       return res.status(400).json({ error: "Valid client ID is required" });
     }
 
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+
     // Apply visibility rules
     const qFinal = await applyVisibility({ client: clientId }, req);
 
-    // Group by threadId and get latest message from each thread
-    const threads = await AssignmentMessage.aggregate([
+    // Aggregate threads and return both paginated data and total count using $facet
+    const pipeline = [
       { $match: qFinal },
-      { $sort: { createdAt: -1 } },
+      // Group messages into threads, keeping the latest message
       {
         $group: {
           _id: "$threadId",
           latestMessage: { $first: "$$ROOT" },
           messageCount: { $sum: 1 },
           unreadCount: {
-            $sum: {
-              $cond: [{ $eq: ["$isRead", false] }, 1, 0],
-            },
+            $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] },
           },
           lastActivity: { $max: "$createdAt" },
         },
       },
       { $sort: { lastActivity: -1 } },
-      { $skip: (page - 1) * limit },
-      { $limit: parseInt(limit) },
-    ]);
+      {
+        $facet: {
+          data: [
+            { $skip: (pageNum - 1) * lim },
+            { $limit: lim },
+          ],
+          totalCount: [ { $count: "count" } ],
+        },
+      },
+    ];
 
-    // Populate the latest messages
-    const populatedThreads = await AssignmentMessage.populate(threads, [
+    const aggResult = await AssignmentMessage.aggregate(pipeline);
+    const facet = aggResult && aggResult[0] ? aggResult[0] : { data: [], totalCount: [] };
+    const itemsRaw = facet.data || [];
+    const total = (facet.totalCount && facet.totalCount[0] && facet.totalCount[0].count) || 0;
+
+    // Populate the latestMessage subdocuments
+    const populatedThreads = await AssignmentMessage.populate(itemsRaw, [
       { path: "latestMessage.sender", select: "_id name companyEmail" },
       { path: "latestMessage.receiver", select: "_id name companyEmail" },
       { path: "latestMessage.client", select: "_id clientName" },
@@ -4833,10 +4846,10 @@ exports.getClientThreads = async function getClientThreads(req, res) {
 
     res.json({
       items: populatedThreads,
-      total: populatedThreads.length,
-      page: parseInt(page),
-      pages: Math.ceil(populatedThreads.length / limit),
-      limit: parseInt(limit),
+      total,
+      page: pageNum,
+      pages: Math.max(1, Math.ceil(total / lim)),
+      limit: lim,
     });
   } catch (e) {
     console.error("Error in getClientThreads:", e);
