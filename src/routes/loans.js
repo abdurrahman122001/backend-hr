@@ -121,15 +121,8 @@ async function recomputeSingleMonthOtherLoans(
       console.error(`Invalid month or year: ${month}, ${yNum}`);
       return;
     }
-
-    console.log(
-      `Recomputing loans for employee ${employeeId}, ${month} ${yNum}`
-    );
-
     // Get ALL loans for this employee
     const loans = await LoanDetail.find({ employee: employeeId }).lean();
-    console.log(`Found ${loans.length} loans for employee ${employeeId}`);
-
     // Find the salary slip for this month
     const slipQuery = {
       employee: employeeId,
@@ -142,14 +135,8 @@ async function recomputeSingleMonthOtherLoans(
 
     // If no slip exists for this month, we can't update it
     if (!slip) {
-      console.log(
-        `No salary slip found for ${month} ${yNum}, employee ${employeeId}`
-      );
       return;
     }
-
-    console.log(`Found salary slip for ${month} ${yNum}`);
-
     let totalOtherLoans = 0;
 
     // Calculate total loan deduction for this month
@@ -160,18 +147,11 @@ async function recomputeSingleMonthOtherLoans(
           month,
           yNum
         );
-        console.log(
-          `Loan ${loan._id} contributes: ${contribution} for ${month} ${yNum}`
-        );
         totalOtherLoans += contribution;
       } catch (e) {
         console.error(`Loan ${loan._id} compute error @ ${month} ${yNum}:`, e);
       }
     }
-
-    console.log(
-      `Total other loans deduction for ${month} ${yNum}: ${totalOtherLoans}`
-    );
 
     // Encrypt and update the slip
     const encrypted = await encrypt(String(totalOtherLoans || 0));
@@ -223,8 +203,6 @@ async function recomputeSingleMonthOtherLoans(
     }
 
     await slip.save();
-    console.log(`Successfully updated salary slip for ${month} ${yNum}`);
-
     return slip;
   } catch (error) {
     console.error(
@@ -292,16 +270,11 @@ async function recomputeSingleMonthOtherLoans(
  */
 async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
   try {
-    console.log(`Recomputing all salary slips for employee ${employeeId}`);
 
     const loans = await LoanDetail.find({ employee: employeeId }).lean();
-    console.log(`Found ${loans.length} loans for employee ${employeeId}`);
 
     // If no loans exist, clear all loan calculations
     if (!loans.length) {
-      console.log(
-        `No loans found, clearing loan calculations for employee ${employeeId}`
-      );
       await removeAllLoanCalculationsFromSlips(employeeId, ownerId);
       return;
     }
@@ -310,16 +283,12 @@ async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
     if (ownerId) slipQuery.owner = ownerId;
 
     const slips = await SalarySlip.find(slipQuery);
-    console.log(
-      `Found ${slips.length} salary slips for employee ${employeeId}`
-    );
 
     for (const slip of slips) {
       const month = normMonth(slip.month);
       const yearNum = Number(String(slip.year));
 
       if (!monthsList.includes(month) || !Number.isFinite(yearNum)) {
-        console.log(`Invalid month/year in slip: ${month}, ${yearNum}`);
         continue;
       }
 
@@ -392,14 +361,7 @@ async function recomputeOtherLoansForExistingSlips(employeeId, ownerId) {
       }
 
       await slip.save();
-      console.log(
-        `Updated slip for ${month} ${yearNum} with loan deduction: ${totalOtherLoans}`
-      );
     }
-
-    console.log(
-      `Finished recomputing all salary slips for employee ${employeeId}`
-    );
   } catch (error) {
     console.error(
       `Error in recomputeOtherLoansForExistingSlips for employee ${employeeId}:`,
@@ -415,9 +377,6 @@ async function removeAllLoanCalculationsFromSlips(employeeId, ownerId) {
     if (ownerId) slipQuery.owner = ownerId;
 
     const slips = await SalarySlip.find(slipQuery);
-    console.log(
-      `Removing loan calculations from ${slips.length} slips for employee ${employeeId}`
-    );
 
     for (const slip of slips) {
       slip.loanBenefits = await encrypt("0");
@@ -466,15 +425,11 @@ async function removeAllLoanCalculationsFromSlips(employeeId, ownerId) {
 async function recomputeAffectedSalarySlips(loan, ownerId, changedMonths = []) {
   try {
     const employeeId = loan.employee;
-    console.log(`Recomputing salary slips for employee ${employeeId}`);
-    console.log(`Changed months:`, changedMonths);
-
     // If specific months are provided, only recompute those
     if (changedMonths.length > 0) {
       for (const monthYear of changedMonths) {
         if (typeof monthYear === "string") {
           const [month, year] = monthYear.split("-");
-          console.log(`Recomputing specific month: ${month} ${year}`);
           await recomputeSingleMonthOtherLoans(
             employeeId,
             month,
@@ -486,10 +441,6 @@ async function recomputeAffectedSalarySlips(loan, ownerId, changedMonths = []) {
           monthYear.month &&
           monthYear.year
         ) {
-          // Handle object format
-          console.log(
-            `Recomputing specific month (object format): ${monthYear.month} ${monthYear.year}`
-          );
           await recomputeSingleMonthOtherLoans(
             employeeId,
             monthYear.month,
@@ -499,20 +450,13 @@ async function recomputeAffectedSalarySlips(loan, ownerId, changedMonths = []) {
         }
       }
     } else {
-      // Otherwise recompute all months for this employee
-      console.log(
-        `No specific months provided, recomputing all slips for employee ${employeeId}`
-      );
       await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
     }
-
-    console.log(`Finished recomputing salary slips for employee ${employeeId}`);
   } catch (error) {
     console.error(`Error in recomputeAffectedSalarySlips:`, error);
     throw error;
   }
 }
-
 async function recalculatePaymentSchedule(
   loan,
   updatedInstallmentIndex,
@@ -656,42 +600,141 @@ async function recalculatePaymentSchedule(
       affectedMonths.push(`${updatedEntry.month}-${updatedEntry.year}`);
     }
 
-    // Recalculate remaining rows
-    const remainingRows =
-      loan.paymentSchedule.length - updatedInstallmentIndex - 1;
+    // Check if we're updating the last installment and there's still outstanding balance
+    const isUpdatingLastInstallment = updatedInstallmentIndex === loan.paymentSchedule.length - 1;
+    const hasOutstandingBalance = remainingPrincipal > 0.01;
+    
+    // Calculate the new monthly installment amount for extending the schedule
+    let newMonthlyInstallment = 0;
+    if (updateData.totalPayment !== undefined) {
+      newMonthlyInstallment = Number(updateData.totalPayment);
+    } else if (updateData.principal !== undefined && updateData.markupAmount !== undefined) {
+      newMonthlyInstallment = Number(updateData.principal) + Number(updateData.markupAmount);
+    } else if (updateData.principal !== undefined) {
+      newMonthlyInstallment = Number(updateData.principal) + markupAmount;
+    } else {
+      // Get from the updated row
+      newMonthlyInstallment = totalPayment;
+    }
 
-    for (
-      let i = updatedInstallmentIndex + 1;
-      i < loan.paymentSchedule.length;
-      i++
-    ) {
-      const entry = loan.paymentSchedule[i];
-      const installmentsLeft = loan.paymentSchedule.length - i;
+    // Recalculate remaining rows
+    const originalRemainingRows = loan.paymentSchedule.length - updatedInstallmentIndex - 1;
+    
+    // If updating last installment and there's outstanding balance, we need to extend the schedule
+    const needsScheduleExtension = isUpdatingLastInstallment && hasOutstandingBalance && newMonthlyInstallment > 0;
+    const totalRemainingRows = needsScheduleExtension 
+      ? Math.ceil(remainingPrincipal / newMonthlyInstallment) 
+      : originalRemainingRows;
+
+    // Helper function to get month/year for a given installment index
+    const getMonthYearForIndex = (installmentIndex) => {
+      // Find the start month from the first entry in the schedule
+      let scheduleStartMonth = 0; // Default to January
+      let scheduleStartYear = new Date().getFullYear();
+      
+      if (loan.paymentSchedule && loan.paymentSchedule.length > 0) {
+        const firstEntry = loan.paymentSchedule[0];
+        if (firstEntry.month) {
+          scheduleStartMonth = monthsList.indexOf(normMonth(firstEntry.month));
+        }
+        if (firstEntry.year) {
+          scheduleStartYear = Number(firstEntry.year);
+        }
+      }
+      
+      // Calculate month and year for the given installment index (1-based)
+      const totalMonthOffset = scheduleStartMonth + installmentIndex;
+      const monthIndex = totalMonthOffset % 12;
+      const year = scheduleStartYear + Math.floor(totalMonthOffset / 12);
+      
+      return {
+        month: monthsList[monthIndex],
+        year: year.toString()
+      };
+    };
+
+    for (let i = 1; i <= totalRemainingRows; i++) {
+      const currentIndex = updatedInstallmentIndex + i;
+      const installmentsLeft = totalRemainingRows - i + 1;
+      
+      let entry;
+      let isExtendedMonth = false;
+      
+      // Check if this is an existing entry or a new extended month
+      if (i <= originalRemainingRows) {
+        // Use existing schedule entry
+        entry = loan.paymentSchedule[currentIndex];
+      } else {
+        // Create new entry for extended month
+        const { month, year } = getMonthYearForIndex(currentIndex);
+        entry = {
+          month,
+          year,
+          installmentNo: currentIndex + 1,
+          // Copy other fields from the last existing entry if available
+          ...(loan.paymentSchedule[loan.paymentSchedule.length - 1] || {})
+        };
+        isExtendedMonth = true;
+        
+        // Remove any incorrect month/year that might have been copied
+        delete entry.month;
+        delete entry.year;
+        entry.month = month;
+        entry.year = year;
+      }
 
       let newPrincipal, newMarkupAmount, newTotalPayment;
 
       if (markupType === "fixed") {
         const monthlyInterest = (decryptedLoanAmount * (yearlyRate / 100)) / 12;
-        newPrincipal = remainingPrincipal / installmentsLeft;
-        newMarkupAmount = monthlyInterest;
-        newTotalPayment = newPrincipal + newMarkupAmount;
+        
+        if (needsScheduleExtension && i === totalRemainingRows) {
+          // Last extended payment - pay off remaining balance
+          newPrincipal = remainingPrincipal;
+          newMarkupAmount = monthlyInterest;
+          newTotalPayment = newPrincipal + newMarkupAmount;
+        } else {
+          newPrincipal = remainingPrincipal / installmentsLeft;
+          newMarkupAmount = monthlyInterest;
+          newTotalPayment = newPrincipal + newMarkupAmount;
+        }
       } else if (markupType === "reducing" || markupType === "interestOnly") {
-        newPrincipal = remainingPrincipal / installmentsLeft;
-        newMarkupAmount = remainingPrincipal * monthlyRate;
-        newTotalPayment = newPrincipal + newMarkupAmount;
+        if (needsScheduleExtension && i === totalRemainingRows) {
+          // Last extended payment - pay off remaining balance
+          newPrincipal = remainingPrincipal;
+          newMarkupAmount = remainingPrincipal * monthlyRate;
+          newTotalPayment = newPrincipal + newMarkupAmount;
+        } else {
+          newPrincipal = remainingPrincipal / installmentsLeft;
+          newMarkupAmount = remainingPrincipal * monthlyRate;
+          newTotalPayment = newPrincipal + newMarkupAmount;
+        }
       } else if (markupType === "custom") {
-        newPrincipal = remainingPrincipal / installmentsLeft;
-        newMarkupAmount = 0;
-        newTotalPayment = newPrincipal;
+        if (needsScheduleExtension && i === totalRemainingRows) {
+          // Last extended payment - pay off remaining balance
+          newPrincipal = remainingPrincipal;
+          newMarkupAmount = 0;
+          newTotalPayment = newPrincipal;
+        } else {
+          newPrincipal = remainingPrincipal / installmentsLeft;
+          newMarkupAmount = 0;
+          newTotalPayment = newPrincipal;
+        }
       }
 
-      // Ensure we don't have negative principal
+      // Ensure we don't have negative principal and handle rounding
       newPrincipal = Math.max(0, newPrincipal);
+      if (i === totalRemainingRows) {
+        // For the last payment, ensure we pay off the exact remaining balance
+        newPrincipal = Math.min(newPrincipal, remainingPrincipal);
+      }
+      
       remainingPrincipal -= newPrincipal;
       totalMarkup += newMarkupAmount;
 
       const newRow = {
         ...entry,
+        installmentNo: currentIndex + 1,
         principal: await encrypt(newPrincipal.toString()),
         markupPercentage: await encrypt(yearlyRate.toString()),
         markupAmount: await encrypt(newMarkupAmount.toString()),
@@ -708,9 +751,27 @@ async function recalculatePaymentSchedule(
       newSchedule.push(newRow);
 
       // Track affected months for recalculation
-      if (entry.month && entry.year) {
-        affectedMonths.push(`${entry.month}-${entry.year}`);
+      if (newRow.month && newRow.year) {
+        affectedMonths.push(`${newRow.month}-${newRow.year}`);
       }
+    }
+
+    // Handle any remaining balance due to rounding errors
+    if (remainingPrincipal > 0.01 && newSchedule.length > 0) {
+      const lastRow = newSchedule[newSchedule.length - 1];
+      const lastPrincipal = Number(await decrypt(lastRow.principal)) + remainingPrincipal;
+      const lastMarkupAmount = markupType === "custom" ? 0 : remainingPrincipal * monthlyRate;
+      
+      newSchedule[newSchedule.length - 1] = {
+        ...lastRow,
+        principal: await encrypt(lastPrincipal.toString()),
+        markupAmount: await encrypt(lastMarkupAmount.toString()),
+        totalPayment: await encrypt((lastPrincipal + lastMarkupAmount).toString()),
+        outstanding: await encrypt("0"),
+      };
+      
+      totalMarkup += lastMarkupAmount;
+      remainingPrincipal = 0;
     }
 
     return {
@@ -720,6 +781,8 @@ async function recalculatePaymentSchedule(
         (decryptedLoanAmount + totalMarkup).toString()
       ),
       affectedMonths: Array.from(new Set(affectedMonths)), // Remove duplicates
+      // Also return the new loan term if it changed
+      newLoanTerm: newSchedule.length,
     };
   } catch (error) {
     console.error("Error in recalculatePaymentSchedule:", error);
@@ -1166,14 +1229,6 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
     const { principal, markupPercentage, totalPayment, customAmount } =
       req.body;
 
-    console.log(`Updating installment ${installmentNo} for loan ${loanId}`);
-    console.log("Update data:", {
-      principal,
-      markupPercentage,
-      totalPayment,
-      customAmount,
-    });
-
     if (!Types.ObjectId.isValid(loanId)) {
       return res.status(400).json({ error: "Invalid loan ID" });
     }
@@ -1214,12 +1269,8 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
       return res.status(400).json({ error: "No valid field provided" });
     }
 
-    console.log(`Recalculating payment schedule with updateData:`, updateData);
-
     const { paymentSchedule, totalMarkup, totalToBePaid, affectedMonths } =
       await recalculatePaymentSchedule(loan, installmentIndex, updateData);
-
-    console.log(`Recalculation complete. Affected months:`, affectedMonths);
 
     // Update the loan
     loan.paymentSchedule = paymentSchedule;
@@ -1227,21 +1278,14 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
     loan.totalToBePaid = totalToBePaid;
     await loan.save();
 
-    console.log(`Loan saved successfully`);
-
     // Recompute affected salary slips
     const ownerId = resolveOwnerId(req.user);
-    console.log(`Owner ID: ${ownerId}`);
 
     if (affectedMonths && affectedMonths.length > 0) {
-      console.log(`Recomputing affected months:`, affectedMonths);
       await recomputeAffectedSalarySlips(loan, ownerId, affectedMonths);
     } else {
-      console.log(`No affected months specified, recomputing all slips`);
       await recomputeOtherLoansForExistingSlips(loan.employee, ownerId);
     }
-
-    console.log(`Salary slips updated successfully`);
 
     return res.json({
       message: "Installment updated successfully",
@@ -1261,7 +1305,6 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
     });
   }
 });
-
 // Apply a constant tail from `startIndex` (1-based installment no) onward
 router.patch("/loan/:loanId/apply-tail", async (req, res) => {
   try {
@@ -1321,14 +1364,16 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
     // Keep rows BEFORE the start index as-is
     const beforeRows = loan.paymentSchedule.slice(0, startIdx0);
 
-    // Build the new tail
+    // Build the new tail - THIS IS THE FIXED PART
     const tail = [];
     const safeInstallment = Math.max(0.01, newInstallment);
     const fixedMonthlyInterest = (P0 * (yearly / 100)) / 12;
-
+    
     let i = startIdx0;
     let guard = 0;
-    while (outstanding > 0 && guard < 600) {
+    const maxAdditionalMonths = 120; // Allow up to 10 years extension
+    
+    while (outstanding > 0.01 && guard < (loan.paymentSchedule.length + maxAdditionalMonths)) {
       const { month, year } = monthYearForIndex(i);
       let principalPay = 0;
       let interestAmt = 0;
@@ -1336,45 +1381,71 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
 
       if (loan.markupType === "reducing") {
         interestAmt = outstanding * r;
-        const minFeasible = interestAmt + 1;
-        const M = Math.max(safeInstallment, minFeasible);
-        const tentativePrincipal = M - interestAmt;
-        const isLast = tentativePrincipal >= outstanding - 1e-8;
-
-        principalPay = isLast ? outstanding : tentativePrincipal;
-        totalPay = isLast ? interestAmt + outstanding : M;
-      } else if (loan.markupType === "fixed") {
-        interestAmt = fixedMonthlyInterest;
-        const M = Math.max(safeInstallment, interestAmt + 1);
-        let p = Math.max(0, M - interestAmt);
-        if (outstanding - p <= 1e-8) {
-          p = outstanding;
-          totalPay = p + interestAmt;
+        
+        // Check if this should be the final payment
+        if (outstanding <= safeInstallment) {
+          // Final payment - pay off remaining balance
+          principalPay = outstanding;
+          interestAmt = outstanding * r;
+          totalPay = principalPay + interestAmt;
         } else {
+          // Regular payment
+          const M = Math.max(safeInstallment, interestAmt + 0.01);
+          principalPay = M - interestAmt;
           totalPay = M;
         }
-        principalPay = p;
+      } else if (loan.markupType === "fixed") {
+        interestAmt = fixedMonthlyInterest;
+        
+        if (outstanding <= safeInstallment) {
+          // Final payment
+          principalPay = outstanding;
+          totalPay = principalPay + interestAmt;
+        } else {
+          // Regular payment
+          const M = Math.max(safeInstallment, interestAmt + 0.01);
+          principalPay = M - interestAmt;
+          totalPay = M;
+        }
       } else if (loan.markupType === "interestOnly") {
         interestAmt = outstanding * r;
-        const M = Math.max(safeInstallment, interestAmt + 1);
-        const p = M - interestAmt;
-        const isLast = p >= outstanding - 1e-8;
-
-        principalPay = isLast ? outstanding : p;
-        totalPay = isLast ? interestAmt + outstanding : M;
+        
+        if (outstanding <= safeInstallment) {
+          // Final payment
+          principalPay = outstanding;
+          totalPay = principalPay + interestAmt;
+        } else {
+          // Regular payment - for interest-only, principal payment is optional
+          // but we'll apply the safe installment minus interest
+          const M = Math.max(safeInstallment, interestAmt + 0.01);
+          principalPay = Math.min(outstanding, M - interestAmt);
+          totalPay = principalPay + interestAmt;
+        }
       } else {
         // custom: treat installment as pure principal
-        const p =
-          outstanding - safeInstallment <= 1e-8 ? outstanding : safeInstallment;
-        principalPay = p;
+        if (outstanding <= safeInstallment) {
+          principalPay = outstanding;
+        } else {
+          principalPay = safeInstallment;
+        }
         interestAmt = 0;
-        totalPay = p;
+        totalPay = principalPay;
       }
 
+      // Ensure principal payment doesn't exceed outstanding
+      principalPay = Math.min(principalPay, outstanding);
+      totalPay = principalPay + interestAmt;
+      
+      // Update outstanding balance
       outstanding = Math.max(0, outstanding - principalPay);
 
       tail.push({
-        ...loan.paymentSchedule[Math.min(i, loan.paymentSchedule.length - 1)],
+        // Use the original schedule entry if it exists, otherwise create new
+        ...(loan.paymentSchedule[i] || {
+          month,
+          year,
+          installmentNo: i + 1
+        }),
         installmentNo: i + 1,
         month,
         year,
@@ -1396,6 +1467,21 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
       guard += 1;
     }
 
+    // If there's still outstanding (due to rounding errors), add one more month to clear it
+    if (outstanding > 0.01) {
+      const lastEntry = tail[tail.length - 1];
+      const finalPrincipal = Number(await decrypt(lastEntry.principal)) + outstanding;
+      const finalInterest = loan.markupType === "custom" ? 0 : outstanding * r;
+      
+      tail[tail.length - 1] = {
+        ...lastEntry,
+        principal: await encrypt(String(finalPrincipal)),
+        markupAmount: await encrypt(String(finalInterest)),
+        totalPayment: await encrypt(String(finalPrincipal + finalInterest)),
+        outstanding: await encrypt("0"),
+      };
+    }
+
     // Stitch new schedule and renumber
     const newSchedule = [...beforeRows, ...tail].map((row, idx) => ({
       ...row,
@@ -1408,10 +1494,15 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
       totalMarkupNum += Number(await decrypt(row.markupAmount)) || 0;
     }
 
+    // Update the loan
     loan.paymentSchedule = newSchedule;
-    loan.loanTerm = newSchedule.length;
+    loan.loanTerm = newSchedule.length; // This now includes extended months
     loan.totalMarkup = await encrypt(String(totalMarkupNum));
     loan.totalToBePaid = await encrypt(String(P0 + totalMarkupNum));
+    
+    // Update monthly installment based on the new tail amount
+    loan.monthlyInstallment = await encrypt(String(safeInstallment));
+    
     await loan.save();
 
     // Recompute affected salary slips
@@ -1425,8 +1516,9 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
       message: "Tail applied successfully",
       loan: {
         _id: loan._id,
-        paymentSchedule: loan.paymentSchedule,
         loanTerm: loan.loanTerm,
+        paymentSchedule: loan.paymentSchedule,
+        monthlyInstallment: loan.monthlyInstallment,
         totalMarkup: loan.totalMarkup,
         totalToBePaid: loan.totalToBePaid,
       },
