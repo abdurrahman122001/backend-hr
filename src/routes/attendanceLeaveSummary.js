@@ -4,7 +4,6 @@ const requireAuth = require("../middleware/auth");
 const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employees");
 const requireEmpAuth = require("../middleware/empAuth");
-const ProbationPeriod = require("../models/ProbationPeriod");
 
 // Helper to get YYYY-MM-DD string
 function toYMD(date) {
@@ -215,22 +214,8 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
         const bonus = employee.leaveEntitlement?.bonus || 0;
         const entitled = total + bonus;
         console.log("total: " + total + " bonus: " + bonus + " entitled: " + entitled);
-        // 2. Get Probation Policy (latest one for owner)
-        const probationPolicy = await ProbationPeriod.findOne({ owner: employee.owner }).sort({ createdAt: -1 });
-        let probationDays = 0;
-        let leaveDuringProbation = false;
-        if (probationPolicy) {
-            probationDays = probationPolicy.days;
-            leaveDuringProbation = probationPolicy.leaveDuringProbation;
-        }
-
-        // 3. Calculate probation end date
+        
         let joiningDate = new Date(employee.joiningDate);
-        let probationEnd = new Date(joiningDate);
-        probationEnd.setDate(probationEnd.getDate() + probationDays);
-
-        // 4. Calculate which months must be skipped for running balance
-        //     - If the entire requested month is before joining/probation end and leave not allowed, skip!
         const months = [
             "January", "February", "March", "April", "May", "June",
             "July", "August", "September", "October", "November", "December"
@@ -251,11 +236,7 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
                 skipMonthIndexes.push(m);
                 continue;
             }
-            // 🚩 2. If on probation (payroll period ends before probation end) and leave not allowed, skip this month!
-            let onProbation = payrollPeriodEnd < probationEnd;
-            if (onProbation && !leaveDuringProbation) {
-                skipMonthIndexes.push(m);
-            }
+            
         }
 
         // 🚩 5. If the SELECTED month is skipped, respond with "-"
@@ -298,35 +279,20 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
         const { employeeId } = req.params;
         const { year } = req.query;
         if (!year) {
-            console.warn("[leave-summary-history] year query param is missing.");
             return res.status(400).json({ error: "year is required" });
         }
 
         // 1. Fetch employee
         const employee = await Employee.findById(employeeId);
         if (!employee) {
-            console.warn(`[leave-summary-history] Employee not found: ${employeeId}`);
             return res.status(404).json({ error: "Employee not found" });
         }
 
-        // 2. Get Probation Policy (assuming latest one for owner)
-        const probationPolicy = await ProbationPeriod.findOne({ owner: employee.owner }).sort({ createdAt: -1 });
-        let probationDays = 0;
-        let leaveDuringProbation = false;
-        if (probationPolicy) {
-            probationDays = probationPolicy.days;
-            leaveDuringProbation = probationPolicy.leaveDuringProbation;
-        }
+        const joiningDate = new Date(employee.joiningDate);
 
-        // 3. Calculate probation end date
-        let joiningDate = new Date(employee.joiningDate);
-        let probationEnd = new Date(joiningDate);
-        probationEnd.setDate(probationEnd.getDate() + probationDays);
-
-        const total = employee.leaveEntitlement?.total;
-        const bonus = employee.leaveEntitlement?.bonus || 0;
+        const total = employee.leaveEntitlement?.total ?? 0;
+        const bonus = employee.leaveEntitlement?.bonus ?? 0;
         const entitled = total + bonus;
-
 
         const months = [
             "January", "February", "March", "April", "May", "June",
@@ -334,6 +300,8 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
         ];
 
         let results = [];
+
+        // Get all attendances in the year
         const yearAttendances = await Attendance.find({
             employee: employeeId,
             date: { $gte: `${year}-01-01`, $lte: `${year}-12-31` }
@@ -342,16 +310,15 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
         let lastMonthWithAttendance = -1;
         if (yearAttendances.length > 0) {
             lastMonthWithAttendance = Math.max(
-                ...yearAttendances.map(a => {
-                    const d = new Date(a.date);
-                    return d.getMonth(); // 0-based: Jan=0, Feb=1, ...
-                })
+                ...yearAttendances.map(a => new Date(a.date).getMonth())
             );
         }
 
-        let runningBalance = entitled ?? 0;
+        let runningBalance = entitled;
 
         for (let m = 0; m < 12; m++) {
+
+            // Future months → "-"
             if (m > lastMonthWithAttendance) {
                 results.push({
                     month: months[m],
@@ -361,17 +328,14 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
                 });
                 continue;
             }
-            const monthName = months[m];
-            const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), monthName);
 
-            // Parse payroll period end date and employee's joining date
-            let payrollPeriodEnd = new Date(mthTo);
-            let employeeJoiningDate = new Date(employee.joiningDate);
+            const { from: mthFrom, to: mthTo } = getMonthRange(Number(year), months[m]);
+            const payrollPeriodEnd = new Date(mthTo);
 
-            // 🚩 1. If the payroll period ends before employee joined, skip
-            if (payrollPeriodEnd < employeeJoiningDate) {
+            // Before joining → "-"
+            if (payrollPeriodEnd < joiningDate) {
                 results.push({
-                    month: monthName,
+                    month: months[m],
                     usedPaid: "-",
                     usedMonth: "-",
                     balance: "-"
@@ -379,58 +343,44 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
                 continue;
             }
 
-            // 🚩 2. If on probation and leaves not allowed during probation, skip
-            let onProbation = payrollPeriodEnd < probationEnd;
-            if (onProbation && !leaveDuringProbation) {
-                results.push({
-                    month: monthName,
-                    usedPaid: "-",
-                    usedMonth: "-",
-                    balance: "-"
-                });
-                continue;
-            }
-
-            // Normal logic: use only THIS month's attendances
+            // Normal calculation
             const attendancesMth = await Attendance.find({
                 employee: employeeId,
                 date: { $gte: mthFrom, $lte: mthTo }
             });
 
-            // Calculate for this month only!
             const statsMth = calculateLeaveUsed(attendancesMth);
 
-            // 1. Apply late/halfday deduction only if runningBalance > 0
+            // Deduct late + half days (only if balance > 0)
             let lateAndHalf = statsMth.fromLates + statsMth.fromHalfDays;
-            let useFromBalance = runningBalance > 0 ? Math.min(runningBalance, lateAndHalf) : 0;
+            let useFromBalance = runningBalance > 0
+                ? Math.min(runningBalance, lateAndHalf)
+                : 0;
+
             runningBalance -= useFromBalance;
 
-            // 2. Always deduct paid absents
+            // Always deduct paid absents
             runningBalance -= statsMth.fromPaidAbsent;
 
-            // Prevent negative zero (-0)
             if (runningBalance === -0) runningBalance = 0;
 
             results.push({
-                month: monthName,
+                month: months[m],
                 usedPaid: statsMth.fromLates + statsMth.fromHalfDays + statsMth.fromPaidAbsent,
                 usedMonth: statsMth.fromLates + statsMth.fromHalfDays + statsMth.fromPaidAbsent,
                 balance: runningBalance
             });
         }
 
-
         res.json({
-            total: entitled ?? "-",
+            total: entitled,
             history: results
         });
-
 
     } catch (e) {
         console.error("[leave-summary-history][ERROR]", e);
         res.status(500).json({ error: e.message });
     }
 });
-
 
 module.exports = router;

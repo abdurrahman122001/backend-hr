@@ -1096,8 +1096,6 @@ exports.markAttendance = async (req, res) => {
         }
       }
 
-      // --- Normal (non-Friday) existing logic below ---
-      // Proportionate paid+unpaid (for 1 day)
       if (leaveType === "Paid" && balance > 0 && balance < 1) {
         await Employee.updateOne(
           { _id: employeeId },
