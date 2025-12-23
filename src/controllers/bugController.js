@@ -367,7 +367,7 @@ exports.getBugsByOwner = async (req, res) => {
     const totalBugs = await Bug.countDocuments(query);
     const totalPages = Math.ceil(totalBugs / limit);
 
-    // Get paginated bugs
+    // Get paginated bugs with ALL fields including approvedByReporter
     const bugs = await Bug.find(query)
       .populate({
         path: "reportedBy",
@@ -383,30 +383,40 @@ exports.getBugsByOwner = async (req, res) => {
     
     for (const employee of ownedEmployees) {
       const allEmployeeBugs = await Bug.find({ 
-        reportedBy: employee._id 
-      }).select("rewardAmount rewardAdded status");
+        reportedBy: employee._id,
+        status: "resolved"
+      }).select("rewardAmount rewardAdded status approvedByReporter");
       
-      // Sum all rewardAmounts from this employee's bugs
-      // Use actual rewardAmount from DB or default to 100
+      // Sum all rewardAmounts from this employee's approved bugs only
       const totalFromBugs = allEmployeeBugs.reduce((sum, bug) => {
-        return sum + (bug.rewardAmount || 100);
+        // Only count rewards if bug is approved by reporter
+        if (bug.approvedByReporter === true) {
+          return sum + (bug.rewardAmount || 100);
+        }
+        return sum;
       }, 0);
       
       employeeTotalRewards[employee._id.toString()] = totalFromBugs;
     }
 
-    // FIXED: Ensure each bug has 100 Rs reward
+    // Process bugs to show appropriate data
     const bugsWithRewards = bugs.map((bug) => {
-      // Create a new object to ensure the rewardAmount is properly set
       const bugData = bug.toObject();
       
-      // Always show 100 Rs for each bug
-      bugData.rewardAmount = 100;
+      // IMPORTANT: Include the approvedByReporter field
+      bugData.approvedByReporter = bug.approvedByReporter || false;
       
-      // Mark reward as added if rewardAmount is set
-      bugData.rewardAdded = true;
+      // Only show reward if bug is resolved AND approved by reporter
+      if (bugData.status === "resolved" && bugData.approvedByReporter === true) {
+        bugData.rewardAmount = bugData.rewardAmount || 100;
+        bugData.rewardAdded = true;
+      } else {
+        // No reward for unapproved bugs
+        bugData.rewardAmount = 0;
+        bugData.rewardAdded = false;
+      }
       
-      // Add employee total from all bugs to the populated employee object
+      // Add employee total from all approved bugs to the populated employee object
       if (bugData.reportedBy && bugData.reportedBy._id) {
         bugData.reportedBy.totalFromBugs = employeeTotalRewards[bugData.reportedBy._id.toString()] || 0;
       }
@@ -414,7 +424,7 @@ exports.getBugsByOwner = async (req, res) => {
       return bugData;
     });
 
-    // Calculate statistics - total from all bugs, not employee balance
+    // Calculate statistics - total from approved bugs only
     let totalFromAllBugs = 0;
     Object.values(employeeTotalRewards).forEach(amount => {
       totalFromAllBugs += amount;
@@ -424,14 +434,17 @@ exports.getBugsByOwner = async (req, res) => {
     const totalBugCount = await Bug.countDocuments({
       reportedBy: { $in: ownedEmployeeIds },
     });
+    
     const openBugCount = await Bug.countDocuments({
       reportedBy: { $in: ownedEmployeeIds },
       status: "open",
     });
+    
     const pendingBugCount = await Bug.countDocuments({
       reportedBy: { $in: ownedEmployeeIds },
       status: "pending_approval",
     });
+    
     const resolvedBugCount = await Bug.countDocuments({
       reportedBy: { $in: ownedEmployeeIds },
       status: "resolved",
@@ -459,7 +472,7 @@ exports.getBugsByOwner = async (req, res) => {
         return {
           name: emp.name,
           department: emp.department,
-          balance: employeeTotalRewardsFromBugs, // Use total from bugs, not employee balance
+          balance: employeeTotalRewardsFromBugs, // Use total from approved bugs
           bugCount: employeeBugs.length,
           totalRewards: employeeTotalRewardsFromBugs,
         };
@@ -475,7 +488,7 @@ exports.getBugsByOwner = async (req, res) => {
       },
       statistics: {
         totalEmployees: ownedEmployees.length,
-        totalBugBountyBalance: totalFromAllBugs, // Use total from bugs
+        totalBugBountyBalance: totalFromAllBugs,
         bugCounts,
         employeesWithBugs,
       },
