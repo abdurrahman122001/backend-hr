@@ -1328,6 +1328,87 @@ exports.markAttendance = async (req, res) => {
       }
     }
 
+    // If an existing record was Late and user changed it away from Late,
+    // try to reverse previously-applied late deduction days if overall
+    // late count in the payroll period has fallen below the credited value.
+    if (oldRec && oldRec.status === "Late" && status !== "Late" && !beforeJoin) {
+      // Recompute lates in the period (note: the upsert above has already
+      // written the new status, so this count reflects the new state).
+      const lateRecordsNow = await Attendance.find({
+        employee: employeeId,
+        owner: ownerId,
+        date: { $gte: start, $lte: end },
+        status: "Late",
+      }).lean();
+
+      const lateCountNow = lateRecordsNow.length;
+      const lateDeductionDaysNow = Math.floor(lateCountNow / 3);
+      const previouslyCredited = slip.lateDeductionDaysCredited || 0;
+
+      if (lateDeductionDaysNow < previouslyCredited) {
+        const daysToReverse = previouslyCredited - lateDeductionDaysNow;
+        // Compute monetary refund from slip.lateDeductions conservatively
+        let prevLateAmt = 0;
+        if (slip.lateDeductions) prevLateAmt = Number(await decrypt(slip.lateDeductions)) || 0;
+        const maxRefundPossible = perDay * daysToReverse;
+        const refundAmt = Math.min(prevLateAmt, maxRefundPossible);
+
+        // Convert refund to days (may be fractional when proportionate)
+        const unpaidDaysRefund = +(refundAmt / perDay);
+
+        // Adjust employee used unpaid / used paid balances conservatively.
+        const empDoc = await Employee.findById(employeeId).lean();
+        const usedPaid = empDoc.leaveEntitlement?.usedPaid || 0;
+        const usedUnpaid = empDoc.leaveEntitlement?.usedUnpaid || 0;
+
+        // Prefer to refund unpaid first (deduction money is stored in slip.lateDeductions)
+        let newUsedUnpaid = Math.max(0, usedUnpaid - unpaidDaysRefund);
+        let remainingDaysToReverse = daysToReverse - Math.min(usedUnpaid, unpaidDaysRefund);
+        let newUsedPaid = usedPaid;
+        if (remainingDaysToReverse > 0) {
+          // reduce paid usage next
+          newUsedPaid = Math.max(0, usedPaid - remainingDaysToReverse);
+        }
+
+        // Persist changes
+        if (typeof newUsedUnpaid === "number" || typeof newUsedPaid === "number") {
+          await Employee.updateOne(
+            { _id: employeeId },
+            {
+              $set: {
+                "leaveEntitlement.usedUnpaid": newUsedUnpaid,
+                "leaveEntitlement.usedPaid": newUsedPaid,
+              },
+            }
+          );
+        }
+
+        // Update slip amounts
+        const newLateAmt = Math.max(0, prevLateAmt - refundAmt);
+        slip.lateDeductions = await encrypt(String(newLateAmt));
+        slip.lateDeductionDaysCredited = lateDeductionDaysNow;
+        await slip.save();
+
+        // If any attendance record was marked proportionate earlier and
+        // we reversed full day(s), clear the proportionate flag if appropriate.
+        if (daysToReverse >= 1) {
+          const propRec = await Attendance.findOne({
+            employee: employeeId,
+            owner: ownerId,
+            date: { $gte: start, $lte: end },
+            proportionate: true,
+          }).sort({ date: -1 });
+          if (propRec) {
+            await Attendance.updateOne({ _id: propRec._id }, { $set: { proportionate: false } });
+          }
+        }
+
+        console.log(
+          `[LATE-REV] [${employee.name}] Reversed ${daysToReverse} late deduction(s) -> Refund=${refundAmt}, New lateDeductions=${newLateAmt}`
+        );
+      }
+    }
+
     // ========= LATE (3 = 1 day) =========
     if (!beforeJoin && status === "Late") {
       const lateRecords = await Attendance.find({
