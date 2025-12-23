@@ -85,11 +85,11 @@ const EmployeeSchema = new Schema(
     // EMPLOYMENT DETAILS
     department: { type: String },
     designation: { type: String },
-    balance: {
-      type: Number,
-      default: 0,
-      min: 0,
-    },
+    // balance: {
+    //   type: Number,
+    //   default: 0,
+    //   min: 0,
+    // },
     joiningDate: { type: String },
     leavingDate: { type: String }, // Last working day / employment end date
 

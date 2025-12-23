@@ -32,32 +32,34 @@ const bugSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
-    images: [{
-      filename: {
-        type: String,
-        required: true,
+    images: [
+      {
+        filename: {
+          type: String,
+          required: true,
+        },
+        originalName: {
+          type: String,
+          required: true,
+        },
+        path: {
+          type: String,
+          required: true,
+        },
+        mimetype: {
+          type: String,
+          required: true,
+        },
+        size: {
+          type: Number,
+          required: true,
+        },
+        uploadDate: {
+          type: Date,
+          default: Date.now,
+        },
       },
-      originalName: {
-        type: String,
-        required: true,
-      },
-      path: {
-        type: String,
-        required: true,
-      },
-      mimetype: {
-        type: String,
-        required: true,
-      },
-      size: {
-        type: Number,
-        required: true,
-      },
-      uploadDate: {
-        type: Date,
-        default: Date.now,
-      },
-    }],
+    ],
     approvalRequired: {
       type: Boolean,
       default: false,
@@ -70,8 +72,14 @@ const bugSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    rewardAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
   },
-  { 
+  {
     timestamps: true,
     toJSON: { virtuals: true },
     toObject: { virtuals: true },
@@ -79,8 +87,8 @@ const bugSchema = new mongoose.Schema(
 );
 
 // Virtual for image URLs
-bugSchema.virtual('imageUrls').get(function() {
-  return this.images.map(image => `/api/bugs/images/${image.filename}`);
+bugSchema.virtual("imageUrls").get(function () {
+  return this.images.map((image) => `/api/bugs/images/${image.filename}`);
 });
 
 module.exports = mongoose.model("Bug", bugSchema);

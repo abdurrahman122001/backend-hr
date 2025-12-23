@@ -295,7 +295,6 @@ exports.getBugs = async (req, res) => {
     });
   }
 };
-// controllers/bugController.js - Updated with pagination
 exports.getBugsByOwner = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -314,14 +313,6 @@ exports.getBugsByOwner = async (req, res) => {
         message: "User not found",
       });
     }
-
-    // // Check if user has owner role or is admin
-    // if (user.role !== "admin" && user.role !== "owner") {
-    //   return res.status(403).json({
-    //     status: "error",
-    //     message: "You don't have permission to view owner bugs",
-    //   });
-    // }
 
     // Get all employees owned by this user
     const ownedEmployees = await Employee.find({ owner: userId }).select(
@@ -387,11 +378,47 @@ exports.getBugsByOwner = async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    // Calculate statistics
-    const totalBalance = ownedEmployees.reduce(
-      (sum, emp) => sum + (emp.balance || 0),
-      0
-    );
+    // Calculate total reward for each employee from ALL their bugs (not just paginated)
+    const employeeTotalRewards = {};
+    
+    for (const employee of ownedEmployees) {
+      const allEmployeeBugs = await Bug.find({ 
+        reportedBy: employee._id 
+      }).select("rewardAmount rewardAdded status");
+      
+      // Sum all rewardAmounts from this employee's bugs
+      // Use actual rewardAmount from DB or default to 100
+      const totalFromBugs = allEmployeeBugs.reduce((sum, bug) => {
+        return sum + (bug.rewardAmount || 100);
+      }, 0);
+      
+      employeeTotalRewards[employee._id.toString()] = totalFromBugs;
+    }
+
+    // FIXED: Ensure each bug has 100 Rs reward
+    const bugsWithRewards = bugs.map((bug) => {
+      // Create a new object to ensure the rewardAmount is properly set
+      const bugData = bug.toObject();
+      
+      // Always show 100 Rs for each bug
+      bugData.rewardAmount = 100;
+      
+      // Mark reward as added if rewardAmount is set
+      bugData.rewardAdded = true;
+      
+      // Add employee total from all bugs to the populated employee object
+      if (bugData.reportedBy && bugData.reportedBy._id) {
+        bugData.reportedBy.totalFromBugs = employeeTotalRewards[bugData.reportedBy._id.toString()] || 0;
+      }
+      
+      return bugData;
+    });
+
+    // Calculate statistics - total from all bugs, not employee balance
+    let totalFromAllBugs = 0;
+    Object.values(employeeTotalRewards).forEach(amount => {
+      totalFromAllBugs += amount;
+    });
 
     // Get bug counts for statistics
     const totalBugCount = await Bug.countDocuments({
@@ -417,38 +444,24 @@ exports.getBugsByOwner = async (req, res) => {
       resolved: resolvedBugCount,
     };
 
-    // Group bugs by employee
-    const bugsByEmployee = {};
-    ownedEmployees.forEach((emp) => {
-      const employeeBugs = bugs.filter(
-        (b) =>
-          b.reportedBy &&
-          b.reportedBy._id &&
-          b.reportedBy._id.toString() === emp._id.toString()
-      );
-
-      bugsByEmployee[emp._id] = {
-        employee: emp,
-        bugs: employeeBugs,
-        bugCount: employeeBugs.length,
-      };
-    });
-
     // Prepare employees with bugs data
     const employeesWithBugs = ownedEmployees
       .map((emp) => {
-        const employeeBugCount = bugs.filter(
+        const employeeBugs = bugsWithRewards.filter(
           (b) =>
             b.reportedBy &&
             b.reportedBy._id &&
             b.reportedBy._id.toString() === emp._id.toString()
-        ).length;
+        );
+
+        const employeeTotalRewardsFromBugs = employeeTotalRewards[emp._id.toString()] || 0;
 
         return {
           name: emp.name,
           department: emp.department,
-          balance: emp.balance || 0,
-          bugCount: employeeBugCount,
+          balance: employeeTotalRewardsFromBugs, // Use total from bugs, not employee balance
+          bugCount: employeeBugs.length,
+          totalRewards: employeeTotalRewardsFromBugs,
         };
       })
       .sort((a, b) => b.balance - a.balance);
@@ -462,15 +475,14 @@ exports.getBugsByOwner = async (req, res) => {
       },
       statistics: {
         totalEmployees: ownedEmployees.length,
-        totalBugBountyBalance: totalBalance,
+        totalBugBountyBalance: totalFromAllBugs, // Use total from bugs
         bugCounts,
         employeesWithBugs,
       },
-      bugs,
+      bugs: bugsWithRewards,
       totalBugs,
       totalPages,
       currentPage: page,
-      bugsByEmployee,
     });
   } catch (err) {
     console.error("❌ Error fetching bugs by owner:", err);
@@ -744,9 +756,6 @@ exports.deleteImage = async (req, res) => {
   }
 };
 
-// ---------------------
-// RESOLVE BUG
-// ---------------------
 exports.resolveBug = async (req, res) => {
   try {
     const { id } = req.params;
@@ -762,6 +771,22 @@ exports.resolveBug = async (req, res) => {
 
     const emp = await Employee.findById(employeeId).select("department role");
 
+    // Calculate reward based on priority
+    const calculateReward = (priority) => {
+      switch (priority) {
+        case "high":
+          return 100;
+        case "medium":
+          return 100;
+        case "low":
+          return 100;
+        default:
+          return 100;
+      }
+    };
+
+    const rewardAmount = calculateReward(bug.priority);
+
     // Reporter can resolve directly
     if (bug.reportedBy.toString() === employeeId.toString()) {
       bug.status = "resolved";
@@ -770,8 +795,9 @@ exports.resolveBug = async (req, res) => {
 
       // Add reward if not already added
       if (!bug.rewardAdded) {
-        await addRewardToReporter(bug.reportedBy);
+        await addRewardToReporter(bug.reportedBy, rewardAmount);
         bug.rewardAdded = true;
+        bug.rewardAmount = rewardAmount; // Store the reward amount
       }
 
       await bug.save();
@@ -787,7 +813,7 @@ exports.resolveBug = async (req, res) => {
 
       return res.json({
         status: "success",
-        message: "Bug resolved by reporter. Reward of 100 points added.",
+        message: `Bug resolved by reporter. Reward of ${rewardAmount} points added.`,
         bug,
       });
     }
@@ -800,6 +826,7 @@ exports.resolveBug = async (req, res) => {
     ) {
       bug.status = "pending_approval";
       bug.approvalRequired = true;
+      bug.rewardAmount = rewardAmount; // Store the reward amount even if pending
       await bug.save();
 
       await bug.populate({
@@ -830,8 +857,9 @@ exports.resolveBug = async (req, res) => {
       bug.approvedByReporter = true;
 
       if (!bug.rewardAdded) {
-        await addRewardToReporter(bug.reportedBy);
+        await addRewardToReporter(bug.reportedBy, rewardAmount);
         bug.rewardAdded = true;
+        bug.rewardAmount = rewardAmount;
       }
 
       await bug.save();
@@ -847,7 +875,7 @@ exports.resolveBug = async (req, res) => {
 
       return res.json({
         status: "success",
-        message: "Bug resolved by owner. Reward of 100 points added.",
+        message: `Bug resolved by owner. Reward of ${rewardAmount} points added.`,
         bug,
       });
     }
@@ -872,10 +900,6 @@ exports.resolveBug = async (req, res) => {
     });
   }
 };
-
-// ---------------------
-// APPROVE BUG
-// ---------------------
 exports.approveBug = async (req, res) => {
   try {
     const { id } = req.params;
@@ -908,10 +932,27 @@ exports.approveBug = async (req, res) => {
     bug.approvalRequired = false;
     bug.approvedByReporter = true;
 
+    // Calculate reward if not already set
+    const calculateReward = (priority) => {
+      switch (priority) {
+        case "high":
+          return 1000;
+        case "medium":
+          return 500;
+        case "low":
+          return 100;
+        default:
+          return 100;
+      }
+    };
+
+    const rewardAmount = bug.rewardAmount || calculateReward(bug.priority);
+
     // Add reward if not already added
     if (!bug.rewardAdded) {
-      await addRewardToReporter(bug.reportedBy);
+      await addRewardToReporter(bug.reportedBy, rewardAmount);
       bug.rewardAdded = true;
+      bug.rewardAmount = rewardAmount;
     }
 
     await bug.save();
@@ -927,8 +968,7 @@ exports.approveBug = async (req, res) => {
 
     return res.json({
       status: "success",
-      message:
-        "Bug approved and marked as resolved. Reward of 100 points added.",
+      message: `Bug approved and marked as resolved. Reward of ${rewardAmount} points added.`,
       bug,
     });
   } catch (err) {
@@ -1439,13 +1479,8 @@ exports.getAllEmployeeBalances = async (req, res) => {
   }
 };
 
-// ---------------------
-// HELPER FUNCTION: Add Reward
-// ---------------------
-const addRewardToReporter = async (reporterId) => {
+const addRewardToReporter = async (reporterId, rewardAmount = 100) => {
   try {
-    const rewardAmount = 100;
-
     const reporter = await Employee.findById(reporterId);
     if (!reporter) {
       console.error("Reporter not found for reward");

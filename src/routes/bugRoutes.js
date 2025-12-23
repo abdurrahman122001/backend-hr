@@ -5,7 +5,7 @@ const router = express.Router();
 const requireEmployeeAuth = require("../middleware/empAuth");
 const bugController = require("../controllers/bugController");
 const { upload } = require("../utils/multer");
-const requireAuth = require("../middleware/auth"); // Make sure this is correct
+const requireAuth = require("../middleware/auth");
 
 // @route   POST /api/bugs/create
 // @desc    Create new bug with image upload
@@ -24,7 +24,8 @@ router.get("/", requireEmployeeAuth, bugController.getBugs);
 
 // @route   GET /api/bugs/owner
 // @desc    Get bugs reported by employees owned by current user
-// @access  Private (Owner)
+// @access  Private (Owner/User)
+// FIX: Using requireAuth for user authentication instead of requireEmployeeAuth
 router.get("/owner", requireAuth, bugController.getBugsByOwner);
 
 // @route   GET /api/bugs/owner/dashboard
