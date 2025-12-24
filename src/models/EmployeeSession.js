@@ -11,7 +11,7 @@ const EmployeeSessionSchema = new mongoose.Schema(
     logoutTime: { type: Date },
     deviceFingerprint: { type: String },
     active: { type: Boolean, default: true },
-    date: { type: String, required: true }, // YYYY-MM-DD format for uniqueness per day
+    date: { type: String, required: false }, // YYYY-MM-DD format for uniqueness per day
     shiftId: { type: mongoose.Schema.Types.ObjectId, ref: "Shift" },
     shiftName: { type: String },
     shiftStartTime: { type: String }, // HH:mm format

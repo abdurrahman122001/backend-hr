@@ -864,7 +864,6 @@ function normalizeFields(fieldArr, orderArr) {
   }
   return orderArr.filter((key) => keys.includes(key));
 }
-
 async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
   if (!monthYear) {
     throw new Error("monthYear is required");
@@ -919,6 +918,8 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         : 0;
 
       let currentMonthPayment = 0;
+      let currentMonthPrincipal = 0;
+      
       if (currentMonthEntry.totalPayment) {
         currentMonthPayment =
           parseFloat(
@@ -929,9 +930,14 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
           parseFloat(await decrypt(loan.monthlyInstallment, decryptionKey)) ||
           0;
       }
+      
+      // Calculate current month principal (total payment - markup)
+      currentMonthPrincipal = Math.max(0, currentMonthPayment - currentMonthMarkup);
 
-      // Calculate previous months payments (all payments before current month)
-      let previousMonthsPayment = 0;
+      // Calculate previous months PRINCIPAL payments (all principal payments before current month)
+      let previousMonthsPrincipal = 0;
+      let previousMonthsTotalPayment = 0;
+      
       for (const scheduleEntry of loan.paymentSchedule) {
         const scheduleYear = Number(scheduleEntry.year);
         const scheduleMonth = scheduleEntry.month;
@@ -943,37 +949,82 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
           scheduleYear < year ||
           (scheduleYear === year && scheduleMonthIndex < currentMonthIndex);
 
-        if (isBeforeCurrentMonth && scheduleEntry.totalPayment) {
-          const paymentAmount =
-            parseFloat(
-              await decrypt(scheduleEntry.totalPayment, decryptionKey)
-            ) || 0;
-          previousMonthsPayment += paymentAmount;
+        if (isBeforeCurrentMonth) {
+          let entryTotalPayment = 0;
+          let entryMarkup = 0;
+          
+          if (scheduleEntry.totalPayment) {
+            entryTotalPayment =
+              parseFloat(
+                await decrypt(scheduleEntry.totalPayment, decryptionKey)
+              ) || 0;
+          }
+          
+          if (scheduleEntry.markupAmount) {
+            entryMarkup =
+              parseFloat(
+                await decrypt(scheduleEntry.markupAmount, decryptionKey)
+              ) || 0;
+          }
+          
+          // Calculate principal for this entry
+          const entryPrincipal = Math.max(0, entryTotalPayment - entryMarkup);
+          previousMonthsPrincipal += entryPrincipal;
+          previousMonthsTotalPayment += entryTotalPayment;
         }
       }
 
-      // SIMPLE CALCULATION LIKE REACT COMPONENT
-      const netBalance = Math.max(
-        0,
-        totalToBePaid - (previousMonthsPayment + currentMonthPayment)
-      );
+      // Get outstanding balance from current month's schedule entry (if available)
+      // This should be the principal balance AFTER this month's payment
+      let principalBalance = 0;
+      if (currentMonthEntry.outstanding) {
+        principalBalance = parseFloat(
+          await decrypt(currentMonthEntry.outstanding, decryptionKey)
+        ) || 0;
+      } else {
+        // Calculate principal balance if outstanding field is not available
+        // Principal balance = original loan amount - (previous principal + current principal)
+        principalBalance = Math.max(
+          0, 
+          loanAmount - (previousMonthsPrincipal + currentMonthPrincipal)
+        );
+      }
 
-      console.log("Loan calculation (React style):", {
-        loanAmount,
-        totalMarkup,
-        totalToBePaid,
-        previousMonthsPayment,
-        currentMonthPayment,
-        netBalance,
-      });
+      // Calculate remaining markup balance (future markup payments)
+      let remainingMarkup = 0;
+      for (const scheduleEntry of loan.paymentSchedule) {
+        const scheduleYear = Number(scheduleEntry.year);
+        const scheduleMonth = scheduleEntry.month;
+        const currentMonthIndex = monthsList.indexOf(monthName);
+        const scheduleMonthIndex = monthsList.indexOf(scheduleMonth);
+
+        // Check if this schedule entry is after the current month
+        const isAfterCurrentMonth =
+          scheduleYear > year ||
+          (scheduleYear === year && scheduleMonthIndex > currentMonthIndex);
+
+        if (isAfterCurrentMonth && scheduleEntry.markupAmount) {
+          const futureMarkup =
+            parseFloat(
+              await decrypt(scheduleEntry.markupAmount, decryptionKey)
+            ) || 0;
+          remainingMarkup += futureMarkup;
+        }
+      }
+
+      // Calculate TOTAL paid so far (for reference)
+      const totalPaidSoFar = previousMonthsTotalPayment + currentMonthPayment;
+      
+      // NET BALANCE: Just the principal balance (NOT principal + markup)
+      const netBalance = principalBalance;
 
       loanDetails.push({
         type: loan.type || "Personal Loan",
-        amountPaidCurrentMonth: currentMonthPayment,
-        amountPaidPreviousMonths: previousMonthsPayment,
-        balancePrincipal: loanAmount, // Show original loan amount as principal balance
-        balanceMarkup: totalMarkup, // Show total markup as markup balance
-        netBalance: netBalance,
+        amountPaidCurrentMonth: currentMonthPayment, // Total installment for current month
+        amountPaidPreviousMonths: previousMonthsPrincipal, // Only principal for previous months
+        balancePrincipal: principalBalance,
+        balanceMarkup: remainingMarkup,
+        netBalance: netBalance, // Just the principal balance
         // Additional details for reference
         loanAmount: loanAmount,
         totalMarkup: totalMarkup,
@@ -982,6 +1033,9 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         markupValue: loan.markupValue || 0,
         markupType: loan.markupType || "fixed",
         loanId: loan._id.toString(),
+        // For debugging/verification
+        totalPaidSoFar: totalPaidSoFar,
+        principalPaidSoFar: previousMonthsPrincipal + currentMonthPrincipal
       });
 
       totalLoanBenefits += currentMonthMarkup;
@@ -998,6 +1052,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
     totalLoanInstallments,
   };
 }
+
 module.exports = async function sendSlipEmail(req, res) {
   try {
     // Fetch company profile

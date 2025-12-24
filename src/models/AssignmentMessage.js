@@ -124,6 +124,22 @@ const AssignmentMessageSchema = new Schema(
     lastEditedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     lastEditedAt: { type: Date },
     attachments: [AttachmentSchema],
+    emailMetadata: {
+      messageId: String,
+      from: String,
+      to: String,
+      date: Date,
+      cc: [String],
+      bcc: [String],
+      headers: Schema.Types.Mixed, // Store full headers if needed
+    },
+
+    // Add source field to distinguish between manual and email messages
+    source: {
+      type: String,
+      enum: ["manual", "email", "system"],
+      default: "manual",
+    },
     replyTo: {
       type: Schema.Types.ObjectId,
       ref: "AssignmentMessage",
