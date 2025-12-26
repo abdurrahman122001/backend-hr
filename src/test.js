@@ -16,7 +16,7 @@ const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
 const empAuth = require("./middleware/empAuth");
 const puppeteer = require("puppeteer");
-
+const ProbationPeriod = require("./models/ProbationPeriod");
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
