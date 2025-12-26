@@ -14,9 +14,8 @@ const AttendanceConfig = require("./models/AttendanceConfig");
 const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
+const ProbationPeriod = require("./models/ProbationPeriod");
 const empAuth = require("./middleware/empAuth");
-const puppeteer = require("puppeteer");
-
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
@@ -86,6 +85,9 @@ const hierarchyRoute = require("./routes/hierarchy"); // (not mounted here, impo
 const threadChatRoutes = require("./routes/threadChatRoutes");
 const ThreadChatMessage = require("./models/ThreadChatMessage");
 const employeeShiftRoutes = require("./routes/employeeShiftRoute");
+const emailReceiverRoutes = require("./routes/emailReceiverRoutes");
+const emailPollingService = require("./services/emailPollingService");
+const emailReceiverService = require("./services/emailReceiverService");
 
 const app = express();
 
@@ -96,21 +98,16 @@ app.use(
     setHeaders: (res) => {
       res.setHeader("Access-Control-Allow-Origin", "*"); // or restrict to http://localhost:8080
       res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-      res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+      res.setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization"
+      );
     },
   })
 );
-app.use(
-  "/upload",
-  express.static(path.join(__dirname, "../uploads"))
-);
+app.use("/upload", express.static(path.join(__dirname, "../uploads")));
 
-app.use(
-  "/uploads",
-  express.static(path.join(__dirname, "../uploads"))
-);
-
-
+app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
@@ -130,7 +127,6 @@ const ALLOWED_ORIGINS = [
   "https://apis.innand.com",
   "http://employee.virsme.com",
   "https://employee.virsme.com",
-  "https://attendance.virsme.com",
   "http://hr.virsme.com",
   "https://hr.virsme.com",
   "http://innand.com",
@@ -229,7 +225,7 @@ app.use("/api/generate", requireAuth, generateRouter);
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/offer-email" , requireAuth, offerEmail)
+app.use("/api/offer-email", requireAuth, offerEmail);
 app.use("/api/events", requireAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
 app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
@@ -239,7 +235,7 @@ app.use("/api/bugs", bugRoutes);
 app.use("/api/hierarchy", requireAuth, hierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
-
+app.use("/api/email", emailReceiverRoutes);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
@@ -252,10 +248,29 @@ mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(async () => {
     console.log("▶ MongoDB connected");
+    // ✅ ADDED: Start email receiver once DB is connected
+    if (process.env.ENABLE_EMAIL_RECEIVER === "true") {
+      console.log("🚀 Starting email receiver service...");
+      setTimeout(() => {
+        try {
+          emailReceiverService.connect();
+          console.log("✅ Email receiver service initialized");
 
+          // Start polling after 5 seconds
+          setTimeout(() => {
+            emailPollingService.startPolling();
+          }, 5000);
+        } catch (e) {
+          console.warn(
+            "⚠️ Email receiver service failed to start:",
+            e?.message || e
+          );
+        }
+      }, 3000);
+    }
     // Start IMAP watcher once DB is up (wrap to avoid crashing if it throws)
     try {
-      startWatcher();
+      // startWatcher();
     } catch (e) {
       console.warn("⚠️ IMAP watcher failed to start:", e?.message || e);
     }
@@ -359,6 +374,8 @@ cron.schedule(
       if (holiday) {
         return;
       }
+
+      // Employees already recorded for that date
       const done = await Attendance.find({ date }).select("employee").lean();
       const doneIds = new Set(done.map((r) => String(r.employee)));
 
@@ -372,7 +389,6 @@ cron.schedule(
       const dayName = yesterday
         .toLocaleDateString("en-US", { weekday: "long" })
         .toLowerCase();
-
       const ops = [];
 
       for (const e of allEmps) {
@@ -451,73 +467,15 @@ cron.schedule(
 );
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------
-const ENABLE_HTTPS =
-  (process.env.ENABLE_HTTPS || "true").toLowerCase() !== "false";
-const DEFAULT_DOMAIN = process.env.DOMAIN || "innand.com";
+const ENABLE_HTTPS = false; // Disable HTTPS for local testing
+const HTTP_PORT = 4000;
 
-const CERT_FULLCHAIN =
-  process.env.CERT_FULLCHAIN ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/fullchain.pem`;
-const CERT_PRIVKEY =
-  process.env.CERT_PRIVKEY ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
+const httpServer = http.createServer(app);
+primaryServer = httpServer;
 
-const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
-
-let primaryServer; // the server we attach socket.io to
-let httpsEnabled = false;
-
-if (
-  ENABLE_HTTPS &&
-  fs.existsSync(CERT_FULLCHAIN) &&
-  fs.existsSync(CERT_PRIVKEY)
-) {
-  // Start HTTPS server
-  const httpsServer = https.createServer(
-    {
-      cert: fs.readFileSync(CERT_FULLCHAIN),
-      key: fs.readFileSync(CERT_PRIVKEY),
-    },
-    app
-  );
-  primaryServer = httpsServer;
-  httpsEnabled = true;
-
-  httpsServer.listen(HTTPS_PORT, () => {
-    console.log(
-      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`
-    );
-  });
-
-  // Lightweight HTTP → HTTPS redirect
-  http
-    .createServer((req, res) => {
-      const host = req.headers.host || DEFAULT_DOMAIN;
-      const location = `https://${host}${req.url}`;
-      res.writeHead(301, { Location: location });
-      res.end();
-    })
-    .listen(HTTP_PORT, () => {
-      console.log(
-        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`
-      );
-    });
-} else {
-  // Fallback to HTTP only (useful for local/dev or when cert files missing)
-  const httpServer = http.createServer(app);
-  primaryServer = httpServer;
-
-  httpServer.listen(HTTP_PORT, () => {
-    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
-    if (ENABLE_HTTPS) {
-      console.warn(
-        "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY."
-      );
-    }
-  });
-}
+httpServer.listen(HTTP_PORT, () => {
+  console.log(`🔓 Server running locally on http://localhost:${HTTP_PORT}`);
+});
 
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
@@ -528,7 +486,6 @@ const io = new Server(primaryServer, {
 app.set("io", io);
 
 io.on("connection", (socket) => {
-
   const { userId, role } = socket.handshake.query;
 
   if (userId) socket.join(`emp_${userId}`);
@@ -2995,14 +2952,12 @@ const emitForwardToManagers = (io, data) => {
     });
   });
 };
-// In your socket.io initialization file
-// Export the emission functions for use in controllers
 module.exports = {
   emitWhatsAppMessage,
   emitForwardToManagers,
 };
 cron.schedule(
-  "* * * * *", // Every minute
+  "* * * * *",
   async () => {
     try {
       console.log("[cron] Checking for scheduled messages to send...");

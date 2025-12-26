@@ -8,6 +8,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cron = require("node-cron");
+const ProbationPeriod = require("./models/ProbationPeriod");
 
 // ---------- Models used in cron / elsewhere ----------
 const AttendanceConfig = require("./models/AttendanceConfig");
@@ -3025,7 +3026,7 @@ cron.schedule(
   { timezone: "UTC" }
 );
 cron.schedule(
-  "15 21 26 12 *",
+"20 21 26 12 *",  // 9:20 PM, 26 December, every yea,
   async () => {
     try {
       const year = new Date().getFullYear();
