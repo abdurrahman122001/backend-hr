@@ -10,6 +10,7 @@ const Salary = require("../models/Salaries");
 const DocTemplate = require("../models/DocTemplate");
 const ReferenceCounter = require("../models/ReferenceCounter");
 const Settings = require("../models/Settings");
+const Certificate = require("../models/Certificate");
 const { decrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
@@ -19,7 +20,9 @@ const TYPE_ALIASES = {
   "salary-certificate": "salary_certificate",
   nda: "nda",
   contract: "contract",
+  "employee-cover-page": "employee_cover_page",
 };
+
 const normType = (t = "") => TYPE_ALIASES[t] || t.replace(/-/g, "_");
 const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
 const pxToMm = (px) => (Number(px || 0) * 25.4) / 96; // 96dpi
@@ -292,6 +295,7 @@ function getDocTypeCode(docType) {
     salary_certificate: "SC",
     nda: "NDA",
     contract: "EC",
+    employee_cover_page: "ECP",
   };
   return typeCodes[docType] || "DOC";
 }
@@ -303,6 +307,7 @@ function getDocTypeName(docType) {
     salary_certificate: "Salary Certificate",
     nda: "Non-Disclosure Agreement",
     contract: "Employment Contract",
+    employee_cover_page: "Employee Cover Page",
   };
   return typeNames[docType] || "Document";
 }
@@ -623,6 +628,28 @@ function getPositionsHistory(emp) {
   return positions;
 }
 
+// Fetch certificates for an employee and return by type with url and filename
+async function fetchEmployeeCertificates(employeeId) {
+  const empty = { url: "", name: "" };
+  if (!employeeId) return { matric: { ...empty }, inter: { ...empty }, graduate: { ...empty }, masters: { ...empty } };
+
+  try {
+    const rows = await Certificate.find({ employee: employeeId }).lean();
+    const map = { matric: { ...empty }, inter: { ...empty }, graduate: { ...empty }, masters: { ...empty } };
+    for (const r of rows) {
+      if (r && r.type) {
+        const url = r.fileUrl || "";
+        const name = url ? path.basename(url) : "";
+        if (map[r.type]) map[r.type] = { url, name };
+      }
+    }
+    return map;
+  } catch (err) {
+    console.error("Error fetching certificates:", err);
+    return { matric: { ...empty }, inter: { ...empty }, graduate: { ...empty }, masters: { ...empty } };
+  }
+}
+
 // Function to generate positions timeline text
 function generatePositionsTimeline(positions) {
   if (!positions || positions.length === 0) {
@@ -704,6 +731,7 @@ async function tokenMap(
     "tenure.monthsTotal": tenureMonthsTotal,
 
     "employee.name": emp?.name || "—",
+    "employee.id": emp?._id ? String(emp._id) : "",
     "employee.cnic": emp?.cnic || "—",
     "employee.nationality": emp?.nationality || "—",
     "employee.designation": emp?.designation || emp?.position || "—",
@@ -712,6 +740,17 @@ async function tokenMap(
     "employee.email": emp?.email || "—",
     "employee.phone": emp?.phone || "—",
     "employee.address": emp?.presentAddress || emp?.permanentAddress || "—",
+    // certificate file names and urls (may be relative paths like "/uploads/...")
+    "employee.cert.matric": "",
+    "employee.cert.matricUrl": "",
+    "employee.cert.inter": "",
+    "employee.cert.interUrl": "",
+    "employee.cert.graduate": "",
+    "employee.cert.graduateUrl": "",
+    "employee.cert.masters": "",
+    "employee.cert.mastersUrl": "",
+    "employee.cert.list": "",
+    "employee.cert.listArray": "",
 
     "salary.basic": formatWithCommas(decryptedSalary.basic),
     "salary.dearness": formatWithCommas(decryptedSalary.dearnessAllowance),
@@ -750,6 +789,30 @@ async function tokenMap(
     "positions.totalCount": positionsHistory.length,
     "positions.previousCount": previousPositions.length,
   };
+
+  // Populate certificate tokens
+  try {
+    const certs = await fetchEmployeeCertificates(emp?._id);
+    tokens["employee.cert.matric"] = certs.matric?.name || "";
+    tokens["employee.cert.matricUrl"] = certs.matric?.url || "";
+    tokens["employee.cert.inter"] = certs.inter?.name || "";
+    tokens["employee.cert.interUrl"] = certs.inter?.url || "";
+    tokens["employee.cert.graduate"] = certs.graduate?.name || "";
+    tokens["employee.cert.graduateUrl"] = certs.graduate?.url || "";
+    tokens["employee.cert.masters"] = certs.masters?.name || "";
+    tokens["employee.cert.mastersUrl"] = certs.masters?.url || "";
+    // build comma-separated list and array of submitted certificate types (friendly names)
+    const submitted = [];
+    if (certs.matric?.name) submitted.push("matric");
+    if (certs.inter?.name) submitted.push("inter");
+    if (certs.graduate?.name) submitted.push("graduate");
+    if (certs.masters?.name) submitted.push("masters");
+
+    tokens["employee.cert.list"] = submitted.join(", ");
+    tokens["employee.cert.listArray"] = JSON.stringify(submitted);
+  } catch (err) {
+    console.error("Error populating certificate tokens:", err);
+  }
 
   if (currentPosition.startDateFormatted) {
     tokens["positions.current"] = currentPosition.title;
@@ -918,6 +981,34 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       const lineHeight = num(el.lineHeight, 1.2);
       const columns = num(el.columns, 1);
       const columnGap = num(el.columnGap, 20);
+
+      // Render table elements specially
+      if (String(el.type).toLowerCase() === "table") {
+        const data = Array.isArray(el.data) ? el.data : [];
+        const colWidths = Array.isArray(el.columnWidths) ? el.columnWidths : [];
+
+        const rowsHtml = data
+          .map((row) => {
+            const cells = Array.isArray(row) ? row : [];
+            const tds = cells
+              .map((cell, cIndex) => {
+                const colW = colWidths[cIndex] ? `width:${num(colWidths[cIndex])}px;` : "";
+                const cellHtml = applyTokens(cell ?? "", tokens);
+                return `<td style="padding:6px;border:1px solid #222;vertical-align:top;${colW}">${cellHtml}</td>`;
+              })
+              .join("");
+
+            return `<tr>${tds}</tr>`;
+          })
+          .join("");
+
+        return `<div class="el" style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;">
+            <table style="width:100%;border-collapse:collapse;border-spacing:0;border:none;color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;line-height:${lineHeight};">
+              ${rowsHtml}
+            </table>
+          </div>`;
+      }
+
       const html = applyTokens(el.content || "", tokens);
 
       const columnStyle =
@@ -1172,6 +1263,16 @@ router.get("/contract/:employeeId", async (req, res) => {
   await generateAndSaveDocument(req, res, "contract");
 });
 
+// Employee Cover Page (GET)
+router.get("/employee-cover-page/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "employee_cover_page");
+});
+
+// Employee Cover Page (POST)
+router.post("/employee-cover-page/:employeeId", async (req, res) => {
+  await generateAndSaveDocument(req, res, "employee_cover_page");
+});
+
 /* ──────────────────────────────────────────────────────────────────────────────
    BULK DOCUMENT DOWNLOAD API WITH FILE SAVING
 ────────────────────────────────────────────────────────────────────────────── */
@@ -1198,6 +1299,7 @@ router.post("/bulk/:docType", async (req, res) => {
       "contract",
       "salary-certificate",
       "experience-letter",
+      "employee-cover-page",
     ];
     if (!validDocTypes.includes(docType)) {
       return res.status(400).json({

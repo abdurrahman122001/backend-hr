@@ -3024,6 +3024,104 @@ cron.schedule(
   },
   { timezone: "UTC" }
 );
+cron.schedule(
+  "15 21 26 12 *",
+  async () => {
+    try {
+      const year = new Date().getFullYear();
+
+      // Get distinct owners to respect owner-specific probation policies
+      const owners = await Employee.distinct("owner", { isTrashed: false });
+      let totalUpdated = 0;
+
+      for (const ownerId of owners) {
+        try {
+          const probationPolicy = await ProbationPeriod.findOne({
+            owner: ownerId,
+          })
+            .sort({ createdAt: -1 })
+            .lean();
+          const probationDays = probationPolicy
+            ? Number(probationPolicy.days || 0)
+            : 0;
+          const leaveDuringProbation = probationPolicy
+            ? !!probationPolicy.leaveDuringProbation
+            : true;
+
+          const baseFilter = {
+            isTrashed: false,
+            status: { $in: ["active", "pending", "review", "Onboarding"] },
+            owner: ownerId,
+          };
+
+          if (!leaveDuringProbation && probationDays > 0) {
+            // Only update employees whose probation period has ended (joiningDate + probationDays <= today)
+            const cutoff = new Date();
+            cutoff.setDate(cutoff.getDate() - probationDays);
+
+            // Fetch employees for this owner and filter in JS because joiningDate is stored as string
+            const emps = await Employee.find(baseFilter)
+              .select("_id joiningDate")
+              .lean();
+            const idsToUpdate = [];
+
+            for (const e of emps) {
+              if (!e.joiningDate) continue;
+              const jd = new Date(e.joiningDate);
+              if (isNaN(jd.getTime())) continue;
+              if (jd <= cutoff) idsToUpdate.push(e._id);
+            }
+
+            if (idsToUpdate.length > 0) {
+              const res = await Employee.updateMany(
+                { _id: { $in: idsToUpdate } },
+                {
+                  $set: {
+                    "leaveEntitlement.total": 22,
+                    "leaveEntitlement.usedPaid": 0,
+                    "leaveEntitlement.usedUnpaid": 0,
+                    "leaveEntitlement.bonus": 0,
+                    "leaveEntitlement.bonusHoursAccumulated": 0,
+                    "leaveEntitlement.bonusYear": year,
+                  },
+                }
+              );
+              totalUpdated += res.modifiedCount || 0;
+            }
+          } else {
+            // Leave allowed during probation or no probation policy: update all for this owner
+            const res = await Employee.updateMany(baseFilter, {
+              $set: {
+                "leaveEntitlement.total": 22,
+                "leaveEntitlement.usedPaid": 0,
+                "leaveEntitlement.usedUnpaid": 0,
+                "leaveEntitlement.bonus": 0,
+                "leaveEntitlement.bonusHoursAccumulated": 0,
+                "leaveEntitlement.bonusYear": year,
+              },
+            });
+            totalUpdated += res.modifiedCount || 0;
+          }
+        } catch (innerErr) {
+          console.error(
+            `Error processing owner ${ownerId} probation policy:`,
+            innerErr
+          );
+        }
+      }
+
+      console.log(
+        `✅ Yearly leave entitlement reset completed for ${totalUpdated} employees`
+      );
+    } catch (error) {
+      console.error("❌ Yearly leave entitlement reset failed:", error);
+    }
+  },
+  {
+    timezone: "Asia/Karachi",
+  }
+);
+
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
   res.send("OK");
