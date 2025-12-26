@@ -3025,7 +3025,7 @@ cron.schedule(
   { timezone: "UTC" }
 );
 cron.schedule(
-"25 21 26 12 *",  // 9:25 PM, 26 December, every year
+"42 21 26 12 *",  // 9:25 PM, 26 December, every year
   async () => {
     try {
       const year = new Date().getFullYear();
