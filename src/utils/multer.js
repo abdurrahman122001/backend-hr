@@ -45,6 +45,10 @@ const ACCEPTED = new Set([
   "audio/mp4",
   "audio/x-m4a",
   "audio/flac",
+  // ZIP (important)
+  "application/zip",
+  "application/x-zip-compressed",
+  "multipart/x-zip",
   "audio/x-flac",
   "application/msword", // .doc
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document", // .docx
