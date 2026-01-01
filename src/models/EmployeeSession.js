@@ -21,8 +21,8 @@ const EmployeeSessionSchema = new mongoose.Schema(
     totalHours: { type: Number, default: 0 }, // in hours
     status: { 
       type: String, 
-      enum: ["present", "late", "half-day", "absent", "early-leave"], 
-      default: "present" 
+      enum: ["on-time", "late", "half-day", "absent", "leave"], 
+      default: "on-time" 
     },
     isAutoLogout: { type: Boolean, default: false },
     isLoginAfter6PM: { type: Boolean, default: false }, // New field to track login after 6 PM

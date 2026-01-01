@@ -59,6 +59,22 @@ router.post("/login", async (req, res) => {
   const { companyEmail, password, deviceFingerprint, deviceToken } = req.body;
 
   try {
+    // ---------------------------
+    // ⚠️ TIME RESTRICTION: No login between 12 AM - 8 AM
+    // ---------------------------
+    const now = new Date();
+    const hours = now.getHours();
+    const minutes = now.getMinutes();
+    const currentTime = hours * 60 + minutes;
+    
+    // Block login between 12 AM (0:00) to 8 AM (8:00)
+    if (currentTime >= 0 && currentTime < 8 * 60) {
+      return res.status(403).json({
+        error: "Login Restricted",
+        message: "Logins are not allowed between 12 AM to 8 AM"
+      });
+    }
+
     const emp = await Employee.findOne({ companyEmail }).select(
       "_id companyEmail password role owner name trustedDevices department status"
     );
@@ -66,7 +82,7 @@ router.post("/login", async (req, res) => {
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
     // ❌ Block login for offboarded employees
-    if (emp.status && emp.status.toLowerCase() === "offboarded" || emp.status.toLowerCase() === "review") {
+    if (emp.status && (emp.status.toLowerCase() === "offboarded" || emp.status.toLowerCase() === "review")) {
       return res.status(403).json({
         error: "Account Disabled",
         message:
@@ -86,6 +102,61 @@ router.post("/login", async (req, res) => {
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
     // ---------------------------
+    // CHECK FOR EXISTING SESSION TODAY (ACTIVE OR INACTIVE)
+    // ---------------------------
+    const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD format
+
+    // Look for any session from today (active or inactive)
+    const existingSession = await EmployeeSession.findOne({
+      employeeId: emp._id,
+      date: today
+    }).sort({ loginTime: -1 }); // Get the latest session
+
+    let session;
+    let sessionStatus = "on-time";
+    let isLoginAfter6PM = false;
+
+    // ---------------------------
+    // IF NO EXISTING SESSION → CREATE NEW ONE
+    // ---------------------------
+    if (!existingSession) {
+      // CALCULATE STATUS BASED ON LOGIN TIME
+      const loginTotalMinutes = hours * 60 + minutes;
+      
+      // Time thresholds in minutes since midnight
+      const officeStart = 15 * 60; // 3:00 PM (15:00)
+      const gracePeriodEnd = 15 * 60 + 15; // 3:15 PM (15:15)
+      const halfDayThreshold = 18 * 60; // 6:00 PM (18:00)
+      
+      if (loginTotalMinutes < officeStart) {
+        sessionStatus = "on-time";
+      } else if (loginTotalMinutes <= gracePeriodEnd) {
+        sessionStatus = "on-time";
+      } else if (loginTotalMinutes < halfDayThreshold) {
+        sessionStatus = "late";
+      } else {
+        sessionStatus = "half-day";
+        isLoginAfter6PM = true;
+      }
+
+      // ✅ CREATE NEW SESSION (first login of the day)
+      session = await EmployeeSession.create({
+        employeeId: emp._id,
+        deviceFingerprint,
+        loginTime: now,
+        date: today,
+        active: true,
+        status: sessionStatus,
+        isLoginAfter6PM: isLoginAfter6PM,
+        actualLoginTime: `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`
+      });
+    } else {
+      // ✅ SESSION ALREADY EXISTS → Use existing session, don't create/update
+      session = existingSession;
+      sessionStatus = existingSession.status;
+    }
+
+    // ---------------------------
     // CHECK IF DEVICE IS TRUSTED
     // ---------------------------
     const isTrusted = emp.trustedDevices?.some(
@@ -102,22 +173,16 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           name: emp.name,
           companyEmail: emp.companyEmail,
-          department: emp.department, // ⭐ ADD THIS
+          department: emp.department,
         },
         JWT_SECRET,
         { expiresIn: "9h" }
       );
 
-      // Log session
-      await EmployeeSession.create({
-        employeeId: emp._id,
-        deviceFingerprint,
-        loginTime: new Date(),
-        active: true,
-      });
-
       return res.json({
-        message: "Login successful (trusted device).",
+        message: existingSession ? 
+          "Login successful (session already exists)." : 
+          "Login successful (trusted device).",
         token,
         user: {
           id: emp._id,
@@ -125,8 +190,11 @@ router.post("/login", async (req, res) => {
           companyEmail: emp.companyEmail,
           role: emp.role,
           owner: emp.owner,
-          department: emp.department, // ⭐ ALSO ADD HERE
+          department: emp.department,
         },
+        sessionId: session._id,
+        sessionStatus: sessionStatus,
+        sessionExists: !!existingSession, // Flag to show session already existed
         trusted: true,
         expiresIn: 9 * 60 * 60,
       });
@@ -153,34 +221,46 @@ router.post("/login", async (req, res) => {
     await sendMail({
       to: "abdullahahmedqureshint@gmail.com",
       subject: "Employee login verification requested",
-      text: `Employee: ${emp.companyEmail}\nTime: ${when}\nIP: ${loginIp}\nCode: ${code}`,
+      text: `Employee: ${emp.companyEmail}\nTime: ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
       html: `<p><b>New device login verification requested</b></p>
              <ul>
                <li><b>Employee:</b> ${emp.companyEmail}</li>
                <li><b>Time:</b> ${when}</li>
                <li><b>IP:</b> ${loginIp}</li>
-               <li><b>Code:</b> <code>${code}</code></li>
+               <li><b>Login Status:</b> ${sessionStatus}</li>
+               <li><b>Verification Code:</b> <code>${code}</code></li>
              </ul>`,
     });
 
     return res.json({
       message: "Verification code sent to admin email.",
       tempToken,
+      sessionId: session._id,
+      sessionStatus: sessionStatus,
+      sessionExists: !!existingSession, // Flag for 2FA path too
       user: {
         id: emp._id,
         name: emp.name,
         companyEmail: emp.companyEmail,
         role: emp.role,
         owner: emp.owner,
-        department: emp.department, // ⭐ ADD THIS HERE TOO
+        department: emp.department,
       },
     });
   } catch (err) {
     console.error("Login error:", err);
+    
+    // Handle duplicate session error (from unique index)
+    if (err.code === 11000) {
+      return res.status(400).json({
+        error: "Session Conflict",
+        message: "A session already exists for today."
+      });
+    }
+    
     return res.status(500).json({ error: "Server error" });
   }
 });
-
 // ---------------------
 // 2️⃣ CONFIRM CODE — trust new device + create session + return permanent token
 // ---------------------
@@ -275,18 +355,56 @@ router.post("/confirm-code", async (req, res) => {
 // ---------------------
 router.post("/logout", requireAuth, async (req, res) => {
   try {
-    await EmployeeSession.findOneAndUpdate(
-      { employeeId: req.employee.id || req.employee._id, active: true },
-      { logoutTime: new Date(), active: false }
+    const now = new Date();
+    const logoutHour = now.getHours();
+    const logoutMinute = now.getMinutes();
+    const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
+    
+    const halfDayLogoutThreshold = 21 * 60; // 9:00 PM in minutes (21:00)
+    
+    // Find the active session
+    const session = await EmployeeSession.findOne({
+      employeeId: req.employee.id || req.employee._id,
+      active: true
+    });
+    
+    if (!session) {
+      return res.status(400).json({ 
+        error: "No active session found" 
+      });
+    }
+    
+    let finalStatus = session.status; // Start with login-time status
+    
+    // If logged out before 9:00 PM, change status to half-day
+    if (logoutTotalMinutes < halfDayLogoutThreshold) {
+      finalStatus = "half-day";
+    }
+    
+    // Update the session
+    const updated = await EmployeeSession.findByIdAndUpdate(
+      session._id,
+      { 
+        logoutTime: now,
+        active: false,
+        status: finalStatus,
+        actualLogoutTime: `${String(logoutHour).padStart(2, '0')}:${String(logoutMinute).padStart(2, '0')}`,
+        totalHours: (now - session.loginTime) / (1000 * 60 * 60) // Calculate hours worked
+      },
+      { new: true }
     );
 
-    return res.json({ status: "success", message: "Logged out successfully" });
+    return res.json({ 
+      status: "success", 
+      message: "Logged out successfully",
+      logoutTime: updated.logoutTime,
+      sessionStatus: updated.status
+    });
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json({ error: "Server error during logout" });
   }
 });
-
 
 router.get("/me", requireAuth, authCtrl.getMe);
 
@@ -319,8 +437,11 @@ router.get("/all-sessions", async (req, res) => {
       employeeEmail: s.employeeId?.companyEmail || "N/A",
       role: s.employeeId?.role || "N/A",
       loginTime: s.loginTime,
+      actualLoginTime: s.actualLoginTime,
+      actualLogoutTime: s.actualLogoutTime,
       logoutTime: s.logoutTime,
       active: s.active,
+      status: s.status,
       deviceFingerprint: s.deviceFingerprint,
     }));
 

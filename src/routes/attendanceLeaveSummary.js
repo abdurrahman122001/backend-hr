@@ -461,7 +461,7 @@ router.get("/available-years", async (req, res) => {
 
 router.get(
   "/employee/:employeeId/current",
-  empAuth,
+  requireAuth,
   leaveYearBalanceController.getCurrentYearLeaveBalance
 );
 
