@@ -66,14 +66,10 @@ router.post("/login", async (req, res) => {
     const hours = now.getHours();
     const minutes = now.getMinutes();
     const currentTime = hours * 60 + minutes;
-    
-    // Block login between 12 AM (0:00) to 8 AM (8:00)
-    if (currentTime >= 0 && currentTime < 8 * 60) {
-      return res.status(403).json({
-        error: "Login Restricted",
-        message: "Logins are not allowed between 12 AM to 8 AM"
-      });
-    }
+
+    const isRestrictedTime = currentTime >= 0 && currentTime < 8 * 60;
+
+
 
     const emp = await Employee.findOne({ companyEmail }).select(
       "_id companyEmail password role owner name trustedDevices department status"
@@ -101,6 +97,40 @@ router.post("/login", async (req, res) => {
     const ok = await emp.comparePassword(password);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
+    if (isRestrictedTime) {
+      console.log(`[RESTRICTED TIME LOGIN] ${emp.companyEmail} logged in during 12 AM - 8 AM. No session created.`);
+
+      // Generate token anyway
+      const token = jwt.sign(
+        {
+          id: emp._id,
+          role: emp.role,
+          owner: emp.owner,
+          name: emp.name,
+          companyEmail: emp.companyEmail,
+          department: emp.department,
+        },
+        JWT_SECRET,
+        { expiresIn: "9h" }
+      );
+
+      return res.json({
+        message: "Login successful (Restricted hours: 12 AM - 8 AM. No attendance recorded)",
+        token,
+        user: {
+          id: emp._id,
+          name: emp.name,
+          companyEmail: emp.companyEmail,
+          role: emp.role,
+          owner: emp.owner,
+          department: emp.department,
+        },
+        restrictedHours: true, // Flag to show this was during restricted hours
+        expiresIn: 9 * 60 * 60,
+      });
+    }
+
+
     // ---------------------------
     // CHECK FOR EXISTING SESSION TODAY (ACTIVE OR INACTIVE)
     // ---------------------------
@@ -122,12 +152,12 @@ router.post("/login", async (req, res) => {
     if (!existingSession) {
       // CALCULATE STATUS BASED ON LOGIN TIME
       const loginTotalMinutes = hours * 60 + minutes;
-      
+
       // Time thresholds in minutes since midnight
       const officeStart = 15 * 60; // 3:00 PM (15:00)
       const gracePeriodEnd = 15 * 60 + 15; // 3:15 PM (15:15)
       const halfDayThreshold = 18 * 60; // 6:00 PM (18:00)
-      
+
       if (loginTotalMinutes < officeStart) {
         sessionStatus = "on-time";
       } else if (loginTotalMinutes <= gracePeriodEnd) {
@@ -180,8 +210,8 @@ router.post("/login", async (req, res) => {
       );
 
       return res.json({
-        message: existingSession ? 
-          "Login successful (session already exists)." : 
+        message: existingSession ?
+          "Login successful (session already exists)." :
           "Login successful (trusted device).",
         token,
         user: {
@@ -249,7 +279,7 @@ router.post("/login", async (req, res) => {
     });
   } catch (err) {
     console.error("Login error:", err);
-    
+
     // Handle duplicate session error (from unique index)
     if (err.code === 11000) {
       return res.status(400).json({
@@ -257,7 +287,7 @@ router.post("/login", async (req, res) => {
         message: "A session already exists for today."
       });
     }
-    
+
     return res.status(500).json({ error: "Server error" });
   }
 });
@@ -359,32 +389,32 @@ router.post("/logout", requireAuth, async (req, res) => {
     const logoutHour = now.getHours();
     const logoutMinute = now.getMinutes();
     const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
-    
+
     const halfDayLogoutThreshold = 21 * 60; // 9:00 PM in minutes (21:00)
-    
+
     // Find the active session
     const session = await EmployeeSession.findOne({
       employeeId: req.employee.id || req.employee._id,
       active: true
     });
-    
+
     if (!session) {
-      return res.status(400).json({ 
-        error: "No active session found" 
+      return res.status(400).json({
+        error: "No active session found"
       });
     }
-    
+
     let finalStatus = session.status; // Start with login-time status
-    
+
     // If logged out before 9:00 PM, change status to half-day
     if (logoutTotalMinutes < halfDayLogoutThreshold) {
       finalStatus = "half-day";
     }
-    
+
     // Update the session
     const updated = await EmployeeSession.findByIdAndUpdate(
       session._id,
-      { 
+      {
         logoutTime: now,
         active: false,
         status: finalStatus,
@@ -394,8 +424,8 @@ router.post("/logout", requireAuth, async (req, res) => {
       { new: true }
     );
 
-    return res.json({ 
-      status: "success", 
+    return res.json({
+      status: "success",
       message: "Logged out successfully",
       logoutTime: updated.logoutTime,
       sessionStatus: updated.status
