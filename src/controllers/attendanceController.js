@@ -85,13 +85,11 @@ async function updateLeaveEntitlementForEmployeeProportional(
     isProportionate = true;
   }
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
 
   try {
     if (paidToUse > 0) {
       await LeaveTransaction.create(
-        [{
+        {
           owner: ownerId,
           employee: employeeId,
           leaveYearBalance: balance._id,
@@ -99,8 +97,7 @@ async function updateLeaveEntitlementForEmployeeProportional(
           date: new Date(date),
           type: "PAID_LEAVE_USED",
           value: paidToUse,
-        }],
-        { session }
+        },
       );
 
       balance.usedPaid = usedPaid + paidToUse;
@@ -108,7 +105,7 @@ async function updateLeaveEntitlementForEmployeeProportional(
 
     if (unpaidToUse > 0) {
       await LeaveTransaction.create(
-        [{
+        {
           owner: ownerId,
           employee: employeeId,
           leaveYearBalance: balance._id,
@@ -116,16 +113,12 @@ async function updateLeaveEntitlementForEmployeeProportional(
           date: new Date(date),
           type: "UNPAID_LEAVE_USED",
           value: unpaidToUse,
-        }],
-        { session }
+        },
       );
 
       balance.usedUnpaid = Number(balance.usedUnpaid || 0) + unpaidToUse;
     }
-
-    await balance.save({ session });
-    await session.commitTransaction();
-    session.endSession();
+    await balance.save();
 
     return {
       paid: paidToUse,
@@ -133,8 +126,6 @@ async function updateLeaveEntitlementForEmployeeProportional(
       isProportionate,
     };
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
     throw err;
   }
 }
@@ -144,7 +135,7 @@ async function reverseOldBonus(oldRec) {
 
   const ownerId = oldRec.owner;
   const employeeId = oldRec.employee;
-  const year = new Date(oldRec.date).getFullYear();
+  const year = getLeaveYear(oldRec.date);
   const bonusHoursToRemove = oldRec.bonusHoursGiven;
 
   // Get current balance
@@ -221,7 +212,7 @@ async function updateBonusForNonWorkingDay(
   if (!employee) return { bonus: 0, accumulated: 0 };
   
   const ownerId = employee.owner || employee.createdBy;
-  const year = new Date(date).getFullYear();
+  const year = getLeaveYear(date);
   
   // Find or create LeaveYearBalance
   let balance = await LeaveYearBalance.findOne({
@@ -347,7 +338,7 @@ async function updateBonusForEarlyBird(
   if (!employee) return { bonus: null, accumulated: null };
   
   const ownerId = employee.owner || employee.createdBy;
-  const year = new Date(date).getFullYear();
+  const year = getLeaveYear(date);
   
   // Find or create LeaveYearBalance
   let balance = await LeaveYearBalance.findOne({
