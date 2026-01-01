@@ -416,6 +416,46 @@ exports.toggleWhatsAppFlag = async (req, res) => {
     res.status(500).json({ error: "Failed to toggle WhatsApp flag" });
   }
 };
+// Search clients by NAME (Team Lead & Team Member primarily)
+exports.searchClientByName = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("_id role owner");
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { search } = req.query;
+    if (!search) {
+      return res.status(400).json({ error: "Search query parameter is required" });
+    }
+
+    const role = String(emp.role || "").trim().toLowerCase();
+
+    // Base query: always scope by owner
+    let query = {
+      owner: emp.owner,
+      $or: [
+        { clientName: { $regex: search, $options: "i" } },
+        { dba: { $regex: search, $options: "i" } },
+        { company: { $regex: search, $options: "i" } },
+      ],
+    };
+
+    // 🔒 Non-managers can ONLY search their assigned clients
+    if (role !== "manager") {
+      query.assignedTo = emp._id;
+    }
+
+    const clients = await ClientInfo.find(query)
+      .populate("assignedTo", "_id name companyEmail")
+      .limit(10)
+      .sort({ clientName: 1 });
+
+    res.json(clients);
+  } catch (err) {
+    console.error("searchClientByName error:", err);
+    res.status(500).json({ error: "Failed to search clients by name" });
+  }
+};
+
 
 exports.getWhatsAppFlags = async (req, res) => {
   try {
@@ -613,47 +653,55 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
   }
 };
 
-// Search team members (for all roles)
+// Search team members (role-aware)
 exports.searchTeamMembers = async (req, res) => {
   try {
-    const emp = await Employee.findById(req.employee._id);
-    if (!emp) return res.status(404).json({ error: "Employee not found" });
+    const emp = await Employee.findById(req.employee._id).select(
+      "_id role owner teamLead"
+    );
+    if (!emp) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
 
     const { search } = req.query;
     if (!search) {
       return res.status(400).json({ error: "Search query parameter is required" });
     }
 
-    let employeesQuery = { owner: emp.owner, _id: { $ne: emp._id } };
+    const role = String(emp.role || "").toLowerCase().trim();
+    const searchRegex = new RegExp(search, "i");
 
-    // Add search conditions
-    const searchRegex = new RegExp(search, 'i');
-    employeesQuery.$or = [
-      { name: searchRegex },
-      { email: searchRegex },
-      { companyEmail: searchRegex }
-    ];
+    // Base query: same owner, exclude self
+    let employeesQuery = {
+      owner: emp.owner,
+      _id: { $ne: emp._id },
+      $or: [
+        { name: searchRegex },
+        { email: searchRegex },
+        { companyEmail: searchRegex }
+      ]
+    };
 
-    // Role-based filtering
-    if (emp.role?.toLowerCase() === "manager") {
-      // Manager can see all employees
-    } else if (emp.role?.toLowerCase() === "team lead" || emp.role?.toLowerCase() === "team_lead") {
-      // Team lead can see their team members
-      // First, get the team lead's team
-      const teamLeadTeam = await Employee.find({
-        owner: emp.owner,
-        teamLead: emp._id,
-        role: { $in: ["team member", "team member"] }
-      }).select("_id");
-      
-      const teamMemberIds = teamLeadTeam.map(member => member._id);
-      employeesQuery._id = { $in: teamMemberIds };
-    } else if (emp.role?.toLowerCase() === "team member") {
-      // Team member can only see themselves (already excluded) and their team lead
-      employeesQuery.$or = [
-        { _id: emp.teamLead }, // Their team lead
-        ...employeesQuery.$or
-      ];
+    /* ---------------- ROLE RULES ---------------- */
+
+    // ✅ Manager → see all employees
+    if (role === "manager") {
+      // no extra restriction
+    }
+
+    // ✅ Team Lead → see all employees (IMPORTANT FIX)
+    else if (role === "team lead" || role === "team_lead") {
+      // no restriction — same as manager for internal search
+    }
+
+    // 🔒 Team Member → only their Team Lead
+    else if (role === "team member") {
+      if (!emp.teamLead) {
+        // no team lead → no results
+        employeesQuery._id = { $eq: null };
+      } else {
+        employeesQuery._id = emp.teamLead;
+      }
     }
 
     const employees = await Employee.find(employeesQuery)
@@ -666,6 +714,7 @@ exports.searchTeamMembers = async (req, res) => {
     res.status(500).json({ error: "Failed to search team members" });
   }
 };
+
 
 exports.updateClientSupervision = async (req, res) => {
   try {

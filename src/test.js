@@ -86,7 +86,7 @@ const hierarchyRoute = require("./routes/hierarchy"); // (not mounted here, impo
 const threadChatRoutes = require("./routes/threadChatRoutes");
 const ThreadChatMessage = require("./models/ThreadChatMessage");
 const employeeShiftRoutes = require("./routes/employeeShiftRoute");
-
+const labelRoutes = require("./routes/labelRoutes");
 const app = express();
 
 // ---------- Static ----------
@@ -239,6 +239,7 @@ app.use("/api/bugs", bugRoutes);
 app.use("/api/hierarchy", requireAuth, hierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
+app.use("/api/labels", labelRoutes);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
@@ -329,6 +330,7 @@ app.get("/api/employees/count", async (_req, res) => {
     res.status(500).json({ error: "Failed to get employee count" });
   }
 });
+const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 
 // ---------- Cron: auto-fill YESTERDAY’s attendance ----------
 // Runs at 00:00 in configured timezone (default Asia/Karachi)
@@ -448,6 +450,133 @@ cron.schedule(
     }
   },
   { timezone: ATTENDANCE_CRON_TZ }
+);
+cron.schedule(
+  "5 0 * * *", 
+  async () => {
+    try {
+      // ✅ normalize today to DATE ONLY
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStr = today.toISOString().slice(0, 10);
+
+      console.log("[cron][leave] checking probation completions…");
+
+      const owners = await Employee.distinct("owner", { isTrashed: false });
+
+      for (const ownerId of owners) {
+        const policy = await ProbationPeriod.findOne({ owner: ownerId })
+          .sort({ createdAt: -1 })
+          .lean();
+
+        if (!policy) continue;
+        if (!policy.leaveAfterProbation) continue;
+        if (policy.leaveDuringProbation) continue;
+
+        const probationDays = Number(policy.days || 0);
+        if (probationDays < 1) continue;
+
+        // ✅ ONLY ACTIVE EMPLOYEES
+        const employees = await Employee.find({
+          owner: ownerId,
+          isTrashed: false,
+          status: "active",
+        })
+          .select("_id joiningDate")
+          .lean();
+
+        for (const emp of employees) {
+          if (!emp.joiningDate) continue;
+
+          const joiningDate = new Date(emp.joiningDate);
+          if (isNaN(joiningDate)) continue;
+
+          // probation end = joiningDate + probationDays
+          const probationEnd = new Date(joiningDate);
+          probationEnd.setDate(probationEnd.getDate() + probationDays);
+          probationEnd.setHours(0, 0, 0, 0);
+
+          const probationEndStr = probationEnd.toISOString().slice(0, 10);
+
+          // ✅ DATE-ONLY comparison
+          if (probationEndStr > todayStr) continue;
+
+          const leaveYear = getLeaveYear(probationEnd);
+
+          // ⛔ prevent double credit
+          const existingTx = await LeaveTransaction.findOne({
+            owner: ownerId,
+            employee: emp._id,
+            year: leaveYear,
+            type: "PAID_LEAVE_CREDITED",
+            sourceModel: "PROBATION",
+          }).lean();
+
+          if (existingTx) continue;
+
+          const leaveYearEnd = new Date(leaveYear, 11, 25); // 25 Dec of leaveYear
+          leaveYearEnd.setHours(0, 0, 0, 0);
+
+          // months remaining until leave-year end
+          const monthsLeft =
+            (leaveYearEnd.getFullYear() - probationEnd.getFullYear()) * 12 +
+            (leaveYearEnd.getMonth() - probationEnd.getMonth()) +
+            (leaveYearEnd.getDate() >= probationEnd.getDate() ? 1 : 0);
+
+          const proratedLeaves = Math.max(
+            0,
+            Math.round((22 / 12) * monthsLeft)
+          );
+
+          console.log(
+            `[cron][leave][proration] probationEnd=${probationEnd.toISOString().slice(0, 10)}, leaveYearEnd=${leaveYearEnd.toISOString().slice(0, 10)}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`
+          );
+          if (proratedLeaves <= 0) continue;
+
+          // ✅ upsert LeaveYearBalance
+          const balance = await LeaveYearBalance.findOneAndUpdate(
+            {
+              owner: ownerId,
+              employee: emp._id,
+              year: leaveYear,
+            },
+            {
+              $inc: { total: proratedLeaves },
+              lastRecalculatedAt: new Date(),
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true,
+            }
+          );
+
+          // 🧾 transaction record
+          await LeaveTransaction.create({
+            owner: ownerId,
+            employee: emp._id,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: probationEnd,
+            type: "PAID_LEAVE_CREDITED",
+            value: proratedLeaves,
+            sourceModel: "PROBATION",
+            sourceId: emp._id,
+            createdBy: null, // system
+          });
+
+          console.log(
+            `[cron][leave] credited ${proratedLeaves} leaves → employee ${emp._id}`
+          );
+        }
+      }
+
+      console.log("[cron][leave] ✅ completed");
+    } catch (err) {
+      console.error("[cron][leave] ❌ error:", err);
+    }
+  },
+  { timezone: PROBATION_CRON_TZ }
 );
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------

@@ -1,87 +1,127 @@
 const cron = require("node-cron");
 const mongoose = require("mongoose");
-const Employee = require("../models/Employees");
 const Attendance = require("../models/Attendance");
 const PayrollPeriod = require("../models/PayrollPeriod");
+const LeaveYearBalance = require("../models/LeaveYearBalance");
+const LeaveTransaction = require("../models/LeaveTransaction");
 
-// Helper to compute hours difference between "HH:mm" strings
+// ---------- Helpers ----------
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
-  const [inH, inM] = checkIn.split(':').map(Number);
-  const [outH, outM] = checkOut.split(':').map(Number);
-  let diff = (outH * 60 + outM) - (inH * 60 + inM);
-  if (diff < 0) diff += 24 * 60; // overnight shift
+  const [inH, inM] = checkIn.split(":").map(Number);
+  const [outH, outM] = checkOut.split(":").map(Number);
+  let diff = outH * 60 + outM - (inH * 60 + inM);
+  if (diff < 0) diff += 24 * 60;
   return +(diff / 60).toFixed(2);
 }
 
-// Cron: runs every 2 minutes for testing
-cron.schedule("*/1 * * * *", async () => {
-  try {
-    console.log("=== Running Credit Bonus Leaves Cron ===", new Date());
+function getLeaveYear(dateInput) {
+  const d = new Date(dateInput);
+  const year = d.getFullYear();
+  const dec26 = new Date(year, 11, 26);
+  return d >= dec26 ? year + 1 : year;
+}
 
-    // Get all payroll periods
-    const payrolls = await PayrollPeriod.find({ payrollPeriodType: "monthly" }).lean();
+// ---------- CRON ----------
+cron.schedule("*/1 * * * *", async () => {
+  const session = await mongoose.startSession();
+  try {
+    console.log("=== Bonus Leave Cron Started ===", new Date());
+
+    const payrolls = await PayrollPeriod.find({
+      payrollPeriodType: "monthly",
+    }).lean();
 
     for (const payroll of payrolls) {
-      console.log(`Processing payroll: ${payroll.name} (${payroll._id})`);
-
-      // Determine periodStart / periodEnd dynamically
       const anchor = new Date(payroll.payrollPeriodStartDay);
       const today = new Date();
-
       const anchorDay = anchor.getDate();
-      let periodStart, periodEnd;
 
-      // Monthly payroll
-      let thisMonthStart = new Date(today.getFullYear(), today.getMonth(), anchorDay);
-      if (today >= thisMonthStart) {
-        periodStart = thisMonthStart;
+      let periodStart;
+      if (today >= new Date(today.getFullYear(), today.getMonth(), anchorDay)) {
+        periodStart = new Date(today.getFullYear(), today.getMonth(), anchorDay);
       } else {
         periodStart = new Date(today.getFullYear(), today.getMonth() - 1, anchorDay);
       }
-      periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, periodStart.getDate());
+
+      let periodEnd = new Date(periodStart);
+      periodEnd.setMonth(periodEnd.getMonth() + 1);
       periodEnd.setDate(periodEnd.getDate() - 1);
 
       const start = periodStart.toISOString().slice(0, 10);
       const end = periodEnd.toISOString().slice(0, 10);
 
-      // Get all employees for this payroll
-      const employees = await Employee.find({ owner: payroll.owner }).lean();
+      const attendances = await Attendance.find({
+        owner: payroll.owner,
+        markedOnNonWorkingDay: true,
+        status: "Present",
+        date: { $gte: start, $lte: end },
+      }).lean();
 
-      for (let emp of employees) {
-        // Find all markedOnNonWorkingDay attendances in this period
-        const attendances = await Attendance.find({
-          owner: payroll.owner,
-          employee: emp._id,
-          date: { $gte: start, $lte: end },
-          markedOnNonWorkingDay: true,
-          status: "Present",
-        });
-
-        let nineHourCount = 0;
-        for (let att of attendances) {
-          if (getHoursDiff(att.checkIn, att.checkOut) === 9) {
-            nineHourCount++;
-          }
-        }
-
-        if (nineHourCount > 0) {
-          await Employee.updateOne(
-            { _id: emp._id },
-            { $inc: { "leaveEntitlement.bonus": nineHourCount } }
-          );
-          console.log(
-            `Employee: ${emp.name} | Bonus leaves added: ${nineHourCount}`
-          );
-        } else {
-          console.log(`Employee: ${emp.name} | No 9-hour attendances found`);
+      const grouped = {};
+      for (const att of attendances) {
+        if (getHoursDiff(att.checkIn, att.checkOut) === 9) {
+          grouped[att.employee] = (grouped[att.employee] || 0) + 1;
         }
       }
-      console.log(`Finished payroll: ${payroll.name}\n`);
+
+      for (const [employeeId, bonusDays] of Object.entries(grouped)) {
+        if (bonusDays <= 0) continue;
+
+        const year = getLeaveYear(new Date());
+
+        let balance = await LeaveYearBalance.findOne({
+          owner: payroll.owner,
+          employee: employeeId,
+          year,
+        });
+
+        if (!balance) {
+          balance = await LeaveYearBalance.create({
+            owner: payroll.owner,
+            employee: employeeId,
+            year,
+            total: 0,
+            bonus: 0,
+            usedPaid: 0,
+            usedUnpaid: 0,
+          });
+        }
+
+        session.startTransaction();
+
+        await LeaveTransaction.create(
+          [
+            {
+              owner: payroll.owner,
+              employee: employeeId,
+              leaveYearBalance: balance._id,
+              year,
+              date: new Date(),
+              type: "BONUS_EARNED",
+              value: bonusDays,
+              sourceModel: "Cron",
+            },
+          ],
+          { session }
+        );
+
+        balance.bonus += bonusDays;
+        await balance.save({ session });
+
+        await session.commitTransaction();
+
+        console.log(
+          `[BONUS] Employee=${employeeId} | BonusDays=${bonusDays} | LeaveYear=${year}`
+        );
+      }
     }
 
-    console.log("=== Cron Completed ===", new Date(), "\n\n");
+    console.log("=== Bonus Leave Cron Completed ===", new Date());
   } catch (err) {
-    console.error("Error in Credit Bonus Leaves Cron:", err);
+    await session.abortTransaction();
+    console.error("Error in Bonus Leave Cron:", err);
+  } finally {
+    session.endSession();
   }
 });

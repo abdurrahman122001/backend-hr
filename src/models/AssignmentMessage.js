@@ -97,6 +97,24 @@ const AssignmentMessageSchema = new Schema(
         },
       },
     ],
+    labels: [
+      {
+        label: {
+          type: Schema.Types.ObjectId,
+          ref: "EmailLabel",
+          required: true,
+        },
+        appliedAt: {
+          type: Date,
+          default: Date.now,
+        },
+        appliedBy: {
+          type: Schema.Types.ObjectId,
+          ref: "Employee",
+        },
+      },
+    ],
+
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },

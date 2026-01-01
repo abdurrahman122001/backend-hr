@@ -25,6 +25,11 @@ router.post("/:id/read", requireAuth, clientInfoCtrl.markClientRead);
 router.get("/:id", requireAuth, clientInfoCtrl.getClientById);
 
 router.get("/search/client-by-email", requireAuth, clientInfoCtrl.searchClientByEmail);
+router.get(
+  "/search/client-by-name",
+  requireAuth,
+  clientInfoCtrl.searchClientByName
+);
 router.get("/search/company-employee-by-email", requireAuth, clientInfoCtrl.searchCompanyEmployeeByEmail);
 router.get(
   "/search/team-members",

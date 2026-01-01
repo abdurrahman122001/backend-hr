@@ -1,18 +1,50 @@
-const Employee = require('../models/Employees');
+const mongoose = require("mongoose");
+const LeaveYearBalance = require("../models/LeaveYearBalance");
+const LeaveTransaction = require("../models/LeaveTransaction");
 
+function getLeaveYear(attendanceDate) {
+  const d = new Date(attendanceDate);
+  const year = d.getFullYear();
+  const month = d.getMonth(); // 0 = Jan
+  const day = d.getDate();
 
-async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1, type = 'absent', forceUnpaid = false) {
-  const employee = await Employee.findById(employeeId).lean();
-  if (!employee) return { paid: 0, unpaid: 0 };
+  // If date is on or after 26 Dec → belongs to next leave year
+  if (month === 11 && day >= 26) {
+    return year + 1;
+  }
 
-  const { total = 0, usedPaid = 0, usedUnpaid = 0 } = employee.leaveEntitlement || {};
-  let entitlementLeft = total - usedPaid;
+  return year;
+}
+
+async function updateLeaveEntitlementForEmployee(
+  ownerId,
+  employeeId,
+  attendanceDate,
+  deductionCount = 1,
+  type = "absent",
+  forceUnpaid = false
+) {
+  const leaveYear = getLeaveYear(attendanceDate);
+
+  const balance = await LeaveYearBalance.findOne({
+    owner: ownerId,
+    employee: employeeId,
+    year: leaveYear,
+  });
+
+  if (!balance) {
+    return { paid: 0, unpaid: 0 };
+  }
+
+  const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
+  const usedPaid = Number(balance.usedPaid || 0);
+  const entitlementLeft = totalEntitled - usedPaid;
 
   let addPaid = 0;
   let addUnpaid = 0;
 
-  if (type === 'late') {
-    // For late, use up all paid leaves, then start counting as unpaid
+  // ===== Decision Logic =====
+  if (type === "late") {
     if (entitlementLeft >= deductionCount) {
       addPaid = deductionCount;
     } else if (entitlementLeft > 0) {
@@ -21,15 +53,13 @@ async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1,
     } else {
       addUnpaid = deductionCount;
     }
-  } else if (type === 'leave') {
-    // Always increment paid, even if negative
+  } else if (type === "leave") {
+    // Explicit leave request → always attempt paid first
     addPaid = deductionCount;
-    addUnpaid = 0;
-  } else if (type === 'absent' && forceUnpaid) {
-    // Always count as unpaid if forceUnpaid flag is true
+  } else if (type === "absent" && forceUnpaid) {
     addUnpaid = deductionCount;
   } else {
-    // Absent logic (already correct)
+    // Default absent logic
     if (entitlementLeft >= deductionCount) {
       addPaid = deductionCount;
     } else if (entitlementLeft > 0) {
@@ -40,15 +70,64 @@ async function updateLeaveEntitlementForEmployee(employeeId, deductionCount = 1,
     }
   }
 
-  // Actually increment correct counters in DB
-  await Employee.updateOne(
-    { _id: employee._id },
-    { $inc: { "leaveEntitlement.usedPaid": addPaid, "leaveEntitlement.usedUnpaid": addUnpaid } }
-  );
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  // Return real deduction info for late as well!
-  return { paid: addPaid, unpaid: addUnpaid };
+  try {
+    if (addPaid > 0) {
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(attendanceDate),
+            type: "PAID_LEAVE_USED",
+            value: addPaid,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedPaid = Number(balance.usedPaid || 0) + addPaid;
+    }
+
+    if (addUnpaid > 0) {
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(attendanceDate),
+            type: "UNPAID_LEAVE_USED",
+            value: addUnpaid,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedUnpaid = Number(balance.usedUnpaid || 0) + addUnpaid;
+    }
+
+    await balance.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return { paid: addPaid, unpaid: addUnpaid };
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
 }
 
-
-module.exports = { updateLeaveEntitlementForEmployee }; 
+module.exports = {
+  updateLeaveEntitlementForEmployee,
+  getLeaveYear, // exported for reuse elsewhere
+};
