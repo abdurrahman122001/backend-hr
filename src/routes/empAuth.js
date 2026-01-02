@@ -52,11 +52,13 @@ function getDateOnly(date) {
   return moment(date).tz(TIMEZONE).format("YYYY-MM-DD");
 }
 
-// Helper to calculate minutes since midnight in Karachi time
-function getMinutesSinceMidnightKarachi(date) {
-  const karachiTime = moment(date).tz(TIMEZONE);
-  return karachiTime.hours() * 60 + karachiTime.minutes();
+
+function secondsUntilMidnight() {
+  const now = moment().tz(TIMEZONE);
+  const midnight = moment().tz(TIMEZONE).endOf("day").add(1, "second");
+  return Math.max(midnight.diff(now, "seconds"), 60);
 }
+
 
 // ---------------------
 // Email Transport Setup
@@ -81,14 +83,8 @@ async function sendMail({ to, subject, text, html }) {
   return transporter.sendMail({ from, to, subject, text, html });
 }
 
-// ---------------------
-// Temporary Code Store
-// ---------------------
 const codes = new Map();
 
-// ---------------------
-// 1️⃣ LOGIN — with Karachi timezone
-// ---------------------
 router.post("/login", async (req, res) => {
   const { companyEmail, password, deviceFingerprint, deviceToken } = req.body;
 
@@ -143,7 +139,7 @@ router.post("/login", async (req, res) => {
           department: emp.department,
         },
         JWT_SECRET,
-        { expiresIn: "9h" }
+        { expiresIn: secondsUntilMidnight() }
       );
 
       return res.json({
@@ -232,7 +228,7 @@ router.post("/login", async (req, res) => {
           department: emp.department,
         },
         JWT_SECRET,
-        { expiresIn: "9h" }
+        { expiresIn: secondsUntilMidnight() }
       );
 
       return res.json({
@@ -316,9 +312,6 @@ router.post("/login", async (req, res) => {
   }
 });
 
-// ---------------------
-// 2️⃣ CONFIRM CODE
-// ---------------------
 router.post("/confirm-code", async (req, res) => {
   const { code, deviceFingerprint } = req.body;
   const tempToken = req.headers.authorization?.split(" ")[1];
@@ -371,7 +364,7 @@ router.post("/confirm-code", async (req, res) => {
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
-      { expiresIn: "9h" }
+      { expiresIn: secondsUntilMidnight() }
     );
 
     // Get Karachi time for session logging
@@ -410,9 +403,6 @@ router.post("/confirm-code", async (req, res) => {
   }
 });
 
-// ---------------------
-// 3️⃣ LOGOUT — with Karachi timezone
-// ---------------------
 router.post("/logout", requireAuth, async (req, res) => {
   try {
     // Get current time in Karachi
