@@ -222,7 +222,7 @@ exports.createThreadChatMessage = async function (req, res) {
     // Populate message
     const populated = await message.populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role avatar" },
+      { path: "sender", select: "_id name companyEmail role photographUrl" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "replyTo", select: "_id content sender" },
@@ -306,7 +306,7 @@ exports.getThreadMessages = async function (req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role avatar" },
+          { path: "sender", select: "_id name companyEmail role photographUrl" },
           { path: "receiver", select: "_id name companyEmail role" },
           { path: "client", select: "_id clientName" },
           { path: "replyTo", select: "_id content sender createdAt" },
@@ -355,7 +355,7 @@ exports.getThreadMessages = async function (req, res) {
         client: thread.client,
         participants: await Employee.find(
           { _id: { $in: await ThreadChatMessage.getThreadParticipants(threadId) } },
-          "_id name companyEmail role avatar"
+          "_id name companyEmail role photographUrl"
         )
 
       }
@@ -418,7 +418,7 @@ exports.getThreadInfo = async function (req, res) {
     });
     const participantDetails = await Employee.find(
   { _id: { $in: participants }},
-  "_id name companyEmail role avatar"
+  "_id name companyEmail role photographUrl"
 );
 
 
@@ -490,7 +490,7 @@ exports.editMessage = async function (req, res) {
     // Populate updated message
     const populated = await ThreadChatMessage.findById(message._id)
       .populate([
-        { path: "sender", select: "_id name companyEmail role avatar" },
+        { path: "sender", select: "_id name companyEmail role photographUrl" },
         { path: "editHistory.editedBy", select: "_id name companyEmail" }
       ]);
 
@@ -712,7 +712,7 @@ exports.uploadAttachments = async function (req, res) {
       await message.markAsRead(currentUser);
 
       const populated = await message.populate([
-        { path: "sender", select: "_id name companyEmail role avatar" },
+        { path: "sender", select: "_id name companyEmail role photographUrl" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" }
       ]);
 
@@ -751,7 +751,7 @@ exports.getThreadParticipants = async function (req, res) {
     // Get employee details
     const employeeDetails = await Employee.find(
       { _id: { $in: participants } },
-      "_id name companyEmail role avatar"
+      "_id name companyEmail role photographUrl"
     );
 
     res.json({
@@ -857,7 +857,7 @@ exports.searchInThread = async function (req, res) {
         .skip((pageNum - 1) * lim)
         .limit(lim)
         .populate([
-          { path: "sender", select: "_id name companyEmail role avatar" },
+          { path: "sender", select: "_id name companyEmail role photographUrl" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" }
         ])
         .lean(),

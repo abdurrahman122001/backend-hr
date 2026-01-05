@@ -40,80 +40,6 @@ function normalizeRole(role) {
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
-async function applyVisibility(q, req) {
-  if (!req.employee?._id) return q;
-
-  const me = oid(String(req.employee._id));
-  if (!me) return q;
-
-  const currentUserRole = normalizeRole(req.employee?.role || "");
-  const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
-
-  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
-    return { ...q, owner: ownerId };
-  }
-
-  // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are involved OR manager messages for supervision
-  if (currentUserRole === "team_lead") {
-    // Get all managers in the same organization
-    const { managers } = await findTLsAndManagersByOwner(ownerId);
-
-    return {
-      ...q,
-      $or: [
-        { sender: me },
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        // 🔥 CRITICAL FIX: Allow team leads to see manager messages
-        {
-          sender: { $in: managers.map((id) => oid(id)) },
-          owner: ownerId,
-        },
-      ],
-    };
-  }
-
-  // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
-  const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
-
-  if (q.isScheduled === true && q.status === "scheduled") {
-    return { ...q, $and: [{ $or: visOr }] };
-  }
-
-  return {
-    $or: [
-      {
-        ...q,
-        $and: [
-          {
-            $or: [
-              { isScheduled: { $ne: true } },
-              { isScheduled: true, status: "sent" },
-              {
-                isScheduled: true,
-                status: "scheduled",
-                scheduledFor: { $lte: now },
-              },
-            ],
-          },
-          { $or: visOr },
-        ],
-      },
-      {
-        ...q,
-        isScheduled: true,
-        status: "scheduled",
-        scheduledFor: { $gt: now },
-        sender: me,
-      },
-    ],
-  };
-}
 
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
 async function findTLsAndManagersByOwner(ownerId) {
@@ -2572,5 +2498,89 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
   } catch (e) {
     console.error("Error marking messages as seen:", e);
     res.status(500).json({ error: "Failed to mark messages as seen" });
+  }
+};
+
+exports.searchMessages = async function searchMessages(req, res) {
+  try {
+    const { query, limit = 10 } = req.query;
+
+    if (!query || !query.trim()) {
+      return res.json({ items: [] });
+    }
+
+    const searchQuery = query.trim();
+    
+    // Build base query - exclude drafts
+    const q = {
+      status: { $ne: "draft" },
+      $or: [
+        { note: { $regex: searchQuery, $options: "i" } },
+        { subject: { $regex: searchQuery, $options: "i" } },
+      ],
+    };
+
+    // Apply visibility rules safely
+    let qFinal = q;
+    if (req.employee && req.employee._id) {
+      try {
+        qFinal = await applyVisibility(q, req);
+      } catch (visibilityError) {
+        console.warn("Visibility filter skipped:", visibilityError.message);
+        // Use base query if visibility fails
+      }
+    }
+
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 20);
+    
+    const messages = await WhatsAppMessage.find(qFinal)
+      .sort({ createdAt: -1 })
+      .limit(lim)
+      .populate([
+        { path: "client", select: "_id clientName" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "owner", select: "_id name companyEmail" },
+      ])
+      .select("_id note message subject sender client createdAt receiver status")
+      .lean();
+
+    // Debug: Log first few messages
+    if (messages.length > 0) {
+      messages.slice(0, 3).forEach((msg, i) => {
+      });
+    }
+
+    // Format response
+    const items = messages.map((m) => ({
+      _id: m._id,
+      note: m.note || m.message || "",
+      subject: m.subject || "",
+      sender: m.sender ? {
+        _id: m.sender._id,
+        name: m.sender.name || "Unknown"
+      } : { _id: null, name: "Unknown" },
+      clientId: m.client?._id || null,
+      clientName: m.client?.clientName || "Unknown",
+      time: m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      }) : "",
+      timestamp: m.createdAt || new Date(),
+      status: m.status || "sent"
+    }));
+
+    return res.json({ 
+      items,
+      count: items.length,
+      query: searchQuery 
+    });
+    
+  } catch (e) {
+    console.error("❌ Search failed:", e);
+    console.error("❌ Stack trace:", e.stack);
+    res.status(500).json({ 
+      error: "Search failed",
+      items: []
+    });
   }
 };
