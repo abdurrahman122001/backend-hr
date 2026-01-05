@@ -17,6 +17,7 @@ const PayrollPeriod = require("./models/PayrollPeriod");
 const empAuth = require("./middleware/empAuth");
 const puppeteer = require("puppeteer");
 const ProbationPeriod = require("./models/ProbationPeriod");
+const EmployeeSession = require("./models/EmployeeSession");
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
@@ -3261,7 +3262,7 @@ cron.schedule(
 );
 
 cron.schedule(
-  "5 0 * * *", // 12:00 AM
+  "7 0 * * *", // 12:00 AM
   async () => {
     const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
     const logoutTimeUTC = nowKarachi.utc().toDate();
