@@ -3261,7 +3261,7 @@ cron.schedule(
 );
 
 cron.schedule(
-  "0 0 * * *", // 12:00 AM
+  "5 0 * * *", // 12:00 AM
   async () => {
     const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
     const logoutTimeUTC = nowKarachi.utc().toDate();
