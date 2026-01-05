@@ -3262,10 +3262,11 @@ cron.schedule(
 );
 
 cron.schedule(
-  "7 0 * * *", // 12:00 AM
+  "7 0 * * *", // 12:07 AM Karachi
   async () => {
     const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
-    const logoutTimeUTC = nowKarachi.utc().toDate();
+
+    const logoutTime = nowKarachi.toDate(); // Karachi time
     const actualLogoutTime = nowKarachi.format("YYYY-MM-DD HH:mm");
 
     const sessions = await EmployeeSession.find({ active: true });
@@ -3275,19 +3276,20 @@ cron.schedule(
       const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
 
       await EmployeeSession.findByIdAndUpdate(session._id, {
-        logoutTime: logoutTimeUTC,
+        logoutTime, // stored in Karachi timezone
         actualLogoutTime,
-        totalHours: parseFloat(totalHours.toFixed(2)),
+        totalHours: Number(totalHours.toFixed(2)),
         active: false,
         status: totalHours < 6 ? "half-day" : session.status,
         isAutoLogout: true,
       });
     }
 
-    console.log("✅ Auto logout completed at 12:00 AM");
+    console.log("✅ Auto logout completed at 12:07 AM (Asia/Karachi)");
   },
   { timezone: "Asia/Karachi" }
 );
+
 
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
