@@ -3259,6 +3259,34 @@ cron.schedule(
   }
 );
 
+cron.schedule(
+  "0 0 * * *", // 12:00 AM
+  async () => {
+    const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
+    const logoutTimeUTC = nowKarachi.utc().toDate();
+    const actualLogoutTime = nowKarachi.format("YYYY-MM-DD HH:mm");
+
+    const sessions = await EmployeeSession.find({ active: true });
+
+    for (const session of sessions) {
+      const loginTimeKarachi = moment(session.loginTime).tz(ATTENDANCE_CRON_TZ);
+      const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
+
+      await EmployeeSession.findByIdAndUpdate(session._id, {
+        logoutTime: logoutTimeUTC,
+        actualLogoutTime,
+        totalHours: parseFloat(totalHours.toFixed(2)),
+        active: false,
+        status: totalHours < 6 ? "half-day" : session.status,
+        isAutoLogout: true,
+      });
+    }
+
+    console.log("✅ Auto logout completed at 12:00 AM");
+  },
+  { timezone: "Asia/Karachi" }
+);
+
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
   res.send("OK");
