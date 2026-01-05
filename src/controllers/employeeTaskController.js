@@ -1,0 +1,584 @@
+// controllers/workspaceController.js
+const Workspace = require("../models/Workspace");
+const TaskSpace = require("../models/TaskSpace");
+const Task = require("../models/Task");
+const Employee = require("../models/Employees");
+
+/* =========================
+   WORKSPACES
+========================= */
+
+exports.getMyWorkspaces = async (req, res) => {
+  try {
+    const workspaces = await Workspace.find({
+      owner: req.employee.owner,
+      "members.employee": req.employee._id,
+      isArchived: false,
+    }).select("_id name");
+
+    res.json(workspaces);
+  } catch (err) {
+    console.error("getMyWorkspaces:", err);
+    res.status(500).json({ message: "Failed to load workspaces" });
+  }
+};
+
+/* =========================
+   SPACES
+========================= */
+
+exports.getMySpaces = async (req, res) => {
+  const { workspaceId } = req.params;
+
+  try {
+    // First verify workspace access
+    const workspace = await Workspace.findOne({
+      _id: workspaceId,
+      owner: req.employee.owner,
+      "members.employee": req.employee._id,
+    });
+
+    if (!workspace) {
+      return res.status(403).json({ message: "Access denied to workspace" });
+    }
+
+    // Get spaces visible to the employee in this workspace
+    const spaces = await TaskSpace.find({
+      workspace: workspaceId,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } } // Also include spaces with no specific visibility (visible to all)
+      ],
+      isArchived: false,
+    }).select("_id name status isArchived createdAt updatedAt");
+
+    res.json(spaces);
+  } catch (err) {
+    console.error("getMySpaces:", err);
+    res.status(500).json({ message: "Failed to load spaces" });
+  }
+};
+
+/* =========================
+   TASKS
+========================= */
+
+// Get tasks in a space
+exports.getMyTasks = async (req, res) => {
+  const { spaceId } = req.params;
+
+  try {
+    // Verify space access
+    const space = await TaskSpace.findOne({
+      _id: spaceId,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+      isArchived: false,
+    });
+
+    if (!space) {
+      return res.status(403).json({ message: "Access denied to space" });
+    }
+
+    // Get tasks in this space
+    const tasks = await Task.find({
+      space: spaceId,
+      owner: req.employee.owner,
+      workspace: space.workspace,
+    })
+      .populate("assignees", "name companyEmail avatar")
+      .populate("createdBy", "name companyEmail")
+      .sort({ createdAt: -1 });
+
+    res.json(tasks);
+  } catch (err) {
+    console.error("getMyTasks:", err);
+    res.status(500).json({ message: "Failed to load tasks" });
+  }
+};
+
+// Create a new task
+exports.createTask = async (req, res) => {
+  const { 
+    spaceId, 
+    title, 
+    description, 
+    priority, 
+    assignees, 
+    status, 
+    dueDate 
+  } = req.body;
+
+  try {
+    if (!req.employee || !req.employee.owner) {
+      return res.status(400).json({
+        message: "Employee or owner context missing",
+      });
+    }
+
+    // Verify space access
+    const space = await TaskSpace.findOne({
+      _id: spaceId,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+      isArchived: false,
+    });
+
+    if (!space) {
+      return res.status(403).json({
+        message: "No access to this space",
+      });
+    }
+
+    // Validate assignees if provided
+    let taskAssignees = [];
+    if (assignees && Array.isArray(assignees) && assignees.length > 0) {
+      // Check if all assignees are in the workspace
+      const workspaceMembers = await Workspace.findOne({
+        _id: space.workspace,
+        owner: req.employee.owner,
+      }).select("members.employee");
+
+      if (!workspaceMembers) {
+        return res.status(404).json({
+          message: "Workspace not found",
+        });
+      }
+
+      const memberIds = workspaceMembers.members.map(m => m.employee.toString());
+      
+      // Verify all assignees are workspace members
+      const invalidAssignees = assignees.filter(assigneeId => 
+        !memberIds.includes(assigneeId.toString())
+      );
+
+      if (invalidAssignees.length > 0) {
+        return res.status(403).json({
+          message: "Some assignees are not workspace members",
+        });
+      }
+
+      taskAssignees = assignees;
+    } else {
+      // Default to current employee if no assignees specified
+      taskAssignees = [req.employee._id];
+    }
+
+    // Create the task using Task model
+    const task = await Task.create({
+      owner: req.employee.owner,
+      workspace: space.workspace,
+      space: spaceId,
+      title,
+      description,
+      priority: priority || "medium",
+      status: status || "todo",
+      assignees: taskAssignees,
+      createdBy: req.employee._id,
+      dueDate: dueDate || null,
+    });
+
+    // Populate the response
+    const populatedTask = await Task.findById(task._id)
+      .populate("assignees", "name companyEmail avatar")
+      .populate("createdBy", "name companyEmail");
+
+    res.status(201).json(populatedTask);
+  } catch (err) {
+    console.error("createTask:", err);
+    res.status(500).json({ 
+      message: "Failed to create task", 
+      error: err.message 
+    });
+  }
+};
+
+// Update task assignees
+exports.updateTaskAssignee = async (req, res) => {
+  const { taskId } = req.params;
+  const { assignees } = req.body;
+
+  try {
+    // Find the task
+    const task = await Task.findById(taskId)
+      .populate("assignees", "name companyEmail avatar");
+
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    // Check if user has access to the task's space
+    const space = await TaskSpace.findOne({
+      _id: task.space,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+    });
+
+    if (!space) {
+      return res.status(403).json({ message: "No access to this task" });
+    }
+
+    // If assignees are provided, validate them
+    if (assignees && Array.isArray(assignees)) {
+      // Check if all assignees are in the workspace
+      const workspaceMembers = await Workspace.findOne({
+        _id: task.workspace,
+        owner: req.employee.owner,
+      }).select("members.employee");
+
+      if (!workspaceMembers) {
+        return res.status(404).json({
+          message: "Workspace not found",
+        });
+      }
+
+      const memberIds = workspaceMembers.members.map(m => m.employee.toString());
+      
+      // Verify all assignees are workspace members
+      const invalidAssignees = assignees.filter(assigneeId => 
+        !memberIds.includes(assigneeId.toString())
+      );
+
+      if (invalidAssignees.length > 0) {
+        return res.status(403).json({
+          message: "Some assignees are not workspace members",
+        });
+      }
+
+      task.assignees = assignees;
+    }
+
+    await task.save();
+
+    // Get updated task with populated fields
+    const updatedTask = await Task.findById(task._id)
+      .populate("assignees", "name companyEmail avatar")
+      .populate("createdBy", "name companyEmail");
+
+    res.json({ 
+      message: "Task assignees updated", 
+      task: updatedTask 
+    });
+  } catch (err) {
+    console.error("updateTaskAssignee:", err);
+    res.status(500).json({ 
+      message: "Failed to update assignees",
+      error: err.message 
+    });
+  }
+};
+// Get employees available for a space (workspace members)
+exports.getEmployeesForSpace = async (req, res) => {
+  const { spaceId } = req.params;
+
+  try {
+    // 1. Check space access - More flexible query
+    const space = await TaskSpace.findOne({
+      _id: spaceId,
+      owner: req.employee.owner,
+    });
+
+    if (!space) {
+      return res.status(403).json({
+        message: "Space not found or access denied",
+      });
+    }
+
+    // 2. Get workspace members - More robust population
+    const workspace = await Workspace.findOne({
+      _id: space.workspace,
+      owner: req.employee.owner,
+    }).populate({
+      path: "members.employee",
+      select: "_id name companyEmail avatar isActive status",
+      model: "Employee"
+    });
+
+    if (!workspace) {
+      return res.status(404).json({
+        message: "Workspace not found",
+      });
+    }
+
+    // Debug logging
+    console.log("Workspace found:", workspace._id);
+    console.log("Workspace members count:", workspace.members?.length);
+    
+    if (workspace.members && workspace.members.length > 0) {
+      console.log("First member:", workspace.members[0]);
+      console.log("Employee populated:", workspace.members[0].employee);
+    }
+
+    // 3. Filter active employees - Handle null employee references
+    const activeEmployees = workspace.members
+      .filter(member => {
+        // Check if employee exists and is active
+        return member.employee && 
+               member.employee.isActive !== false &&
+               member.employee.status === "active";
+      })
+      .map(member => member.employee);
+
+    // If still no employees, check direct employee access
+    if (activeEmployees.length === 0) {
+      console.log("No active employees found in workspace members");
+      
+      // Alternative: Get all active employees from the same owner
+      const allEmployees = await Employee.find({
+        owner: req.employee.owner,
+        isActive: true,
+        status: "active"
+      }).select("_id name companyEmail avatar isActive status");
+      
+      return res.json(allEmployees);
+    }
+
+    res.json(activeEmployees);
+  } catch (err) {
+    console.error("getEmployeesForSpace error:", err);
+    res.status(500).json({
+      message: "Failed to load employees for space",
+      error: err.message,
+      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+  }
+};
+
+// Update task details
+exports.updateTask = async (req, res) => {
+  const { taskId } = req.params;
+  const { 
+    status, 
+    title, 
+    description, 
+    priority, 
+    dueDate 
+  } = req.body;
+
+  // Allowed statuses (from Task model)
+  const ALLOWED_STATUSES = ["todo", "in_progress", "pending", "complete"];
+
+  try {
+    // Find the task
+    const task = await Task.findById(taskId);
+
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    // Check if user has access to the task's space
+    const space = await TaskSpace.findOne({
+      _id: task.space,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+    });
+
+    if (!space) {
+      return res.status(403).json({ message: "No access to this task" });
+    }
+
+    // Update fields if provided
+    if (status !== undefined) {
+      if (!ALLOWED_STATUSES.includes(status)) {
+        return res.status(400).json({ 
+          message: "Invalid task status. Allowed: todo, in_progress, review, done" 
+        });
+      }
+      task.status = status;
+    }
+
+    if (title !== undefined) task.title = title;
+    if (description !== undefined) task.description = description;
+    if (priority !== undefined) {
+      if (!["low", "medium", "high", "urgent"].includes(priority)) {
+        return res.status(400).json({ 
+          message: "Invalid priority. Allowed: low, medium, high, urgent" 
+        });
+      }
+      task.priority = priority;
+    }
+    if (dueDate !== undefined) {
+      task.dueDate = dueDate === "" || dueDate === null ? null : new Date(dueDate);
+    }
+
+    await task.save();
+
+    // Get updated task with populated fields
+    const updatedTask = await Task.findById(task._id)
+      .populate("assignees", "name companyEmail avatar")
+      .populate("createdBy", "name companyEmail");
+
+    res.json({
+      message: "Task updated successfully",
+      task: updatedTask,
+    });
+  } catch (err) {
+    console.error("updateTask:", err);
+    res.status(500).json({ 
+      message: "Failed to update task",
+      error: err.message 
+    });
+  }
+};
+
+// Delete task (soft delete by archiving)
+exports.deleteTask = async (req, res) => {
+  const { taskId } = req.params;
+
+  try {
+    const task = await Task.findById(taskId);
+    
+    if (!task) {
+      return res.status(404).json({ message: "Task not found" });
+    }
+
+    // Check if user has access to the task's space
+    const space = await TaskSpace.findOne({
+      _id: task.space,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+    });
+
+    if (!space) {
+      return res.status(403).json({ message: "No access to this task" });
+    }
+
+    // Note: The Task model doesn't have isArchived field.
+    // You can either add it to the Task model or do a hard delete.
+    // For now, I'll do a hard delete since the model doesn't have isArchived.
+    
+    await Task.deleteOne({ _id: taskId });
+
+    res.json({ 
+      message: "Task deleted successfully" 
+    });
+  } catch (err) {
+    console.error("deleteTask:", err);
+    res.status(500).json({ 
+      message: "Failed to delete task",
+      error: err.message 
+    });
+  }
+};
+
+// Get task statistics for dashboard
+exports.getTaskStats = async (req, res) => {
+  const { spaceId } = req.params;
+
+  try {
+    // Verify space access
+    const space = await TaskSpace.findOne({
+      _id: spaceId,
+      owner: req.employee.owner,
+      $or: [
+        { visibleTo: req.employee._id },
+        { visibleTo: { $size: 0 } }
+      ],
+      isArchived: false,
+    });
+
+    if (!space) {
+      return res.status(403).json({ message: "Access denied to space" });
+    }
+
+    // Get task statistics
+    const stats = await Task.aggregate([
+      {
+        $match: {
+          space: space._id,
+          owner: req.employee.owner,
+        }
+      },
+      {
+        $group: {
+          _id: "$status",
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    // Format the stats
+    const formattedStats = {
+      todo: 0,
+      in_progress: 0,
+      review: 0,
+      done: 0,
+      total: 0
+    };
+
+    stats.forEach(stat => {
+      if (stat._id in formattedStats) {
+        formattedStats[stat._id] = stat.count;
+        formattedStats.total += stat.count;
+      }
+    });
+
+    res.json(formattedStats);
+  } catch (err) {
+    console.error("getTaskStats:", err);
+    res.status(500).json({ 
+      message: "Failed to load task statistics",
+      error: err.message 
+    });
+  }
+};
+
+// Create a new space
+exports.createSpace = async (req, res) => {
+  const { workspaceId, name, visibleTo } = req.body;
+
+  try {
+    // Verify workspace access
+    const workspace = await Workspace.findOne({
+      _id: workspaceId,
+      owner: req.employee.owner,
+      "members.employee": req.employee._id,
+    });
+
+    if (!workspace) {
+      return res.status(403).json({ message: "Access denied to workspace" });
+    }
+
+    // Create the space
+    const space = await TaskSpace.create({
+      owner: req.employee.owner,
+      workspace: workspaceId,
+      name,
+      visibleTo: visibleTo || [],
+      status: "todo",
+      isArchived: false,
+    });
+
+    res.status(201).json({
+      message: "Space created successfully",
+      space: {
+        _id: space._id,
+        name: space.name,
+        status: space.status,
+        createdAt: space.createdAt,
+      }
+    });
+  } catch (err) {
+    console.error("createSpace:", err);
+    res.status(500).json({ 
+      message: "Failed to create space",
+      error: err.message 
+    });
+  }
+};

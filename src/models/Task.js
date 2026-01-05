@@ -2,58 +2,68 @@
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
 
-const AttachmentSchema = new Schema(
-  {
-    filename: { type: String, required: true },        // stored on disk
-    originalName: { type: String, required: true },    // user-facing
-    mimetype: { type: String, required: true },
-    size: { type: Number, required: true },
-    url: { type: String, required: true },             // public URL (/uploads/…)
-    uploadedBy: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
-    uploadedAt: { type: Date, default: Date.now },
-  },
-  { _id: true }
-);
-
-// Keep schema + UI + controller in sync:
-const TASK_STATUS = ["todo", "in_progress", "blocked", "pending_review", "done"];
-const TASK_PRIORITY = ["low", "medium", "high", "urgent"];
-
 const TaskSchema = new Schema(
   {
-    owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
-    client: { type: Schema.Types.ObjectId, ref: "ClientInfo", required: true },
-    createdBy: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
-    assignedTo: { type: Schema.Types.ObjectId, ref: "Employee" },
+    owner: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
 
-    title: { type: String, required: true, trim: true },
-    description: { type: String, default: "" },
+    workspace: {
+      type: Schema.Types.ObjectId,
+      ref: "Workspace",
+      required: true,
+      index: true,
+    },
+
+    space: {
+      type: Schema.Types.ObjectId,
+      ref: "Space",
+      required: true,
+      index: true,
+    },
+
+    title: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+
+    description: String,
+
+    status: {
+      type: String,
+      enum: ["todo", "in_progress", "pending", "complete"],
+      default: "todo",
+    },
 
     priority: {
       type: String,
-      enum: TASK_PRIORITY,
+      enum: ["low", "medium", "high", "urgent"],
       default: "medium",
     },
 
-    // IMPORTANT: includes "pending_review" and "blocked"
-    status: {
-      type: String,
-      enum: TASK_STATUS,
-      default: "todo",
-      set: (v) => (v === "review" ? "pending_review" : v), // map legacy value
+    assignees: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
+
+    dueDate: Date,
+
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      required: true,
     },
-
-    dueDate: { type: Date },
-
-    attachments: { type: [AttachmentSchema], default: [] },
   },
   { timestamps: true }
 );
 
-// Extra safety in case status is assigned after setters or via updates
-TaskSchema.pre("validate", function (next) {
-  if (this.status === "review") this.status = "pending_review";
-  next();
-});
+TaskSchema.index({ owner: 1, space: 1 });
 
-module.exports = model("Task", TaskSchema);
+module.exports =
+  mongoose.models.Task || mongoose.model("Task", TaskSchema);

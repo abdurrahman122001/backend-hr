@@ -239,6 +239,29 @@ async function applyVisibility(q, req) {
 
   return employeeQuery;
 }
+
+// Helper function to get employees under supervision
+async function getEmployeesUnderSupervision(ownerId, supervisorRole) {
+  try {
+    const employees = await Employee.find({
+      owner: ownerId,
+      ...(supervisorRole === "team_lead" && {
+        $or: [
+          { supervisionMode: "direct" },
+          { supervisionMode: "needs_approval" },
+        ],
+      }),
+    })
+      .select("_id")
+      .lean();
+
+    return employees.map((emp) => emp._id);
+  } catch (error) {
+    console.error("Error getting employees under supervision:", error);
+    return [];
+  }
+}
+
 function normalizeIds(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val.filter(isObjId).map(String);
@@ -1989,7 +2012,6 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
   }
 };
 
-
 exports.searchMessages = async function searchMessages(req, res) {
   try {
     const {
@@ -2293,5 +2315,230 @@ exports.getDraftCount = async function getDraftCount(req, res) {
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to get draft count" });
+  }
+};
+exports.getTeamLeadPendingApprovals = async function getTeamLeadPendingApprovals(req, res) {
+  try {
+    const {
+      client,
+      sender,
+      receiver,
+      limit = 50,
+      page = 1,
+      search,
+      dateFrom,
+      dateTo,
+      includeDirect = "true",
+      includeExternal = "true",
+      threadId,
+      showThread = "true",
+    } = req.query;
+
+    // Verify team lead
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    if (currentUserRole !== "team_lead") {
+      return res.status(403).json({
+        error: "Access denied. Only team leads can view pending approvals.",
+      });
+    }
+
+    const currentUserId = req.employee?._id;
+    const ownerId = req.employee?.owner;
+
+    if (!isObjId(currentUserId) || !isObjId(ownerId)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Get employees under supervision
+    const supervisedEmployees = await getEmployeesUnderSupervision(
+      ownerId,
+      "team_lead"
+    );
+
+    // Base query: Get all pending messages from supervised employees
+    const query = {
+      owner: ownerId,
+      approvalStatus: "pending",
+      sender: { $in: supervisedEmployees },
+      isTrashed: false,
+      isSpam: false,
+    };
+
+    // Apply client filter
+    if (isObjId(client)) {
+      query.client = client;
+    }
+
+    // Apply sender filter
+    if (isObjId(sender)) {
+      query.sender = sender;
+    }
+
+    // Apply receiver filter
+    if (isObjId(receiver)) {
+      query.$or = [
+        { receiver: receiver },
+        { receiver: { $in: [receiver] } },
+      ];
+    }
+
+    // Apply thread filter
+    if (threadId) {
+      query.threadId = threadId;
+    }
+
+    // Apply search filter
+    if (search?.trim()) {
+      const regex = new RegExp(search.trim(), "i");
+      query.$or = query.$or || [];
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { subject: regex },
+          { note: regex },
+          { "sender.name": regex },
+        ],
+      });
+    }
+
+    // Apply date filter
+    if (dateFrom || dateTo) {
+      const dateFilter = {};
+      if (dateFrom) dateFilter.$gte = new Date(dateFrom);
+      if (dateTo) dateFilter.$lte = new Date(dateTo);
+      query.createdAt = dateFilter;
+    }
+
+    // Get total count first
+    const totalCount = await AssignmentMessage.countDocuments(query);
+    // Pagination
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+
+    // Fetch ALL messages (not paginated) to group by thread
+    const allMessages = await AssignmentMessage.find(query)
+      .sort({ createdAt: -1 })
+      .populate([
+        { path: "owner", select: "_id name companyEmail" },
+        {
+          path: "sender",
+          select: "_id name companyEmail role supervisionMode",
+        },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+        { path: "readBy.employee", select: "_id name companyEmail" },
+        { path: "starredBy", select: "_id name companyEmail" },
+      ])
+      .lean();
+    // Group messages by threadId
+    const threadMap = new Map();
+    
+    allMessages.forEach((message) => {
+      const threadId = message.threadId || `single_${message._id}`;
+      
+      if (!threadMap.has(threadId)) {
+        // First message in this thread
+        threadMap.set(threadId, {
+          threadId: threadId,
+          clientId: message.client?._id || null,
+          clientName: message.client?.clientName || 
+                     (message.client ? "Client" : "Direct Message"),
+          latestMessage: message, // Latest is the first one (sorted by createdAt: -1)
+          messages: [message],
+          unreadCount: message.readBy?.some(read => 
+            read.employee && read.employee._id && read.employee._id.toString() === currentUserId.toString()
+          ) ? 0 : 1,
+          totalMessages: 1,
+          pendingMessages: message.approvalStatus === "pending" ? 1 : 0,
+          lastActivity: message.createdAt,
+          isStarred: message.starredBy?.some(star => 
+            star._id && star._id.toString() === currentUserId.toString()
+          ) || false,
+          subject: message.subject || "No Subject",
+          sender: message.sender,
+          isDirectMessage: !message.client,
+          createdAt: message.createdAt,
+          updatedAt: message.updatedAt,
+        });
+      } else {
+        // Additional message in existing thread
+        const thread = threadMap.get(threadId);
+        thread.messages.push(message);
+        thread.totalMessages++;
+        
+        // Update pending message count
+        if (message.approvalStatus === "pending") {
+          thread.pendingMessages++;
+        }
+        
+        // Update to latest message if this one is newer
+        if (new Date(message.createdAt) > new Date(thread.latestMessage.createdAt)) {
+          thread.latestMessage = message;
+          thread.updatedAt = message.updatedAt;
+        }
+        
+        // Update unread count
+        const isRead = message.readBy?.some(read => 
+          read.employee && read.employee._id && read.employee._id.toString() === currentUserId.toString()
+        );
+        if (!isRead) {
+          thread.unreadCount++;
+        }
+        
+        // Update starred status
+        const isStarred = message.starredBy?.some(star => 
+          star._id && star._id.toString() === currentUserId.toString()
+        );
+        if (isStarred) {
+          thread.isStarred = true;
+        }
+      }
+    });
+
+    // Convert map to array and sort by lastActivity (newest first)
+    let threads = Array.from(threadMap.values());
+    threads.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+
+    // Apply pagination to threads (not messages)
+    const startIndex = (pageNum - 1) * lim;
+    const endIndex = startIndex + lim;
+    const paginatedThreads = threads.slice(startIndex, endIndex);
+
+    // Debug: Log first few threads
+    paginatedThreads.slice(0, 3).forEach((thread, index) => {
+    });
+
+    // Return results
+    res.json({
+      success: true,
+      items: paginatedThreads, // Return threads, not individual messages
+      threads: paginatedThreads, // For consistency
+      messages: allMessages, // Still return all messages for reference
+      total: threads.length, // Total number of threads
+      totalCount: totalCount, // Total number of messages
+      page: pageNum,
+      pages: Math.ceil(threads.length / lim), // Pages based on threads
+      limit: lim,
+      statistics: {
+        totalThreads: threads.length,
+        totalMessages: totalCount,
+        pendingMessages: totalCount, // All messages are pending in this view
+        directMessages: threads.filter(t => t.isDirectMessage).length,
+        clientMessages: threads.filter(t => !t.isDirectMessage).length,
+        uniqueSenders: new Set(threads.map(t => t.sender?._id).filter(Boolean)).size,
+      },
+      debug: {
+        supervisedEmployeesCount: supervisedEmployees.length,
+        query: query,
+        threadsCount: threads.length,
+        paginatedThreadsCount: paginatedThreads.length,
+      },
+    });
+  } catch (e) {
+    console.error("❌ Error in getTeamLeadPendingApprovals:", e);
+    res.status(500).json({
+      error: "Failed to fetch pending approvals",
+      details: process.env.NODE_ENV === "development" ? e.message : undefined,
+    });
   }
 };

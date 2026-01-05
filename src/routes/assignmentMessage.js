@@ -9,6 +9,7 @@ router.use(empAuth);
 router.get("/search", filterCtrl.searchMessages);
 router.get("/count", filterCtrl.getMessageCounts);
 router.get("/external", filterCtrl.getExternalCommunications);
+router.get("/pending-approval", filterCtrl.getTeamLeadPendingApprovals);
 router.get("/internal", filterCtrl.getInternalCommunications);
 // =============================
 // ✅ SPECIFIC ROUTES FIRST (without parameters)
