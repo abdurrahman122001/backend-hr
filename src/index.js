@@ -88,6 +88,8 @@ const ThreadChatMessage = require("./models/ThreadChatMessage");
 const employeeShiftRoutes = require("./routes/employeeShiftRoute");
 const labelRoutes = require("./routes/labelRoutes");
 const employeeLeaveSummary = require("./routes/empLeaveBalanceRoutes");
+const adminWorkSpaceManagementRoute = require("./routes/adminWorkSpaceManagementRoute");
+const employeeWorkSpaceManagementRoute = require("./routes/employeeTaskRoutes");
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 
@@ -238,6 +240,9 @@ app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);
 app.use("/api", employeeLeaveSummary);
+app.use("/api/admin", adminWorkSpaceManagementRoute);
+app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
+
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
