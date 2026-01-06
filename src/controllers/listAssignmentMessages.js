@@ -4,6 +4,10 @@ const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const isObjId = (v) => mongoose.isValidObjectId(v);
+/** ---------- SOCKET.IO UTILITIES ---------- **/
+function getIO(req) {
+  return req.app.get("io");
+}
 const oid = (v) =>
   mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 

@@ -3,7 +3,7 @@ const Workspace = require("../models/Workspace");
 const TaskSpace = require("../models/TaskSpace");
 const Task = require("../models/Task");
 const Employee = require("../models/Employees");
-
+const mongoose = require("mongoose");
 /* =========================
    WORKSPACES
 ========================= */
@@ -48,7 +48,7 @@ exports.getMySpaces = async (req, res) => {
       owner: req.employee.owner,
       $or: [
         { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } } // Also include spaces with no specific visibility (visible to all)
+        { visibleTo: { $size: 0 } }, // Also include spaces with no specific visibility (visible to all)
       ],
       isArchived: false,
     }).select("_id name status isArchived createdAt updatedAt");
@@ -73,10 +73,7 @@ exports.getMyTasks = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
+      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
       isArchived: false,
     });
 
@@ -103,15 +100,8 @@ exports.getMyTasks = async (req, res) => {
 
 // Create a new task
 exports.createTask = async (req, res) => {
-  const { 
-    spaceId, 
-    title, 
-    description, 
-    priority, 
-    assignees, 
-    status, 
-    dueDate 
-  } = req.body;
+  const { spaceId, title, description, priority, assignees, status, dueDate } =
+    req.body;
 
   try {
     if (!req.employee || !req.employee.owner) {
@@ -124,10 +114,7 @@ exports.createTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
+      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
       isArchived: false,
     });
 
@@ -152,11 +139,13 @@ exports.createTask = async (req, res) => {
         });
       }
 
-      const memberIds = workspaceMembers.members.map(m => m.employee.toString());
-      
+      const memberIds = workspaceMembers.members.map((m) =>
+        m.employee.toString()
+      );
+
       // Verify all assignees are workspace members
-      const invalidAssignees = assignees.filter(assigneeId => 
-        !memberIds.includes(assigneeId.toString())
+      const invalidAssignees = assignees.filter(
+        (assigneeId) => !memberIds.includes(assigneeId.toString())
       );
 
       if (invalidAssignees.length > 0) {
@@ -193,90 +182,75 @@ exports.createTask = async (req, res) => {
     res.status(201).json(populatedTask);
   } catch (err) {
     console.error("createTask:", err);
-    res.status(500).json({ 
-      message: "Failed to create task", 
-      error: err.message 
+    res.status(500).json({
+      message: "Failed to create task",
+      error: err.message,
     });
   }
 };
 
-// Update task assignees
 exports.updateTaskAssignee = async (req, res) => {
-  const { taskId } = req.params;
-  const { assignees } = req.body;
-
   try {
-    // Find the task
-    const task = await Task.findById(taskId)
-      .populate("assignees", "name companyEmail avatar");
+    const { taskId } = req.params;
+    const { assignedTo, assignees } = req.body;
 
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res.status(400).json({ error: "Invalid task ID" });
+    }
+
+    // 1️⃣ Find task (no restrictions)
+    const task = await Task.findById(taskId);
     if (!task) {
-      return res.status(404).json({ message: "Task not found" });
+      return res.status(404).json({ error: "Task not found" });
     }
 
-    // Check if user has access to the task's space
-    const space = await TaskSpace.findOne({
-      _id: task.space,
-      owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
-    });
+    // 2️⃣ Normalize assignees
+    let newAssignees = [];
 
-    if (!space) {
-      return res.status(403).json({ message: "No access to this task" });
+    if (Array.isArray(assignees)) {
+      newAssignees = assignees;
+    } else if (assignedTo !== undefined) {
+      newAssignees = assignedTo ? [assignedTo] : [];
     }
 
-    // If assignees are provided, validate them
-    if (assignees && Array.isArray(assignees)) {
-      // Check if all assignees are in the workspace
-      const workspaceMembers = await Workspace.findOne({
-        _id: task.workspace,
-        owner: req.employee.owner,
-      }).select("members.employee");
+    // 3️⃣ Validate employees exist (ONLY existence, no permission)
+    if (newAssignees.length > 0) {
+      const count = await Employee.countDocuments({
+        _id: { $in: newAssignees },
+      });
 
-      if (!workspaceMembers) {
-        return res.status(404).json({
-          message: "Workspace not found",
+      if (count !== newAssignees.length) {
+        return res.status(400).json({
+          error: "One or more assignees not found",
         });
       }
-
-      const memberIds = workspaceMembers.members.map(m => m.employee.toString());
-      
-      // Verify all assignees are workspace members
-      const invalidAssignees = assignees.filter(assigneeId => 
-        !memberIds.includes(assigneeId.toString())
-      );
-
-      if (invalidAssignees.length > 0) {
-        return res.status(403).json({
-          message: "Some assignees are not workspace members",
-        });
-      }
-
-      task.assignees = assignees;
     }
 
+    // 4️⃣ Update assignees
+    task.assignees = newAssignees;
     await task.save();
 
-    // Get updated task with populated fields
-    const updatedTask = await Task.findById(task._id)
-      .populate("assignees", "name companyEmail avatar")
-      .populate("createdBy", "name companyEmail");
+    // 5️⃣ Populate response
+    await task.populate({
+      path: "assignees",
+      select: "_id name companyEmail avatar",
+    });
 
-    res.json({ 
-      message: "Task assignees updated", 
-      task: updatedTask 
+    res.json({
+      message: "Task assignees updated successfully",
+      task: {
+        _id: task._id,
+        assignees: task.assignees,
+        assignedTo: task.assignees[0] || null,
+        updatedAt: task.updatedAt,
+      },
     });
-  } catch (err) {
-    console.error("updateTaskAssignee:", err);
-    res.status(500).json({ 
-      message: "Failed to update assignees",
-      error: err.message 
-    });
+  } catch (error) {
+    console.error("Update task assignee error:", error);
+    res.status(500).json({ error: "Failed to update task assignees" });
   }
 };
+
 // Get employees available for a space (workspace members)
 exports.getEmployeesForSpace = async (req, res) => {
   const { spaceId } = req.params;
@@ -301,7 +275,7 @@ exports.getEmployeesForSpace = async (req, res) => {
     }).populate({
       path: "members.employee",
       select: "_id name companyEmail avatar isActive status",
-      model: "Employee"
+      model: "Employee",
     });
 
     if (!workspace) {
@@ -309,37 +283,26 @@ exports.getEmployeesForSpace = async (req, res) => {
         message: "Workspace not found",
       });
     }
-
-    // Debug logging
-    console.log("Workspace found:", workspace._id);
-    console.log("Workspace members count:", workspace.members?.length);
-    
-    if (workspace.members && workspace.members.length > 0) {
-      console.log("First member:", workspace.members[0]);
-      console.log("Employee populated:", workspace.members[0].employee);
-    }
-
     // 3. Filter active employees - Handle null employee references
     const activeEmployees = workspace.members
-      .filter(member => {
+      .filter((member) => {
         // Check if employee exists and is active
-        return member.employee && 
-               member.employee.isActive !== false &&
-               member.employee.status === "active";
+        return (
+          member.employee &&
+          member.employee.isActive !== false &&
+          member.employee.status === "active"
+        );
       })
-      .map(member => member.employee);
+      .map((member) => member.employee);
 
     // If still no employees, check direct employee access
     if (activeEmployees.length === 0) {
-      console.log("No active employees found in workspace members");
-      
-      // Alternative: Get all active employees from the same owner
       const allEmployees = await Employee.find({
         owner: req.employee.owner,
         isActive: true,
-        status: "active"
+        status: "active",
       }).select("_id name companyEmail avatar isActive status");
-      
+
       return res.json(allEmployees);
     }
 
@@ -349,7 +312,7 @@ exports.getEmployeesForSpace = async (req, res) => {
     res.status(500).json({
       message: "Failed to load employees for space",
       error: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 };
@@ -357,13 +320,7 @@ exports.getEmployeesForSpace = async (req, res) => {
 // Update task details
 exports.updateTask = async (req, res) => {
   const { taskId } = req.params;
-  const { 
-    status, 
-    title, 
-    description, 
-    priority, 
-    dueDate 
-  } = req.body;
+  const { status, title, description, priority, dueDate } = req.body;
 
   // Allowed statuses (from Task model)
   const ALLOWED_STATUSES = ["todo", "in_progress", "pending", "complete"];
@@ -380,10 +337,7 @@ exports.updateTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: task.space,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
+      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
     });
 
     if (!space) {
@@ -393,8 +347,9 @@ exports.updateTask = async (req, res) => {
     // Update fields if provided
     if (status !== undefined) {
       if (!ALLOWED_STATUSES.includes(status)) {
-        return res.status(400).json({ 
-          message: "Invalid task status. Allowed: todo, in_progress, review, done" 
+        return res.status(400).json({
+          message:
+            "Invalid task status. Allowed: todo, in_progress, review, done",
         });
       }
       task.status = status;
@@ -404,14 +359,15 @@ exports.updateTask = async (req, res) => {
     if (description !== undefined) task.description = description;
     if (priority !== undefined) {
       if (!["low", "medium", "high", "urgent"].includes(priority)) {
-        return res.status(400).json({ 
-          message: "Invalid priority. Allowed: low, medium, high, urgent" 
+        return res.status(400).json({
+          message: "Invalid priority. Allowed: low, medium, high, urgent",
         });
       }
       task.priority = priority;
     }
     if (dueDate !== undefined) {
-      task.dueDate = dueDate === "" || dueDate === null ? null : new Date(dueDate);
+      task.dueDate =
+        dueDate === "" || dueDate === null ? null : new Date(dueDate);
     }
 
     await task.save();
@@ -427,9 +383,9 @@ exports.updateTask = async (req, res) => {
     });
   } catch (err) {
     console.error("updateTask:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       message: "Failed to update task",
-      error: err.message 
+      error: err.message,
     });
   }
 };
@@ -440,7 +396,7 @@ exports.deleteTask = async (req, res) => {
 
   try {
     const task = await Task.findById(taskId);
-    
+
     if (!task) {
       return res.status(404).json({ message: "Task not found" });
     }
@@ -449,10 +405,7 @@ exports.deleteTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: task.space,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
+      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
     });
 
     if (!space) {
@@ -462,17 +415,17 @@ exports.deleteTask = async (req, res) => {
     // Note: The Task model doesn't have isArchived field.
     // You can either add it to the Task model or do a hard delete.
     // For now, I'll do a hard delete since the model doesn't have isArchived.
-    
+
     await Task.deleteOne({ _id: taskId });
 
-    res.json({ 
-      message: "Task deleted successfully" 
+    res.json({
+      message: "Task deleted successfully",
     });
   } catch (err) {
     console.error("deleteTask:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       message: "Failed to delete task",
-      error: err.message 
+      error: err.message,
     });
   }
 };
@@ -486,10 +439,7 @@ exports.getTaskStats = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }
-      ],
+      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
       isArchived: false,
     });
 
@@ -503,14 +453,14 @@ exports.getTaskStats = async (req, res) => {
         $match: {
           space: space._id,
           owner: req.employee.owner,
-        }
+        },
       },
       {
         $group: {
           _id: "$status",
-          count: { $sum: 1 }
-        }
-      }
+          count: { $sum: 1 },
+        },
+      },
     ]);
 
     // Format the stats
@@ -519,10 +469,10 @@ exports.getTaskStats = async (req, res) => {
       in_progress: 0,
       review: 0,
       done: 0,
-      total: 0
+      total: 0,
     };
 
-    stats.forEach(stat => {
+    stats.forEach((stat) => {
       if (stat._id in formattedStats) {
         formattedStats[stat._id] = stat.count;
         formattedStats.total += stat.count;
@@ -532,9 +482,9 @@ exports.getTaskStats = async (req, res) => {
     res.json(formattedStats);
   } catch (err) {
     console.error("getTaskStats:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       message: "Failed to load task statistics",
-      error: err.message 
+      error: err.message,
     });
   }
 };
@@ -572,13 +522,13 @@ exports.createSpace = async (req, res) => {
         name: space.name,
         status: space.status,
         createdAt: space.createdAt,
-      }
+      },
     });
   } catch (err) {
     console.error("createSpace:", err);
-    res.status(500).json({ 
+    res.status(500).json({
       message: "Failed to create space",
-      error: err.message 
+      error: err.message,
     });
   }
 };

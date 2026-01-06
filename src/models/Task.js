@@ -51,7 +51,6 @@ const TaskSchema = new Schema(
         ref: "Employee",
       },
     ],
-
     dueDate: Date,
 
     createdBy: {
@@ -65,5 +64,4 @@ const TaskSchema = new Schema(
 
 TaskSchema.index({ owner: 1, space: 1 });
 
-module.exports =
-  mongoose.models.Task || mongoose.model("Task", TaskSchema);
+module.exports = mongoose.models.Task || mongoose.model("Task", TaskSchema);

@@ -76,10 +76,10 @@ async function findTLsAndManagersByOwner(ownerId) {
 /** ---------- CLIENT SUPERVISION HELPER FUNCTIONS ---------- **/
 async function getClientSupervision(clientId) {
   if (!isObjId(clientId)) return "direct";
-  
+
   const Client = require("../models/ClientInfo");
   const client = await Client.findById(clientId).select("supervision").lean();
-  
+
   return client?.supervision || "direct";
 }
 
@@ -88,7 +88,6 @@ async function clientRequiresApproval(clientId) {
   return supervision === "needs_approval";
 }
 
-/** ---------- ENHANCED applyVisibility WITH CLIENT SUPERVISION ---------- **/
 async function applyVisibility(q, req) {
   if (!req.employee?._id) return q;
 
@@ -99,10 +98,7 @@ async function applyVisibility(q, req) {
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
+  if ((currentUserRole === "manager" || currentUserRole === "owner") && ownerId) {
     return { ...q, owner: ownerId };
   }
 
@@ -111,8 +107,8 @@ async function applyVisibility(q, req) {
     // Get all managers in the same organization
     const { managers } = await findTLsAndManagersByOwner(ownerId);
 
-    return {
-      ...q,
+    // Create visibility conditions
+    const visibilityConditions = {
       $or: [
         { sender: me },
         { receiver: me },
@@ -129,6 +125,12 @@ async function applyVisibility(q, req) {
         },
       ],
     };
+
+    // CRITICAL FIX: Combine original query with visibility conditions using $and
+    // This preserves the text search while applying visibility rules
+    return {
+      $and: [q, visibilityConditions]
+    };
   }
 
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
@@ -136,13 +138,12 @@ async function applyVisibility(q, req) {
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
 
   if (q.isScheduled === true && q.status === "scheduled") {
-    return { ...q, $and: [{ $or: visOr }] };
+    return { $and: [q, { $or: visOr }] };
   }
 
-  return {
+  const scheduledVisibility = {
     $or: [
       {
-        ...q,
         $and: [
           {
             $or: [
@@ -159,13 +160,17 @@ async function applyVisibility(q, req) {
         ],
       },
       {
-        ...q,
         isScheduled: true,
         status: "scheduled",
         scheduledFor: { $gt: now },
         sender: me,
       },
     ],
+  };
+
+  // Combine with original query
+  return {
+    $and: [q, scheduledVisibility],
   };
 }
 /** ---------- SCHEDULING UTILITIES ---------- **/
@@ -282,7 +287,10 @@ exports.listMessages = async function listMessages(req, res) {
     if (isObjId(client)) q.client = client;
 
     // Status filter
-    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
     } else {
@@ -291,7 +299,10 @@ exports.listMessages = async function listMessages(req, res) {
     }
 
     // Approval status filter
-    if (approvalStatus && ["pending", "approved", "disapproved"].includes(approvalStatus)) {
+    if (
+      approvalStatus &&
+      ["pending", "approved", "disapproved"].includes(approvalStatus)
+    ) {
       q.approvalStatus = approvalStatus;
     }
 
@@ -343,9 +354,19 @@ exports.listMessages = async function listMessages(req, res) {
     }
 
     // Must have at least one scope
-    if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or && !q.status && q.isScheduled === undefined && !q.approvalStatus) {
+    if (
+      !q.owner &&
+      !q.client &&
+      !q.sender &&
+      !q.receiver &&
+      !q.$or &&
+      !q.status &&
+      q.isScheduled === undefined &&
+      !q.approvalStatus
+    ) {
       return res.status(400).json({
-        error: "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
+        error:
+          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
       });
     }
 
@@ -354,8 +375,10 @@ exports.listMessages = async function listMessages(req, res) {
 
     // 🎯 NEW: Cursor-based pagination logic
     if (cursor && isObjId(cursor)) {
-      const cursorMessage = await WhatsAppMessage.findById(cursor).select('createdAt').lean();
-      
+      const cursorMessage = await WhatsAppMessage.findById(cursor)
+        .select("createdAt")
+        .lean();
+
       if (cursorMessage) {
         if (direction === "before") {
           qFinal.createdAt = { $lt: cursorMessage.createdAt };
@@ -365,7 +388,8 @@ exports.listMessages = async function listMessages(req, res) {
       }
     }
 
-    const sortOrder = direction === "before" ? { createdAt: -1 } : { createdAt: -1 };
+    const sortOrder =
+      direction === "before" ? { createdAt: -1 } : { createdAt: -1 };
     const lim = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 50);
 
     // 🎯 Fetch with limit + 1 for pagination check
@@ -391,12 +415,12 @@ exports.listMessages = async function listMessages(req, res) {
     let hasMore = false;
     let nextCursor = null;
     let prevCursor = null;
-    
+
     if (items.length > lim) {
       hasMore = true;
       items.pop(); // Remove the extra one
     }
-    
+
     if (items.length > 0) {
       if (direction === "before") {
         nextCursor = items[items.length - 1]?._id || null;
@@ -415,7 +439,9 @@ exports.listMessages = async function listMessages(req, res) {
     // CRITICAL FIX: Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
       ...item,
-      receiver: Array.isArray(item.receiver) ? item.receiver : [item.receiver].filter(Boolean),
+      receiver: Array.isArray(item.receiver)
+        ? item.receiver
+        : [item.receiver].filter(Boolean),
     }));
 
     const total = await WhatsAppMessage.countDocuments(qFinal);
@@ -431,7 +457,7 @@ exports.listMessages = async function listMessages(req, res) {
         hasMore,
         nextCursor,
         prevCursor,
-        direction
+        direction,
       },
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
@@ -442,9 +468,13 @@ exports.listMessages = async function listMessages(req, res) {
   }
 };
 
-exports.listMessagesForManager = async function listMessagesForManager(req, res) {
+exports.listMessagesForManager = async function listMessagesForManager(
+  req,
+  res
+) {
   try {
-    const clientId = req.params.clientId || req.query.clientId || req.query.client || null;
+    const clientId =
+      req.params.clientId || req.query.clientId || req.query.client || null;
     const owner = req.query.owner || req.employee?.owner || null;
     const sender = req.query.sender || null;
     const receiver = req.query.receiver || req.query.toEmployee || null;
@@ -466,7 +496,10 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
 
     // FIXED: Handle status filter for drafts to exclude scheduled messages
     const status = req.query.status;
-    if (status && ["draft", "scheduled", "sent", "cancelled"].includes(status)) {
+    if (
+      status &&
+      ["draft", "scheduled", "sent", "cancelled"].includes(status)
+    ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
     }
@@ -488,7 +521,8 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     // FIXED: Remove overly restrictive validation
     if (!q.owner && !q.client && !q.sender && !q.receiver && !q.$or) {
       return res.status(400).json({
-        error: "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
+        error:
+          "Provide at least one scope: clientId/client, owner, sender, receiver, or participant",
       });
     }
 
@@ -496,8 +530,10 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
 
     // 🎯 FIXED: Proper cursor-based pagination logic
     if (cursor && isObjId(cursor)) {
-      const cursorMessage = await WhatsAppMessage.findById(cursor).select('createdAt').lean();
-      
+      const cursorMessage = await WhatsAppMessage.findById(cursor)
+        .select("createdAt")
+        .lean();
+
       if (cursorMessage) {
         if (direction === "before") {
           // For loading OLDER messages (scroll up) - get messages BEFORE cursor
@@ -518,7 +554,7 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
       // When loading NEWER messages (initial load), we want descending (newest first)
       sortOrder = { createdAt: -1 };
     }
-    
+
     // 🎯 Fetch messages with limit + 1 to check if there are more
     const messages = await WhatsAppMessage.find(qFinal)
       .sort(sortOrder)
@@ -541,12 +577,12 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
     let hasMore = false;
     let nextCursor = null;
     let prevCursor = null;
-    
+
     if (messages.length > limit) {
       hasMore = true;
       messages.pop(); // Remove the extra one
     }
-    
+
     // 🎯 Set cursor for next/prev pagination
     if (messages.length > 0) {
       if (direction === "before") {
@@ -588,22 +624,21 @@ exports.listMessagesForManager = async function listMessagesForManager(req, res)
       })
     );
 
-    return res.json({ 
+    return res.json({
       messages: messagesWithSupervision,
       pagination: {
         hasMore,
         nextCursor,
         prevCursor,
         limit,
-        direction
-      }
+        direction,
+      },
     });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -649,7 +684,7 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔥 CLIENT-BASED SUPERVISION: Get supervision mode from CLIENT, not employee
     const Client = require("../models/ClientInfo");
     const clientDoc = await Client.findById(client)
-      .populate("assignedTo", "_id role")
+      .populate("assignedTo", "_id role name companyEmail")
       .lean();
 
     // Use client's supervision setting, fallback to "direct" if not set
@@ -659,12 +694,16 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // 🔥 CRITICAL CHANGE: TEAM LEAD SENDS TO MANAGER INSTEAD OF ASSIGNED EMPLOYEE
+    // 🔥 GET ASSIGNED EMPLOYEE FROM CLIENT
+    const assignedEmployeeId = clientDoc?.assignedTo
+      ? String(clientDoc.assignedTo._id)
+      : null;
+
+    // 🔥 CRITICAL UPDATE: TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEE
     if (senderRole === "team_lead") {
-      
-      // Clear any existing receivers (don't use assigned employee)
+      // Clear any existing receivers (don't use arbitrary receivers)
       receivers = [];
-      
+
       // Add managers as receivers
       if (managers.length > 0) {
         managers.forEach((managerId) => {
@@ -672,7 +711,14 @@ exports.createMessage = async function createMessage(req, res) {
             receivers.push(managerId);
           }
         });
-      } 
+      }
+
+      // 🔥 CRITICAL FIX: ADD ASSIGNED EMPLOYEE AS RECEIVER
+      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
+        if (!receivers.includes(assignedEmployeeId)) {
+          receivers.push(assignedEmployeeId);
+        }
+      }
 
       // Get CRM employee ID from environment or database
       const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
@@ -697,11 +743,13 @@ exports.createMessage = async function createMessage(req, res) {
 
       if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
         receivers.push(crmId);
-      } 
-    } 
-    // 🔥 CRITICAL UPDATE: Add team leads AND assigned employee as receivers for manager messages
+      }
+
+      // Team leads don't need approval
+      approvalStatus = null;
+    }
+    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEE
     else if (senderRole === "manager") {
-      
       // Add team leads to receivers for supervision visibility
       tls.forEach((teamLeadId) => {
         if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
@@ -709,26 +757,21 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
 
-      // 🔥 NEW: Add assigned employee as receiver
-      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-        const assignedEmployeeId = String(clientDoc.assignedTo._id);
-        if (
-          !receivers.includes(assignedEmployeeId) &&
-          assignedEmployeeId !== String(sender)
-        ) {
+      // 🔥 ADD ASSIGNED EMPLOYEE AS RECEIVER
+      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
+        if (!receivers.includes(assignedEmployeeId)) {
           receivers.push(assignedEmployeeId);
         }
       }
+
+      // Managers don't need approval
+      approvalStatus = null;
     }
     // 👷 EMPLOYEE LOGIC: Use assigned employee and CLIENT-BASED supervision rules
     else if (senderRole === "employee") {
       // ✅ Include assignedTo employee if present (but only if not already included)
-      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-        const assignedEmployeeId = String(clientDoc.assignedTo._id);
-        if (
-          !receivers.includes(assignedEmployeeId) &&
-          assignedEmployeeId !== String(sender)
-        ) {
+      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
+        if (!receivers.includes(assignedEmployeeId)) {
           receivers.push(assignedEmployeeId);
         }
       }
@@ -740,7 +783,7 @@ exports.createMessage = async function createMessage(req, res) {
       // Managers don't need approval, but team leads are now included as receivers
     } else if (senderRole === "team_lead") {
       approvalStatus = null;
-      // Team leads don't need approval, and we send to managers + CRM
+      // Team leads don't need approval, and we send to managers + assigned employee + CRM
     } else if (needsApproval) {
       // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
       approvalStatus = "pending";
@@ -752,6 +795,61 @@ exports.createMessage = async function createMessage(req, res) {
       // 🔥 CLIENT-BASED: DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
       approvalStatus = "approved";
       // Don't add any team leads or managers - message goes directly to intended receivers
+    }
+
+    // 🔥 FIXED: Handle reply scenario - Preserve original receivers and add assigned employee
+    if (isReply && repliedTo) {
+      try {
+        // Get the original message being replied to
+        const originalMessage = await WhatsAppMessage.findById(repliedTo)
+          .populate("sender receiver", "_id role name companyEmail")
+          .lean();
+
+        if (originalMessage) {
+          // Extract original receivers
+          const originalReceivers = originalMessage.receiver.map((r) =>
+            typeof r === "object" ? String(r._id) : String(r)
+          );
+
+          // Add original receivers (excluding sender)
+          originalReceivers.forEach((receiverId) => {
+            if (
+              receiverId !== String(sender) &&
+              !receivers.includes(receiverId)
+            ) {
+              receivers.push(receiverId);
+            }
+          });
+
+          // 🔥 SPECIAL CASE: If team lead is replying, ensure assigned employee is included
+          if (
+            senderRole === "team_lead" &&
+            assignedEmployeeId &&
+            assignedEmployeeId !== String(sender)
+          ) {
+            if (!receivers.includes(assignedEmployeeId)) {
+              receivers.push(assignedEmployeeId);
+            }
+          }
+
+          // Also add original sender if not already included
+          const originalSenderId = originalMessage.sender
+            ? typeof originalMessage.sender === "object"
+              ? String(originalMessage.sender._id)
+              : String(originalMessage.sender)
+            : null;
+
+          if (
+            originalSenderId &&
+            originalSenderId !== String(sender) &&
+            !receivers.includes(originalSenderId)
+          ) {
+            receivers.push(originalSenderId);
+          }
+        }
+      } catch (replyError) {
+        console.warn("Failed to process reply context:", replyError);
+      }
     }
 
     // 🔥 Fallback logic if no receivers are still found
@@ -767,8 +865,13 @@ exports.createMessage = async function createMessage(req, res) {
           approvalStatus = "pending";
         }
       } else if (senderRole === "team_lead") {
-        // Team lead with no receivers - add managers and CRM as fallback
+        // Team lead with no receivers - add managers and assigned employee as fallback
         receivers = [...managers];
+
+        // Add assigned employee in fallback too
+        if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
+          receivers.push(assignedEmployeeId);
+        }
 
         // Try to add CRM again in fallback
         const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
@@ -777,10 +880,15 @@ exports.createMessage = async function createMessage(req, res) {
         }
 
         approvalStatus = null;
-        
       } else if (senderRole === "manager") {
-        // Manager with no receivers - add team leads
+        // Manager with no receivers - add team leads and assigned employee
         receivers = [...tls];
+
+        // Add assigned employee in fallback
+        if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
+          receivers.push(assignedEmployeeId);
+        }
+
         approvalStatus = null;
       }
     }
@@ -845,30 +953,47 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
+    // Get assigned employee info for response
+    const assignedEmployeeInfo = clientDoc?.assignedTo
+      ? {
+          id: clientDoc.assignedTo._id,
+          name: clientDoc.assignedTo.name,
+          email: clientDoc.assignedTo.companyEmail,
+          role: clientDoc.assignedTo.role,
+        }
+      : null;
+
     // Add client supervision info to response
     const responseWithSupervision = {
       ...populated.toObject(),
       clientSupervision: clientSupervision,
       requiresApproval: needsApproval,
       teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
-      assignedEmployeeIncluded: senderRole === "manager" && clientDoc?.assignedTo ? true : false, // Indicate if assigned employee was added
+      assignedEmployeeIncluded: assignedEmployeeId
+        ? receivers.includes(assignedEmployeeId)
+        : false,
       crmIncluded: senderRole === "team_lead", // Indicate if CRM was added
       managersIncluded: senderRole === "team_lead", // Indicate if managers were added (for team lead messages)
       totalReceivers: receivers.length,
+      assignedEmployee: assignedEmployeeInfo,
       receiverSummary: {
         role: senderRole,
         sentToManagers: senderRole === "team_lead",
-        sentToTeamLeads: senderRole === "manager", 
-        sentToAssignedEmployee: senderRole === "manager" && clientDoc?.assignedTo ? true : false,
-        sentToCRM: senderRole === "team_lead"
-      }
+        sentToTeamLeads: senderRole === "manager",
+        sentToAssignedEmployee: assignedEmployeeId
+          ? receivers.includes(assignedEmployeeId)
+          : false,
+        sentToCRM: senderRole === "team_lead",
+        isReply: isReply || false,
+        replyToMessageId: isReply ? repliedTo : null,
+      },
     };
 
     // FIXED: Emit real-time events ONLY to relevant users
     if (req.app.get("io")) {
       const io = req.app.get("io");
 
-      // Notify ONLY the actual receivers
+      // Notify ALL receivers
       receivers.forEach((receiverId) => {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: responseWithSupervision,
@@ -876,35 +1001,24 @@ exports.createMessage = async function createMessage(req, res) {
         });
       });
 
-      // Notify ONLY the sender
+      // Notify sender
       io.to(`employee_${sender}`).emit("new_message", {
         message: responseWithSupervision,
         type: "message_created",
       });
 
-      // Special notification for team leads when manager sends message
-      if (senderRole === "manager") {
-        tls.forEach((teamLeadId) => {
-          if (receivers.includes(teamLeadId)) {
-            io.to(`employee_${teamLeadId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "manager_message_visibility",
-              note: "You are included as a receiver for manager message visibility",
-            });
-          }
+      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies, notify assigned employee
+      if (
+        senderRole === "team_lead" &&
+        assignedEmployeeId &&
+        receivers.includes(assignedEmployeeId)
+      ) {
+        io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
+          message: responseWithSupervision,
+          type: "team_lead_direct_message",
+          note: "Team Lead has sent you a direct message regarding this client",
+          clientName: clientDoc?.clientName || "Unknown Client",
         });
-
-        // Special notification for assigned employee when manager sends message
-        if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-          const assignedEmployeeId = String(clientDoc.assignedTo._id);
-          if (receivers.includes(assignedEmployeeId)) {
-            io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "manager_direct_message",
-              note: "Manager has sent you a direct message",
-            });
-          }
-        }
       }
 
       // Special notification for managers when team lead sends message
@@ -929,15 +1043,36 @@ exports.createMessage = async function createMessage(req, res) {
           });
         }
       }
+
+      // Special notification for team leads when manager sends message
+      if (senderRole === "manager") {
+        tls.forEach((teamLeadId) => {
+          if (receivers.includes(teamLeadId)) {
+            io.to(`employee_${teamLeadId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "manager_message_visibility",
+              note: "You are included as a receiver for manager message visibility",
+            });
+          }
+        });
+
+        // Special notification for assigned employee when manager sends message
+        if (assignedEmployeeId && receivers.includes(assignedEmployeeId)) {
+          io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
+            message: responseWithSupervision,
+            type: "manager_direct_message",
+            note: "Manager has sent you a direct message",
+          });
+        }
+      }
     }
 
     res.status(201).json(responseWithSupervision);
   } catch (e) {
-    console.error(e);
+    console.error("❌ Create message error:", e);
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
-
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {
@@ -1297,14 +1432,16 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     // 🔥 CHECK CLIENT SUPERVISION
     const Client = require("../models/ClientInfo");
-    const client = await Client.findById(msg.client).select("supervision").lean();
+    const client = await Client.findById(msg.client)
+      .select("supervision")
+      .lean();
     const clientSupervision = client?.supervision || "direct";
-    
+
     // Only allow approval if client has "needs_approval" supervision
     if (clientSupervision !== "needs_approval") {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "This client uses direct supervision. Approval not required.",
-        clientSupervision: clientSupervision
+        clientSupervision: clientSupervision,
       });
     }
 
@@ -1391,7 +1528,6 @@ exports.approveMessage = async function approveMessage(req, res) {
     if (senderRole === "employee") {
       const { managers } = await findTLsAndManagersByOwner(msg.owner);
       if (managers.length > 0) {
-        
         // 🔥 CRITICAL FIX: Include replyContent and repliedTo in forwarded message
         const forwardMsgData = {
           owner: msg.owner,
@@ -1422,7 +1558,10 @@ exports.approveMessage = async function approveMessage(req, res) {
           { path: "receiver", select: "_id name companyEmail role" },
           { path: "client", select: "_id clientName" },
           { path: "forwardedBy", select: "_id name companyEmail" },
-          { path: "replyContent.originalSender", select: "_id name companyEmail" },
+          {
+            path: "replyContent.originalSender",
+            select: "_id name companyEmail",
+          },
           { path: "repliedTo", select: "_id note message sender attachments" },
         ]);
 
@@ -1439,11 +1578,13 @@ exports.approveMessage = async function approveMessage(req, res) {
               originalMessageId: msg._id,
               clientSupervision: clientSupervision,
               // Include context about the reply chain
-              replyContext: msg.isReply ? {
-                hasOriginalThread: true,
-                originalSender: msg.replyContent?.originalSender,
-                repliedToMessage: msg.repliedTo?._id
-              } : null
+              replyContext: msg.isReply
+                ? {
+                    hasOriginalThread: true,
+                    originalSender: msg.replyContent?.originalSender,
+                    repliedToMessage: msg.repliedTo?._id,
+                  }
+                : null,
             });
           });
         }
@@ -1455,10 +1596,12 @@ exports.approveMessage = async function approveMessage(req, res) {
           message: "Message approved and forwarded to managers",
           clientSupervision: clientSupervision,
           // Include reply context in response
-          replyContext: msg.isReply ? {
-            includedReplyContent: true,
-            originalThreadPreserved: true
-          } : null
+          replyContext: msg.isReply
+            ? {
+                includedReplyContent: true,
+                originalThreadPreserved: true,
+              }
+            : null,
         });
       }
     }
@@ -1487,14 +1630,16 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
     // 🔥 CHECK CLIENT SUPERVISION
     const Client = require("../models/ClientInfo");
-    const client = await Client.findById(msg.client).select("supervision").lean();
+    const client = await Client.findById(msg.client)
+      .select("supervision")
+      .lean();
     const clientSupervision = client?.supervision || "direct";
-    
+
     // Only allow disapproval if client has "needs_approval" supervision
     if (clientSupervision !== "needs_approval") {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "This client uses direct supervision. Disapproval not required.",
-        clientSupervision: clientSupervision
+        clientSupervision: clientSupervision,
       });
     }
 
@@ -1627,7 +1772,9 @@ exports.editMessage = async function editMessage(req, res) {
 
     // 🔥 CHECK CLIENT SUPERVISION
     const Client = require("../models/ClientInfo");
-    const client = await Client.findById(msg.client).select("supervision").lean();
+    const client = await Client.findById(msg.client)
+      .select("supervision")
+      .lean();
     const clientSupervision = client?.supervision || "direct";
     const clientRequiresApproval = clientSupervision === "needs_approval";
 
@@ -1649,11 +1796,12 @@ exports.editMessage = async function editMessage(req, res) {
     if (isTeamLead && !isSender) {
       if (!clientRequiresApproval) {
         return res.status(403).json({
-          error: "This client uses direct supervision. Team leads cannot edit messages.",
-          clientSupervision: clientSupervision
+          error:
+            "This client uses direct supervision. Team leads cannot edit messages.",
+          clientSupervision: clientSupervision,
         });
       }
-      
+
       if (
         msg.approvalStatus !== "pending" &&
         msg.approvalStatus !== "disapproved"
@@ -1712,7 +1860,7 @@ exports.editMessage = async function editMessage(req, res) {
         msg.approvalStatus = "approved";
       } else if (isSender) {
         // Original sender editing their own message
-        if (msg.approvalStatus === "disapproved") {          
+        if (msg.approvalStatus === "disapproved") {
           // If client requires approval, set to pending. Otherwise, keep as approved
           msg.approvalStatus = clientRequiresApproval ? "pending" : "approved";
         } else if (msg.approvalStatus === "approved") {
@@ -1773,7 +1921,6 @@ exports.editMessage = async function editMessage(req, res) {
       msg.approvalStatus === "approved" &&
       clientRequiresApproval
     ) {
-
       const senderRole = normalizeRole(msg.sender?.role || "");
 
       // ✅ Forward only if sender was an Employee under supervision
@@ -1818,8 +1965,14 @@ exports.editMessage = async function editMessage(req, res) {
               { path: "receiver", select: "_id name companyEmail role" },
               { path: "client", select: "_id clientName" },
               { path: "forwardedBy", select: "_id name companyEmail" },
-              { path: "replyContent.originalSender", select: "_id name companyEmail" },
-              { path: "repliedTo", select: "_id note message sender attachments" },
+              {
+                path: "replyContent.originalSender",
+                select: "_id name companyEmail",
+              },
+              {
+                path: "repliedTo",
+                select: "_id note message sender attachments",
+              },
             ]);
 
             // Add forwarding info to response
@@ -1901,11 +2054,13 @@ exports.editMessage = async function editMessage(req, res) {
               source: "team_lead_edit",
               clientSupervision: clientSupervision,
               // Include reply context
-              replyContext: msg.isReply ? {
-                hasOriginalThread: true,
-                originalSender: msg.replyContent?.originalSender,
-                repliedToMessage: msg.repliedTo?._id
-              } : null
+              replyContext: msg.isReply
+                ? {
+                    hasOriginalThread: true,
+                    originalSender: msg.replyContent?.originalSender,
+                    repliedToMessage: msg.repliedTo?._id,
+                  }
+                : null,
             });
           }
         });
@@ -1913,7 +2068,6 @@ exports.editMessage = async function editMessage(req, res) {
 
       // Special notifications based on approval status changes
       if (msg.approvalStatus === "approved") {
-
         // Notify ALL involved users about approval
         involvedUsersArray.forEach((userId) => {
           io.to(`employee_${userId}`).emit("new_message", {
@@ -1926,7 +2080,12 @@ exports.editMessage = async function editMessage(req, res) {
         });
 
         // If auto-approved by Team Lead, also notify managers (if not already forwarded)
-        if (isTeamLead && !isSender && !forwardedMessage && clientRequiresApproval) {
+        if (
+          isTeamLead &&
+          !isSender &&
+          !forwardedMessage &&
+          clientRequiresApproval
+        ) {
           const { managers } = await findTLsAndManagersByOwner(msg.owner);
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
@@ -1937,7 +2096,6 @@ exports.editMessage = async function editMessage(req, res) {
           });
         }
       } else if (msg.approvalStatus === "pending" && clientRequiresApproval) {
-
         // Notify ALL involved users about pending status
         involvedUsersArray.forEach((userId) => {
           io.to(`employee_${userId}`).emit("new_message", {
@@ -1977,7 +2135,8 @@ exports.editMessage = async function editMessage(req, res) {
     } else if (msg.approvalStatus === "approved" && isSender) {
       responseMessage = "Message updated (already approved)";
     } else if (!clientRequiresApproval) {
-      responseMessage = "Message updated (direct supervision - no approval needed)";
+      responseMessage =
+        "Message updated (direct supervision - no approval needed)";
     }
 
     // Build final response
@@ -2002,7 +2161,7 @@ exports.editMessage = async function editMessage(req, res) {
         includedReplyContent: true,
         originalThreadPreserved: true,
         hasRepliedTo: !!msg.repliedTo,
-        hasReplyContent: !!msg.replyContent
+        hasReplyContent: !!msg.replyContent,
       };
     }
 
@@ -2446,7 +2605,6 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       "seenBy.employee": { $ne: currentUserId }, // Not already seen
     });
 
-
     // Mark each message as seen
     const updatePromises = unreadMessages.map(async (message) => {
       // Check if user already seen this message (double check)
@@ -2503,14 +2661,14 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
 
 exports.searchMessages = async function searchMessages(req, res) {
   try {
-    const { query, limit = 10 } = req.query;
+    const { query, limit = 20 } = req.query;
 
     if (!query || !query.trim()) {
       return res.json({ items: [] });
     }
 
     const searchQuery = query.trim();
-    
+
     // Build base query - exclude drafts
     const q = {
       status: { $ne: "draft" },
@@ -2532,7 +2690,7 @@ exports.searchMessages = async function searchMessages(req, res) {
     }
 
     const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 20);
-    
+
     const messages = await WhatsAppMessage.find(qFinal)
       .sort({ createdAt: -1 })
       .limit(lim)
@@ -2541,13 +2699,14 @@ exports.searchMessages = async function searchMessages(req, res) {
         { path: "sender", select: "_id name companyEmail role" },
         { path: "owner", select: "_id name companyEmail" },
       ])
-      .select("_id note message subject sender client createdAt receiver status")
+      .select(
+        "_id note message subject sender client createdAt receiver status"
+      )
       .lean();
 
     // Debug: Log first few messages
     if (messages.length > 0) {
-      messages.slice(0, 3).forEach((msg, i) => {
-      });
+      messages.slice(0, 3).forEach((msg, i) => {});
     }
 
     // Format response
@@ -2555,32 +2714,35 @@ exports.searchMessages = async function searchMessages(req, res) {
       _id: m._id,
       note: m.note || m.message || "",
       subject: m.subject || "",
-      sender: m.sender ? {
-        _id: m.sender._id,
-        name: m.sender.name || "Unknown"
-      } : { _id: null, name: "Unknown" },
+      sender: m.sender
+        ? {
+            _id: m.sender._id,
+            name: m.sender.name || "Unknown",
+          }
+        : { _id: null, name: "Unknown" },
       clientId: m.client?._id || null,
       clientName: m.client?.clientName || "Unknown",
-      time: m.createdAt ? new Date(m.createdAt).toLocaleTimeString([], { 
-        hour: '2-digit', 
-        minute: '2-digit' 
-      }) : "",
+      time: m.createdAt
+        ? new Date(m.createdAt).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+        : "",
       timestamp: m.createdAt || new Date(),
-      status: m.status || "sent"
+      status: m.status || "sent",
     }));
 
-    return res.json({ 
+    return res.json({
       items,
       count: items.length,
-      query: searchQuery 
+      query: searchQuery,
     });
-    
   } catch (e) {
     console.error("❌ Search failed:", e);
     console.error("❌ Stack trace:", e.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       error: "Search failed",
-      items: []
+      items: [],
     });
   }
 };
