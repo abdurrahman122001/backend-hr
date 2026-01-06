@@ -243,6 +243,54 @@ async function applyVisibility(q, req) {
 
   return employeeQuery;
 }
+async function emitMessageUpdate(io, message, action) {
+  try {
+    const populatedMessage = await AssignmentMessage.findById(message._id)
+      .populate("owner")
+      .populate("sender")
+      .populate("receiver")
+      .populate("client");
+
+    if (!populatedMessage) return;
+
+    // 🔥 CRITICAL: Only get actual participants, not thread participants
+    const actualParticipants = new Set();
+
+    // Add sender
+    const senderId = String(populatedMessage.sender._id);
+    actualParticipants.add(senderId);
+
+    // Add ONLY the receivers from this specific message
+    if (populatedMessage.receiver && Array.isArray(populatedMessage.receiver)) {
+      populatedMessage.receiver.forEach((receiver) => {
+        const receiverId = String(receiver._id);
+        actualParticipants.add(receiverId);
+      });
+    }
+    // Emit to actual participants only
+    actualParticipants.forEach((participantId) => {
+      io.to(`employee_${participantId}`).emit("assignment_message_updated", {
+        message: populatedMessage,
+        action: action,
+        timestamp: new Date(),
+      });
+    });
+
+    // 🔥 REMOVED: Thread-based and role-based broadcasting for sensitive operations
+    if (action === "approved" || action === "disapproved") {
+      // Keep approval/disapproval logic but ensure it's properly filtered
+      const role =
+        action === "approved" ? "assignment_managers" : "assignment_team_leads";
+      io.to(role).emit(`assignment_message_${action}`, {
+        message: populatedMessage,
+        action: action,
+        timestamp: new Date(),
+      });
+    }
+  } catch (error) {
+    console.error("❌ Error emitting message update:", error);
+  }
+}
 
 // Helper function to get employees under supervision
 async function getEmployeesUnderSupervision(ownerId, supervisorRole) {
