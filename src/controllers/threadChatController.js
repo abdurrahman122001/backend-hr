@@ -121,6 +121,86 @@ async function emitToThreadParticipants(io, message, eventName = "new_thread_cha
   }
 }
 
+// NEW: Get immediate thread participants with assignment message context
+async function getImmediateThreadParticipants(threadId, req) {
+  try {
+    // First, get the main assignment message to get initial participants
+    const assignmentMessage = await AssignmentMessage.findOne({ threadId })
+      .populate([
+        { path: "sender", select: "_id name companyEmail role photographUrl" },
+        { path: "receiver", select: "_id name companyEmail role photographUrl" },
+        { path: "client", select: "_id clientName" }
+      ]);
+
+    if (!assignmentMessage) {
+      return [];
+    }
+
+    // Collect participants from assignment message
+    const participants = new Map();
+
+    // Add sender
+    if (assignmentMessage.sender) {
+      const sender = assignmentMessage.sender;
+      if (sender._id) {
+        participants.set(sender._id.toString(), {
+          _id: sender._id,
+          name: sender.name,
+          companyEmail: sender.companyEmail,
+          role: sender.role,
+          photographUrl: sender.photographUrl,
+          isFromAssignment: true
+        });
+      }
+    }
+
+    // Add receivers
+    if (Array.isArray(assignmentMessage.receiver)) {
+      assignmentMessage.receiver.forEach(receiver => {
+        if (receiver && receiver._id) {
+          participants.set(receiver._id.toString(), {
+            _id: receiver._id,
+            name: receiver.name,
+            companyEmail: receiver.companyEmail,
+            role: receiver.role,
+            photographUrl: receiver.photographUrl,
+            isFromAssignment: true
+          });
+        }
+      });
+    }
+
+    // Also get participants from chat messages (if any)
+    const chatParticipants = await ThreadChatMessage.getThreadParticipants(threadId);
+    
+    if (chatParticipants.length > 0) {
+      const employeeDetails = await Employee.find(
+        { _id: { $in: chatParticipants } },
+        "_id name companyEmail role photographUrl"
+      );
+
+      employeeDetails.forEach(emp => {
+        if (!participants.has(emp._id.toString())) {
+          participants.set(emp._id.toString(), {
+            _id: emp._id,
+            name: emp.name,
+            companyEmail: emp.companyEmail,
+            role: emp.role,
+            photographUrl: emp.photographUrl,
+            isFromChat: true
+          });
+        }
+      });
+    }
+
+    return Array.from(participants.values());
+
+  } catch (error) {
+    console.error("❌ Error in getImmediateThreadParticipants:", error);
+    return [];
+  }
+}
+
 // Create a new thread chat message
 exports.createThreadChatMessage = async function (req, res) {
   try {
@@ -253,7 +333,7 @@ exports.createThreadChatMessage = async function (req, res) {
   }
 };
 
-// Get messages for a thread
+// Get messages for a thread (UPDATED with immediate participants)
 exports.getThreadMessages = async function (req, res) {
   try {
     const { threadId } = req.params;
@@ -268,6 +348,9 @@ exports.getThreadMessages = async function (req, res) {
     if (!thread) {
       return res.status(404).json({ error: "Thread not found" });
     }
+
+    // Get immediate participants first
+    const participants = await getImmediateThreadParticipants(threadId, req);
 
     // Build query
     const q = {
@@ -342,6 +425,7 @@ exports.getThreadMessages = async function (req, res) {
     res.json({
       success: true,
       data: formattedMessages,
+      participants: participants, // Send participants immediately
       pagination: {
         total,
         page: pageNum,
@@ -353,11 +437,7 @@ exports.getThreadMessages = async function (req, res) {
         threadId,
         subject: thread.subject,
         client: thread.client,
-        participants: await Employee.find(
-          { _id: { $in: await ThreadChatMessage.getThreadParticipants(threadId) } },
-          "_id name companyEmail role photographUrl"
-        )
-
+        assignmentMessageId: thread._id
       }
     });
 
@@ -367,7 +447,7 @@ exports.getThreadMessages = async function (req, res) {
   }
 };
 
-// Get thread info
+// Get thread info (OPTIMIZED for immediate response)
 exports.getThreadInfo = async function (req, res) {
   try {
     const { threadId } = req.params;
@@ -380,8 +460,8 @@ exports.getThreadInfo = async function (req, res) {
     const thread = await AssignmentMessage.findOne({ threadId })
       .populate([
         { path: "owner", select: "_id name companyEmail" },
-        { path: "sender", select: "_id name companyEmail role" },
-        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "sender", select: "_id name companyEmail role photographUrl" },
+        { path: "receiver", select: "_id name companyEmail role photographUrl" },
         { path: "client", select: "_id clientName" },
       ]);
 
@@ -389,38 +469,85 @@ exports.getThreadInfo = async function (req, res) {
       return res.status(404).json({ error: "Thread not found" });
     }
 
-    // Get participants from chat messages
-    const participants = await ThreadChatMessage.getThreadParticipants(threadId);
+    // Get immediate participants (fast version)
+    const participants = [];
+    
+    // Add sender
+    if (thread.sender) {
+      participants.push({
+        _id: thread.sender._id,
+        name: thread.sender.name,
+        companyEmail: thread.sender.companyEmail,
+        role: thread.sender.role,
+        photographUrl: thread.sender.photographUrl,
+        isFromAssignment: true
+      });
+    }
 
-    // Get latest message
-    const latestMessage = await ThreadChatMessage.findOne({ threadId, isDeleted: false })
-      .sort({ createdAt: -1 })
-      .populate("sender", "_id name companyEmail")
-      .lean();
+    // Add receivers
+    if (Array.isArray(thread.receiver)) {
+      thread.receiver.forEach(receiver => {
+        if (receiver && receiver._id) {
+          participants.push({
+            _id: receiver._id,
+            name: receiver.name,
+            companyEmail: receiver.companyEmail,
+            role: receiver.role,
+            photographUrl: receiver.photographUrl,
+            isFromAssignment: true
+          });
+        }
+      });
+    }
+
+    // Remove duplicates
+    const uniqueParticipants = participants.reduce((acc, current) => {
+      const existing = acc.find(item => item._id.toString() === current._id.toString());
+      if (!existing) {
+        acc.push(current);
+      }
+      return acc;
+    }, []);
+
+    // Get latest message if exists
+    let latestMessage = null;
+    try {
+      latestMessage = await ThreadChatMessage.findOne({ threadId, isDeleted: false })
+        .sort({ createdAt: -1 })
+        .populate("sender", "_id name companyEmail")
+        .lean();
+    } catch (error) {
+      console.log("No chat messages yet");
+    }
 
     // Get unread count for current user
     const currentUser = req.employee._id;
-    const unreadCount = await ThreadChatMessage.countDocuments({
-      threadId,
-      isDeleted: false,
-      'readBy.employee': { $ne: currentUser },
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } }
-      ]
-    });
+    let unreadCount = 0;
+    try {
+      unreadCount = await ThreadChatMessage.countDocuments({
+        threadId,
+        isDeleted: false,
+        'readBy.employee': { $ne: currentUser },
+        $or: [
+          { sender: currentUser },
+          { receiver: currentUser },
+          { receiver: { $in: [currentUser] } }
+        ]
+      });
+    } catch (error) {
+      console.log("Error counting unread messages:", error);
+    }
 
     // Get total message count
-    const totalMessages = await ThreadChatMessage.countDocuments({
-      threadId,
-      isDeleted: false
-    });
-    const participantDetails = await Employee.find(
-  { _id: { $in: participants }},
-  "_id name companyEmail role photographUrl"
-);
-
+    let totalMessages = 0;
+    try {
+      totalMessages = await ThreadChatMessage.countDocuments({
+        threadId,
+        isDeleted: false
+      });
+    } catch (error) {
+      console.log("Error counting messages:", error);
+    }
 
     res.json({
       success: true,
@@ -433,14 +560,16 @@ exports.getThreadInfo = async function (req, res) {
           subject: thread.subject,
           note: thread.note,
           status: thread.status,
-          approvalStatus: thread.approvalStatus
+          approvalStatus: thread.approvalStatus,
+          sender: thread.sender,
+          receiver: thread.receiver
         },
-        participants: participantDetails,
+        participants: uniqueParticipants, // Send immediate participants
         latestMessage,
         stats: {
           totalMessages,
           unreadCount,
-          participantCount: participants.length
+          participantCount: uniqueParticipants.length
         },
         createdAt: thread.createdAt,
         updatedAt: thread.updatedAt
@@ -450,6 +579,58 @@ exports.getThreadInfo = async function (req, res) {
   } catch (e) {
     console.error("❌ Error in getThreadInfo:", e);
     res.status(500).json({ error: "Failed to fetch thread info" });
+  }
+};
+
+// NEW: Get thread participants immediately (separate endpoint)
+exports.getThreadParticipantsImmediate = async function (req, res) {
+  try {
+    const { threadId } = req.params;
+
+    if (!threadId) {
+      return res.status(400).json({ error: "Thread ID is required" });
+    }
+
+    const participants = await getImmediateThreadParticipants(threadId, req);
+
+    res.json({
+      success: true,
+      data: participants,
+      count: participants.length
+    });
+
+  } catch (e) {
+    console.error("❌ Error in getThreadParticipantsImmediate:", e);
+    res.status(500).json({ error: "Failed to fetch participants" });
+  }
+};
+
+// Get thread participants (original, for backward compatibility)
+exports.getThreadParticipants = async function (req, res) {
+  try {
+    const { threadId } = req.params;
+
+    if (!threadId) {
+      return res.status(400).json({ error: "Thread ID is required" });
+    }
+
+    const participants = await ThreadChatMessage.getThreadParticipants(threadId);
+
+    // Get employee details
+    const employeeDetails = await Employee.find(
+      { _id: { $in: participants } },
+      "_id name companyEmail role photographUrl"
+    );
+
+    res.json({
+      success: true,
+      data: employeeDetails,
+      count: employeeDetails.length
+    });
+
+  } catch (e) {
+    console.error("❌ Error in getThreadParticipants:", e);
+    res.status(500).json({ error: "Failed to fetch participants" });
   }
 };
 
@@ -734,35 +915,6 @@ exports.uploadAttachments = async function (req, res) {
   } catch (e) {
     console.error("❌ Error in uploadAttachments:", e);
     res.status(500).json({ error: "Failed to upload attachments" });
-  }
-};
-
-// Get thread participants
-exports.getThreadParticipants = async function (req, res) {
-  try {
-    const { threadId } = req.params;
-
-    if (!threadId) {
-      return res.status(400).json({ error: "Thread ID is required" });
-    }
-
-    const participants = await ThreadChatMessage.getThreadParticipants(threadId);
-
-    // Get employee details
-    const employeeDetails = await Employee.find(
-      { _id: { $in: participants } },
-      "_id name companyEmail role photographUrl"
-    );
-
-    res.json({
-      success: true,
-      data: employeeDetails,
-      count: employeeDetails.length
-    });
-
-  } catch (e) {
-    console.error("❌ Error in getThreadParticipants:", e);
-    res.status(500).json({ error: "Failed to fetch participants" });
   }
 };
 

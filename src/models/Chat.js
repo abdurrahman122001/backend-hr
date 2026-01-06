@@ -207,31 +207,32 @@ messageSchema.methods.addView = async function (employeeId) {
 };
 
 // Add to Message schema methods
-messageSchema.methods.markAsRead = function(userId) {
+messageSchema.methods.markAsRead = function (userId) {
   // Check if already read by this user
   if (!this.isReadBy(userId)) {
     this.readBy.push({
       employee: userId,
-      readAt: new Date()
+      readAt: new Date(),
     });
     return this.save();
   }
   return Promise.resolve(this);
 };
 
-messageSchema.methods.isReadBy = function(userId) {
+messageSchema.methods.isReadBy = function (userId) {
   return this.readBy.some(
-    read => read.employee.toString() === userId.toString()
+    (read) => read.employee.toString() === userId.toString()
   );
 };
 
-messageSchema.methods.getUnreadUsers = function(senderId) {
+messageSchema.methods.getUnreadUsers = function (senderId) {
   const participants = this.conversation?.participants || [];
-  const readUserIds = this.readBy.map(read => read.employee.toString());
-  
-  return participants.filter(participantId => 
-    participantId.toString() !== senderId.toString() && 
-    !readUserIds.includes(participantId.toString())
+  const readUserIds = this.readBy.map((read) => read.employee.toString());
+
+  return participants.filter(
+    (participantId) =>
+      participantId.toString() !== senderId.toString() &&
+      !readUserIds.includes(participantId.toString())
   );
 };
 
@@ -318,14 +319,16 @@ const conversationSchema = new mongoose.Schema(
         ref: "Employee",
       },
     ],
-      mutedBy: [{
-    employee: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'Employee'
-    },
-    mutedAt: Date,
-    muteExpiresAt: Date
-  }],
+    mutedBy: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+        },
+        mutedAt: Date,
+        muteExpiresAt: Date,
+      },
+    ],
   },
   {
     timestamps: true,
@@ -344,30 +347,30 @@ conversationSchema.methods.getUserPin = function (userId) {
     (pin) => pin.employee.toString() === userId.toString()
   );
 };
-conversationSchema.path('mutedBy').default([]);
+conversationSchema.path("mutedBy").default([]);
 
 // Add helper method to check if conversation is muted by a user
-conversationSchema.methods.isMutedBy = function(employeeId) {
+conversationSchema.methods.isMutedBy = function (employeeId) {
   if (!this.mutedBy || !Array.isArray(this.mutedBy)) {
     return false;
   }
-  
-  const mute = this.mutedBy.find(mute => 
-    mute.employee.toString() === employeeId.toString()
+
+  const mute = this.mutedBy.find(
+    (mute) => mute.employee.toString() === employeeId.toString()
   );
-  
+
   if (!mute) return false;
-  
+
   // Check if mute has expired
   if (mute.muteExpiresAt && new Date() > mute.muteExpiresAt) {
     // Remove expired mute
-    this.mutedBy = this.mutedBy.filter(m => 
-      m.employee.toString() !== employeeId.toString()
+    this.mutedBy = this.mutedBy.filter(
+      (m) => m.employee.toString() !== employeeId.toString()
     );
     this.save(); // Save the update
     return false;
   }
-  
+
   return true;
 };
 const spaceSchema = new mongoose.Schema(
@@ -538,24 +541,29 @@ conversationSchema.methods.isHiddenBy = function (userId) {
 };
 
 // Add to Conversation schema methods
-conversationSchema.methods.updateUnreadCount = function(senderId, increment = true) {
-  this.participants.forEach(participantId => {
+conversationSchema.methods.updateUnreadCount = function (
+  senderId,
+  increment = true
+) {
+  this.participants.forEach((participantId) => {
     // Don't increment for the sender
     if (participantId.toString() !== senderId.toString()) {
       const currentCount = this.unreadCount.get(participantId.toString()) || 0;
-      const newCount = increment ? currentCount + 1 : Math.max(0, currentCount - 1);
+      const newCount = increment
+        ? currentCount + 1
+        : Math.max(0, currentCount - 1);
       this.unreadCount.set(participantId.toString(), newCount);
     }
   });
 };
 
-conversationSchema.methods.markAsRead = function(userId) {
+conversationSchema.methods.markAsRead = function (userId) {
   // Reset unread count for this user
   this.unreadCount.set(userId.toString(), 0);
   return this.save();
 };
 
-conversationSchema.methods.getUnreadCount = function(userId) {
+conversationSchema.methods.getUnreadCount = function (userId) {
   return this.unreadCount.get(userId.toString()) || 0;
 };
 
@@ -571,6 +579,36 @@ spaceSchema.methods.isPinnedBy = function (userId) {
   );
 };
 
+// ✅ ADD: Pin space for a user
+spaceSchema.methods.addPin = function (employeeId) {
+  if (!this.pinnedBy) this.pinnedBy = [];
+
+  if (this.isPinnedBy(employeeId)) {
+    return false; // already pinned
+  }
+
+  this.pinnedBy.push({
+    employee: employeeId,
+    pinnedAt: new Date(),
+  });
+
+  return true;
+};
+
+// ✅ ADD: Unpin space for a user
+spaceSchema.methods.removePin = function (employeeId) {
+  if (!this.pinnedBy || !Array.isArray(this.pinnedBy)) {
+    return false;
+  }
+
+  const initialLength = this.pinnedBy.length;
+
+  this.pinnedBy = this.pinnedBy.filter(
+    (pin) => pin.employee.toString() !== employeeId.toString()
+  );
+
+  return this.pinnedBy.length < initialLength;
+};
 
 // ============ INDEXES ============
 

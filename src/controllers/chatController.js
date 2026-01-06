@@ -410,6 +410,56 @@ exports.getConversations = async (req, res) => {
       .json({ success: false, error: "Failed to fetch conversations" });
   }
 };
+exports.pinSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const employeeId = req.employee._id;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: employeeId,
+    });
+
+    if (!space) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied or space not found",
+      });
+    }
+
+    const pinned = space.addPin(employeeId);
+    if (!pinned) {
+      return res.status(400).json({
+        success: false,
+        error: "Space already pinned",
+      });
+    }
+
+    await space.save();
+
+    // 🔔 socket event
+    const io = req.app.get("io");
+    io?.to(`space_${spaceId}`).emit("space_pinned", {
+      spaceId,
+      pinnedBy: employeeId,
+      pinnedAt: new Date(),
+    });
+
+    res.json({ success: true, space });
+  } catch (err) {
+    console.error("Pin space error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to pin space",
+    });
+  }
+};
 
 exports.getDirectMessages = async (req, res) => {
   try {
@@ -617,8 +667,7 @@ exports.getSpaces = async (req, res) => {
           isPinned: space.isPinnedBy(req.employee._id),
           pinnedAt: space.isPinnedBy(req.employee._id)
             ? space.pinnedBy.find(
-                (pin) =>
-                  pin.employee.toString() === req.employee._id.toString()
+                (pin) => pin.employee.toString() === req.employee._id.toString()
               )?.pinnedAt
             : null,
         };
@@ -635,7 +684,6 @@ exports.getSpaces = async (req, res) => {
     res.status(500).json({ success: false, error: "Failed to fetch spaces" });
   }
 };
-
 
 exports.getMessages = async (req, res) => {
   try {
@@ -6164,7 +6212,7 @@ exports.getPinnedMessages = async (req, res) => {
     // Check if this conversation has a space reference
     if (conversation.space) {
       const spaceData = await Space.findById(conversation.space);
-      
+
       // Get pinned messages for this conversation
       const pinnedMessages = await Message.find({
         conversation: conversationId,
@@ -6205,11 +6253,13 @@ exports.getPinnedMessages = async (req, res) => {
             isGroup: true,
             isSpace: true,
           },
-          space: spaceData ? {
-            _id: spaceData._id,
-            name: spaceData.name,
-            description: spaceData.description,
-          } : null,
+          space: spaceData
+            ? {
+                _id: spaceData._id,
+                name: spaceData.name,
+                description: spaceData.description,
+              }
+            : null,
           pinnedBy: message.pinnedBy,
           pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
           note: userPin ? userPin.note : message.pinnedBy[0]?.note,
@@ -6259,11 +6309,12 @@ exports.getPinnedMessages = async (req, res) => {
     const otherParticipant = conversation.participants.find(
       (p) => p.toString() !== req.employee._id.toString()
     );
-    
+
     let otherParticipantData = null;
     if (otherParticipant) {
-      otherParticipantData = await Employee.findById(otherParticipant)
-        .select("name companyEmail avatar photographUrl");
+      otherParticipantData = await Employee.findById(otherParticipant).select(
+        "name companyEmail avatar photographUrl"
+      );
     }
 
     // Format the response for direct message
@@ -6285,8 +6336,8 @@ exports.getPinnedMessages = async (req, res) => {
         },
         conversation: {
           _id: conversation._id,
-          name: conversation.isGroup 
-            ? conversation.groupName 
+          name: conversation.isGroup
+            ? conversation.groupName
             : otherParticipantData?.name || "Direct Message",
           isGroup: conversation.isGroup,
           isSpace: false,
@@ -6310,8 +6361,8 @@ exports.getPinnedMessages = async (req, res) => {
       totalPages: Math.ceil(total / limit),
       conversation: {
         _id: conversation._id,
-        name: conversation.isGroup 
-          ? conversation.groupName 
+        name: conversation.isGroup
+          ? conversation.groupName
           : otherParticipantData?.name || "Direct Message",
         isGroup: conversation.isGroup,
         isSpace: false,
@@ -6750,21 +6801,21 @@ exports.getChatUnreadCount = async (req, res) => {
       {
         $match: {
           participants: userId,
-        }
+        },
       },
       {
         $project: {
           unreadForUser: {
-            $ifNull: [`$unreadCount.${userId.toString()}`, 0]
-          }
-        }
+            $ifNull: [`$unreadCount.${userId.toString()}`, 0],
+          },
+        },
       },
       {
         $group: {
           _id: null,
-          totalUnread: { $sum: "$unreadForUser" }
-        }
-      }
+          totalUnread: { $sum: "$unreadForUser" },
+        },
+      },
     ]);
 
     const totalUnread = unreadCount.length > 0 ? unreadCount[0].totalUnread : 0;
@@ -6772,11 +6823,57 @@ exports.getChatUnreadCount = async (req, res) => {
     res.json({
       success: true,
       data: {
-        unreadCount: totalUnread
-      }
+        unreadCount: totalUnread,
+      },
     });
   } catch (error) {
-    console.error('Error getting chat unread count:', error);
-    res.status(500).json({ error: 'Server error' });
+    console.error("Error getting chat unread count:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+exports.unpinSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const employeeId = req.employee._id;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: employeeId,
+    });
+
+    if (!space) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied or space not found",
+      });
+    }
+
+    const unpinned = space.removePin(employeeId);
+    if (!unpinned) {
+      return res.status(400).json({
+        success: false,
+        error: "Space not pinned",
+      });
+    }
+
+    await space.save();
+
+    const io = req.app.get("io");
+    io?.to(`space_${spaceId}`).emit("space_unpinned", {
+      spaceId,
+      unpinnedBy: employeeId,
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Unpin space error:", err);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unpin space",
+    });
   }
 };
