@@ -3264,7 +3264,7 @@ cron.schedule(
 );
 
 cron.schedule(
-  "7 0 * * *", // 12:07 AM Karachi
+  "0 0 * * *", // 12:00 AM Karachi
   async () => {
     const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
 
