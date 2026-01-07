@@ -3659,12 +3659,80 @@ exports.markAsRead = async function markAsRead(req, res) {
       await message.save();
     }
 
+    // 🔥 NEW: Also mark the ENTIRE thread as read (optional - you can remove if not needed)
+    // This ensures when user opens one message, whole thread gets marked as read
+    const threadMessages = await AssignmentMessage.find({
+      threadId: message.threadId,
+      $or: [{ receiver: userId }, { receiver: { $in: [userId] } }, { sender: userId }],
+      isTrashed: false,
+      isSpam: false,
+      "readBy.employee": { $ne: userId }, // Only unread ones
+    });
+
+    if (threadMessages.length > 0) {
+      const threadUpdatePromises = threadMessages.map((msg) => {
+        if (msg._id.toString() !== id) { // Don't update the current message again
+          return AssignmentMessage.findByIdAndUpdate(
+            msg._id,
+            {
+              $push: {
+                readBy: {
+                  employee: userId,
+                  readAt: new Date(),
+                },
+              },
+            },
+            { new: true }
+          );
+        }
+        return Promise.resolve();
+      });
+
+      await Promise.all(threadUpdatePromises);
+    }
+
+    // 🔥 FIX: Emit socket event
+    const io = getIO(req);
+    if (io) {
+      // Get all participants
+      const allParticipants = new Set();
+      
+      // Add sender
+      const senderId = String(message.sender);
+      allParticipants.add(senderId);
+
+      // Add receivers
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach((receiver) => {
+          const receiverId = String(receiver);
+          allParticipants.add(receiverId);
+        });
+      }
+
+      // Add current user
+      allParticipants.add(String(userId));
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("message_read", {
+          messageId: message._id,
+          threadId: message.threadId,
+          read: true,
+          readBy: userId,
+          timestamp: new Date(),
+          markEntireThread: true, // Indicate that entire thread was marked
+        });
+      });
+    }
+
     res.json({
       success: true,
-      message: "Marked as read",
+      message: "Message and thread marked as read",
       data: {
         messageId: message._id,
+        threadId: message.threadId,
         readBy: message.readBy,
+        threadMarkedCount: threadMessages.length,
       },
     });
   } catch (error) {
@@ -3676,44 +3744,101 @@ exports.markAsRead = async function markAsRead(req, res) {
   }
 };
 
-// Mark all messages in thread as read
 exports.markThreadAsRead = async function markThreadAsRead(req, res) {
   try {
     const { threadId } = req.params;
     const userId = req.employee._id;
 
-    // Find all unread messages in this thread where user is receiver
-    const unreadMessages = await AssignmentMessage.find({
+    if (!threadId || threadId.trim() === "") {
+      return res.status(400).json({
+        success: false,
+        error: "Thread ID is required",
+      });
+    }
+
+    // 🔥 CRITICAL FIX: Get ALL messages in the thread (not just unread ones)
+    const threadMessages = await AssignmentMessage.find({
       threadId: threadId,
-      "readBy.employee": { $ne: userId },
-      $or: [{ receiver: userId }, { receiver: { $in: [userId] } }],
+      $or: [{ receiver: userId }, { receiver: { $in: [userId] } }, { sender: userId }],
       isTrashed: false,
+      isSpam: false,
     });
 
-    // Add user to readBy for all unread messages
-    const updatePromises = unreadMessages.map((msg) =>
-      AssignmentMessage.findByIdAndUpdate(msg._id, {
-        $push: {
-          readBy: {
-            employee: userId,
-            readAt: new Date(),
+    if (threadMessages.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No messages found in this thread or you don't have access",
+      });
+    }
+
+    // 🔥 FIX: Mark ALL messages in thread as read (not just unread ones)
+    const updatePromises = threadMessages.map((msg) => {
+      // Check if user already marked this message as read
+      const alreadyRead = msg.readBy.some(
+        (read) => read.employee.toString() === userId.toString()
+      );
+
+      if (!alreadyRead) {
+        return AssignmentMessage.findByIdAndUpdate(
+          msg._id,
+          {
+            $push: {
+              readBy: {
+                employee: userId,
+                readAt: new Date(),
+              },
+            },
           },
-        },
-      })
-    );
+          { new: true }
+        );
+      }
+      return Promise.resolve(msg); // Already read, no update needed
+    });
 
     await Promise.all(updatePromises);
 
+    // 🔥 FIX: Emit socket event for entire thread
+    const io = getIO(req);
+    if (io) {
+      // Get all participants in this thread
+      const allParticipants = new Set();
+      
+      threadMessages.forEach((message) => {
+        // Add sender
+        const senderId = String(message.sender);
+        allParticipants.add(senderId);
+
+        // Add receivers
+        if (message.receiver && Array.isArray(message.receiver)) {
+          message.receiver.forEach((receiver) => {
+            const receiverId = String(receiver);
+            allParticipants.add(receiverId);
+          });
+        }
+      });
+
+      // Emit to all participants
+      allParticipants.forEach((participantId) => {
+        io.to(`employee_${participantId}`).emit("thread_marked_as_read", {
+          threadId: threadId,
+          markedBy: userId,
+          timestamp: new Date(),
+          messageCount: threadMessages.length,
+        });
+      });
+    }
+
     res.json({
       success: true,
-      message: `Marked ${unreadMessages.length} messages as read`,
-      readCount: unreadMessages.length,
+      message: `Marked all ${threadMessages.length} messages in thread as read`,
+      threadId: threadId,
+      markedCount: threadMessages.length,
     });
   } catch (error) {
     console.error("Error marking thread as read:", error);
     res.status(500).json({
       success: false,
-      error: "Failed to mark thread as read",
+      error: "Server error while marking thread as read",
     });
   }
 };
@@ -3771,10 +3896,9 @@ exports.markAsUnread = async function markAsUnread(req, res) {
   }
 };
 
-// Mark multiple messages as read
 exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
   try {
-    const { messageIds } = req.body;
+    const { messageIds, markThreads = true } = req.body; // 🔥 NEW: Add markThreads option
     const userId = req.employee._id;
 
     if (!messageIds || !Array.isArray(messageIds)) {
@@ -3784,28 +3908,97 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
       });
     }
 
-    // Update all messages that haven't been read by this user
-    const result = await AssignmentMessage.updateMany(
-      {
-        _id: { $in: messageIds },
-        "readBy.employee": { $ne: userId },
-        $or: [{ sender: userId }, { receiver: userId }],
-      },
-      {
-        $push: {
-          readBy: {
-            employee: userId,
-            readAt: new Date(),
-          },
-        },
+    // 🔥 FIX: Get all threads from the messages
+    const messages = await AssignmentMessage.find({
+      _id: { $in: messageIds },
+      "readBy.employee": { $ne: userId },
+      $or: [{ sender: userId }, { receiver: userId }],
+    }).select('_id threadId');
+
+    if (messages.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No unread messages found",
+      });
+    }
+
+    // Get unique thread IDs
+    const threadIds = [...new Set(messages.map(msg => msg.threadId))];
+    
+    let threadMarkedCount = 0;
+
+    // 🔥 NEW: Mark entire threads if requested
+    if (markThreads) {
+      for (const threadId of threadIds) {
+        const threadMessages = await AssignmentMessage.find({
+          threadId: threadId,
+          $or: [{ receiver: userId }, { receiver: { $in: [userId] } }, { sender: userId }],
+          isTrashed: false,
+          isSpam: false,
+          "readBy.employee": { $ne: userId },
+        });
+
+        if (threadMessages.length > 0) {
+          const updatePromises = threadMessages.map((msg) =>
+            AssignmentMessage.findByIdAndUpdate(
+              msg._id,
+              {
+                $push: {
+                  readBy: {
+                    employee: userId,
+                    readAt: new Date(),
+                  },
+                },
+              },
+              { new: true }
+            )
+          );
+
+          await Promise.all(updatePromises);
+          threadMarkedCount += threadMessages.length;
+        }
       }
-    );
+    } else {
+      // Original behavior - mark only specific messages
+      const result = await AssignmentMessage.updateMany(
+        {
+          _id: { $in: messageIds },
+          "readBy.employee": { $ne: userId },
+          $or: [{ sender: userId }, { receiver: userId }],
+        },
+        {
+          $push: {
+            readBy: {
+              employee: userId,
+              readAt: new Date(),
+            },
+          },
+        }
+      );
+      threadMarkedCount = result.modifiedCount;
+    }
+
+    // 🔥 FIX: Emit socket events
+    const io = getIO(req);
+    if (io) {
+      threadIds.forEach((threadId) => {
+        io.to(`employee_${userId}`).emit("thread_marked_as_read", {
+          threadId: threadId,
+          markedBy: userId,
+          timestamp: new Date(),
+        });
+      });
+    }
 
     res.json({
       success: true,
-      message: `${result.modifiedCount} messages marked as read`,
+      message: markThreads 
+        ? `Marked ${threadMarkedCount} messages across ${threadIds.length} threads as read`
+        : `Marked ${threadMarkedCount} messages as read`,
       data: {
-        modifiedCount: result.modifiedCount,
+        modifiedCount: threadMarkedCount,
+        threadsAffected: threadIds.length,
+        markThreads: markThreads,
       },
     });
   } catch (error) {
