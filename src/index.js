@@ -340,122 +340,122 @@ app.get("/api/employees/count", async (_req, res) => {
 // ---------- Cron: auto-fill YESTERDAY’s attendance ----------
 // Runs at 00:00 in configured timezone (default Asia/Karachi)
 const ATTENDANCE_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
-cron.schedule(
-  "0 0 * * *",
-  async () => {
-    try {
-      // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
-      const yesterday = new Date();
-      yesterday.setDate(yesterday.getDate() - 1);
+// cron.schedule(
+//   "0 0 * * *",
+//   async () => {
+//     try {
+//       // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
+//       const yesterday = new Date();
+//       yesterday.setDate(yesterday.getDate() - 1);
 
-      const y = yesterday.getFullYear();
-      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
-      const d = String(yesterday.getDate()).padStart(2, "0");
-      const date = `${y}-${m}-${d}`;
+//       const y = yesterday.getFullYear();
+//       const m = String(yesterday.getMonth() + 1).padStart(2, "0");
+//       const d = String(yesterday.getDate()).padStart(2, "0");
+//       const date = `${y}-${m}-${d}`;
 
-      const config = await AttendanceConfig.findOne({}).lean();
-      if (config && config.markAbsentManually === true) {
-        return;
-      }
+//       const config = await AttendanceConfig.findOne({}).lean();
+//       if (config && config.markAbsentManually === true) {
+//         return;
+//       }
 
-      // Skip holidays
-      const holiday = await Attendance.findOne({
-        date,
-        isHoliday: true,
-      }).lean();
-      if (holiday) {
-        return;
-      }
-      const done = await Attendance.find({ date }).select("employee").lean();
-      const doneIds = new Set(done.map((r) => String(r.employee)));
+//       // Skip holidays
+//       const holiday = await Attendance.findOne({
+//         date,
+//         isHoliday: true,
+//       }).lean();
+//       if (holiday) {
+//         return;
+//       }
+//       const done = await Attendance.find({ date }).select("employee").lean();
+//       const doneIds = new Set(done.map((r) => String(r.employee)));
 
-      // All employees
-      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
+//       // All employees
+//       const allEmps = await Employee.find({}).select("_id owner shifts").lean();
 
-      // Payroll periods
-      const allPayrolls = await PayrollPeriod.find({}).lean();
+//       // Payroll periods
+//       const allPayrolls = await PayrollPeriod.find({}).lean();
 
-      // Day name for yesterday (lowercase long weekday)
-      const dayName = yesterday
-        .toLocaleDateString("en-US", { weekday: "long" })
-        .toLowerCase();
+//       // Day name for yesterday (lowercase long weekday)
+//       const dayName = yesterday
+//         .toLocaleDateString("en-US", { weekday: "long" })
+//         .toLowerCase();
 
-      const ops = [];
+//       const ops = [];
 
-      for (const e of allEmps) {
-        if (doneIds.has(String(e._id))) continue;
+//       for (const e of allEmps) {
+//         if (doneIds.has(String(e._id))) continue;
 
-        const payroll = allPayrolls.find(
-          (p) =>
-            Array.isArray(p.shifts) &&
-            Array.isArray(e.shifts) &&
-            e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
-        );
+//         const payroll = allPayrolls.find(
+//           (p) =>
+//             Array.isArray(p.shifts) &&
+//             Array.isArray(e.shifts) &&
+//             e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
+//         );
 
-        // If no payroll period or no nonWorkingDays config → mark absent
-        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
-          ops.push({
-            updateOne: {
-              filter: { employee: e._id, date },
-              update: {
-                $setOnInsert: {
-                  employee: e._id,
-                  date,
-                  owner: e.owner || null,
-                  status: "Absent",
-                  checkIn: null,
-                  checkOut: null,
-                  notes: null,
-                  markedByHR: false,
-                },
-              },
-              upsert: true,
-            },
-          });
-          continue;
-        }
+//         // If no payroll period or no nonWorkingDays config → mark absent
+//         if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
+//           ops.push({
+//             updateOne: {
+//               filter: { employee: e._id, date },
+//               update: {
+//                 $setOnInsert: {
+//                   employee: e._id,
+//                   date,
+//                   owner: e.owner || null,
+//                   status: "Absent",
+//                   checkIn: null,
+//                   checkOut: null,
+//                   notes: null,
+//                   markedByHR: false,
+//                 },
+//               },
+//               upsert: true,
+//             },
+//           });
+//           continue;
+//         }
 
-        // Respect non-working days
-        const nonWorking = payroll.nonWorkingDays.map((n) =>
-          String(n).toLowerCase().trim()
-        );
-        if (nonWorking.includes(dayName)) {
-          // It's a non-working day for this employee; skip
-          continue;
-        }
+//         // Respect non-working days
+//         const nonWorking = payroll.nonWorkingDays.map((n) =>
+//           String(n).toLowerCase().trim()
+//         );
+//         if (nonWorking.includes(dayName)) {
+//           // It's a non-working day for this employee; skip
+//           continue;
+//         }
 
-        // Otherwise, mark absent
-        ops.push({
-          updateOne: {
-            filter: { employee: e._id, date },
-            update: {
-              $setOnInsert: {
-                employee: e._id,
-                date,
-                owner: e.owner || null,
-                status: "Absent",
-                checkIn: null,
-                checkOut: null,
-                notes: null,
-                markedByHR: false,
-              },
-            },
-            upsert: true,
-          },
-        });
-      }
+//         // Otherwise, mark absent
+//         ops.push({
+//           updateOne: {
+//             filter: { employee: e._id, date },
+//             update: {
+//               $setOnInsert: {
+//                 employee: e._id,
+//                 date,
+//                 owner: e.owner || null,
+//                 status: "Absent",
+//                 checkIn: null,
+//                 checkOut: null,
+//                 notes: null,
+//                 markedByHR: false,
+//               },
+//             },
+//             upsert: true,
+//           },
+//         });
+//       }
 
-      if (ops.length) {
-        const result = await Attendance.bulkWrite(ops);
-        const upserted = result?.upsertedCount || 0;
-      } else {
-      }
-    } catch (err) {
-      console.error("[cron] Error auto-filling attendance:", err);
-    }
-  },
-  { timezone: ATTENDANCE_CRON_TZ }
-);
+//       if (ops.length) {
+//         const result = await Attendance.bulkWrite(ops);
+//         const upserted = result?.upsertedCount || 0;
+//       } else {
+//       }
+//     } catch (err) {
+//       console.error("[cron] Error auto-filling attendance:", err);
+//     }
+//   },
+//   { timezone: ATTENDANCE_CRON_TZ }
+// );
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------
 const ENABLE_HTTPS =
