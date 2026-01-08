@@ -93,6 +93,7 @@ const labelRoutes = require("./routes/labelRoutes");
 const employeeLeaveSummary = require("./routes/empLeaveBalanceRoutes");
 const adminWorkSpaceManagementRoute = require("./routes/adminWorkSpaceManagementRoute");
 const employeeWorkSpaceManagementRoute = require("./routes/employeeTaskRoutes");
+const penaltyRoutes = require("./routes/penaltyRoutes");
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 const moment = require("moment-timezone");
@@ -246,6 +247,7 @@ app.use("/api/labels", labelRoutes);
 app.use("/api", employeeLeaveSummary);
 app.use("/api/admin", adminWorkSpaceManagementRoute);
 app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
+app.use("/api/penalties", penaltyRoutes);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;

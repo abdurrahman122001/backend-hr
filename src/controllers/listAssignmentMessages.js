@@ -657,10 +657,16 @@ exports.getInternalCommunications = async function getInternalCommunications(
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // Base query: Must NOT have client field (internal communications)
+    /* --------------------------------------------------
+     * BASE QUERY (INTERNAL ONLY + NO DRAFTS)
+     * -------------------------------------------------- */
     const q = {
       client: { $exists: false },
-      // 🔥 CRITICAL: Include messages where current user is sender OR receiver
+
+      // 🚫 ABSOLUTE EXCLUSION OF DRAFTS
+      status: { $ne: "draft" },
+
+      // Must involve current user
       $or: [
         { sender: currentUser },
         { receiver: currentUser },
@@ -668,43 +674,44 @@ exports.getInternalCommunications = async function getInternalCommunications(
       ],
     };
 
-    // Owner scope
+    /* --------------------------------------------------
+     * OWNER SCOPE
+     * -------------------------------------------------- */
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
-    // Status handling - include sent messages
-    if (
-      status &&
-      ["draft", "scheduled", "sent", "cancelled"].includes(status)
-    ) {
+    /* --------------------------------------------------
+     * STATUS FILTER (DRAFT NOT ALLOWED)
+     * -------------------------------------------------- */
+    if (["sent", "scheduled", "cancelled"].includes(status)) {
       q.status = status;
-      if (status === "scheduled") {
-        q.isScheduled = true;
-      }
+      if (status === "scheduled") q.isScheduled = true;
     } else {
-      // Default: include both sent and scheduled messages
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    // Trash/Spam logic - default: exclude trash and spam
-    if (isTrashed === "true" || isTrashed === true) {
+    /* --------------------------------------------------
+     * TRASH / SPAM
+     * -------------------------------------------------- */
+    if (isTrashed === "true") {
       q.isTrashed = true;
-    } else if (isSpam === "true" || isSpam === true) {
+    } else if (isSpam === "true") {
       q.isSpam = true;
     } else {
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
 
-    // Approval status filter (internal messages typically don't need approval)
-    if (
-      approvalStatus &&
-      ["pending", "approved", "disapproved"].includes(approvalStatus)
-    ) {
+    /* --------------------------------------------------
+     * APPROVAL STATUS
+     * -------------------------------------------------- */
+    if (["pending", "approved", "disapproved"].includes(approvalStatus)) {
       q.approvalStatus = approvalStatus;
     }
 
-    // Scheduled filter
+    /* --------------------------------------------------
+     * SCHEDULED FILTER
+     * -------------------------------------------------- */
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -712,7 +719,9 @@ exports.getInternalCommunications = async function getInternalCommunications(
       q.isScheduled = false;
     }
 
-    // Time filters
+    /* --------------------------------------------------
+     * TIME FILTERS
+     * -------------------------------------------------- */
     const timeFilters = {};
     if (scheduledBefore) {
       const d = new Date(scheduledBefore);
@@ -722,26 +731,27 @@ exports.getInternalCommunications = async function getInternalCommunications(
       const d = new Date(scheduledAfter);
       if (!isNaN(d)) timeFilters.$gte = d;
     }
-    if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
-
-    // Thread ID filter
-    if (threadId) {
-      q.threadId = threadId;
+    if (Object.keys(timeFilters).length) {
+      q.scheduledFor = timeFilters;
     }
 
-    // User-based filtering
-    const currentUserRole = normalizeRole(req.employee?.role || "");
-    const me = oid(String(req.employee._id));
+    /* --------------------------------------------------
+     * THREAD FILTER
+     * -------------------------------------------------- */
+    if (threadId) q.threadId = threadId;
+
+    /* --------------------------------------------------
+     * PARTICIPANT / BETWEEN LOGIC
+     * -------------------------------------------------- */
     const between = normalizeIds(betweenRaw);
 
-    // Override base $or if between or participant filters are used
     if (between.length === 2) {
       const [a, b] = between;
       q.$or = [
-        { sender: a, receiver: { $in: [b] } },
-        { sender: b, receiver: { $in: [a] } },
         { sender: a, receiver: b },
         { sender: b, receiver: a },
+        { sender: a, receiver: { $in: [b] } },
+        { sender: b, receiver: { $in: [a] } },
       ];
     } else if (isObjId(participant)) {
       q.$or = [
@@ -752,34 +762,43 @@ exports.getInternalCommunications = async function getInternalCommunications(
     } else {
       if (isObjId(sender)) {
         q.$or = [
-          { sender: sender },
+          { sender },
           { receiver: sender },
           { receiver: { $in: [sender] } },
         ];
       }
+
       if (isObjId(receiver)) {
         q.$or = [
           { sender: receiver },
-          { receiver: receiver },
+          { receiver },
           { receiver: { $in: [receiver] } },
         ];
       }
     }
 
-    // Search functionality
-    if (search && search.trim().length > 0) {
-      const searchTerm = search.trim();
-      q.$or = q.$or || [];
-      q.$or.push(
-        { subject: { $regex: searchTerm, $options: "i" } },
-        { note: { $regex: searchTerm, $options: "i" } }
-      );
+    /* --------------------------------------------------
+     * SEARCH (SAFE WITH NO DRAFT LEAK)
+     * -------------------------------------------------- */
+    if (search && search.trim()) {
+      const term = search.trim();
+      q.$and = q.$and || [];
+      q.$and.push({
+        $or: [
+          { subject: { $regex: term, $options: "i" } },
+          { note: { $regex: term, $options: "i" } },
+        ],
+      });
     }
 
-    // Apply visibility rules
+    /* --------------------------------------------------
+     * VISIBILITY RULES
+     * -------------------------------------------------- */
     const qFinal = await applyVisibility(q, req);
 
-    // Pagination & fetch
+    /* --------------------------------------------------
+     * PAGINATION
+     * -------------------------------------------------- */
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -801,7 +820,9 @@ exports.getInternalCommunications = async function getInternalCommunications(
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // Ensure receiver is always treated as array for consistency
+    /* --------------------------------------------------
+     * NORMALIZATION
+     * -------------------------------------------------- */
     const normalizedItems = items.map((item) => {
       const isSender = String(item.sender?._id) === String(currentUser);
 
@@ -810,39 +831,35 @@ exports.getInternalCommunications = async function getInternalCommunications(
         receiver: Array.isArray(item.receiver)
           ? item.receiver
           : [item.receiver].filter(Boolean),
-        communicationType: "internal", // Mark as internal communication
+        communicationType: "internal",
         hasClient: false,
         clientInfo: null,
-        // Add metadata about user's role in this message
         userRole: isSender ? "sender" : "receiver",
         isSentByMe: isSender,
         isReceivedByMe: !isSender,
       };
     });
 
-    // Calculate statistics
-    const sentCount = normalizedItems.filter((item) => item.isSentByMe).length;
+    const sentCount = normalizedItems.filter((i) => i.isSentByMe).length;
     const receivedCount = normalizedItems.filter(
-      (item) => item.isReceivedByMe
+      (i) => i.isReceivedByMe
     ).length;
 
+    /* --------------------------------------------------
+     * RESPONSE
+     * -------------------------------------------------- */
     res.json({
       communicationType: "internal",
       items: normalizedItems,
-      total: total,
+      total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
-      userRole: currentUserRole,
       summary: {
         totalMessages: normalizedItems.length,
         sentMessages: sentCount,
         receivedMessages: receivedCount,
-        directMessages: normalizedItems.length, // All internal messages are direct
-        scheduledMessages: normalizedItems.filter((item) => item.isScheduled)
-          .length,
-        draftMessages: normalizedItems.filter((item) => item.status === "draft")
-          .length,
+        scheduledMessages: normalizedItems.filter((i) => i.isScheduled).length,
       },
       userStats: {
         sentCount,
@@ -966,10 +983,16 @@ exports.getExternalCommunications = async function getExternalCommunications(
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // Base query: Must have client field (external communications)
+    /* --------------------------------------------------
+     * BASE QUERY (EXTERNAL ONLY + NO DRAFTS)
+     * -------------------------------------------------- */
     const q = {
       client: { $exists: true, $ne: null },
-      // 🔥 CRITICAL: Include messages where current user is sender OR receiver
+
+      // 🚫 HARD BLOCK DRAFTS
+      status: { $ne: "draft" },
+
+      // Must involve current user
       $or: [
         { sender: currentUser },
         { receiver: currentUser },
@@ -977,30 +1000,32 @@ exports.getExternalCommunications = async function getExternalCommunications(
       ],
     };
 
-    // Apply client filter if specifically requested
+    /* --------------------------------------------------
+     * CLIENT FILTER
+     * -------------------------------------------------- */
     if (isObjId(client)) {
       q.client = client;
     }
 
-    // Owner scope
+    /* --------------------------------------------------
+     * OWNER SCOPE
+     * -------------------------------------------------- */
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
-    // Status handling - include sent messages
-    if (
-      status &&
-      ["draft", "scheduled", "sent", "cancelled"].includes(status)
-    ) {
+    /* --------------------------------------------------
+     * STATUS FILTER (DRAFT NOT ALLOWED)
+     * -------------------------------------------------- */
+    if (["sent", "scheduled", "cancelled"].includes(status)) {
       q.status = status;
-      if (status === "scheduled") {
-        q.isScheduled = true;
-      }
+      if (status === "scheduled") q.isScheduled = true;
     } else {
-      // Default: include both sent and scheduled messages
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    // Trash/Spam logic - default: exclude trash and spam
+    /* --------------------------------------------------
+     * TRASH / SPAM
+     * -------------------------------------------------- */
     if (isTrashed === "true" || isTrashed === true) {
       q.isTrashed = true;
     } else if (isSpam === "true" || isSpam === true) {
@@ -1010,14 +1035,16 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.isSpam = { $ne: true };
     }
 
-    // Approval status filter
-    if (filter === "review") {
-      q.approvalStatus = "pending";
-    } else if (approvalStatus === "pending") {
+    /* --------------------------------------------------
+     * APPROVAL / REVIEW FILTERS
+     * -------------------------------------------------- */
+    if (filter === "review" || approvalStatus === "pending") {
       q.approvalStatus = "pending";
     }
 
-    // Scheduled filter
+    /* --------------------------------------------------
+     * SCHEDULED FILTER
+     * -------------------------------------------------- */
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
@@ -1025,7 +1052,9 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.isScheduled = false;
     }
 
-    // Time filters
+    /* --------------------------------------------------
+     * TIME FILTERS
+     * -------------------------------------------------- */
     const timeFilters = {};
     if (scheduledBefore) {
       const d = new Date(scheduledBefore);
@@ -1035,27 +1064,29 @@ exports.getExternalCommunications = async function getExternalCommunications(
       const d = new Date(scheduledAfter);
       if (!isNaN(d)) timeFilters.$gte = d;
     }
-    if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
-
-    // Thread ID filter
-    if (threadId) {
-      q.threadId = threadId;
+    if (Object.keys(timeFilters).length) {
+      q.scheduledFor = timeFilters;
     }
 
-    // User-based filtering
+    /* --------------------------------------------------
+     * THREAD FILTER
+     * -------------------------------------------------- */
+    if (threadId) q.threadId = threadId;
+
+    /* --------------------------------------------------
+     * USER / PARTICIPANT FILTERING
+     * -------------------------------------------------- */
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
-    const me = oid(String(req.employee._id));
     const between = normalizeIds(betweenRaw);
 
-    // Override base $or if between or participant filters are used
     if (between.length === 2) {
       const [a, b] = between;
       q.$or = [
-        { sender: a, receiver: { $in: [b] } },
-        { sender: b, receiver: { $in: [a] } },
         { sender: a, receiver: b },
         { sender: b, receiver: a },
+        { sender: a, receiver: { $in: [b] } },
+        { sender: b, receiver: { $in: [a] } },
       ];
     } else if (isObjId(participant)) {
       q.$or = [
@@ -1066,7 +1097,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     } else {
       if (isObjId(sender)) {
         q.$or = [
-          { sender: sender },
+          { sender },
           { receiver: sender },
           { receiver: { $in: [sender] } },
         ];
@@ -1074,40 +1105,35 @@ exports.getExternalCommunications = async function getExternalCommunications(
       if (isObjId(receiver)) {
         q.$or = [
           { sender: receiver },
-          { receiver: receiver },
+          { receiver },
           { receiver: { $in: [receiver] } },
         ];
       }
     }
 
-    // Search functionality
-    if (search && search.trim().length > 0) {
-      const searchTerm = search.trim();
-      const searchConditions = [];
-
-      searchConditions.push(
-        { subject: { $regex: searchTerm, $options: "i" } },
-        { note: { $regex: searchTerm, $options: "i" } }
-      );
-
-      // If client is populated, search client name too
-      searchConditions.push({
-        "client.clientName": { $regex: searchTerm, $options: "i" },
+    /* --------------------------------------------------
+     * SEARCH (SAFE – NO DRAFT LEAK)
+     * -------------------------------------------------- */
+    if (search && search.trim()) {
+      const term = search.trim();
+      q.$and = q.$and || [];
+      q.$and.push({
+        $or: [
+          { subject: { $regex: term, $options: "i" } },
+          { note: { $regex: term, $options: "i" } },
+          { "client.clientName": { $regex: term, $options: "i" } },
+        ],
       });
-
-      // Add search conditions to query
-      if (searchConditions.length > 0) {
-        q.$and = q.$and || [];
-        q.$and.push({
-          $or: searchConditions,
-        });
-      }
     }
 
-    // Apply visibility rules
+    /* --------------------------------------------------
+     * VISIBILITY RULES
+     * -------------------------------------------------- */
     const qFinal = await applyVisibility(q, req);
 
-    // Pagination & fetch
+    /* --------------------------------------------------
+     * PAGINATION
+     * -------------------------------------------------- */
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -1133,7 +1159,9 @@ exports.getExternalCommunications = async function getExternalCommunications(
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // Filter for review messages on backend for team leads
+    /* --------------------------------------------------
+     * TEAM LEAD REVIEW FILTER
+     * -------------------------------------------------- */
     let finalItems = items;
     if (filter === "review" && isTeamLead) {
       finalItems = items.filter(
@@ -1143,7 +1171,9 @@ exports.getExternalCommunications = async function getExternalCommunications(
       );
     }
 
-    // Ensure receiver is always treated as array for consistency
+    /* --------------------------------------------------
+     * NORMALIZATION
+     * -------------------------------------------------- */
     const normalizedItems = finalItems.map((item) => {
       const isSender = String(item.sender?._id) === String(currentUser);
 
@@ -1152,43 +1182,40 @@ exports.getExternalCommunications = async function getExternalCommunications(
         receiver: Array.isArray(item.receiver)
           ? item.receiver
           : [item.receiver].filter(Boolean),
-        communicationType: "external", // Mark as external communication
+        communicationType: "external",
         hasClient: true,
         clientInfo: item.client || null,
-        // Add metadata about user's role in this message
         userRole: isSender ? "sender" : "receiver",
         isSentByMe: isSender,
         isReceivedByMe: !isSender,
       };
     });
 
-    // Calculate statistics
-    const sentCount = normalizedItems.filter((item) => item.isSentByMe).length;
+    const sentCount = normalizedItems.filter((i) => i.isSentByMe).length;
     const receivedCount = normalizedItems.filter(
-      (item) => item.isReceivedByMe
+      (i) => i.isReceivedByMe
     ).length;
 
+    /* --------------------------------------------------
+     * RESPONSE
+     * -------------------------------------------------- */
     res.json({
       communicationType: "external",
       items: normalizedItems,
-      total: total,
+      total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
       userRole: currentUserRole,
-      isTeamLead: isTeamLead,
+      isTeamLead,
       summary: {
         totalMessages: normalizedItems.length,
         sentMessages: sentCount,
         receivedMessages: receivedCount,
-        withClientEmployees: normalizedItems.filter(
-          (item) => item.isFromClient || item.isFromCompanyEmployee
-        ).length,
         pendingApproval: normalizedItems.filter(
-          (item) => item.approvalStatus === "pending"
+          (i) => i.approvalStatus === "pending"
         ).length,
-        scheduledMessages: normalizedItems.filter((item) => item.isScheduled)
-          .length,
+        scheduledMessages: normalizedItems.filter((i) => i.isScheduled).length,
       },
       userStats: {
         sentCount,
@@ -1200,6 +1227,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     res.status(500).json({ error: "Failed to fetch external communications" });
   }
 };
+
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
   res
@@ -2369,228 +2397,240 @@ exports.getDraftCount = async function getDraftCount(req, res) {
     res.status(500).json({ error: "Failed to get draft count" });
   }
 };
-exports.getTeamLeadPendingApprovals = async function getTeamLeadPendingApprovals(req, res) {
-  try {
-    const {
-      client,
-      sender,
-      receiver,
-      limit = 50,
-      page = 1,
-      search,
-      dateFrom,
-      dateTo,
-      includeDirect = "true",
-      includeExternal = "true",
-      threadId,
-      showThread = "true",
-    } = req.query;
+exports.getTeamLeadPendingApprovals =
+  async function getTeamLeadPendingApprovals(req, res) {
+    try {
+      const {
+        client,
+        sender,
+        receiver,
+        limit = 50,
+        page = 1,
+        search,
+        dateFrom,
+        dateTo,
+        includeDirect = "true",
+        includeExternal = "true",
+        threadId,
+        showThread = "true",
+      } = req.query;
 
-    // Verify team lead
-    const currentUserRole = normalizeRole(req.employee?.role || "");
-    if (currentUserRole !== "team_lead") {
-      return res.status(403).json({
-        error: "Access denied. Only team leads can view pending approvals.",
-      });
-    }
-
-    const currentUserId = req.employee?._id;
-    const ownerId = req.employee?.owner;
-
-    if (!isObjId(currentUserId) || !isObjId(ownerId)) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    // Get employees under supervision
-    const supervisedEmployees = await getEmployeesUnderSupervision(
-      ownerId,
-      "team_lead"
-    );
-
-    // Base query: Get all pending messages from supervised employees
-    const query = {
-      owner: ownerId,
-      approvalStatus: "pending",
-      sender: { $in: supervisedEmployees },
-      isTrashed: false,
-      isSpam: false,
-    };
-
-    // Apply client filter
-    if (isObjId(client)) {
-      query.client = client;
-    }
-
-    // Apply sender filter
-    if (isObjId(sender)) {
-      query.sender = sender;
-    }
-
-    // Apply receiver filter
-    if (isObjId(receiver)) {
-      query.$or = [
-        { receiver: receiver },
-        { receiver: { $in: [receiver] } },
-      ];
-    }
-
-    // Apply thread filter
-    if (threadId) {
-      query.threadId = threadId;
-    }
-
-    // Apply search filter
-    if (search?.trim()) {
-      const regex = new RegExp(search.trim(), "i");
-      query.$or = query.$or || [];
-      query.$and = query.$and || [];
-      query.$and.push({
-        $or: [
-          { subject: regex },
-          { note: regex },
-          { "sender.name": regex },
-        ],
-      });
-    }
-
-    // Apply date filter
-    if (dateFrom || dateTo) {
-      const dateFilter = {};
-      if (dateFrom) dateFilter.$gte = new Date(dateFrom);
-      if (dateTo) dateFilter.$lte = new Date(dateTo);
-      query.createdAt = dateFilter;
-    }
-
-    // Get total count first
-    const totalCount = await AssignmentMessage.countDocuments(query);
-    // Pagination
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
-
-    // Fetch ALL messages (not paginated) to group by thread
-    const allMessages = await AssignmentMessage.find(query)
-      .sort({ createdAt: -1 })
-      .populate([
-        { path: "owner", select: "_id name companyEmail" },
-        {
-          path: "sender",
-          select: "_id name companyEmail role supervisionMode",
-        },
-        { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
-        { path: "readBy.employee", select: "_id name companyEmail" },
-        { path: "starredBy", select: "_id name companyEmail" },
-      ])
-      .lean();
-    // Group messages by threadId
-    const threadMap = new Map();
-    
-    allMessages.forEach((message) => {
-      const threadId = message.threadId || `single_${message._id}`;
-      
-      if (!threadMap.has(threadId)) {
-        // First message in this thread
-        threadMap.set(threadId, {
-          threadId: threadId,
-          clientId: message.client?._id || null,
-          clientName: message.client?.clientName || 
-                     (message.client ? "Client" : "Direct Message"),
-          latestMessage: message, // Latest is the first one (sorted by createdAt: -1)
-          messages: [message],
-          unreadCount: message.readBy?.some(read => 
-            read.employee && read.employee._id && read.employee._id.toString() === currentUserId.toString()
-          ) ? 0 : 1,
-          totalMessages: 1,
-          pendingMessages: message.approvalStatus === "pending" ? 1 : 0,
-          lastActivity: message.createdAt,
-          isStarred: message.starredBy?.some(star => 
-            star._id && star._id.toString() === currentUserId.toString()
-          ) || false,
-          subject: message.subject || "No Subject",
-          sender: message.sender,
-          isDirectMessage: !message.client,
-          createdAt: message.createdAt,
-          updatedAt: message.updatedAt,
+      // Verify team lead
+      const currentUserRole = normalizeRole(req.employee?.role || "");
+      if (currentUserRole !== "team_lead") {
+        return res.status(403).json({
+          error: "Access denied. Only team leads can view pending approvals.",
         });
-      } else {
-        // Additional message in existing thread
-        const thread = threadMap.get(threadId);
-        thread.messages.push(message);
-        thread.totalMessages++;
-        
-        // Update pending message count
-        if (message.approvalStatus === "pending") {
-          thread.pendingMessages++;
-        }
-        
-        // Update to latest message if this one is newer
-        if (new Date(message.createdAt) > new Date(thread.latestMessage.createdAt)) {
-          thread.latestMessage = message;
-          thread.updatedAt = message.updatedAt;
-        }
-        
-        // Update unread count
-        const isRead = message.readBy?.some(read => 
-          read.employee && read.employee._id && read.employee._id.toString() === currentUserId.toString()
-        );
-        if (!isRead) {
-          thread.unreadCount++;
-        }
-        
-        // Update starred status
-        const isStarred = message.starredBy?.some(star => 
-          star._id && star._id.toString() === currentUserId.toString()
-        );
-        if (isStarred) {
-          thread.isStarred = true;
-        }
       }
-    });
 
-    // Convert map to array and sort by lastActivity (newest first)
-    let threads = Array.from(threadMap.values());
-    threads.sort((a, b) => new Date(b.lastActivity) - new Date(a.lastActivity));
+      const currentUserId = req.employee?._id;
+      const ownerId = req.employee?.owner;
 
-    // Apply pagination to threads (not messages)
-    const startIndex = (pageNum - 1) * lim;
-    const endIndex = startIndex + lim;
-    const paginatedThreads = threads.slice(startIndex, endIndex);
+      if (!isObjId(currentUserId) || !isObjId(ownerId)) {
+        return res.status(401).json({ error: "Unauthorized" });
+      }
 
-    // Debug: Log first few threads
-    paginatedThreads.slice(0, 3).forEach((thread, index) => {
-    });
+      // Get employees under supervision
+      const supervisedEmployees = await getEmployeesUnderSupervision(
+        ownerId,
+        "team_lead"
+      );
 
-    // Return results
-    res.json({
-      success: true,
-      items: paginatedThreads, // Return threads, not individual messages
-      threads: paginatedThreads, // For consistency
-      messages: allMessages, // Still return all messages for reference
-      total: threads.length, // Total number of threads
-      totalCount: totalCount, // Total number of messages
-      page: pageNum,
-      pages: Math.ceil(threads.length / lim), // Pages based on threads
-      limit: lim,
-      statistics: {
-        totalThreads: threads.length,
-        totalMessages: totalCount,
-        pendingMessages: totalCount, // All messages are pending in this view
-        directMessages: threads.filter(t => t.isDirectMessage).length,
-        clientMessages: threads.filter(t => !t.isDirectMessage).length,
-        uniqueSenders: new Set(threads.map(t => t.sender?._id).filter(Boolean)).size,
-      },
-      debug: {
-        supervisedEmployeesCount: supervisedEmployees.length,
-        query: query,
-        threadsCount: threads.length,
-        paginatedThreadsCount: paginatedThreads.length,
-      },
-    });
-  } catch (e) {
-    console.error("❌ Error in getTeamLeadPendingApprovals:", e);
-    res.status(500).json({
-      error: "Failed to fetch pending approvals",
-      details: process.env.NODE_ENV === "development" ? e.message : undefined,
-    });
-  }
-};
+      // Base query: Get all pending messages from supervised employees
+      const query = {
+        owner: ownerId,
+        approvalStatus: "pending",
+        sender: { $in: supervisedEmployees },
+        isTrashed: false,
+        isSpam: false,
+      };
+
+      // Apply client filter
+      if (isObjId(client)) {
+        query.client = client;
+      }
+
+      // Apply sender filter
+      if (isObjId(sender)) {
+        query.sender = sender;
+      }
+
+      // Apply receiver filter
+      if (isObjId(receiver)) {
+        query.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
+      }
+
+      // Apply thread filter
+      if (threadId) {
+        query.threadId = threadId;
+      }
+
+      // Apply search filter
+      if (search?.trim()) {
+        const regex = new RegExp(search.trim(), "i");
+        query.$or = query.$or || [];
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [{ subject: regex }, { note: regex }, { "sender.name": regex }],
+        });
+      }
+
+      // Apply date filter
+      if (dateFrom || dateTo) {
+        const dateFilter = {};
+        if (dateFrom) dateFilter.$gte = new Date(dateFrom);
+        if (dateTo) dateFilter.$lte = new Date(dateTo);
+        query.createdAt = dateFilter;
+      }
+
+      // Get total count first
+      const totalCount = await AssignmentMessage.countDocuments(query);
+      // Pagination
+      const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+      const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+
+      // Fetch ALL messages (not paginated) to group by thread
+      const allMessages = await AssignmentMessage.find(query)
+        .sort({ createdAt: -1 })
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          {
+            path: "sender",
+            select: "_id name companyEmail role supervisionMode",
+          },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+          { path: "readBy.employee", select: "_id name companyEmail" },
+          { path: "starredBy", select: "_id name companyEmail" },
+        ])
+        .lean();
+      // Group messages by threadId
+      const threadMap = new Map();
+
+      allMessages.forEach((message) => {
+        const threadId = message.threadId || `single_${message._id}`;
+
+        if (!threadMap.has(threadId)) {
+          // First message in this thread
+          threadMap.set(threadId, {
+            threadId: threadId,
+            clientId: message.client?._id || null,
+            clientName:
+              message.client?.clientName ||
+              (message.client ? "Client" : "Direct Message"),
+            latestMessage: message, // Latest is the first one (sorted by createdAt: -1)
+            messages: [message],
+            unreadCount: message.readBy?.some(
+              (read) =>
+                read.employee &&
+                read.employee._id &&
+                read.employee._id.toString() === currentUserId.toString()
+            )
+              ? 0
+              : 1,
+            totalMessages: 1,
+            pendingMessages: message.approvalStatus === "pending" ? 1 : 0,
+            lastActivity: message.createdAt,
+            isStarred:
+              message.starredBy?.some(
+                (star) =>
+                  star._id && star._id.toString() === currentUserId.toString()
+              ) || false,
+            subject: message.subject || "No Subject",
+            sender: message.sender,
+            isDirectMessage: !message.client,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+          });
+        } else {
+          // Additional message in existing thread
+          const thread = threadMap.get(threadId);
+          thread.messages.push(message);
+          thread.totalMessages++;
+
+          // Update pending message count
+          if (message.approvalStatus === "pending") {
+            thread.pendingMessages++;
+          }
+
+          // Update to latest message if this one is newer
+          if (
+            new Date(message.createdAt) >
+            new Date(thread.latestMessage.createdAt)
+          ) {
+            thread.latestMessage = message;
+            thread.updatedAt = message.updatedAt;
+          }
+
+          // Update unread count
+          const isRead = message.readBy?.some(
+            (read) =>
+              read.employee &&
+              read.employee._id &&
+              read.employee._id.toString() === currentUserId.toString()
+          );
+          if (!isRead) {
+            thread.unreadCount++;
+          }
+
+          // Update starred status
+          const isStarred = message.starredBy?.some(
+            (star) =>
+              star._id && star._id.toString() === currentUserId.toString()
+          );
+          if (isStarred) {
+            thread.isStarred = true;
+          }
+        }
+      });
+
+      // Convert map to array and sort by lastActivity (newest first)
+      let threads = Array.from(threadMap.values());
+      threads.sort(
+        (a, b) => new Date(b.lastActivity) - new Date(a.lastActivity)
+      );
+
+      // Apply pagination to threads (not messages)
+      const startIndex = (pageNum - 1) * lim;
+      const endIndex = startIndex + lim;
+      const paginatedThreads = threads.slice(startIndex, endIndex);
+
+      // Debug: Log first few threads
+      paginatedThreads.slice(0, 3).forEach((thread, index) => {});
+
+      // Return results
+      res.json({
+        success: true,
+        items: paginatedThreads, // Return threads, not individual messages
+        threads: paginatedThreads, // For consistency
+        messages: allMessages, // Still return all messages for reference
+        total: threads.length, // Total number of threads
+        totalCount: totalCount, // Total number of messages
+        page: pageNum,
+        pages: Math.ceil(threads.length / lim), // Pages based on threads
+        limit: lim,
+        statistics: {
+          totalThreads: threads.length,
+          totalMessages: totalCount,
+          pendingMessages: totalCount, // All messages are pending in this view
+          directMessages: threads.filter((t) => t.isDirectMessage).length,
+          clientMessages: threads.filter((t) => !t.isDirectMessage).length,
+          uniqueSenders: new Set(
+            threads.map((t) => t.sender?._id).filter(Boolean)
+          ).size,
+        },
+        debug: {
+          supervisedEmployeesCount: supervisedEmployees.length,
+          query: query,
+          threadsCount: threads.length,
+          paginatedThreadsCount: paginatedThreads.length,
+        },
+      });
+    } catch (e) {
+      console.error("❌ Error in getTeamLeadPendingApprovals:", e);
+      res.status(500).json({
+        error: "Failed to fetch pending approvals",
+        details: process.env.NODE_ENV === "development" ? e.message : undefined,
+      });
+    }
+  };
