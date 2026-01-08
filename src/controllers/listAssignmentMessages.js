@@ -626,7 +626,6 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
   res
@@ -658,17 +657,22 @@ exports.getInternalCommunications = async function getInternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (INTERNAL + NO DRAFTS + RECEIVED ONLY)
+     * BASE QUERY (INTERNAL + INBOX ONLY)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: false },
+
+      // ❌ no drafts
       status: { $ne: "draft" },
 
-      // ❌ EXCLUDE messages sent by current user
+      // ❌ exclude my sent messages
       sender: { $ne: currentUser },
 
-      // ✅ Only messages received by current user
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+      // ✅ received by me only
+      $or: [
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+      ],
     };
 
     /* -------------------------------------------------- */
@@ -711,7 +715,10 @@ exports.getInternalCommunications = async function getInternalCommunications(
         { sender: b, receiver: a },
       ];
     } else if (isObjId(participant)) {
-      q.$or = [{ receiver: participant }, { receiver: { $in: [participant] } }];
+      q.$or = [
+        { receiver: participant },
+        { receiver: { $in: [participant] } },
+      ];
     }
 
     if (search && search.trim()) {
@@ -735,6 +742,11 @@ exports.getInternalCommunications = async function getInternalCommunications(
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role" },
+        ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
@@ -833,6 +845,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+
 exports.getExternalCommunications = async function getExternalCommunications(
   req,
   res
@@ -862,17 +875,22 @@ exports.getExternalCommunications = async function getExternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (EXTERNAL + NO DRAFTS + RECEIVED ONLY)
+     * BASE QUERY (EXTERNAL + INBOX ONLY)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: true, $ne: null },
+
+      // ❌ no drafts
       status: { $ne: "draft" },
 
-      // ❌ EXCLUDE messages sent by current user
+      // ❌ exclude my sent messages
       sender: { $ne: currentUser },
 
-      // ✅ Only messages received by current user
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+      // ✅ received by me only
+      $or: [
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+      ],
     };
 
     if (isObjId(client)) q.client = client;
@@ -910,6 +928,15 @@ exports.getExternalCommunications = async function getExternalCommunications(
 
     if (threadId) q.threadId = threadId;
 
+    const between = normalizeIds(betweenRaw);
+    if (between.length === 2) {
+      const [a, b] = between;
+      q.$or = [
+        { sender: a, receiver: b },
+        { sender: b, receiver: a },
+      ];
+    }
+
     if (search && search.trim()) {
       q.$and = [
         {
@@ -932,6 +959,12 @@ exports.getExternalCommunications = async function getExternalCommunications(
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role supervisionMode" },
+          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "client", select: "_id clientName" },
+        ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
@@ -949,6 +982,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     res.status(500).json({ error: "Failed to fetch external communications" });
   }
 };
+
 
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
