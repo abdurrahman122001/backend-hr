@@ -626,144 +626,6 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-exports.getInternalCommunications = async function getInternalCommunications(
-  req,
-  res
-) {
-  try {
-    const {
-      owner,
-      sender,
-      receiver,
-      participant,
-      status,
-      isScheduled,
-      scheduledBefore,
-      scheduledAfter,
-      limit = 50,
-      page = 1,
-      between: betweenRaw,
-      filter,
-      isTrashed,
-      isSpam,
-      approvalStatus,
-      threadId,
-      search,
-    } = req.query;
-
-    const currentUser = req.employee?._id;
-    if (!isObjId(currentUser)) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    /* --------------------------------------------------
-     * BASE QUERY (INTERNAL + INBOX ONLY)
-     * -------------------------------------------------- */
-    const q = {
-      client: { $exists: false },
-
-      // ❌ no drafts
-      status: { $ne: "draft" },
-
-      // ❌ exclude my sent messages
-      sender: { $ne: currentUser },
-
-      // ✅ received by me only
-      $or: [
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
-    };
-
-    /* -------------------------------------------------- */
-    if (isObjId(owner)) q.owner = owner;
-    else if (req.employee?.owner) q.owner = req.employee.owner;
-
-    if (["sent", "scheduled", "cancelled"].includes(status)) {
-      q.status = status;
-      if (status === "scheduled") q.isScheduled = true;
-    } else {
-      q.status = { $in: ["sent", "scheduled"] };
-    }
-
-    if (isTrashed === "true") q.isTrashed = true;
-    else if (isSpam === "true") q.isSpam = true;
-    else {
-      q.isTrashed = { $ne: true };
-      q.isSpam = { $ne: true };
-    }
-
-    if (approvalStatus) q.approvalStatus = approvalStatus;
-
-    if (filter === "scheduled" || isScheduled === "true") {
-      q.isScheduled = true;
-      q.status = "scheduled";
-    }
-
-    const timeFilters = {};
-    if (scheduledBefore) timeFilters.$lte = new Date(scheduledBefore);
-    if (scheduledAfter) timeFilters.$gte = new Date(scheduledAfter);
-    if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
-
-    if (threadId) q.threadId = threadId;
-
-    const between = normalizeIds(betweenRaw);
-    if (between.length === 2) {
-      const [a, b] = between;
-      q.$or = [
-        { sender: a, receiver: b },
-        { sender: b, receiver: a },
-      ];
-    } else if (isObjId(participant)) {
-      q.$or = [
-        { receiver: participant },
-        { receiver: { $in: [participant] } },
-      ];
-    }
-
-    if (search && search.trim()) {
-      q.$and = [
-        {
-          $or: [
-            { subject: { $regex: search, $options: "i" } },
-            { note: { $regex: search, $options: "i" } },
-          ],
-        },
-      ];
-    }
-
-    const qFinal = await applyVisibility(q, req);
-
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
-    const [items, total] = await Promise.all([
-      AssignmentMessage.find(qFinal)
-        .sort({ createdAt: -1 })
-        .skip((pageNum - 1) * lim)
-        .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-        ])
-        .lean(),
-      AssignmentMessage.countDocuments(qFinal),
-    ]);
-
-    res.json({
-      communicationType: "internal",
-      items,
-      total,
-      page: pageNum,
-      pages: Math.ceil(total / lim),
-      limit: lim,
-    });
-  } catch (e) {
-    console.error("❌ Error in getInternalCommunications:", e);
-    res.status(500).json({ error: "Failed to fetch internal communications" });
-  }
-};
 
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
@@ -887,10 +749,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
       sender: { $ne: currentUser },
 
       // ✅ received by me only
-      $or: [
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
+      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
     if (isObjId(client)) q.client = client;
@@ -961,7 +820,10 @@ exports.getExternalCommunications = async function getExternalCommunications(
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role supervisionMode" },
+          {
+            path: "sender",
+            select: "_id name companyEmail role supervisionMode",
+          },
           { path: "receiver", select: "_id name companyEmail role" },
           { path: "client", select: "_id clientName" },
         ])
@@ -982,7 +844,6 @@ exports.getExternalCommunications = async function getExternalCommunications(
     res.status(500).json({ error: "Failed to fetch external communications" });
   }
 };
-
 
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
@@ -1014,129 +875,78 @@ exports.getInternalCommunications = async function getInternalCommunications(
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // Base query: Must NOT have client field (internal communications)
+    /* --------------------------------------------------
+     * BASE QUERY (INTERNAL + INBOX ONLY)
+     * -------------------------------------------------- */
     const q = {
       client: { $exists: false },
-      // 🔥 CRITICAL: Include messages where current user is sender OR receiver
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
+
+      // ❌ no drafts
+      status: { $ne: "draft" },
+
+      // ❌ exclude my sent messages
+      sender: { $ne: currentUser },
+
+      // ✅ received by me only
+      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
-    // Owner scope
+    /* -------------------------------------------------- */
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
-    // Status handling - include sent messages
-    if (
-      status &&
-      ["draft", "scheduled", "sent", "cancelled"].includes(status)
-    ) {
+    if (["sent", "scheduled", "cancelled"].includes(status)) {
       q.status = status;
-      if (status === "scheduled") {
-        q.isScheduled = true;
-      }
+      if (status === "scheduled") q.isScheduled = true;
     } else {
-      // Default: include both sent and scheduled messages
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    // Trash/Spam logic - default: exclude trash and spam
-    if (isTrashed === "true" || isTrashed === true) {
-      q.isTrashed = true;
-    } else if (isSpam === "true" || isSpam === true) {
-      q.isSpam = true;
-    } else {
+    if (isTrashed === "true") q.isTrashed = true;
+    else if (isSpam === "true") q.isSpam = true;
+    else {
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
 
-    // Approval status filter (internal messages typically don't need approval)
-    if (
-      approvalStatus &&
-      ["pending", "approved", "disapproved"].includes(approvalStatus)
-    ) {
-      q.approvalStatus = approvalStatus;
-    }
+    if (approvalStatus) q.approvalStatus = approvalStatus;
 
-    // Scheduled filter
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
-    } else if (isScheduled === "false") {
-      q.isScheduled = false;
     }
 
-    // Time filters
     const timeFilters = {};
-    if (scheduledBefore) {
-      const d = new Date(scheduledBefore);
-      if (!isNaN(d)) timeFilters.$lte = d;
-    }
-    if (scheduledAfter) {
-      const d = new Date(scheduledAfter);
-      if (!isNaN(d)) timeFilters.$gte = d;
-    }
+    if (scheduledBefore) timeFilters.$lte = new Date(scheduledBefore);
+    if (scheduledAfter) timeFilters.$gte = new Date(scheduledAfter);
     if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    // Thread ID filter
-    if (threadId) {
-      q.threadId = threadId;
-    }
+    if (threadId) q.threadId = threadId;
 
-    // User-based filtering
-    const currentUserRole = normalizeRole(req.employee?.role || "");
-    const me = oid(String(req.employee._id));
     const between = normalizeIds(betweenRaw);
-
-    // Override base $or if between or participant filters are used
     if (between.length === 2) {
       const [a, b] = between;
       q.$or = [
-        { sender: a, receiver: { $in: [b] } },
-        { sender: b, receiver: { $in: [a] } },
         { sender: a, receiver: b },
         { sender: b, receiver: a },
       ];
     } else if (isObjId(participant)) {
-      q.$or = [
-        { sender: participant },
-        { receiver: participant },
-        { receiver: { $in: [participant] } },
+      q.$or = [{ receiver: participant }, { receiver: { $in: [participant] } }];
+    }
+
+    if (search && search.trim()) {
+      q.$and = [
+        {
+          $or: [
+            { subject: { $regex: search, $options: "i" } },
+            { note: { $regex: search, $options: "i" } },
+          ],
+        },
       ];
-    } else {
-      if (isObjId(sender)) {
-        q.$or = [
-          { sender: sender },
-          { receiver: sender },
-          { receiver: { $in: [sender] } },
-        ];
-      }
-      if (isObjId(receiver)) {
-        q.$or = [
-          { sender: receiver },
-          { receiver: receiver },
-          { receiver: { $in: [receiver] } },
-        ];
-      }
     }
 
-    // Search functionality
-    if (search && search.trim().length > 0) {
-      const searchTerm = search.trim();
-      q.$or = q.$or || [];
-      q.$or.push(
-        { subject: { $regex: searchTerm, $options: "i" } },
-        { note: { $regex: searchTerm, $options: "i" } }
-      );
-    }
-
-    // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
-    // Pagination & fetch
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -1149,68 +959,25 @@ exports.getInternalCommunications = async function getInternalCommunications(
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-          { path: "trashedBy", select: "_id name companyEmail" },
-          { path: "spamReportedBy", select: "_id name companyEmail" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // Ensure receiver is always treated as array for consistency
-    const normalizedItems = items.map((item) => {
-      const isSender = String(item.sender?._id) === String(currentUser);
-
-      return {
-        ...item,
-        receiver: Array.isArray(item.receiver)
-          ? item.receiver
-          : [item.receiver].filter(Boolean),
-        communicationType: "internal", // Mark as internal communication
-        hasClient: false,
-        clientInfo: null,
-        // Add metadata about user's role in this message
-        userRole: isSender ? "sender" : "receiver",
-        isSentByMe: isSender,
-        isReceivedByMe: !isSender,
-      };
-    });
-
-    // Calculate statistics
-    const sentCount = normalizedItems.filter((item) => item.isSentByMe).length;
-    const receivedCount = normalizedItems.filter(
-      (item) => item.isReceivedByMe
-    ).length;
-
     res.json({
       communicationType: "internal",
-      items: normalizedItems,
-      total: total,
+      items,
+      total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
-      userRole: currentUserRole,
-      summary: {
-        totalMessages: normalizedItems.length,
-        sentMessages: sentCount,
-        receivedMessages: receivedCount,
-        directMessages: normalizedItems.length, // All internal messages are direct
-        scheduledMessages: normalizedItems.filter((item) => item.isScheduled)
-          .length,
-        draftMessages: normalizedItems.filter((item) => item.status === "draft")
-          .length,
-      },
-      userStats: {
-        sentCount,
-        receivedCount,
-      },
     });
   } catch (e) {
     console.error("❌ Error in getInternalCommunications:", e);
     res.status(500).json({ error: "Failed to fetch internal communications" });
   }
 };
+
 // GET /api/assignment-messages/:id/attachments
 exports.listAttachments = async function listAttachments(req, res) {
   try {
