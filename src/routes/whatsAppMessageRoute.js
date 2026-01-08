@@ -3,7 +3,7 @@ const router = express.Router();
 const empAuth = require("../middleware/empAuth");
 const { upload } = require("../utils/multer");
 const ctrl = require("../controllers/whatsAppMessageController");
-
+const commentController = require("../controllers/commentController");
 // All routes require employee authentication
 router.use(empAuth);
 
@@ -37,12 +37,34 @@ router.post("/:id/reschedule", ctrl.rescheduleMessage);
 
 router.get("/:id", ctrl.getMessage);
 router.patch("/:id", ctrl.updateMessage);
-router.patch("/:id/edit", ctrl.editMessage); 
+router.patch("/:id/edit", ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 router.patch("/:id/seen", ctrl.markAsSeen);
 router.get("/unread/counts", ctrl.getUnreadCounts);
 router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
 router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
+router.post("/:messageId/comments", commentController.addComment);
+
+// Get comments for message
+router.get("/:messageId/comments", commentController.getComments);
+
+// Edit comment
+router.put("/:messageId/comments/:commentId", commentController.editComment);
+
+// Delete comment
+router.delete(
+  "/:messageId/comments/:commentId",
+  commentController.deleteComment
+);
+
+// Add reaction to comment
+router.post(
+  "/:messageId/comments/:commentId/reactions",
+  commentController.addReaction
+);
+
+// Get comment statistics
+router.get("/:messageId/comments/stats", commentController.getCommentStats);
 
 module.exports = router;
