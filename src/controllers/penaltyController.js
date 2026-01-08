@@ -119,17 +119,13 @@ exports.getPenaltyStats = async (req, res) => {
   try {
     const owner = req.user._id;
 
-    const [
-      totalPenalties,
-      pending,
-      approved,
-      employeesAffected,
-    ] = await Promise.all([
-      Penalty.countDocuments({ owner }),
-      Penalty.countDocuments({ owner, status: "pending" }),
-      Penalty.countDocuments({ owner, status: "approved" }),
-      Penalty.distinct("employee", { owner }).then(arr => arr.length),
-    ]);
+    const [totalPenalties, pending, approved, employeesAffected] =
+      await Promise.all([
+        Penalty.countDocuments({ owner }),
+        Penalty.countDocuments({ owner, status: "pending" }),
+        Penalty.countDocuments({ owner, status: "approved" }),
+        Penalty.distinct("employee", { owner }).then((arr) => arr.length),
+      ]);
 
     res.json({
       success: true,
@@ -141,6 +137,36 @@ exports.getPenaltyStats = async (req, res) => {
       },
     });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.getMyPenalties = async (req, res) => {
+  try {
+    // empAuth attaches employee here
+    if (!req.employee || !req.employee._id) {
+      return res.status(401).json({
+        message: "Unauthorized: employee context missing",
+      });
+    }
+
+    const employeeId = req.employee._id;
+    const ownerId = req.employee.owner;
+
+    const penalties = await Penalty.find({
+      employee: employeeId,
+      owner: ownerId,
+    })
+      .populate("employee", "name department")
+      .populate("reportedBy", "name")
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: penalties,
+    });
+  } catch (error) {
+    console.error("getMyPenalties error:", error);
     res.status(500).json({ message: error.message });
   }
 };
