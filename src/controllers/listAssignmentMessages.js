@@ -658,31 +658,23 @@ exports.getInternalCommunications = async function getInternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (INTERNAL ONLY + NO DRAFTS)
+     * BASE QUERY (INTERNAL + NO DRAFTS + RECEIVED ONLY)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: false },
-
-      // 🚫 ABSOLUTE EXCLUSION OF DRAFTS
       status: { $ne: "draft" },
 
-      // Must involve current user
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
+      // ❌ EXCLUDE messages sent by current user
+      sender: { $ne: currentUser },
+
+      // ✅ Only messages received by current user
+      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
-    /* --------------------------------------------------
-     * OWNER SCOPE
-     * -------------------------------------------------- */
+    /* -------------------------------------------------- */
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
-    /* --------------------------------------------------
-     * STATUS FILTER (DRAFT NOT ALLOWED)
-     * -------------------------------------------------- */
     if (["sent", "scheduled", "cancelled"].includes(status)) {
       q.status = status;
       if (status === "scheduled") q.isScheduled = true;
@@ -690,115 +682,51 @@ exports.getInternalCommunications = async function getInternalCommunications(
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    /* --------------------------------------------------
-     * TRASH / SPAM
-     * -------------------------------------------------- */
-    if (isTrashed === "true") {
-      q.isTrashed = true;
-    } else if (isSpam === "true") {
-      q.isSpam = true;
-    } else {
+    if (isTrashed === "true") q.isTrashed = true;
+    else if (isSpam === "true") q.isSpam = true;
+    else {
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
 
-    /* --------------------------------------------------
-     * APPROVAL STATUS
-     * -------------------------------------------------- */
-    if (["pending", "approved", "disapproved"].includes(approvalStatus)) {
-      q.approvalStatus = approvalStatus;
-    }
+    if (approvalStatus) q.approvalStatus = approvalStatus;
 
-    /* --------------------------------------------------
-     * SCHEDULED FILTER
-     * -------------------------------------------------- */
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
-    } else if (isScheduled === "false") {
-      q.isScheduled = false;
     }
 
-    /* --------------------------------------------------
-     * TIME FILTERS
-     * -------------------------------------------------- */
     const timeFilters = {};
-    if (scheduledBefore) {
-      const d = new Date(scheduledBefore);
-      if (!isNaN(d)) timeFilters.$lte = d;
-    }
-    if (scheduledAfter) {
-      const d = new Date(scheduledAfter);
-      if (!isNaN(d)) timeFilters.$gte = d;
-    }
-    if (Object.keys(timeFilters).length) {
-      q.scheduledFor = timeFilters;
-    }
+    if (scheduledBefore) timeFilters.$lte = new Date(scheduledBefore);
+    if (scheduledAfter) timeFilters.$gte = new Date(scheduledAfter);
+    if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    /* --------------------------------------------------
-     * THREAD FILTER
-     * -------------------------------------------------- */
     if (threadId) q.threadId = threadId;
 
-    /* --------------------------------------------------
-     * PARTICIPANT / BETWEEN LOGIC
-     * -------------------------------------------------- */
     const between = normalizeIds(betweenRaw);
-
     if (between.length === 2) {
       const [a, b] = between;
       q.$or = [
         { sender: a, receiver: b },
         { sender: b, receiver: a },
-        { sender: a, receiver: { $in: [b] } },
-        { sender: b, receiver: { $in: [a] } },
       ];
     } else if (isObjId(participant)) {
-      q.$or = [
-        { sender: participant },
-        { receiver: participant },
-        { receiver: { $in: [participant] } },
-      ];
-    } else {
-      if (isObjId(sender)) {
-        q.$or = [
-          { sender },
-          { receiver: sender },
-          { receiver: { $in: [sender] } },
-        ];
-      }
-
-      if (isObjId(receiver)) {
-        q.$or = [
-          { sender: receiver },
-          { receiver },
-          { receiver: { $in: [receiver] } },
-        ];
-      }
+      q.$or = [{ receiver: participant }, { receiver: { $in: [participant] } }];
     }
 
-    /* --------------------------------------------------
-     * SEARCH (SAFE WITH NO DRAFT LEAK)
-     * -------------------------------------------------- */
     if (search && search.trim()) {
-      const term = search.trim();
-      q.$and = q.$and || [];
-      q.$and.push({
-        $or: [
-          { subject: { $regex: term, $options: "i" } },
-          { note: { $regex: term, $options: "i" } },
-        ],
-      });
+      q.$and = [
+        {
+          $or: [
+            { subject: { $regex: search, $options: "i" } },
+            { note: { $regex: search, $options: "i" } },
+          ],
+        },
+      ];
     }
 
-    /* --------------------------------------------------
-     * VISIBILITY RULES
-     * -------------------------------------------------- */
     const qFinal = await applyVisibility(q, req);
 
-    /* --------------------------------------------------
-     * PAGINATION
-     * -------------------------------------------------- */
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -807,64 +735,17 @@ exports.getInternalCommunications = async function getInternalCommunications(
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-          { path: "trashedBy", select: "_id name companyEmail" },
-          { path: "spamReportedBy", select: "_id name companyEmail" },
-        ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    /* --------------------------------------------------
-     * NORMALIZATION
-     * -------------------------------------------------- */
-    const normalizedItems = items.map((item) => {
-      const isSender = String(item.sender?._id) === String(currentUser);
-
-      return {
-        ...item,
-        receiver: Array.isArray(item.receiver)
-          ? item.receiver
-          : [item.receiver].filter(Boolean),
-        communicationType: "internal",
-        hasClient: false,
-        clientInfo: null,
-        userRole: isSender ? "sender" : "receiver",
-        isSentByMe: isSender,
-        isReceivedByMe: !isSender,
-      };
-    });
-
-    const sentCount = normalizedItems.filter((i) => i.isSentByMe).length;
-    const receivedCount = normalizedItems.filter(
-      (i) => i.isReceivedByMe
-    ).length;
-
-    /* --------------------------------------------------
-     * RESPONSE
-     * -------------------------------------------------- */
     res.json({
       communicationType: "internal",
-      items: normalizedItems,
+      items,
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
-      summary: {
-        totalMessages: normalizedItems.length,
-        sentMessages: sentCount,
-        receivedMessages: receivedCount,
-        scheduledMessages: normalizedItems.filter((i) => i.isScheduled).length,
-      },
-      userStats: {
-        sentCount,
-        receivedCount,
-      },
     });
   } catch (e) {
     console.error("❌ Error in getInternalCommunications:", e);
@@ -960,9 +841,6 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const {
       client,
       owner,
-      sender,
-      receiver,
-      participant,
       status,
       isScheduled,
       scheduledBefore,
@@ -984,38 +862,24 @@ exports.getExternalCommunications = async function getExternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (EXTERNAL ONLY + NO DRAFTS)
+     * BASE QUERY (EXTERNAL + NO DRAFTS + RECEIVED ONLY)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: true, $ne: null },
-
-      // 🚫 HARD BLOCK DRAFTS
       status: { $ne: "draft" },
 
-      // Must involve current user
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
+      // ❌ EXCLUDE messages sent by current user
+      sender: { $ne: currentUser },
+
+      // ✅ Only messages received by current user
+      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
-    /* --------------------------------------------------
-     * CLIENT FILTER
-     * -------------------------------------------------- */
-    if (isObjId(client)) {
-      q.client = client;
-    }
+    if (isObjId(client)) q.client = client;
 
-    /* --------------------------------------------------
-     * OWNER SCOPE
-     * -------------------------------------------------- */
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
-    /* --------------------------------------------------
-     * STATUS FILTER (DRAFT NOT ALLOWED)
-     * -------------------------------------------------- */
     if (["sent", "scheduled", "cancelled"].includes(status)) {
       q.status = status;
       if (status === "scheduled") q.isScheduled = true;
@@ -1023,117 +887,43 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    /* --------------------------------------------------
-     * TRASH / SPAM
-     * -------------------------------------------------- */
-    if (isTrashed === "true" || isTrashed === true) {
-      q.isTrashed = true;
-    } else if (isSpam === "true" || isSpam === true) {
-      q.isSpam = true;
-    } else {
+    if (isTrashed === "true") q.isTrashed = true;
+    else if (isSpam === "true") q.isSpam = true;
+    else {
       q.isTrashed = { $ne: true };
       q.isSpam = { $ne: true };
     }
 
-    /* --------------------------------------------------
-     * APPROVAL / REVIEW FILTERS
-     * -------------------------------------------------- */
     if (filter === "review" || approvalStatus === "pending") {
       q.approvalStatus = "pending";
     }
 
-    /* --------------------------------------------------
-     * SCHEDULED FILTER
-     * -------------------------------------------------- */
     if (filter === "scheduled" || isScheduled === "true") {
       q.isScheduled = true;
       q.status = "scheduled";
-    } else if (isScheduled === "false") {
-      q.isScheduled = false;
     }
 
-    /* --------------------------------------------------
-     * TIME FILTERS
-     * -------------------------------------------------- */
     const timeFilters = {};
-    if (scheduledBefore) {
-      const d = new Date(scheduledBefore);
-      if (!isNaN(d)) timeFilters.$lte = d;
-    }
-    if (scheduledAfter) {
-      const d = new Date(scheduledAfter);
-      if (!isNaN(d)) timeFilters.$gte = d;
-    }
-    if (Object.keys(timeFilters).length) {
-      q.scheduledFor = timeFilters;
-    }
+    if (scheduledBefore) timeFilters.$lte = new Date(scheduledBefore);
+    if (scheduledAfter) timeFilters.$gte = new Date(scheduledAfter);
+    if (Object.keys(timeFilters).length) q.scheduledFor = timeFilters;
 
-    /* --------------------------------------------------
-     * THREAD FILTER
-     * -------------------------------------------------- */
     if (threadId) q.threadId = threadId;
 
-    /* --------------------------------------------------
-     * USER / PARTICIPANT FILTERING
-     * -------------------------------------------------- */
-    const currentUserRole = normalizeRole(req.employee?.role || "");
-    const isTeamLead = currentUserRole === "team_lead";
-    const between = normalizeIds(betweenRaw);
-
-    if (between.length === 2) {
-      const [a, b] = between;
-      q.$or = [
-        { sender: a, receiver: b },
-        { sender: b, receiver: a },
-        { sender: a, receiver: { $in: [b] } },
-        { sender: b, receiver: { $in: [a] } },
-      ];
-    } else if (isObjId(participant)) {
-      q.$or = [
-        { sender: participant },
-        { receiver: participant },
-        { receiver: { $in: [participant] } },
-      ];
-    } else {
-      if (isObjId(sender)) {
-        q.$or = [
-          { sender },
-          { receiver: sender },
-          { receiver: { $in: [sender] } },
-        ];
-      }
-      if (isObjId(receiver)) {
-        q.$or = [
-          { sender: receiver },
-          { receiver },
-          { receiver: { $in: [receiver] } },
-        ];
-      }
-    }
-
-    /* --------------------------------------------------
-     * SEARCH (SAFE – NO DRAFT LEAK)
-     * -------------------------------------------------- */
     if (search && search.trim()) {
-      const term = search.trim();
-      q.$and = q.$and || [];
-      q.$and.push({
-        $or: [
-          { subject: { $regex: term, $options: "i" } },
-          { note: { $regex: term, $options: "i" } },
-          { "client.clientName": { $regex: term, $options: "i" } },
-        ],
-      });
+      q.$and = [
+        {
+          $or: [
+            { subject: { $regex: search, $options: "i" } },
+            { note: { $regex: search, $options: "i" } },
+            { "client.clientName": { $regex: search, $options: "i" } },
+          ],
+        },
+      ];
     }
 
-    /* --------------------------------------------------
-     * VISIBILITY RULES
-     * -------------------------------------------------- */
     const qFinal = await applyVisibility(q, req);
 
-    /* --------------------------------------------------
-     * PAGINATION
-     * -------------------------------------------------- */
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
@@ -1142,85 +932,17 @@ exports.getExternalCommunications = async function getExternalCommunications(
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          {
-            path: "sender",
-            select: "_id name companyEmail role supervisionMode",
-          },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
-          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-          { path: "scheduledBy", select: "_id name companyEmail" },
-          { path: "trashedBy", select: "_id name companyEmail" },
-          { path: "spamReportedBy", select: "_id name companyEmail" },
-        ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    /* --------------------------------------------------
-     * TEAM LEAD REVIEW FILTER
-     * -------------------------------------------------- */
-    let finalItems = items;
-    if (filter === "review" && isTeamLead) {
-      finalItems = items.filter(
-        (item) =>
-          item.sender?.supervisionMode === "direct" &&
-          item.approvalStatus === "pending"
-      );
-    }
-
-    /* --------------------------------------------------
-     * NORMALIZATION
-     * -------------------------------------------------- */
-    const normalizedItems = finalItems.map((item) => {
-      const isSender = String(item.sender?._id) === String(currentUser);
-
-      return {
-        ...item,
-        receiver: Array.isArray(item.receiver)
-          ? item.receiver
-          : [item.receiver].filter(Boolean),
-        communicationType: "external",
-        hasClient: true,
-        clientInfo: item.client || null,
-        userRole: isSender ? "sender" : "receiver",
-        isSentByMe: isSender,
-        isReceivedByMe: !isSender,
-      };
-    });
-
-    const sentCount = normalizedItems.filter((i) => i.isSentByMe).length;
-    const receivedCount = normalizedItems.filter(
-      (i) => i.isReceivedByMe
-    ).length;
-
-    /* --------------------------------------------------
-     * RESPONSE
-     * -------------------------------------------------- */
     res.json({
       communicationType: "external",
-      items: normalizedItems,
+      items,
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
-      userRole: currentUserRole,
-      isTeamLead,
-      summary: {
-        totalMessages: normalizedItems.length,
-        sentMessages: sentCount,
-        receivedMessages: receivedCount,
-        pendingApproval: normalizedItems.filter(
-          (i) => i.approvalStatus === "pending"
-        ).length,
-        scheduledMessages: normalizedItems.filter((i) => i.isScheduled).length,
-      },
-      userStats: {
-        sentCount,
-        receivedCount,
-      },
     });
   } catch (e) {
     console.error("❌ Error in getExternalCommunications:", e);
