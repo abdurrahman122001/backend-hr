@@ -4284,7 +4284,6 @@ exports.blockUser = async (req, res) => {
     });
   }
 };
-
 exports.updateMessage = async (req, res) => {
   try {
     const { messageId } = req.params;
@@ -4299,6 +4298,33 @@ exports.updateMessage = async (req, res) => {
       newFiles: req.files?.length || 0,
     });
 
+    // ✅ CRITICAL FIX: Handle temporary IDs properly
+    if (messageId && messageId.toString().startsWith('temp-')) {
+      console.warn("⚠️ Attempting to update a message with temporary ID:", messageId);
+      
+      // This could mean the message hasn't been created yet
+      // We need to either:
+      // 1. Return an error and let frontend retry
+      // 2. Or find the actual message by content/sender/conversation
+      
+      return res.status(400).json({
+        success: false,
+        error: "Cannot update message: Message hasn't been saved yet",
+        code: "TEMPORARY_ID_ERROR",
+        tempMessageId: messageId,
+        suggestion: "Wait for message to be saved or send the message first"
+      });
+    }
+
+    // ✅ Validate MongoDB ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid message ID format: ${messageId}`,
+        details: "Message ID must be a valid MongoDB ObjectId (24 character hex string)"
+      });
+    }
+
     // Find the message
     const message = await Message.findById(messageId);
 
@@ -4306,6 +4332,8 @@ exports.updateMessage = async (req, res) => {
       return res.status(404).json({
         success: false,
         error: "Message not found",
+        messageId: messageId,
+        details: "The message may have been deleted or never existed"
       });
     }
 
@@ -4405,6 +4433,7 @@ exports.updateMessage = async (req, res) => {
 
     // Mark as edited
     message.editedAt = new Date();
+    message.isEdited = true;
 
     // Save the updated message
     await message.save();

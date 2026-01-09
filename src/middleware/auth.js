@@ -1,6 +1,6 @@
-// middleware/auth.js
 const jwt = require("jsonwebtoken");
 const User = require("../models/Users");
+const Employee = require("../models/Employees");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -16,8 +16,9 @@ module.exports = async function requireAuth(req, res, next) {
   try {
     const payload = jwt.verify(token, JWT_SECRET);
 
+    // Find the user
     const user = await User.findById(payload.id).select(
-      "_id role createdBy owner tokenVersion"
+      "_id role createdBy owner tokenVersion name email companyEmail"
     );
 
     if (!user) {
@@ -29,15 +30,40 @@ module.exports = async function requireAuth(req, res, next) {
       return res.status(401).json({ message: "Token invalidated" });
     }
 
+    // Find the employee record to get permissions and correct role
+    const employee = await Employee.findOne({
+      $or: [
+        { userAccount: user._id },
+        { email: user.email },
+        { companyEmail: user.companyEmail }
+      ]
+    }).select("role permissions name department designation");
+
+    // Build user object with employee data
     req.user = {
       _id: user._id,
-      role: user.role,
+      role: employee?.role || user.role, // Use employee role if available
       createdBy: user.createdBy,
       owner: user.owner,
+      // Add employee info if found
+      ...(employee && {
+        employeeId: employee._id,
+        employeeName: employee.name,
+        employeeRole: employee.role,
+        employeePermissions: employee.permissions,
+        department: employee.department,
+        designation: employee.designation
+      })
     };
+
+    // If employee has permissions in DB, attach them to user object
+    if (employee?.permissions) {
+      req.user.permissions = employee.permissions;
+    }
 
     return next();
   } catch (err) {
+    console.error("Auth middleware error:", err);
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 };

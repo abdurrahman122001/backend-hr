@@ -15,6 +15,21 @@ const PositionSchema = new Schema({
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
+const PermissionSchema = new Schema(
+  {
+    canAccessPenalties: { type: Boolean, default: false },
+    canCreatePenalties: { type: Boolean, default: false },
+    canApprovePenalties: { type: Boolean, default: false },
+    canAccessWarnings: { type: Boolean, default: false },
+    canCreateWarnings: { type: Boolean, default: false },
+    canManageWarningConfig: { type: Boolean, default: false },
+    grantedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    grantedAt: { type: Date, default: Date.now },
+    updatedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    updatedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
 
 const ExperienceSchema = new Schema({
   positions: [PositionSchema],
@@ -152,7 +167,7 @@ const EmployeeSchema = new Schema(
         addedAt: { type: Date, default: Date.now },
       },
     ],
-    // EMPLOYMENT STATUS FIELDS - UPDATED
+    permissions: PermissionSchema,
     status: {
       type: String,
       enum: [
@@ -239,6 +254,14 @@ EmployeeSchema.pre("save", function (next) {
       }
     });
   }
+  // Update permissions timestamp if modified
+  if (this.isModified("permissions")) {
+    if (!this.permissions.updatedAt) {
+      this.permissions = new PermissionSchema();
+    }
+    this.permissions.updatedAt = new Date();
+  }
+
   next();
 });
 

@@ -1,9 +1,7 @@
+// middleware/requireEmployeeAuth.js - Updated to include permissions
 const jwt = require("jsonwebtoken");
 const Employee = require("../models/Employees");
 const JWT_SECRET = process.env.JWT_SECRET;
-
-// Token lifespan (9 hours)
-const TOKEN_LIFETIME = "9h";
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
@@ -21,10 +19,9 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
   try {
     // Verify token
     const payload = jwt.verify(token, JWT_SECRET);
-
-    // Include department from DB
+    // Fetch employee with permissions
     const emp = await Employee.findById(payload.id).select(
-      "_id role companyEmail name owner department"
+      "_id role companyEmail name owner department permissions"
     );
 
     if (!emp) {
@@ -33,7 +30,6 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
         .status(401)
         .json({ status: "error", message: "Unauthorized: employee not found" });
     }
-
     // Attach employee data to request
     req.employee = {
       _id: emp._id,
@@ -41,7 +37,8 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
       companyEmail: emp.companyEmail,
       name: emp.name,
       owner: emp.owner,
-      department: emp.department, // <-- ADDED HERE ✔
+      department: emp.department,
+      permissions: emp.permissions || {},
     };
 
     next();

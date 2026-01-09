@@ -277,3 +277,74 @@ exports.updateEmployeeRole = async (req, res) => {
     res.status(500).json({ message: "Failed to update employee role" });
   }
 };
+// controllers/employeeController.js - Add these methods
+/**
+ * UPDATE employee permissions
+ */
+exports.updateEmployeePermissions = async (req, res) => {
+  try {
+    const { permissions } = req.body;
+    const employeeId = req.params.id;
+    const userId = req.user._id;
+
+    const employee = await Employee.findOne({
+      _id: employeeId,
+      owner: req.user._id,
+    });
+
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    // Update permissions
+    employee.permissions = {
+      ...permissions,
+      grantedBy: userId,
+      grantedAt: new Date(),
+      updatedBy: userId,
+      updatedAt: new Date(),
+    };
+
+    await employee.save();
+
+    res.json({
+      success: true,
+      data: {
+        employee: {
+          _id: employee._id,
+          name: employee.name,
+          permissions: employee.permissions,
+        },
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * GET employee permissions
+ */
+exports.getEmployeePermissions = async (req, res) => {
+  try {
+    const employee = await Employee.findOne({
+      _id: req.params.id,
+      owner: req.user._id,
+    }).select("permissions name email");
+
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        permissions: employee.permissions,
+        name: employee.name,
+        email: employee.email,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};

@@ -19,7 +19,7 @@ const PenaltySchema = new Schema(
     reportedBy: {
       type: Schema.Types.ObjectId,
       ref: "Employee",
-      default: null, // null if anonymous
+      default: null,
     },
 
     isAnonymous: {
@@ -51,6 +51,22 @@ const PenaltySchema = new Schema(
       default: "pending",
       index: true,
     },
+
+    // Link to warning if generated from warning system
+    warningGenerated: {
+      type: Boolean,
+      default: false,
+    },
+    
+    warningConfig: {
+      type: Schema.Types.ObjectId,
+      ref: "WarningConfig",
+    },
+    
+    warningCount: {
+      type: Number,
+      default: 0,
+    }
   },
   { timestamps: true }
 );

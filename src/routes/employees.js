@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
 const requireAuth = require("../middleware/auth");
-const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries } = require("../controllers/employeeController");
+const { getUpcomingBirthdays, updateEmployeeRole, getUpcomingAnniversaries, getEmployeePermissions, updateEmployeePermissions } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
 
 function getEffectiveOwnerId(user) {
@@ -543,5 +543,6 @@ router.get("/roles", requireAuth, async (req, res) => {
 // Update employee role
 // ------------------------------
 router.patch("/:id/role", updateEmployeeRole);
-
+router.put("/:id/permissions", requireAuth, updateEmployeePermissions);
+router.get("/:id/permissions", requireAuth, getEmployeePermissions);
 module.exports = router;

@@ -1,18 +1,43 @@
+// routes/penaltyRoutes.js
 const router = require("express").Router();
 const penaltyController = require("../controllers/penaltyController");
 const auth = require("../middleware/auth");
-const empAuth = require("../middleware/empAuth");
+const { checkPermission, checkPermissions } = require("../middleware/permissions");
+const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
 
-router.post("/", auth, penaltyController.createPenalty);
-router.get("/", auth, penaltyController.getAllPenalties);
-router.get("/stats", auth, penaltyController.getPenaltyStats);
-router.get(
-  "/employee/:employeeId",
-  auth,
+// All routes require specific permissions
+router.post("/", 
+  checkPermission("canCreatePenalties"), 
+  penaltyController.createPenalty
+);
+
+router.get("/", 
+  checkPermission("canAccessPenalties"), 
+  penaltyController.getAllPenalties
+);
+
+router.get("/stats", 
+  checkPermission("canAccessPenalties"), 
+  penaltyController.getPenaltyStats
+);
+
+router.put("/:id", 
+  checkPermission("canApprovePenalties"), 
+  penaltyController.updatePenalty
+);
+
+router.delete("/:id", 
+  checkPermission("canApprovePenalties"), 
+  penaltyController.deletePenalty
+);
+
+router.get("/employee/:employeeId", 
+  checkPermission("canAccessPenalties"), 
   penaltyController.getEmployeePenalties
 );
-router.put("/:id", auth, penaltyController.updatePenalty);
-router.delete("/:id", auth, penaltyController.deletePenalty);
-router.get("/me", empAuth, penaltyController.getMyPenalties);
+
+router.get("/my-penalties", 
+  penaltyController.getMyPenalties
+);
 
 module.exports = router;
