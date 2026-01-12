@@ -16,42 +16,38 @@ const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
 
 function getEffectiveOwnerId(user) {
   if (!user) return null;
-  if (user._id) {
-    return user._id;
-  }
-  return null;
+  return user.owner || user.createdBy || user._id;
 }
 
-/**
- * Build scope for employee queries
- */
 function buildEmployeeScope(user, includeTrashed = false) {
-  if (!user) {
-    throw new Error("User context required for building scope");
-  }
+  if (!user) throw new Error("User context required");
 
-  const ownerId = getEffectiveOwnerId(user);
-  // Base ownership scope
+  const tenantId = getEffectiveOwnerId(user);
+  const userId = user._id;
+
   const ownershipScope = {
-    $or: [{ owner: ownerId }, { createdBy: ownerId }],
+    $or: [
+      { owner: tenantId },
+      { owner: userId },
+      { createdBy: tenantId },
+      { createdBy: userId },
+    ],
   };
 
-  // If user is an employee, ensure they can see themselves
+  // Allow employees to see themselves
   if (user.isEmployee && user.employeeId) {
     ownershipScope.$or.push({ _id: user.employeeId });
   }
 
-  // Trash handling
   const trashScope = includeTrashed
-    ? { isTrashed: { $ne: false } } // Show all, including trashed
-    : {
-        $or: [{ isTrashed: false }, { isTrashed: { $exists: false } }],
-      };
+    ? { isTrashed: { $ne: false } }
+    : { $or: [{ isTrashed: false }, { isTrashed: { $exists: false } }] };
 
   return {
     $and: [ownershipScope, trashScope],
   };
 }
+
 
 // ============================================
 // Employee Routes
