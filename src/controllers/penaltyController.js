@@ -1,7 +1,7 @@
 const Penalty = require("../models/Penalty");
 
 /**
- * CREATE penalty
+ * CREATE penalty - FIXED VERSION
  */
 exports.createPenalty = async (req, res) => {
   try {
@@ -11,6 +11,19 @@ exports.createPenalty = async (req, res) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
+    // DETERMINE who is reporting
+    let reportedBy = null;
+    if (!isAnonymous) {
+      // For employees, use employeeId
+      if (req.user.isEmployee) {
+        reportedBy = req.user.employeeId;
+      }
+      // For admin users, check if they have a linked employee
+      else if (req.user.isAdmin && req.user.employeeInfo) {
+        reportedBy = req.user.employeeInfo.employeeId;
+      }
+    }
+
     const penalty = await Penalty.create({
       owner: req.user._id,
       employee,
@@ -18,7 +31,7 @@ exports.createPenalty = async (req, res) => {
       amount,
       reason,
       isAnonymous: !!isAnonymous,
-      reportedBy: isAnonymous ? null : req.user.employee || null,
+      reportedBy: reportedBy, // Use the determined value
     });
 
     const populated = await penalty.populate([
@@ -34,7 +47,6 @@ exports.createPenalty = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 /**
  * GET all penalties (admin dashboard)
  */

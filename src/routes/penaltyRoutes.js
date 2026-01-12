@@ -5,6 +5,7 @@ const auth = require("../middleware/auth");
 const { checkPermission, checkPermissions } = require("../middleware/permissions");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
 
+router.use(unifiedAuth);
 // All routes require specific permissions
 router.post("/", 
   checkPermission("canCreatePenalties"), 
