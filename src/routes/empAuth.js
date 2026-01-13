@@ -34,6 +34,7 @@ const GRACE_PERIOD_MINUTES = 15;
 const HALF_DAY_THRESHOLD_HOUR = 18; // 6:00 PM
 const LOGIN_RESTRICTION_END_HOUR = 8; // 8:00 AM
 const HALF_DAY_LOGOUT_THRESHOLD_HOUR = 21; // 9:00 PM
+const TOKEN_EXPIRY_SECONDS = 9 * 60 * 60; // 9 hours
 
 // Helper function to get current time in Karachi
 function getKarachiTime() {
@@ -139,7 +140,7 @@ router.post("/login", async (req, res) => {
           department: emp.department,
         },
         JWT_SECRET,
-        { expiresIn: secondsUntilMidnight() }
+        { expiresIn: TOKEN_EXPIRY_SECONDS }
       );
 
       return res.json({
@@ -228,7 +229,7 @@ router.post("/login", async (req, res) => {
           department: emp.department,
         },
         JWT_SECRET,
-        { expiresIn: secondsUntilMidnight() }
+        { expiresIn: TOKEN_EXPIRY_SECONDS }
       );
 
       return res.json({
@@ -364,7 +365,7 @@ router.post("/confirm-code", async (req, res) => {
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
-      { expiresIn: secondsUntilMidnight() }
+      { expiresIn: TOKEN_EXPIRY_SECONDS }
     );
 
     // Get Karachi time for session logging
