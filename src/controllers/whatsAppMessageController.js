@@ -98,7 +98,10 @@ async function applyVisibility(q, req) {
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
   // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if ((currentUserRole === "manager" || currentUserRole === "owner") && ownerId) {
+  if (
+    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    ownerId
+  ) {
     return { ...q, owner: ownerId };
   }
 
@@ -129,7 +132,7 @@ async function applyVisibility(q, req) {
     // CRITICAL FIX: Combine original query with visibility conditions using $and
     // This preserves the text search while applying visibility rules
     return {
-      $and: [q, visibilityConditions]
+      $and: [q, visibilityConditions],
     };
   }
 
@@ -639,6 +642,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -777,27 +781,7 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // 🔑 CORRECTED Approval status logic - NOW CLIENT-BASED
-    if (senderRole === "manager") {
-      approvalStatus = null;
-      // Managers don't need approval, but team leads are now included as receivers
-    } else if (senderRole === "team_lead") {
-      approvalStatus = null;
-      // Team leads don't need approval, and we send to managers + assigned employee + CRM
-    } else if (needsApproval) {
-      // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
-      approvalStatus = "pending";
-      // Add team leads only if the client requires approval
-      if (tls.length > 0) {
-        receivers = [...receivers, ...tls.map((id) => String(id))];
-      }
-    } else if (isDirect) {
-      // 🔥 CLIENT-BASED: DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
-      approvalStatus = "approved";
-      // Don't add any team leads or managers - message goes directly to intended receivers
-    }
-
-    // 🔥 FIXED: Handle reply scenario - Preserve original receivers and add assigned employee
+    // 🔥 FIXED: Handle reply scenario - RE-EVALUATE SUPERVISION FOR REPLIES
     if (isReply && repliedTo) {
       try {
         // Get the original message being replied to
@@ -821,8 +805,85 @@ exports.createMessage = async function createMessage(req, res) {
             }
           });
 
-          // 🔥 SPECIAL CASE: If team lead is replying, ensure assigned employee is included
-          if (
+          // 🔥 CRITICAL FIX 1: Get original sender's role
+          const originalSenderId = originalMessage.sender
+            ? typeof originalMessage.sender === "object"
+              ? String(originalMessage.sender._id)
+              : String(originalMessage.sender)
+            : null;
+
+          let originalSenderRole = "";
+          if (originalSenderId) {
+            const originalSenderDoc = await Employee.findById(originalSenderId)
+              .select("role")
+              .lean();
+            originalSenderRole = normalizeRole(originalSenderDoc?.role || "");
+          }
+
+          // 🔥 CRITICAL FIX 2: If Employee is replying to a Manager's message
+          if (senderRole === "employee" && originalSenderRole === "manager") {
+            console.log("🔄 Employee replying to Manager's message - Special handling");
+
+            // Clear any receivers that might have been added incorrectly
+            receivers = receivers.filter(
+              (id) => id !== String(originalSenderId)
+            );
+
+            // 🔥 EMPLOYEE REPLY TO MANAGER LOGIC:
+            if (needsApproval) {
+              // Client requires approval: Send ONLY to Team Leads for approval first
+              if (tls.length > 0) {
+                // Clear all existing receivers
+                receivers = [];
+                // Add ONLY team leads for approval
+                receivers = [...tls];
+                approvalStatus = "pending";
+                
+                console.log(`✅ Employee reply to Manager: Sent to ${tls.length} team leads for approval`);
+                
+                // DO NOT include the manager yet - they'll get it AFTER approval
+                // DO NOT include assigned employee yet - they'll get it AFTER approval
+                
+                // Store the original manager ID for later forwarding
+                msgData.originalManagerReceiver = originalSenderId;
+                msgData.isEmployeeReplyToManager = true;
+              }
+            } else if (isDirect) {
+              // Direct supervision: Send directly to manager
+              if (originalSenderId && !receivers.includes(originalSenderId)) {
+                receivers.push(originalSenderId);
+              }
+              approvalStatus = "approved";
+              console.log(`✅ Employee reply to Manager: Direct supervision - sent directly to manager`);
+            }
+          }
+          // 🔥 If Team Lead is replying to Manager
+          else if (senderRole === "team_lead" && originalSenderRole === "manager") {
+            console.log("👨‍💼 Team Lead replying to Manager");
+            // Team lead replying to manager - no approval needed
+            approvalStatus = null;
+            // Ensure assigned employee is included
+            if (assignedEmployeeId && !receivers.includes(assignedEmployeeId)) {
+              receivers.push(assignedEmployeeId);
+            }
+          }
+          // 🔥 If Manager is replying to Employee message
+          else if (senderRole === "manager" && originalSenderRole === "employee") {
+            console.log("👷‍♂️ Manager replying to Employee");
+            // Manager reply to Employee: No approval needed
+            approvalStatus = null;
+            // Ensure assigned employee is included
+            if (assignedEmployeeId && !receivers.includes(assignedEmployeeId)) {
+              receivers.push(assignedEmployeeId);
+            }
+          }
+          // 🔥 If Employee is replying to Employee message
+          else if (senderRole === "employee" && originalSenderRole === "employee") {
+            console.log("👷‍♂️ Employee replying to Employee");
+            // Follow normal client supervision rules (handled below)
+          }
+          // 🔥 If Team Lead is replying, ensure assigned employee is included
+          else if (
             senderRole === "team_lead" &&
             assignedEmployeeId &&
             assignedEmployeeId !== String(sender)
@@ -832,23 +893,42 @@ exports.createMessage = async function createMessage(req, res) {
             }
           }
 
-          // Also add original sender if not already included
-          const originalSenderId = originalMessage.sender
-            ? typeof originalMessage.sender === "object"
-              ? String(originalMessage.sender._id)
-              : String(originalMessage.sender)
-            : null;
-
+          // Add original sender if not already included (for all other cases)
+          // But NOT for Employee → Manager when needs_approval
           if (
             originalSenderId &&
             originalSenderId !== String(sender) &&
-            !receivers.includes(originalSenderId)
+            !receivers.includes(originalSenderId) &&
+            !(senderRole === "employee" && originalSenderRole === "manager" && needsApproval)
           ) {
             receivers.push(originalSenderId);
           }
         }
       } catch (replyError) {
         console.warn("Failed to process reply context:", replyError);
+      }
+    }
+
+    // 🔑 CORRECTED Approval status logic - NOW CLIENT-BASED
+    // Only set approval status if not already set by reply logic above
+    if (approvalStatus === undefined) {
+      if (senderRole === "manager") {
+        approvalStatus = null;
+        // Managers don't need approval, but team leads are now included as receivers
+      } else if (senderRole === "team_lead") {
+        approvalStatus = null;
+        // Team leads don't need approval, and we send to managers + assigned employee + CRM
+      } else if (needsApproval) {
+        // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
+        approvalStatus = "pending";
+        // Add team leads only if the client requires approval
+        if (tls.length > 0) {
+          receivers = [...receivers, ...tls.map((id) => String(id))];
+        }
+      } else if (isDirect) {
+        // 🔥 CLIENT-BASED: DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
+        approvalStatus = "approved";
+        // Don't add any team leads or managers - message goes directly to intended receivers
       }
     }
 
@@ -939,7 +1019,32 @@ exports.createMessage = async function createMessage(req, res) {
       isReply: isReply || false,
       repliedTo: isReply ? repliedTo : null,
       replyContent: isReply ? replyContent : null,
+      // 🔥 Store metadata for Employee → Manager replies
+      originalManagerReceiver: null,
+      isEmployeeReplyToManager: senderRole === "employee" && isReply && needsApproval,
     };
+
+    // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval
+    if (senderRole === "employee" && isReply && needsApproval && repliedTo) {
+      try {
+        const originalMessage = await WhatsAppMessage.findById(repliedTo)
+          .populate("sender", "_id role")
+          .lean();
+        
+        if (originalMessage && originalMessage.sender) {
+          const originalSenderRole = normalizeRole(originalMessage.sender.role || "");
+          if (originalSenderRole === "manager") {
+            // Store the manager ID for later forwarding after approval
+            msgData.originalManagerReceiver = String(originalMessage.sender._id);
+            msgData.isEmployeeReplyToManager = true;
+            
+            console.log(`📝 Storing manager ID ${msgData.originalManagerReceiver} for later forwarding`);
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to store manager ID for forwarding:", error);
+      }
+    }
 
     const msg = await WhatsAppMessage.create(msgData);
 
@@ -968,12 +1073,12 @@ exports.createMessage = async function createMessage(req, res) {
       ...populated.toObject(),
       clientSupervision: clientSupervision,
       requiresApproval: needsApproval,
-      teamLeadsIncluded: senderRole === "manager", // Indicate if team leads were added
+      teamLeadsIncluded: senderRole === "manager",
       assignedEmployeeIncluded: assignedEmployeeId
         ? receivers.includes(assignedEmployeeId)
         : false,
-      crmIncluded: senderRole === "team_lead", // Indicate if CRM was added
-      managersIncluded: senderRole === "team_lead", // Indicate if managers were added (for team lead messages)
+      crmIncluded: senderRole === "team_lead",
+      managersIncluded: senderRole === "team_lead",
       totalReceivers: receivers.length,
       assignedEmployee: assignedEmployeeInfo,
       receiverSummary: {
@@ -986,6 +1091,10 @@ exports.createMessage = async function createMessage(req, res) {
         sentToCRM: senderRole === "team_lead",
         isReply: isReply || false,
         replyToMessageId: isReply ? repliedTo : null,
+        // 🔥 ADD REPLY SPECIFIC INFO
+        isEmployeeReplyToManager: senderRole === "employee" && isReply && needsApproval,
+        needsTeamLeadApproval: approvalStatus === "pending",
+        originalManagerStoredForForwarding: !!msgData.originalManagerReceiver,
       },
     };
 
@@ -998,6 +1107,8 @@ exports.createMessage = async function createMessage(req, res) {
         io.to(`employee_${receiverId}`).emit("new_message", {
           message: responseWithSupervision,
           type: "new_assignment",
+          // 🔥 ADD SPECIFIC TYPE FOR REPLY WORKFLOW
+          subType: approvalStatus === "pending" ? "needs_approval" : "direct",
         });
       });
 
@@ -1064,6 +1175,22 @@ exports.createMessage = async function createMessage(req, res) {
             note: "Manager has sent you a direct message",
           });
         }
+      }
+
+      // 🔥 NEW: Notify Team Leads when Employee replies to Manager (pending approval)
+      if (senderRole === "employee" && approvalStatus === "pending") {
+        tls.forEach((teamLeadId) => {
+          if (receivers.includes(teamLeadId)) {
+            io.to(`employee_${teamLeadId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "reply_needs_approval",
+              note: "Employee has replied to a Manager's message - needs approval",
+              requiresApproval: true,
+              isEmployeeReplyToManager: true,
+              originalManagerId: msgData.originalManagerReceiver,
+            });
+          }
+        });
       }
     }
 
