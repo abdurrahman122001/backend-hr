@@ -822,7 +822,9 @@ exports.createMessage = async function createMessage(req, res) {
 
           // 🔥 CRITICAL FIX 2: If Employee is replying to a Manager's message
           if (senderRole === "employee" && originalSenderRole === "manager") {
-            console.log("🔄 Employee replying to Manager's message - Special handling");
+            console.log(
+              "🔄 Employee replying to Manager's message - Special handling"
+            );
 
             // Clear any receivers that might have been added incorrectly
             receivers = receivers.filter(
@@ -838,12 +840,14 @@ exports.createMessage = async function createMessage(req, res) {
                 // Add ONLY team leads for approval
                 receivers = [...tls];
                 approvalStatus = "pending";
-                
-                console.log(`✅ Employee reply to Manager: Sent to ${tls.length} team leads for approval`);
-                
+
+                console.log(
+                  `✅ Employee reply to Manager: Sent to ${tls.length} team leads for approval`
+                );
+
                 // DO NOT include the manager yet - they'll get it AFTER approval
                 // DO NOT include assigned employee yet - they'll get it AFTER approval
-                
+
                 // Store the original manager ID for later forwarding
                 msgData.originalManagerReceiver = originalSenderId;
                 msgData.isEmployeeReplyToManager = true;
@@ -854,11 +858,16 @@ exports.createMessage = async function createMessage(req, res) {
                 receivers.push(originalSenderId);
               }
               approvalStatus = "approved";
-              console.log(`✅ Employee reply to Manager: Direct supervision - sent directly to manager`);
+              console.log(
+                `✅ Employee reply to Manager: Direct supervision - sent directly to manager`
+              );
             }
           }
           // 🔥 If Team Lead is replying to Manager
-          else if (senderRole === "team_lead" && originalSenderRole === "manager") {
+          else if (
+            senderRole === "team_lead" &&
+            originalSenderRole === "manager"
+          ) {
             console.log("👨‍💼 Team Lead replying to Manager");
             // Team lead replying to manager - no approval needed
             approvalStatus = null;
@@ -868,7 +877,10 @@ exports.createMessage = async function createMessage(req, res) {
             }
           }
           // 🔥 If Manager is replying to Employee message
-          else if (senderRole === "manager" && originalSenderRole === "employee") {
+          else if (
+            senderRole === "manager" &&
+            originalSenderRole === "employee"
+          ) {
             console.log("👷‍♂️ Manager replying to Employee");
             // Manager reply to Employee: No approval needed
             approvalStatus = null;
@@ -878,7 +890,10 @@ exports.createMessage = async function createMessage(req, res) {
             }
           }
           // 🔥 If Employee is replying to Employee message
-          else if (senderRole === "employee" && originalSenderRole === "employee") {
+          else if (
+            senderRole === "employee" &&
+            originalSenderRole === "employee"
+          ) {
             console.log("👷‍♂️ Employee replying to Employee");
             // Follow normal client supervision rules (handled below)
           }
@@ -899,7 +914,11 @@ exports.createMessage = async function createMessage(req, res) {
             originalSenderId &&
             originalSenderId !== String(sender) &&
             !receivers.includes(originalSenderId) &&
-            !(senderRole === "employee" && originalSenderRole === "manager" && needsApproval)
+            !(
+              senderRole === "employee" &&
+              originalSenderRole === "manager" &&
+              needsApproval
+            )
           ) {
             receivers.push(originalSenderId);
           }
@@ -1021,7 +1040,8 @@ exports.createMessage = async function createMessage(req, res) {
       replyContent: isReply ? replyContent : null,
       // 🔥 Store metadata for Employee → Manager replies
       originalManagerReceiver: null,
-      isEmployeeReplyToManager: senderRole === "employee" && isReply && needsApproval,
+      isEmployeeReplyToManager:
+        senderRole === "employee" && isReply && needsApproval,
     };
 
     // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval
@@ -1030,15 +1050,21 @@ exports.createMessage = async function createMessage(req, res) {
         const originalMessage = await WhatsAppMessage.findById(repliedTo)
           .populate("sender", "_id role")
           .lean();
-        
+
         if (originalMessage && originalMessage.sender) {
-          const originalSenderRole = normalizeRole(originalMessage.sender.role || "");
+          const originalSenderRole = normalizeRole(
+            originalMessage.sender.role || ""
+          );
           if (originalSenderRole === "manager") {
             // Store the manager ID for later forwarding after approval
-            msgData.originalManagerReceiver = String(originalMessage.sender._id);
+            msgData.originalManagerReceiver = String(
+              originalMessage.sender._id
+            );
             msgData.isEmployeeReplyToManager = true;
-            
-            console.log(`📝 Storing manager ID ${msgData.originalManagerReceiver} for later forwarding`);
+
+            console.log(
+              `📝 Storing manager ID ${msgData.originalManagerReceiver} for later forwarding`
+            );
           }
         }
       } catch (error) {
@@ -1092,7 +1118,8 @@ exports.createMessage = async function createMessage(req, res) {
         isReply: isReply || false,
         replyToMessageId: isReply ? repliedTo : null,
         // 🔥 ADD REPLY SPECIFIC INFO
-        isEmployeeReplyToManager: senderRole === "employee" && isReply && needsApproval,
+        isEmployeeReplyToManager:
+          senderRole === "employee" && isReply && needsApproval,
         needsTeamLeadApproval: approvalStatus === "pending",
         originalManagerStoredForForwarding: !!msgData.originalManagerReceiver,
       },
@@ -1877,7 +1904,6 @@ exports.getMessage = async function getMessage(req, res) {
   }
 };
 // PATCH /api/assignment-messages/:id/edit - ENHANCED APPROVAL WORKFLOW
-// PATCH /api/assignment-messages/:id/edit - ENHANCED APPROVAL WORKFLOW
 exports.editMessage = async function editMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1907,11 +1933,19 @@ exports.editMessage = async function editMessage(req, res) {
 
     // 🔥 CRITICAL FIX 1: Use normalized role comparison
     const isTeamLead = currentUserRole === "team_lead";
+    const isManager = currentUserRole === "manager";
+    const isEmployee = currentUserRole === "employee";
 
     // 🔥 CRITICAL FIX 2: Proper sender ID comparison
     const isSender = msg.sender && String(msg.sender._id) === currentUserId;
 
-    // 🔥 CRITICAL FIX 3: Enhanced permission check with client supervision
+    // 🔥 CRITICAL FIX 3: Get original sender's role
+    const originalSenderRole = msg.sender ? normalizeRole(msg.sender.role || "") : "";
+    const isOriginalSenderManager = originalSenderRole === "manager";
+    const isOriginalSenderTeamLead = originalSenderRole === "team_lead";
+    const isOriginalSenderEmployee = originalSenderRole === "employee";
+
+    // 🔥 CRITICAL FIX 4: Enhanced permission check with client supervision
     if (!isSender && !isTeamLead) {
       return res.status(403).json({
         error:
@@ -1980,27 +2014,60 @@ exports.editMessage = async function editMessage(req, res) {
       msg.editedBy = req.employee._id;
     }
 
-    // 🔥 ENHANCED APPROVAL WORKFLOW LOGIC WITH CLIENT SUPERVISION
+    // 🔥 CRITICAL FIX: ENHANCED APPROVAL WORKFLOW LOGIC WITH CLIENT SUPERVISION
+    // THIS IS THE SINGLE PLACE WHERE APPROVAL STATUS SHOULD BE SET
     if (hasContentChanges) {
+      // CASE 1: Team Lead editing someone else's message
       if (isTeamLead && !isSender && clientRequiresApproval) {
         // Team Lead editing someone else's message for client that requires approval - AUTO APPROVE
         msg.approvalStatus = "approved";
-      } else if (isSender) {
-        // Original sender editing their own message
-        if (msg.approvalStatus === "disapproved") {
-          // If client requires approval, set to pending. Otherwise, keep as approved
-          msg.approvalStatus = clientRequiresApproval ? "pending" : "approved";
-        } else if (msg.approvalStatus === "approved") {
-          // If already approved and sender edits, keep it approved
-          msg.approvalStatus = "approved";
-        } else if (!msg.approvalStatus && clientRequiresApproval) {
-          // If no approval status but client requires approval, set to pending
-          msg.approvalStatus = "pending";
+      }
+      // CASE 2: Original sender editing their own message
+      else if (isSender) {
+        // 🔥 CRITICAL: Managers and Team Leads should NEVER need approval when editing their own messages
+        if (isOriginalSenderManager || isOriginalSenderTeamLead) {
+          msg.approvalStatus = null; // No approval needed
         }
-        // If pending, remains pending
-      } else if (isTeamLead && isSender) {
+        // Employee editing their own message
+        else if (isOriginalSenderEmployee) {
+          if (msg.approvalStatus === "disapproved") {
+            // Employee's message was disapproved - needs re-approval
+            msg.approvalStatus = clientRequiresApproval ? "pending" : "approved";
+          } else if (msg.approvalStatus === "approved") {
+            // Already approved - keep it approved
+            msg.approvalStatus = "approved";
+          } else if (!msg.approvalStatus && clientRequiresApproval) {
+            // No approval status yet and client requires approval
+            msg.approvalStatus = "pending";
+          }
+          // If pending, remains pending
+        }
+      }
+      // CASE 3: Team Lead editing their own message
+      else if (isTeamLead && isSender) {
         // Team Lead editing their own message - no approval needed
         msg.approvalStatus = null;
+      }
+      // CASE 4: Manager editing (not original sender)
+      else if (isManager && !isSender && clientRequiresApproval) {
+        // Manager editing someone else's message
+        if (isOriginalSenderEmployee) {
+          // Manager editing an employee's message - needs approval if client requires it
+          msg.approvalStatus = "pending";
+        } else {
+          // Manager editing another manager or team lead's message - no approval needed
+          msg.approvalStatus = null;
+        }
+      }
+      
+      // 🔥 ADDITIONAL FIX: Ensure Managers and Team Leads never get "pending" status
+      if (msg.approvalStatus === "pending") {
+        const isSenderManagerOrLead = isOriginalSenderManager || isOriginalSenderTeamLead;
+        const isEditorManagerOrLead = isManager || isTeamLead;
+        
+        if (isSenderManagerOrLead || isEditorManagerOrLead) {
+          msg.approvalStatus = null;
+        }
       }
     }
 
@@ -2048,10 +2115,8 @@ exports.editMessage = async function editMessage(req, res) {
       msg.approvalStatus === "approved" &&
       clientRequiresApproval
     ) {
-      const senderRole = normalizeRole(msg.sender?.role || "");
-
       // ✅ Forward only if sender was an Employee under supervision
-      if (senderRole === "employee") {
+      if (isOriginalSenderEmployee) {
         const { managers } = await findTLsAndManagersByOwner(msg.owner);
 
         if (managers.length > 0) {
@@ -2264,6 +2329,8 @@ exports.editMessage = async function editMessage(req, res) {
     } else if (!clientRequiresApproval) {
       responseMessage =
         "Message updated (direct supervision - no approval needed)";
+    } else if (msg.approvalStatus === null && (isManager || isTeamLead)) {
+      responseMessage = "Message updated (no approval needed for manager/team lead)";
     }
 
     // Build final response
@@ -2274,6 +2341,14 @@ exports.editMessage = async function editMessage(req, res) {
       editedBy: currentUserRole,
       clientSupervision: clientSupervision,
       requiresApproval: clientRequiresApproval,
+      // 🔥 ADD DEBUG INFO
+      debug: {
+        currentUserRole,
+        originalSenderRole,
+        isSender,
+        hasContentChanges,
+        clientRequiresApproval,
+      }
     };
 
     // Add forwarding info to response if applicable
