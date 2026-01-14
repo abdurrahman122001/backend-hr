@@ -2513,7 +2513,33 @@ io.on("connection", (socket) => {
       socket.emit("message_error", { error: "Failed to send message" });
     }
   });
+  socket.on("join:message", (messageId) => {
+    if (!messageId) return;
+    socket.join(`message:${messageId}`);
+  });
 
+  // Leave message room
+  socket.on("leave:message", (messageId) => {
+    if (!messageId) return;
+    socket.leave(`message:${messageId}`);
+  });
+
+  // Join per-user room for notifications
+  // Frontend: socket.emit('join:user', currentUser._id)
+  socket.on("join:user", (userId) => {
+    if (!userId) return;
+    socket.join(`user:${userId}`);
+  });
+
+  // Typing indicator inside comment panel
+  // Frontend sends: socket.emit('comment:typing', { messageId, userId, isTyping })
+  socket.on("comment:typing", (data) => {
+    const { messageId } = data || {};
+    if (!messageId) return;
+
+    // Broadcast to everyone else in that message room
+    socket.to(`message:${messageId}`).emit("comment:typing", data);
+  });
   // 🎯 CRITICAL FIX: Handle message approval events
   socket.on("whatsapp_approve_message", async (data) => {
     try {
@@ -3296,7 +3322,6 @@ cron.schedule(
   },
   { timezone: "Asia/Karachi" }
 );
-
 
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
