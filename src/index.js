@@ -19,7 +19,8 @@ const puppeteer = require("puppeteer");
 const ProbationPeriod = require("./models/ProbationPeriod");
 const EmployeeSession = require("./models/EmployeeSession");
 const { getLeaveYear } = require("./utils/leaveEntitlement");
-
+const LeaveTransaction = require("./models/LeaveTransaction");
+const LeaveYearBalance = require("./models/LeaveYearBalance");
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
@@ -2524,15 +2525,11 @@ io.on("connection", (socket) => {
     socket.leave(`message:${messageId}`);
   });
 
-  // Join per-user room for notifications
-  // Frontend: socket.emit('join:user', currentUser._id)
   socket.on("join:user", (userId) => {
     if (!userId) return;
     socket.join(`user:${userId}`);
   });
 
-  // Typing indicator inside comment panel
-  // Frontend sends: socket.emit('comment:typing', { messageId, userId, isTyping })
   socket.on("comment:typing", (data) => {
     const { messageId } = data || {};
     if (!messageId) return;
@@ -3062,7 +3059,7 @@ cron.schedule(
   { timezone: "UTC" }
 );
 cron.schedule(
-  "5 0 * * *",
+  "23 21 * * *",
   async () => {
     try {
       // ✅ normalize today to DATE ONLY
