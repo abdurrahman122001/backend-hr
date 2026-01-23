@@ -1,0 +1,2 @@
+Type,"Reference number",Check-in,Checkout,"Guest name","Reservation status",Currency,"Payment status",Amount,Commission,"Payments Service Fee",Net,"Payout date","Payout ID"
+Reservation,6965363322,"28 Nov 2025","30 Nov 2025","Thomas Charilaou",ok,GBP,by_booking,710.00,-106.50,-11.36,592.14,"1 Dec 2025",DO21ogQKUqRQH9N8

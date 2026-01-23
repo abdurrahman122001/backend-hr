@@ -1,0 +1,2 @@
+Type,"Reference number",Check-in,Checkout,"Guest name","Reservation status",Currency,"Payment status",Amount,Commission,"Payments Service Fee",Net,"Payout date","Payout ID"
+Reservation,5959413675,"17 Dec 2025","21 Dec 2025","Aneta Olkowska",ok,GBP,by_booking,931.00,-139.65,-14.90,776.45,"22 Dec 2025",sOMSWtoPebSSzutT
