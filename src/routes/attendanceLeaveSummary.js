@@ -95,7 +95,6 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
         $or: [
             { type: "PAID_LEAVE_USED" },
             { type: "UNPAID_LEAVE_USED" },
-            { type: "BONUS_EARNED" },
             { type: "PAID_LEAVE_REVERSED" },
             { type: "UNPAID_LEAVE_REVERSED" },
             { type: "PAID_LEAVE_CREDITED" }
@@ -113,8 +112,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
     months.forEach(month => {
         monthlyData[month] = {
             paidUsed: 0,
-            unpaidUsed: 0,
-            bonusAdded: 0
+            unpaidUsed: 0
         };
     });
 
@@ -129,9 +127,6 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
                 break;
             case "UNPAID_LEAVE_USED":
                 monthlyData[monthName].unpaidUsed += tx.value || 0;
-                break;
-            case "BONUS_EARNED":
-                monthlyData[monthName].bonusAdded += tx.value || 0;
                 break;
             case "PAID_LEAVE_REVERSED":
                 monthlyData[monthName].paidUsed -= tx.value || 0; // Subtract reversals
@@ -166,25 +161,22 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
         );
 
         if (isFutureMonth) {
-            // Future month → show "-"
+            // Future month  show "-"
             monthlyBalances[month] = {
                 balance: "-",
                 paidUsed: "-",
                 unpaidUsed: "-",
-                bonusAdded: "-",
                 isFuture: true
             };
         } else {
-            // Past or current month → calculate balance
+            // Past or current month  calculate balance
             const balanceBeforeMonth = runningBalance;
             runningBalance = runningBalance - monthData.paidUsed;
-            runningBalance += monthData.bonusAdded;
 
             monthlyBalances[month] = {
                 balance: runningBalance, // This is CLOSING balance for the month
                 paidUsed: monthData.paidUsed,
                 unpaidUsed: monthData.unpaidUsed,
-                bonusAdded: monthData.bonusAdded,
                 isFuture: false
             };
         }
