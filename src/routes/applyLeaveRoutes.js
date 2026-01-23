@@ -2,25 +2,6 @@ const express = require("express");
 const router = express.Router();
 const leaveController = require("../controllers/leaveController");
 const UnifiedAuth = require("../middleware/unifiedAuth");
-// All routes are protected
-router.get("/debug/auth", UnifiedAuth, (req, res) => {
-  console.log("🔐 [Debug] Auth successful for apply-leave route");
-  res.json({
-    success: true,
-    message: "Authentication successful for apply-leave routes",
-    user: {
-      id: req.user.id,
-      employeeId: req.user.employeeId,
-      role: req.user.role,
-      name: req.user.name,
-      isEmployee: req.user.isEmployee,
-      isAdmin: req.user.isAdmin,
-    },
-    route: "/api/apply-leave",
-    timestamp: new Date().toISOString(),
-  });
-});
-
 // Apply for leave
 router.post("/", UnifiedAuth, leaveController.applyLeave);
 
