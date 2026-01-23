@@ -1,0 +1,2 @@
+Type,"Reference number",Check-in,Checkout,"Guest name","Reservation status",Currency,"Payment status",Amount,Commission,"Payments Service Fee",Net,"Payout date","Payout ID"
+Reservation,6615260395,"16 Dec 2025","19 Dec 2025","Jawad Mataame",ok,GBP,by_booking,638.00,-95.70,-10.21,532.09,"22 Dec 2025",5W3Gq1eO9UStiNJ6
