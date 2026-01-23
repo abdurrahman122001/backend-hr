@@ -118,7 +118,7 @@ exports.createBug = async (req, res) => {
 };
 
 // ---------------------
-// GET BUGS - UPDATED WITH OWNER FILTERING
+// GET BUGS - FIXED WITH PROPER PAGINATION
 // ---------------------
 exports.getBugs = async (req, res) => {
   try {
@@ -131,12 +131,12 @@ exports.getBugs = async (req, res) => {
       search,
       page = 1,
       limit = 10,
-      viewType = "employee", // 'employee', 'owner', or 'all'
+      viewType = "employee",
     } = req.query;
 
     const employeeId = req.employee._id;
     const emp = await Employee.findById(employeeId)
-      .select("department owner role")
+      .select("department role owner")
       .populate("owner", "name email");
 
     if (!emp) {
@@ -146,22 +146,17 @@ exports.getBugs = async (req, res) => {
       });
     }
 
-    let query = {};
-    let showOwnerBugs = false;
+    // Create base query for current user's view
+    let baseQuery = {};
 
     // Determine view type
     if (viewType === "owner" && emp.owner) {
-      // If user wants to see bugs of all employees they own
-      showOwnerBugs = true;
-
-      // Get all employees owned by this user
+      // Owner view - get bugs from all owned employees
       const ownedEmployees = await Employee.find({
         owner: emp.owner._id,
       }).select("_id");
-
       const ownedEmployeeIds = ownedEmployees.map((e) => e._id);
-
-      query.reportedBy = { $in: ownedEmployeeIds };
+      baseQuery.reportedBy = { $in: ownedEmployeeIds };
     } else if (viewType === "all") {
       // Admin/R&D can see all bugs
       if (
@@ -174,10 +169,9 @@ exports.getBugs = async (req, res) => {
           message: "Not authorized to view all bugs",
         });
       }
-      // No specific query - show all
+      // No restriction for all view
     } else {
-      // Default: employee sees their own bugs
-      // R&D sees all bugs
+      // Employee view
       if (
         emp.department === "Research & Development" ||
         emp.department === "Research and Development" ||
@@ -185,11 +179,15 @@ exports.getBugs = async (req, res) => {
       ) {
         // R&D/Admin sees all bugs in employee view
       } else {
-        query.reportedBy = employeeId;
+        // Regular employee sees only their bugs
+        baseQuery.reportedBy = employeeId;
       }
     }
 
-    // Apply filters
+    // Create filtered query for paginated results
+    let query = { ...baseQuery };
+
+    // Apply status filter
     if (status && status !== "all") {
       query.status = status;
     }
@@ -222,9 +220,17 @@ exports.getBugs = async (req, res) => {
     }
 
     // Calculate pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
 
-    // Execute query
+    // Get total count for current query (with all filters)
+    const total = await Bug.countDocuments(query);
+
+    // Calculate total pages
+    const totalPages = Math.ceil(total / limitNum);
+
+    // Execute query for paginated results
     const bugs = await Bug.find(query)
       .populate({
         path: "reportedBy",
@@ -236,55 +242,25 @@ exports.getBugs = async (req, res) => {
       })
       .sort({ createdAt: -1 })
       .skip(skip)
-      .limit(parseInt(limit));
+      .limit(limitNum);
 
-    // Get total count
-    const total = await Bug.countDocuments(query);
-
-    // Get statistics
+    // Get overall statistics for the base query (without status filter)
     const statusCounts = {
-      open: await Bug.countDocuments({ ...query, status: "open" }),
+      total: await Bug.countDocuments(baseQuery),
+      open: await Bug.countDocuments({ ...baseQuery, status: "open" }),
       pending_approval: await Bug.countDocuments({
-        ...query,
+        ...baseQuery,
         status: "pending_approval",
       }),
-      resolved: await Bug.countDocuments({ ...query, status: "resolved" }),
-      total: total,
+      resolved: await Bug.countDocuments({ ...baseQuery, status: "resolved" }),
     };
-
-    // Get owner statistics if viewing owner bugs
-    let ownerStats = null;
-    if (showOwnerBugs && emp.owner) {
-      const ownedEmployees = await Employee.find({
-        owner: emp.owner._id,
-      }).select("name balance department");
-
-      const totalBalance = ownedEmployees.reduce(
-        (sum, emp) => sum + (emp.balance || 0),
-        0
-      );
-
-      ownerStats = {
-        ownerName: emp.owner.name,
-        ownerEmail: emp.owner.email,
-        totalEmployees: ownedEmployees.length,
-        totalBugBountyBalance: totalBalance,
-        employees: ownedEmployees.map((e) => ({
-          name: e.name,
-          department: e.department,
-          balance: e.balance || 0,
-        })),
-      };
-    }
 
     return res.json({
       status: "success",
       total,
-      currentPage: parseInt(page),
-      totalPages: Math.ceil(total / parseInt(limit)),
+      currentPage: pageNum,
+      totalPages,
       statusCounts,
-      ownerStats,
-      viewType,
       bugs,
     });
   } catch (err) {
@@ -295,6 +271,7 @@ exports.getBugs = async (req, res) => {
     });
   }
 };
+
 exports.getBugsByOwner = async (req, res) => {
   try {
     const userId = req.user._id;

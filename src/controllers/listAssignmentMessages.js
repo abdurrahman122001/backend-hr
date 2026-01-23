@@ -729,6 +729,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
       approvalStatus,
       threadId,
       search,
+      threadMode = "true", // Add thread mode parameter
     } = req.query;
 
     const currentUser = req.employee?._id;
@@ -813,6 +814,116 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
+    // If threadMode is enabled and we have client messages
+    if (threadMode === "true") {
+      // First, get distinct threadIds that match the query
+      const distinctThreads = await AssignmentMessage.aggregate([
+        { $match: qFinal },
+        {
+          $group: {
+            _id: "$threadId",
+            latestMessage: { $max: "$createdAt" },
+            client: { $first: "$client" },
+            // Only group threads that have a client
+            hasClient: { $first: { $ne: ["$client", null] } }
+          }
+        },
+        // Filter to only include threads with clients
+        { $match: { hasClient: true } },
+        { $sort: { latestMessage: -1 } },
+        { $skip: (pageNum - 1) * lim },
+        { $limit: lim },
+        { $project: { threadId: "$_id", _id: 0 } }
+      ]);
+
+      const threadIds = distinctThreads.map(t => t.threadId);
+      
+      // If no threads with clients found, return empty result
+      if (threadIds.length === 0) {
+        return res.json({
+          communicationType: "external",
+          items: [],
+          total: 0,
+          page: pageNum,
+          pages: 0,
+          limit: lim,
+        });
+      }
+
+      // Get all messages for these threads
+      const [threadMessages, totalThreads] = await Promise.all([
+        AssignmentMessage.find({
+          ...qFinal,
+          threadId: { $in: threadIds }
+        })
+          .sort({ threadId: 1, createdAt: -1 }) // Group by thread, newest first in each thread
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            {
+              path: "sender",
+              select: "_id name companyEmail role supervisionMode",
+            },
+            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "client", select: "_id clientName" },
+          ])
+          .lean(),
+        AssignmentMessage.aggregate([
+          { $match: qFinal },
+          {
+            $group: {
+              _id: "$threadId",
+              hasClient: { $first: { $ne: ["$client", null] } }
+            }
+          },
+          { $match: { hasClient: true } },
+          { $count: "total" }
+        ])
+      ]);
+
+      // Group messages by threadId
+      const groupedThreads = {};
+      threadMessages.forEach(message => {
+        if (!groupedThreads[message.threadId]) {
+          groupedThreads[message.threadId] = [];
+        }
+        groupedThreads[message.threadId].push(message);
+      });
+
+      // Convert to array format with thread metadata
+      const threadsArray = Object.keys(groupedThreads).map(threadId => {
+        const messages = groupedThreads[threadId];
+        const latestMessage = messages[0]; // Already sorted by createdAt: -1
+        
+        return {
+          threadId,
+          client: latestMessage.client,
+          subject: latestMessage.subject,
+          latestMessageAt: latestMessage.createdAt,
+          messageCount: messages.length,
+          messages: messages, // All messages in the thread
+          isFromClient: latestMessage.isFromClient,
+          isFromCompanyEmployee: latestMessage.isFromCompanyEmployee,
+          // Add any other thread-level metadata you need
+        };
+      });
+
+      // Sort threads by latest message time
+      threadsArray.sort((a, b) => new Date(b.latestMessageAt) - new Date(a.latestMessageAt));
+
+      const totalCount = totalThreads.length > 0 ? totalThreads[0].total : 0;
+
+      return res.json({
+        communicationType: "external",
+        items: threadsArray,
+        total: totalCount,
+        page: pageNum,
+        pages: Math.ceil(totalCount / lim),
+        limit: lim,
+        threadMode: true
+      });
+    }
+
+    // Original non-thread mode (for backward compatibility)
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
@@ -838,13 +949,13 @@ exports.getExternalCommunications = async function getExternalCommunications(
       page: pageNum,
       pages: Math.ceil(total / lim),
       limit: lim,
+      threadMode: false
     });
   } catch (e) {
     console.error("❌ Error in getExternalCommunications:", e);
     res.status(500).json({ error: "Failed to fetch external communications" });
   }
 };
-
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
   res

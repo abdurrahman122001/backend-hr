@@ -92,7 +92,7 @@ function normalizeRole(role) {
   if (raw === "Manager") return "manager";
   if (raw === "Employee") return "employee";
   const r = raw.toLowerCase().replace(/\s+/g, "_");
-  if (["teamlead", "team lead", "team_lead", "team-lead", "lead"].includes(r))
+  if (["teamlead", "team lead", "team_lead", "team-lead", "lead", "Team Lead"].includes(r))
     return "team_lead";
   if (r === "manager") return "manager";
   if (["employee", "staff", "associate"].includes(r)) return "employee";
@@ -1037,7 +1037,7 @@ exports.createMessage = async function createMessage(req, res) {
       // Only include team leads if they're explicitly specified or already in the thread
       console.log(`👨‍💼 Manager sending message - team leads NOT automatically added for client/company employee messages`);
 
-    } else if (senderRole === "team_lead") {
+    } else if (senderRole === "Team Lead") {
       approvalStatus = null;
     }
 
@@ -1196,7 +1196,7 @@ exports.createMessage = async function createMessage(req, res) {
               error: "Please specify at least one receiver for your message",
             });
           }
-        } else if (senderRole === "team_lead") {
+        } else if (senderRole === "Team Lead") {
           return res.status(400).json({
             error:
               "Team leads must specify at least one receiver for their messages",
@@ -1642,7 +1642,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
-    if (userRole !== "team_lead") {
+    if (userRole !== "Team Lead") {
       return res
         .status(403)
         .json({ error: "Only Team Leads can approve messages" });
@@ -1800,7 +1800,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
-    if (userRole !== "team_lead") {
+    if (userRole !== "Team Lead") {
       return res
         .status(403)
         .json({ error: "Only Team Leads can disapprove messages" });
@@ -2556,7 +2556,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         messageOwner: messageSenderId,
         currentUser: currentUserId,
         userRole: req.employee?.role || "unknown",
-        allowedRoles: ["sender", "team_lead", "manager"],
+        allowedRoles: ["sender", "Team Lead", "manager"],
       });
     }
 
@@ -3409,7 +3409,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     const currentUser = req.employee;
     const currentUserId = String(currentUser._id);
     const currentUserRole = normalizeRole(currentUser.role || "");
-    const isTeamLead = currentUserRole === "team_lead";
+    const isTeamLead = currentUserRole === "Team Lead";
 
     // Check permissions: either sender OR team lead can edit pending messages
     const isSender = String(msg.sender) === currentUserId;

@@ -31,7 +31,7 @@ exports.getRoster = async (req, res) => {
     const [employees, clients] = await Promise.all([
       Employee.find({
         owner: me.owner,
-        status: "active", // Only show active employees
+        status: "active",
         $or: [
           { department: "Operations" },
           { role: { $in: ["Employee", "Manager", "Team Lead"] } },
@@ -44,13 +44,40 @@ exports.getRoster = async (req, res) => {
         .sort({ name: 1 }),
       ClientInfo.find({ owner: me.owner })
         .select(
-          "_id clientName legalBusinessName industry taxStatus companyLocation assignedTo"
+          "_id clientName legalBusinessName industry taxStatus companyLocation assignedTo companyEmployees clientEmail"
         )
         .populate("assignedTo", "_id name companyEmail")
         .sort({ createdAt: -1 }),
     ]);
 
-    res.json({ employees, clients });
+    // Extract and format client employees from all clients
+    const allClientEmployees = [];
+    clients.forEach(client => {
+      if (client.companyEmployees && client.companyEmployees.length > 0) {
+        client.companyEmployees.forEach(emp => {
+          allClientEmployees.push({
+            _id: `${client._id}_${emp.email || emp.name.replace(/\s+/g, '_')}`, // Composite ID
+            name: emp.name,
+            email: emp.email,
+            designation: emp.designation,
+            phone: emp.phone,
+            department: emp.department,
+            isPrimaryContact: emp.isPrimaryContact,
+            clientId: client._id,
+            clientName: client.clientName,
+            clientEmail: client.clientEmail,
+            type: "company_employee",
+            addedAt: emp.addedAt
+          });
+        });
+      }
+    });
+
+    res.json({ 
+      employees, 
+      clients,
+      clientEmployees: allClientEmployees 
+    });
   } catch (err) {
     console.error("getRoster error:", err);
     res.status(500).json({ error: "Failed to load roster" });
