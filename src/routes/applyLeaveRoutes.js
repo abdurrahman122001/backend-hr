@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const leaveController = require("../controllers/leaveController");
 const UnifiedAuth = require("../middleware/unifiedAuth");
+
 // Apply for leave
 router.post("/", UnifiedAuth, leaveController.applyLeave);
 
@@ -16,6 +17,7 @@ router.get("/stats", UnifiedAuth, leaveController.getLeaveStats);
 
 // Get single leave
 router.get("/:id", UnifiedAuth, leaveController.getLeaveById);
+
 // Update leave
 router.put("/:id", UnifiedAuth, leaveController.updateLeave);
 
@@ -27,6 +29,15 @@ router.put("/:id/reject", UnifiedAuth, leaveController.rejectLeave);
 
 // Cancel leave
 router.put("/:id/cancel", UnifiedAuth, leaveController.cancelLeave);
+
 // Delete leave (soft delete)
 router.delete("/:id", UnifiedAuth, leaveController.deleteLeave);
+
+// NEW ROUTES FOR POLICY-BASED AUTO-DECISION
+// Check leave against HR policy
+router.post("/check-policy", UnifiedAuth, leaveController.checkLeavePolicy);
+
+// Get HR policy rules for leave
+router.get("/policy-rules", UnifiedAuth, leaveController.getLeavePolicyRules);
+
 module.exports = router;

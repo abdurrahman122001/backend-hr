@@ -111,10 +111,10 @@ app.use(
       res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
       res.setHeader(
         "Access-Control-Allow-Headers",
-        "Content-Type, Authorization"
+        "Content-Type, Authorization",
       );
     },
-  })
+  }),
 );
 app.use("/upload", express.static(path.join(__dirname, "../uploads")));
 
@@ -124,7 +124,7 @@ app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 // but it isn't necessary if they're inside uploads/chat-attachments/
 app.use(
   "/uploads/chat-attachments",
-  express.static(path.join(__dirname, "../uploads/chat-attachments"))
+  express.static(path.join(__dirname, "../uploads/chat-attachments")),
 );
 // ---------- CORS ----------
 // If you need wildcard subdomains, switch to a regex check.
@@ -162,7 +162,7 @@ app.use(
       return cb(new Error(`CORS blocked for origin: ${origin}`));
     },
     credentials: true,
-  })
+  }),
 );
 
 // (Optional) CORS error handler to avoid generic 500s
@@ -321,7 +321,7 @@ function setupEmployeeChangeStream() {
     changeStream.on("error", (err) => {
       console.warn(
         "⚠️ Employee change stream error (likely no replica set). Disabling watcher.",
-        err?.message || err
+        err?.message || err,
       );
       try {
         changeStream.close();
@@ -330,7 +330,7 @@ function setupEmployeeChangeStream() {
   } catch (e) {
     console.warn(
       "⚠️ Change streams not supported (no replica set / permissions?). Skipping.",
-      e?.message || e
+      e?.message || e,
     );
   }
 }
@@ -494,14 +494,14 @@ if (
       cert: fs.readFileSync(CERT_FULLCHAIN),
       key: fs.readFileSync(CERT_PRIVKEY),
     },
-    app
+    app,
   );
   primaryServer = httpsServer;
   httpsEnabled = true;
 
   httpsServer.listen(HTTPS_PORT, () => {
     console.log(
-      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`
+      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`,
     );
   });
 
@@ -515,7 +515,7 @@ if (
     })
     .listen(HTTP_PORT, () => {
       console.log(
-        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`
+        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`,
       );
     });
 } else {
@@ -528,7 +528,7 @@ if (
     if (ENABLE_HTTPS) {
       console.warn(
         "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY."
+          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
       );
     }
   });
@@ -662,7 +662,7 @@ io.on("connection", (socket) => {
             action: "unassigned",
             previousAssignee: previousAssignee, // ✅ Add this
             assignedTo: null, // ✅ Important for unassignment
-          }
+          },
         );
       }
 
@@ -687,7 +687,7 @@ io.on("connection", (socket) => {
           client: { _id: clientId, clientName, dba, assignedTo: employeeId },
           action: "updated",
           timestamp: new Date().toISOString(),
-        }
+        },
       );
 
       if (callback) {
@@ -738,7 +738,7 @@ io.on("connection", (socket) => {
 
         if (!messageId) {
           console.error(
-            "❌ assignment_message_attachments_updated: messageId is required"
+            "❌ assignment_message_attachments_updated: messageId is required",
           );
           if (callback)
             callback({ success: false, error: "messageId is required" });
@@ -756,7 +756,7 @@ io.on("connection", (socket) => {
         if (!populatedMessage) {
           console.error(
             "❌ Message not found for attachment update:",
-            messageId
+            messageId,
           );
           if (callback)
             callback({ success: false, error: "Message not found" });
@@ -773,13 +773,13 @@ io.on("connection", (socket) => {
         if (Array.isArray(populatedMessage.receiver)) {
           receiverIds = populatedMessage.receiver
             .map((receiver) =>
-              typeof receiver === "string" ? receiver : receiver?._id
+              typeof receiver === "string" ? receiver : receiver?._id,
             )
             .filter(Boolean);
         }
 
         const allParticipants = new Set(
-          [senderId, ...receiverIds].filter(Boolean)
+          [senderId, ...receiverIds].filter(Boolean),
         );
         const clientId =
           typeof populatedMessage.client === "string"
@@ -796,7 +796,7 @@ io.on("connection", (socket) => {
               action: action, // 'added', 'removed', 'updated'
               message: populatedMessage,
               timestamp: new Date(),
-            }
+            },
           );
         });
 
@@ -810,7 +810,7 @@ io.on("connection", (socket) => {
               action: action,
               message: populatedMessage,
               timestamp: new Date(),
-            }
+            },
           );
         }
 
@@ -824,7 +824,7 @@ io.on("connection", (socket) => {
               action: action,
               message: populatedMessage,
               timestamp: new Date(),
-            }
+            },
           );
         }
 
@@ -836,7 +836,7 @@ io.on("connection", (socket) => {
               message: populatedMessage,
               action: "attachments_updated",
               timestamp: new Date(),
-            }
+            },
           );
         });
 
@@ -861,7 +861,7 @@ io.on("connection", (socket) => {
           });
         }
       }
-    }
+    },
   );
 
   // 🔥 NEW: Handle message edits with attachments
@@ -901,13 +901,13 @@ io.on("connection", (socket) => {
       if (Array.isArray(populatedMessage.receiver)) {
         receiverIds = populatedMessage.receiver
           .map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver?._id
+            typeof receiver === "string" ? receiver : receiver?._id,
           )
           .filter(Boolean);
       }
 
       const allParticipants = new Set(
-        [senderId, ...receiverIds].filter(Boolean)
+        [senderId, ...receiverIds].filter(Boolean),
       );
       const clientId =
         typeof populatedMessage.client === "string"
@@ -933,7 +933,7 @@ io.on("connection", (socket) => {
             message: populatedMessage,
             updates: updates,
             timestamp: new Date(),
-          }
+          },
         );
       }
 
@@ -1008,7 +1008,7 @@ io.on("connection", (socket) => {
       if (Array.isArray(populatedMessage.receiver)) {
         actualReceiverIds = populatedMessage.receiver
           .map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver?._id
+            typeof receiver === "string" ? receiver : receiver?._id,
           )
           .filter(Boolean);
       } else if (populatedMessage.receiver) {
@@ -1027,7 +1027,7 @@ io.on("connection", (socket) => {
 
       // 1. Emit specific approval event to all participants
       const allParticipants = new Set(
-        [senderId, ...actualReceiverIds].filter(Boolean)
+        [senderId, ...actualReceiverIds].filter(Boolean),
       );
 
       // Emit to all participants
@@ -1066,7 +1066,7 @@ io.on("connection", (socket) => {
             approvalStatus: "approved",
             message: populatedMessage,
             timestamp: new Date(),
-          }
+          },
         );
       }
 
@@ -1079,7 +1079,7 @@ io.on("connection", (socket) => {
             approvalStatus: "approved",
             message: populatedMessage,
             timestamp: new Date(),
-          }
+          },
         );
       }
 
@@ -1132,7 +1132,7 @@ io.on("connection", (socket) => {
       if (!populatedMessage) {
         console.error(
           "❌ Disapproved assignment message not found:",
-          message._id
+          message._id,
         );
         if (callback) callback({ success: false, error: "Message not found" });
         return;
@@ -1149,7 +1149,7 @@ io.on("connection", (socket) => {
       if (Array.isArray(populatedMessage.receiver)) {
         actualReceiverIds = populatedMessage.receiver
           .map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver?._id
+            typeof receiver === "string" ? receiver : receiver?._id,
           )
           .filter(Boolean);
       } else if (populatedMessage.receiver) {
@@ -1168,7 +1168,7 @@ io.on("connection", (socket) => {
 
       // 1. Emit specific disapproval event to all participants
       const allParticipants = new Set(
-        [senderId, ...actualReceiverIds].filter(Boolean)
+        [senderId, ...actualReceiverIds].filter(Boolean),
       );
 
       // Emit to all participants
@@ -1180,7 +1180,7 @@ io.on("connection", (socket) => {
             approvalStatus: "disapproved",
             message: populatedMessage,
             timestamp: new Date(),
-          }
+          },
         );
       });
 
@@ -1210,7 +1210,7 @@ io.on("connection", (socket) => {
             approvalStatus: "disapproved",
             message: populatedMessage,
             timestamp: new Date(),
-          }
+          },
         );
       }
 
@@ -1223,7 +1223,7 @@ io.on("connection", (socket) => {
             approvalStatus: "disapproved",
             message: populatedMessage,
             timestamp: new Date(),
-          }
+          },
         );
       }
 
@@ -1276,7 +1276,7 @@ io.on("connection", (socket) => {
       if (!populatedMessage) {
         console.error(
           "❌ Resubmitted assignment message not found:",
-          message._id
+          message._id,
         );
         if (callback) callback({ success: false, error: "Message not found" });
         return;
@@ -1294,7 +1294,7 @@ io.on("connection", (socket) => {
       if (Array.isArray(populatedMessage.receiver)) {
         actualReceiverIds = populatedMessage.receiver
           .map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver?._id
+            typeof receiver === "string" ? receiver : receiver?._id,
           )
           .filter(Boolean);
       } else if (populatedMessage.receiver) {
@@ -1416,7 +1416,7 @@ io.on("connection", (socket) => {
       await emitToSpecificReceivers(
         io,
         populatedMessage,
-        "new_assignment_message"
+        "new_assignment_message",
       );
 
       // Send success callback
@@ -1455,7 +1455,7 @@ io.on("connection", (socket) => {
       if (Array.isArray(message.receiver)) {
         receiverIds = message.receiver
           .map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver?._id
+            typeof receiver === "string" ? receiver : receiver?._id,
           )
           .filter(Boolean);
       } else if (message.receiver) {
@@ -1482,13 +1482,13 @@ io.on("connection", (socket) => {
               receiver: receiverIds,
             },
             action,
-          }
+          },
         );
       }
 
       // Notify ONLY actual participants
       const allParticipants = new Set(
-        [senderId, ...receiverIds].filter(Boolean)
+        [senderId, ...receiverIds].filter(Boolean),
       );
 
       allParticipants.forEach((participantId) => {
@@ -1604,9 +1604,8 @@ io.on("connection", (socket) => {
         .lean();
 
       // Get thread participants
-      const participants = await ThreadChatMessage.getThreadParticipants(
-        threadId
-      );
+      const participants =
+        await ThreadChatMessage.getThreadParticipants(threadId);
 
       // Format messages
       const allMessages = [
@@ -1708,11 +1707,10 @@ io.on("connection", (socket) => {
       let messageReceivers = receiver;
       if (!messageReceivers || messageReceivers.length === 0) {
         // Get existing participants
-        const participants = await ThreadChatMessage.getThreadParticipants(
-          threadId
-        );
+        const participants =
+          await ThreadChatMessage.getThreadParticipants(threadId);
         messageReceivers = participants.filter(
-          (id) => id.toString() !== senderId.toString()
+          (id) => id.toString() !== senderId.toString(),
         );
       }
 
@@ -1825,7 +1823,7 @@ io.on("connection", (socket) => {
                 readAt: new Date(),
               },
             },
-          }
+          },
         );
       } else {
         // Mark all unread messages in thread as read
@@ -1850,7 +1848,7 @@ io.on("connection", (socket) => {
                 readAt: new Date(),
               },
             },
-          }
+          },
         );
       }
 
@@ -1969,7 +1967,7 @@ io.on("connection", (socket) => {
           content: "[This message was deleted]",
           attachments: [],
         },
-        { new: true }
+        { new: true },
       ).lean();
 
       // Broadcast deletion to thread room
@@ -2025,9 +2023,8 @@ io.on("connection", (socket) => {
         .lean();
 
       // Get thread participants
-      const participants = await ThreadChatMessage.getThreadParticipants(
-        threadId
-      );
+      const participants =
+        await ThreadChatMessage.getThreadParticipants(threadId);
 
       // Get assignment info
       const assignmentInfo = await AssignmentMessage.findOne({
@@ -2368,9 +2365,8 @@ io.on("connection", (socket) => {
         return;
       }
 
-      const participants = await ThreadChatMessage.getThreadParticipants(
-        threadId
-      );
+      const participants =
+        await ThreadChatMessage.getThreadParticipants(threadId);
 
       // Get participant details
       const participantDetails = await Employee.find({
@@ -2482,7 +2478,7 @@ io.on("connection", (socket) => {
 
       if (!message || !clientId || !senderId) {
         console.error(
-          "❌ whatsapp_send_message: message, clientId, and senderId are required"
+          "❌ whatsapp_send_message: message, clientId, and senderId are required",
         );
         socket.emit("message_error", { error: "Missing required fields" });
         return;
@@ -2532,12 +2528,164 @@ io.on("connection", (socket) => {
     socket.join(`user:${userId}`);
   });
 
-  socket.on("comment:typing", (data) => {
-    const { messageId } = data || {};
-    if (!messageId) return;
+  socket.on("comment:add", async (data) => {
+    try {
+      const { messageId, comment, senderId } = data;
 
-    // Broadcast to everyone else in that message room
-    socket.to(`message:${messageId}`).emit("comment:typing", data);
+      if (!messageId || !comment || !senderId) {
+        console.error(
+          "❌ comment:add: messageId, comment, and senderId are required",
+        );
+        return;
+      }
+
+      // Save comment to database (you'll need to implement this)
+      // const savedComment = await saveCommentToDatabase(messageId, comment, senderId);
+
+      // For now, create a mock comment
+      const savedComment = {
+        _id: `comment_${Date.now()}`,
+        ...comment,
+        sender: { _id: senderId, name: "User" }, // Get from DB
+        createdAt: new Date().toISOString(),
+        reactions: [],
+      };
+
+      // Get updated comment count from database
+      // const commentCount = await getCommentCount(messageId);
+      const commentCount = 1; // Mock
+
+      // Emit to everyone in the message room
+      io.to(`message:${messageId}`).emit("comment:added", {
+        messageId,
+        comment: savedComment,
+        commentCount,
+        lastCommentAt: savedComment.createdAt,
+        lastCommentBy: savedComment.sender,
+      });
+
+      // Also notify specific user if mentioned
+      if (comment.mentions && Array.isArray(comment.mentions)) {
+        comment.mentions.forEach((mention) => {
+          if (mention.userId && mention.userId !== senderId) {
+            io.to(`user:${mention.userId}`).emit("comment:mentioned", {
+              messageId,
+              comment: savedComment,
+              mentionedBy: senderId,
+            });
+          }
+        });
+      }
+    } catch (error) {
+      console.error("❌ Error in comment:add:", error);
+      socket.emit("comment:error", { error: "Failed to add comment" });
+    }
+  });
+
+  socket.on("comment:edit", async (data) => {
+    try {
+      const { messageId, commentId, text, editedBy } = data;
+
+      if (!messageId || !commentId || !text || !editedBy) {
+        console.error("❌ comment:edit: All fields are required");
+        return;
+      }
+
+      // Update comment in database
+      // const updatedComment = await updateCommentInDatabase(commentId, text, editedBy);
+
+      // Mock updated comment
+      const updatedComment = {
+        _id: commentId,
+        text,
+        isEdited: true,
+        editedAt: new Date().toISOString(),
+        editedBy,
+      };
+
+      io.to(`message:${messageId}`).emit("comment:updated", {
+        messageId,
+        comment: updatedComment,
+      });
+    } catch (error) {
+      console.error("❌ Error in comment:edit:", error);
+      socket.emit("comment:error", { error: "Failed to edit comment" });
+    }
+  });
+
+  socket.on("comment:delete", async (data) => {
+    try {
+      const { messageId, commentId, deletedBy } = data;
+
+      if (!messageId || !commentId || !deletedBy) {
+        console.error("❌ comment:delete: All fields are required");
+        return;
+      }
+
+      // Delete comment from database
+      // await deleteCommentFromDatabase(commentId, deletedBy);
+      // const commentCount = await getCommentCount(messageId);
+      const commentCount = 0; // Mock
+
+      io.to(`message:${messageId}`).emit("comment:deleted", {
+        messageId,
+        commentId,
+        commentCount,
+      });
+    } catch (error) {
+      console.error("❌ Error in comment:delete:", error);
+      socket.emit("comment:error", { error: "Failed to delete comment" });
+    }
+  });
+
+  socket.on("comment:add_reaction", async (data) => {
+    try {
+      const { messageId, commentId, reaction, userId } = data;
+
+      if (!messageId || !commentId || !reaction || !userId) {
+        console.error("❌ comment:add_reaction: All fields are required");
+        return;
+      }
+
+      // Add reaction to database
+      // const updatedReaction = await addReactionToComment(commentId, reaction, userId);
+
+      // Mock reaction
+      const updatedReaction = {
+        emoji: reaction,
+        userId,
+        timestamp: new Date().toISOString(),
+      };
+
+      io.to(`message:${messageId}`).emit("comment:reaction_added", {
+        messageId,
+        commentId,
+        reaction: updatedReaction,
+      });
+    } catch (error) {
+      console.error("❌ Error in comment:add_reaction:", error);
+      socket.emit("comment:error", { error: "Failed to add reaction" });
+    }
+  });
+
+  socket.on("comment:typing", (data) => {
+    try {
+      const { messageId, userId, isTyping } = data;
+
+      if (!messageId || !userId) {
+        console.error("❌ comment:typing: messageId and userId are required");
+        return;
+      }
+
+      // Broadcast typing status to everyone in the message room except the typing user
+      socket.to(`message:${messageId}`).emit("comment:typing", {
+        messageId,
+        userId,
+        isTyping,
+      });
+    } catch (error) {
+      console.error("❌ Error in comment:typing:", error);
+    }
   });
   // 🎯 CRITICAL FIX: Handle message approval events
   socket.on("whatsapp_approve_message", async (data) => {
@@ -2546,7 +2694,7 @@ io.on("connection", (socket) => {
 
       if (!message || !approvedBy) {
         console.error(
-          "❌ whatsapp_approve_message: message and approvedBy are required"
+          "❌ whatsapp_approve_message: message and approvedBy are required",
         );
         return;
       }
@@ -2626,7 +2774,7 @@ io.on("connection", (socket) => {
 
       if (!message || !managers || !Array.isArray(managers)) {
         console.error(
-          "❌ whatsapp_forward_to_managers: message and managers array are required"
+          "❌ whatsapp_forward_to_managers: message and managers array are required",
         );
         return;
       }
@@ -2672,7 +2820,7 @@ io.on("connection", (socket) => {
 
       if (!message || !editedBy) {
         console.error(
-          "❌ whatsapp_edit_message: message and editedBy are required"
+          "❌ whatsapp_edit_message: message and editedBy are required",
         );
         return;
       }
@@ -2733,7 +2881,7 @@ io.on("connection", (socket) => {
 
       if (!messageId || !status) {
         console.error(
-          "❌ whatsapp_message_status: messageId and status are required"
+          "❌ whatsapp_message_status: messageId and status are required",
         );
         return;
       }
@@ -2773,7 +2921,7 @@ io.on("connection", (socket) => {
 
       if (!conversationId || !message) {
         console.error(
-          "❌ send_message: conversationId and message are required"
+          "❌ send_message: conversationId and message are required",
         );
         return;
       }
@@ -2809,7 +2957,7 @@ io.on("connection", (socket) => {
 
     if (!conversationId || !user) {
       console.error(
-        "❌ user_stopped_typing: conversationId and user are required"
+        "❌ user_stopped_typing: conversationId and user are required",
       );
       return;
     }
@@ -2864,7 +3012,7 @@ io.on("connection", (socket) => {
 
       if (!conversationId || !message) {
         console.error(
-          "❌ send_message: conversationId and message are required"
+          "❌ send_message: conversationId and message are required",
         );
         return;
       }
@@ -2887,7 +3035,7 @@ io.on("connection", (socket) => {
 
       if (!spaceId || !message) {
         console.error(
-          "❌ send_space_message: spaceId and message are required"
+          "❌ send_space_message: spaceId and message are required",
         );
         return;
       }
@@ -2922,7 +3070,7 @@ io.on("connection", (socket) => {
 
     if (!conversationId || !user) {
       console.error(
-        "❌ user_stopped_typing: conversationId and user are required"
+        "❌ user_stopped_typing: conversationId and user are required",
       );
       return;
     }
@@ -2939,7 +3087,7 @@ io.on("connection", (socket) => {
 
     if (!conversationId || !userId) {
       console.error(
-        "❌ mark_messages_read: conversationId and userId are required"
+        "❌ mark_messages_read: conversationId and userId are required",
       );
       return;
     }
@@ -3008,7 +3156,7 @@ const emitForwardToManagers = (io, data) => {
 
   if (!message || !managers || !Array.isArray(managers)) {
     console.error(
-      "❌ emitForwardToManagers: message and managers array are required"
+      "❌ emitForwardToManagers: message and managers array are required",
     );
     return;
   }
@@ -3042,23 +3190,22 @@ cron.schedule(
   async () => {
     try {
       console.log("[cron] Checking for scheduled messages to send...");
-      const results = await assignmentMessageController.sendScheduledMessages(
-        io
-      );
+      const results =
+        await assignmentMessageController.sendScheduledMessages(io);
 
       if (results.sent > 0) {
         console.log(`[cron] Sent ${results.sent} scheduled messages`);
       }
       if (results.failed > 0) {
         console.error(
-          `[cron] Failed to send ${results.failed} scheduled messages`
+          `[cron] Failed to send ${results.failed} scheduled messages`,
         );
       }
     } catch (err) {
       console.error("[cron] Error sending scheduled messages:", err);
     }
   },
-  { timezone: "UTC" }
+  { timezone: "UTC" },
 );
 cron.schedule(
   "23 21 * * *",
@@ -3134,7 +3281,7 @@ cron.schedule(
 
           const proratedLeaves = Math.max(
             0,
-            Math.round((22 / 12) * monthsLeft)
+            Math.round((22 / 12) * monthsLeft),
           );
 
           console.log(
@@ -3144,8 +3291,8 @@ cron.schedule(
               .toISOString()
               .slice(
                 0,
-                10
-              )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`
+                10,
+              )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`,
           );
           if (proratedLeaves <= 0) continue;
 
@@ -3164,7 +3311,7 @@ cron.schedule(
               upsert: true,
               new: true,
               setDefaultsOnInsert: true,
-            }
+            },
           );
 
           // 🧾 transaction record
@@ -3182,7 +3329,7 @@ cron.schedule(
           });
 
           console.log(
-            `[cron][leave] credited ${proratedLeaves} leaves → employee ${emp._id}`
+            `[cron][leave] credited ${proratedLeaves} leaves → employee ${emp._id}`,
           );
         }
       }
@@ -3192,7 +3339,7 @@ cron.schedule(
       console.error("[cron][leave] ❌ error:", err);
     }
   },
-  { timezone: PROBATION_CRON_TZ }
+  { timezone: PROBATION_CRON_TZ },
 );
 
 cron.schedule(
@@ -3255,7 +3402,7 @@ cron.schedule(
                     "leaveEntitlement.bonusHoursAccumulated": 0,
                     "leaveEntitlement.bonusYear": year,
                   },
-                }
+                },
               );
               totalUpdated += res.modifiedCount || 0;
             }
@@ -3276,13 +3423,13 @@ cron.schedule(
         } catch (innerErr) {
           console.error(
             `Error processing owner ${ownerId} probation policy:`,
-            innerErr
+            innerErr,
           );
         }
       }
 
       console.log(
-        `✅ Yearly leave entitlement reset completed for ${totalUpdated} employees`
+        `✅ Yearly leave entitlement reset completed for ${totalUpdated} employees`,
       );
     } catch (error) {
       console.error("❌ Yearly leave entitlement reset failed:", error);
@@ -3290,7 +3437,7 @@ cron.schedule(
   },
   {
     timezone: "Asia/Karachi",
-  }
+  },
 );
 
 cron.schedule(
@@ -3319,7 +3466,7 @@ cron.schedule(
 
     console.log("✅ Auto logout completed at 12:07 AM (Asia/Karachi)");
   },
-  { timezone: "Asia/Karachi" }
+  { timezone: "Asia/Karachi" },
 );
 
 // ---------- Optional root route ----------
