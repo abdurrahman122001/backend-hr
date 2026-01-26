@@ -70,7 +70,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
 
     if (!leaveBalance) {
         const employee = await Employee.findById(employeeId).lean();
-        const totalEntitled = (employee?.leaveEntitlement?.total) + (employee?.leaveEntitlement?.bonus || 0);
+        const totalEntitled = employee?.leaveEntitlement?.total || 0;
         return {
             initialBalance: totalEntitled,
             monthlyBalances: {},
@@ -79,7 +79,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
         };
     }
 
-    const initialBalance = (leaveBalance.total || 0) + (leaveBalance.bonus || 0);
+    const initialBalance = leaveBalance.total || 0;
 
     // 2. Get current FISCAL month (not calendar month)
     const now = new Date();
@@ -95,6 +95,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
         $or: [
             { type: "PAID_LEAVE_USED" },
             { type: "UNPAID_LEAVE_USED" },
+            { type: "BONUS_EARNED" },
             { type: "PAID_LEAVE_REVERSED" },
             { type: "UNPAID_LEAVE_REVERSED" },
             { type: "PAID_LEAVE_CREDITED" }
@@ -112,7 +113,8 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
     months.forEach(month => {
         monthlyData[month] = {
             paidUsed: 0,
-            unpaidUsed: 0
+            unpaidUsed: 0,
+            bonusAdded: 0
         };
     });
 
@@ -127,6 +129,9 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
                 break;
             case "UNPAID_LEAVE_USED":
                 monthlyData[monthName].unpaidUsed += tx.value || 0;
+                break;
+            case "BONUS_EARNED":
+                monthlyData[monthName].bonusAdded += tx.value || 0;
                 break;
             case "PAID_LEAVE_REVERSED":
                 monthlyData[monthName].paidUsed -= tx.value || 0; // Subtract reversals
@@ -166,17 +171,20 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
                 balance: "-",
                 paidUsed: "-",
                 unpaidUsed: "-",
+                bonusAdded: "-",
                 isFuture: true
             };
         } else {
             // Past or current month  calculate balance
             const balanceBeforeMonth = runningBalance;
             runningBalance = runningBalance - monthData.paidUsed;
+            runningBalance += monthData.bonusAdded;
 
             monthlyBalances[month] = {
                 balance: runningBalance, // This is CLOSING balance for the month
                 paidUsed: monthData.paidUsed,
                 unpaidUsed: monthData.unpaidUsed,
+                bonusAdded: monthData.bonusAdded,
                 isFuture: false
             };
         }
@@ -208,7 +216,15 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
         }
 
         const ownerId = employee.owner;
-        const leaveYear = getLeaveYear(new Date(`${year}-${month}-01`));
+
+
+        const months = [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ];
+        const monthIndex = months.indexOf(month);
+
+        const leaveYear = Number(year);
 
         // 2. Calculate monthly balances from transactions
         const balanceData = await calculateMonthlyBalances(ownerId, employeeId, leaveYear);
@@ -269,7 +285,7 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
         }
 
         const ownerId = employee.owner;
-        const leaveYear = getLeaveYear(new Date(`${year}-01-01`));
+        const leaveYear = Number(year);
 
         // 2. Calculate monthly balances from transactions
         const balanceData = await calculateMonthlyBalances(ownerId, employeeId, leaveYear);
@@ -285,6 +301,7 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
                 balance: "-",
                 paidUsed: "-",
                 unpaidUsed: "-",
+                bonusAdded: "-",
                 isFuture: true
             };
 
@@ -293,13 +310,24 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
                 usedPaid: monthData.paidUsed,
                 usedMonth: monthData.paidUsed,
                 balance: monthData.balance,
-                unpaidUsed: monthData.unpaidUsed
+                unpaidUsed: monthData.unpaidUsed,
+                bonusAdded: monthData.bonusAdded
             };
         });
+
+        // 4. Fetch yearly bonus leaves from LeaveYearBalance so frontend can show "Bonus Leaves" column
+        const leaveBalance = await LeaveYearBalance.findOne({
+            owner: ownerId,
+            employee: employeeId,
+            year: leaveYear
+        }).lean();
+
+        const bonus = leaveBalance?.bonus || 0;
 
         res.json({
             total: balanceData.initialBalance,
             initialBalance: balanceData.initialBalance,
+            bonus,
             history
         });
     } catch (e) {
@@ -327,7 +355,7 @@ router.get("/leave-transactions/:employeeId", async (req, res) => {
 
         // If year is provided, get leave year
         if (year) {
-            const targetYear = getLeaveYear(new Date(`${year}-01-01`));
+            const targetYear = getLeaveYear(new Date(`${year}-12-26`));
             const leaveBalance = await LeaveYearBalance.findOne({
                 owner: ownerId,
                 employee: employeeId,
@@ -452,15 +480,15 @@ router.get("/available-years", async (req, res) => {
 });
 
 router.get(
-  "/employee/:employeeId/current",
-  requireAuth,
-  leaveYearBalanceController.getCurrentYearLeaveBalance
+    "/employee/:employeeId/current",
+    requireAuth,
+    leaveYearBalanceController.getCurrentYearLeaveBalance
 );
 
 
 router.put(
-  "/update-balance/:employeeId", requireAuth,
-  leaveYearBalanceController.upsertLeaveBalance
+    "/update-balance/:employeeId", requireAuth,
+    leaveYearBalanceController.upsertLeaveBalance
 );
 
 
