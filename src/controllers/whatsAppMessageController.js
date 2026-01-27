@@ -698,12 +698,20 @@ exports.createMessage = async function createMessage(req, res) {
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
-    // 🔥 GET ASSIGNED EMPLOYEE FROM CLIENT
-    const assignedEmployeeId = clientDoc?.assignedTo
-      ? String(clientDoc.assignedTo._id)
-      : null;
+    // 🔥 GET ASSIGNED EMPLOYEES FROM CLIENT (NOW AN ARRAY)
+    let assignedEmployeeIds = [];
+    if (clientDoc?.assignedTo && Array.isArray(clientDoc.assignedTo)) {
+      // Filter out any null/undefined values and convert to string IDs
+      assignedEmployeeIds = clientDoc.assignedTo
+        .filter(emp => emp && emp._id) // Filter out null/undefined
+        .map(emp => String(emp._id));
+    }
+    // Handle single assigned employee (backward compatibility)
+    else if (clientDoc?.assignedTo && clientDoc.assignedTo._id) {
+      assignedEmployeeIds = [String(clientDoc.assignedTo._id)];
+    }
 
-    // 🔥 CRITICAL UPDATE: TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEE
+    // 🔥 CRITICAL UPDATE: TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEES
     if (senderRole === "team_lead") {
       // Clear any existing receivers (don't use arbitrary receivers)
       receivers = [];
@@ -717,11 +725,13 @@ exports.createMessage = async function createMessage(req, res) {
         });
       }
 
-      // 🔥 CRITICAL FIX: ADD ASSIGNED EMPLOYEE AS RECEIVER
-      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
-        if (!receivers.includes(assignedEmployeeId)) {
-          receivers.push(assignedEmployeeId);
-        }
+      // 🔥 CRITICAL FIX: ADD ALL ASSIGNED EMPLOYEES AS RECEIVERS
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
+            receivers.push(employeeId);
+          }
+        });
       }
 
       // Get CRM employee ID from environment or database
@@ -752,7 +762,7 @@ exports.createMessage = async function createMessage(req, res) {
       // Team leads don't need approval
       approvalStatus = null;
     }
-    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEE
+    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEES
     else if (senderRole === "manager") {
       // Add team leads to receivers for supervision visibility
       tls.forEach((teamLeadId) => {
@@ -761,23 +771,27 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
 
-      // 🔥 ADD ASSIGNED EMPLOYEE AS RECEIVER
-      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
-        if (!receivers.includes(assignedEmployeeId)) {
-          receivers.push(assignedEmployeeId);
-        }
+      // 🔥 ADD ALL ASSIGNED EMPLOYEES AS RECEIVERS
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
+            receivers.push(employeeId);
+          }
+        });
       }
 
       // Managers don't need approval
       approvalStatus = null;
     }
-    // 👷 EMPLOYEE LOGIC: Use assigned employee and CLIENT-BASED supervision rules
+    // 👷 EMPLOYEE LOGIC: Use assigned employees and CLIENT-BASED supervision rules
     else if (senderRole === "employee") {
-      // ✅ Include assignedTo employee if present (but only if not already included)
-      if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
-        if (!receivers.includes(assignedEmployeeId)) {
-          receivers.push(assignedEmployeeId);
-        }
+      // ✅ Include assignedTo employees if present (but only if not already included)
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
+            receivers.push(employeeId);
+          }
+        });
       }
     }
 
@@ -822,10 +836,6 @@ exports.createMessage = async function createMessage(req, res) {
 
           // 🔥 CRITICAL FIX 2: If Employee is replying to a Manager's message
           if (senderRole === "employee" && originalSenderRole === "manager") {
-            console.log(
-              "🔄 Employee replying to Manager's message - Special handling"
-            );
-
             // Clear any receivers that might have been added incorrectly
             receivers = receivers.filter(
               (id) => id !== String(originalSenderId)
@@ -841,14 +851,6 @@ exports.createMessage = async function createMessage(req, res) {
                 receivers = [...tls];
                 approvalStatus = "pending";
 
-                console.log(
-                  `✅ Employee reply to Manager: Sent to ${tls.length} team leads for approval`
-                );
-
-                // DO NOT include the manager yet - they'll get it AFTER approval
-                // DO NOT include assigned employee yet - they'll get it AFTER approval
-
-                // Store the original manager ID for later forwarding
                 msgData.originalManagerReceiver = originalSenderId;
                 msgData.isEmployeeReplyToManager = true;
               }
@@ -858,9 +860,6 @@ exports.createMessage = async function createMessage(req, res) {
                 receivers.push(originalSenderId);
               }
               approvalStatus = "approved";
-              console.log(
-                `✅ Employee reply to Manager: Direct supervision - sent directly to manager`
-              );
             }
           }
           // 🔥 If Team Lead is replying to Manager
@@ -868,12 +867,13 @@ exports.createMessage = async function createMessage(req, res) {
             senderRole === "team_lead" &&
             originalSenderRole === "manager"
           ) {
-            console.log("👨‍💼 Team Lead replying to Manager");
-            // Team lead replying to manager - no approval needed
             approvalStatus = null;
-            // Ensure assigned employee is included
-            if (assignedEmployeeId && !receivers.includes(assignedEmployeeId)) {
-              receivers.push(assignedEmployeeId);
+            if (assignedEmployeeIds.length > 0) {
+              assignedEmployeeIds.forEach((employeeId) => {
+                if (employeeId && !receivers.includes(employeeId)) {
+                  receivers.push(employeeId);
+                }
+              });
             }
           }
           // 🔥 If Manager is replying to Employee message
@@ -881,35 +881,31 @@ exports.createMessage = async function createMessage(req, res) {
             senderRole === "manager" &&
             originalSenderRole === "employee"
           ) {
-            console.log("👷‍♂️ Manager replying to Employee");
-            // Manager reply to Employee: No approval needed
             approvalStatus = null;
-            // Ensure assigned employee is included
-            if (assignedEmployeeId && !receivers.includes(assignedEmployeeId)) {
-              receivers.push(assignedEmployeeId);
+            if (assignedEmployeeIds.length > 0) {
+              assignedEmployeeIds.forEach((employeeId) => {
+                if (employeeId && !receivers.includes(employeeId)) {
+                  receivers.push(employeeId);
+                }
+              });
             }
           }
-          // 🔥 If Employee is replying to Employee message
           else if (
             senderRole === "employee" &&
             originalSenderRole === "employee"
           ) {
-            console.log("👷‍♂️ Employee replying to Employee");
-            // Follow normal client supervision rules (handled below)
           }
-          // 🔥 If Team Lead is replying, ensure assigned employee is included
           else if (
             senderRole === "team_lead" &&
-            assignedEmployeeId &&
-            assignedEmployeeId !== String(sender)
+            assignedEmployeeIds.length > 0
           ) {
-            if (!receivers.includes(assignedEmployeeId)) {
-              receivers.push(assignedEmployeeId);
-            }
+            assignedEmployeeIds.forEach((employeeId) => {
+              if (employeeId && !receivers.includes(employeeId)) {
+                receivers.push(employeeId);
+              }
+            });
           }
-
-          // Add original sender if not already included (for all other cases)
-          // But NOT for Employee → Manager when needs_approval
+          
           if (
             originalSenderId &&
             originalSenderId !== String(sender) &&
@@ -936,7 +932,7 @@ exports.createMessage = async function createMessage(req, res) {
         // Managers don't need approval, but team leads are now included as receivers
       } else if (senderRole === "team_lead") {
         approvalStatus = null;
-        // Team leads don't need approval, and we send to managers + assigned employee + CRM
+        // Team leads don't need approval, and we send to managers + assigned employees + CRM
       } else if (needsApproval) {
         // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
         approvalStatus = "pending";
@@ -964,12 +960,16 @@ exports.createMessage = async function createMessage(req, res) {
           approvalStatus = "pending";
         }
       } else if (senderRole === "team_lead") {
-        // Team lead with no receivers - add managers and assigned employee as fallback
+        // Team lead with no receivers - add managers and assigned employees as fallback
         receivers = [...managers];
 
-        // Add assigned employee in fallback too
-        if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
-          receivers.push(assignedEmployeeId);
+        // Add assigned employees in fallback too
+        if (assignedEmployeeIds.length > 0) {
+          assignedEmployeeIds.forEach((employeeId) => {
+            if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
+              receivers.push(employeeId);
+            }
+          });
         }
 
         // Try to add CRM again in fallback
@@ -980,22 +980,25 @@ exports.createMessage = async function createMessage(req, res) {
 
         approvalStatus = null;
       } else if (senderRole === "manager") {
-        // Manager with no receivers - add team leads and assigned employee
+        // Manager with no receivers - add team leads and assigned employees
         receivers = [...tls];
 
-        // Add assigned employee in fallback
-        if (assignedEmployeeId && assignedEmployeeId !== String(sender)) {
-          receivers.push(assignedEmployeeId);
+        // Add assigned employees in fallback
+        if (assignedEmployeeIds.length > 0) {
+          assignedEmployeeIds.forEach((employeeId) => {
+            if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
+              receivers.push(employeeId);
+            }
+          });
         }
 
         approvalStatus = null;
       }
     }
 
-    // ✅ Remove duplicates and exclude sender
-    receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
-      (id) => id !== String(sender)
-    );
+    // ✅ CRITICAL FIX: Filter out any undefined, null, or invalid IDs
+    receivers = Array.from(new Set(receivers.map((id) => String(id))))
+      .filter((id) => id && id !== "undefined" && id !== "null" && id !== String(sender) && isObjId(id));
 
     if (receivers.length === 0) {
       return res.status(400).json({ error: "No valid receivers found" });
@@ -1061,10 +1064,6 @@ exports.createMessage = async function createMessage(req, res) {
               originalMessage.sender._id
             );
             msgData.isEmployeeReplyToManager = true;
-
-            console.log(
-              `📝 Storing manager ID ${msgData.originalManagerReceiver} for later forwarding`
-            );
           }
         }
       } catch (error) {
@@ -1084,15 +1083,14 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
-    // Get assigned employee info for response
-    const assignedEmployeeInfo = clientDoc?.assignedTo
-      ? {
-          id: clientDoc.assignedTo._id,
-          name: clientDoc.assignedTo.name,
-          email: clientDoc.assignedTo.companyEmail,
-          role: clientDoc.assignedTo.role,
-        }
-      : null;
+    // Get assigned employees info for response
+    const assignedEmployeesInfo = assignedEmployeeIds.length > 0 ? 
+      clientDoc?.assignedTo?.map(emp => ({
+        id: emp._id,
+        name: emp.name,
+        email: emp.companyEmail,
+        role: emp.role,
+      })) || [] : [];
 
     // Add client supervision info to response
     const responseWithSupervision = {
@@ -1100,20 +1098,18 @@ exports.createMessage = async function createMessage(req, res) {
       clientSupervision: clientSupervision,
       requiresApproval: needsApproval,
       teamLeadsIncluded: senderRole === "manager",
-      assignedEmployeeIncluded: assignedEmployeeId
-        ? receivers.includes(assignedEmployeeId)
-        : false,
+      assignedEmployeesIncluded: assignedEmployeeIds.length > 0,
+      assignedEmployeesCount: assignedEmployeeIds.length,
       crmIncluded: senderRole === "team_lead",
       managersIncluded: senderRole === "team_lead",
       totalReceivers: receivers.length,
-      assignedEmployee: assignedEmployeeInfo,
+      assignedEmployees: assignedEmployeesInfo,
       receiverSummary: {
         role: senderRole,
         sentToManagers: senderRole === "team_lead",
         sentToTeamLeads: senderRole === "manager",
-        sentToAssignedEmployee: assignedEmployeeId
-          ? receivers.includes(assignedEmployeeId)
-          : false,
+        sentToAssignedEmployees: assignedEmployeeIds.length > 0,
+        assignedEmployeesCount: assignedEmployeeIds.length,
         sentToCRM: senderRole === "team_lead",
         isReply: isReply || false,
         replyToMessageId: isReply ? repliedTo : null,
@@ -1145,17 +1141,20 @@ exports.createMessage = async function createMessage(req, res) {
         type: "message_created",
       });
 
-      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies, notify assigned employee
+      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies, notify assigned employees
       if (
         senderRole === "team_lead" &&
-        assignedEmployeeId &&
-        receivers.includes(assignedEmployeeId)
+        assignedEmployeeIds.length > 0
       ) {
-        io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
-          message: responseWithSupervision,
-          type: "team_lead_direct_message",
-          note: "Team Lead has sent you a direct message regarding this client",
-          clientName: clientDoc?.clientName || "Unknown Client",
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (receivers.includes(employeeId)) {
+            io.to(`employee_${employeeId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "team_lead_direct_message",
+              note: "Team Lead has sent you a direct message regarding this client",
+              clientName: clientDoc?.clientName || "Unknown Client",
+            });
+          }
         });
       }
 
@@ -1194,12 +1193,16 @@ exports.createMessage = async function createMessage(req, res) {
           }
         });
 
-        // Special notification for assigned employee when manager sends message
-        if (assignedEmployeeId && receivers.includes(assignedEmployeeId)) {
-          io.to(`employee_${assignedEmployeeId}`).emit("new_message", {
-            message: responseWithSupervision,
-            type: "manager_direct_message",
-            note: "Manager has sent you a direct message",
+        // Special notification for assigned employees when manager sends message
+        if (assignedEmployeeIds.length > 0) {
+          assignedEmployeeIds.forEach((employeeId) => {
+            if (receivers.includes(employeeId)) {
+              io.to(`employee_${employeeId}`).emit("new_message", {
+                message: responseWithSupervision,
+                type: "manager_direct_message",
+                note: "Manager has sent you a direct message",
+              });
+            }
           });
         }
       }
@@ -1227,6 +1230,7 @@ exports.createMessage = async function createMessage(req, res) {
     res.status(500).json({ error: "Failed to create assignment message" });
   }
 };
+
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {

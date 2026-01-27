@@ -56,10 +56,6 @@ module.exports = async function requireAuth(req, res, next) {
       })
     };
 
-    // If employee has permissions in DB, attach them to user object
-    if (employee?.permissions) {
-      req.user.permissions = employee.permissions;
-    }
 
     return next();
   } catch (err) {

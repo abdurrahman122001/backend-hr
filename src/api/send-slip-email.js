@@ -1154,7 +1154,7 @@ module.exports = async function sendSlipEmail(req, res) {
         otherBalance: "-",
       };
 
-      // --- New monthly leave calculation (uses the helper)
+      // --- New monthly leave calculation (uses LeaveTransaction records)
       if (slip && slip.employee && slip.employee._id) {
         // Get month/year for this slip (e.g., "July 2025" => "July", 2025)
         let slipMonth = "";
@@ -1169,27 +1169,21 @@ module.exports = async function sendSlipEmail(req, res) {
           slipYear = now.getFullYear();
         }
 
-        // Get entitlement (total + bonus) exactly like your router
-        const emp = slip.employee;
-        const total = emp.leaveEntitlement?.total || 0;
-        const bonus = emp.leaveEntitlement?.bonus || 0;
-        const entitled = total + bonus;
-
-        // Calculate using the exact same helper as in router
+        // Calculate using LeaveTransaction records (same as dashboard)
+        // This uses fiscal month logic (26th to 25th)
         const leaveSummaryResult =
-          await leaveSummary.calculateYTDLeaveWithRunningBalance(
-            emp._id,
-            entitled,
+          await leaveSummary.calculateYTDLeaveFromTransactions(
+            slip.employee._id,
             slipYear,
             slipMonth
           );
 
         // Fill your leaves object accordingly (annual only, for now)
-        leaves.annualEntitled = total;
+        leaves.annualEntitled = leaveSummaryResult.entitled;
         leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
         leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
         leaves.annualBalance = leaveSummaryResult.balance;
-        leaves.annualBonus = bonus;
+        leaves.annualBonus = leaveSummaryResult.bonus;
       }
 
       // Decrypt fields

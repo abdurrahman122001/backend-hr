@@ -1,7 +1,6 @@
 const express = require("express");
 const PDFDocument = require("pdfkit");
 const router = express.Router();
-const requireAuth = require("../middleware/auth");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
 const { encrypt, decrypt } = require("../utils/encryption");
@@ -54,7 +53,7 @@ function calcNet(slip) {
   return totalAllow - totalDed;
 }
 
-router.get("/", requireAuth, async (req, res) => {
+router.get("/", async (req, res) => {
   try {
     let { month, year, limit = 10, skip = 0 } = req.query;
 
@@ -125,7 +124,7 @@ router.get("/", requireAuth, async (req, res) => {
 });
 
 // ---------- CREATE salary slip ----------
-router.post("/", requireAuth, async (req, res) => {
+router.post("/", async (req, res) => {
   try {
     const { employeeId, slipData } = req.body;
 
@@ -165,7 +164,7 @@ router.post("/", requireAuth, async (req, res) => {
   }
 });
 // routes/salarySlips.js - PATCH route
-router.patch("/:id", requireAuth, async (req, res) => {
+router.patch("/:id", async (req, res) => {
   try {
     // All allowed top-level fields
     const allowedFields = [
@@ -321,7 +320,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
   }
 });
 // ---------- GET: Download Salary Slip PDF ----------
-router.get("/:id/download", requireAuth, async (req, res) => {
+router.get("/:id/download", async (req, res) => {
   try {
     const slip = await SalarySlip.findById(req.params.id).populate("employee");
 

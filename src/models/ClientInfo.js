@@ -61,61 +61,58 @@ const ClientInfoSchema = new Schema(
     // 🔹 CLIENT'S COMPANY EMPLOYEES (NEW)
     companyEmployees: [
       {
-
         name: {
           type: String,
           required: true,
-          trim: true
+          trim: true,
         },
         designation: {
           type: String,
           required: true,
-          trim: true
+          trim: true,
         },
         email: {
           type: String,
           trim: true,
-          lowercase: true
+          lowercase: true,
         },
         phone: {
           type: String,
-          trim: true
+          trim: true,
         },
         department: {
           type: String,
-          trim: true
+          trim: true,
         },
         isPrimaryContact: {
           type: Boolean,
-          default: false
+          default: false,
         },
         notes: {
           type: String,
-          trim: true
+          trim: true,
         },
         addedAt: {
           type: Date,
-          default: Date.now
-        }
-      }
+          default: Date.now,
+        },
+      },
     ],
 
-    // 🔹 Assignment (your platform's employee assigned to handle this client)
-    assignedTo: {
-      type: Schema.Types.ObjectId,
-      ref: "Employee",
-      default: null,
-      index: true,
-    },
-
+    assignedTo: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Employee",
+        index: true,
+      },
+    ],
 
     readBy: [
       {
         employee: { type: Schema.Types.ObjectId, ref: "Employee" },
-        readAt: { type: Date, default: Date.now }
-      }
+        readAt: { type: Date, default: Date.now },
+      },
     ],
-
 
     // 🔹 Metadata
     createdBy: {
@@ -123,7 +120,10 @@ const ClientInfoSchema = new Schema(
       ref: "Employee",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
+// Create index for efficient assignment queries
+ClientInfoSchema.index({ assignedTo: 1 });
+ClientInfoSchema.index({ owner: 1, assignedTo: 1 });
 
 module.exports = model("ClientInfo", ClientInfoSchema);
