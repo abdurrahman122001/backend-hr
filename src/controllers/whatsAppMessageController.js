@@ -273,13 +273,18 @@ exports.listMessages = async function listMessages(req, res) {
       isScheduled,
       scheduledBefore,
       scheduledAfter,
-      limit = 5, // 🎯 CHANGE: Default limit to 5
+      limit = 5,
       page = 1,
       cursor,
       direction = "after",
       between: betweenRaw,
       filter,
       approvalStatus,
+      // 🔥 NEW: Add client employee filter
+      clientEmployeeId,
+      isClientEmployeeMessage,
+      // 🔥 NEW: Add conversation type parameter
+      conversationType, // "client" or "client_employee"
     } = req.query;
 
     const q = {};
@@ -288,6 +293,30 @@ exports.listMessages = async function listMessages(req, res) {
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
     if (isObjId(client)) q.client = client;
+
+    // 🔥 ENHANCED: Handle conversation type separation
+    if (conversationType) {
+      if (conversationType === "client") {
+        // Only show direct client messages (not client employee messages)
+        q.isClientEmployeeMessage = false;
+      } else if (conversationType === "client_employee") {
+        // Only show client employee messages
+        q.isClientEmployeeMessage = true;
+      }
+    } else {
+      // 🔥 NEW: Default behavior - separate messages if clientEmployeeId is provided
+      if (clientEmployeeId) {
+        // If specific client employee is requested, show only their messages
+        q.clientEmployeeId = clientEmployeeId;
+        q.isClientEmployeeMessage = true;
+      } else if (isClientEmployeeMessage !== undefined) {
+        // If isClientEmployeeMessage filter is explicitly set
+        q.isClientEmployeeMessage = isClientEmployeeMessage === "true";
+      } else {
+        // Default: show both types but we'll separate them in response
+        // We'll handle separation in the query based on context
+      }
+    }
 
     // Status filter
     if (
@@ -335,8 +364,29 @@ exports.listMessages = async function listMessages(req, res) {
     const me = oid(String(req.employee._id));
 
     const between = normalizeIds(betweenRaw);
+
+    // 🔥 ENHANCED: Handle participant filtering based on conversation type
     if (between.length === 2) {
       const [a, b] = between;
+      // Check if this is a client employee conversation
+      const Client = require("../models/ClientInfo");
+      // Check if either participant is a client employee
+      const clientDoc = await Client.findOne({
+        _id: client,
+        "companyEmployees._id": { $in: [a, b] },
+      }).lean();
+
+      if (clientDoc) {
+        // Find which employee ID matches
+        const employee = clientDoc.companyEmployees.find(
+          (emp) => emp._id.toString() === a || emp._id.toString() === b,
+        );
+        if (employee) {
+          q.isClientEmployeeMessage = true;
+          q.clientEmployeeId = employee._id;
+        }
+      }
+
       q.$or = [
         { sender: a, receiver: { $in: [b] } },
         { sender: b, receiver: { $in: [a] } },
@@ -344,39 +394,76 @@ exports.listMessages = async function listMessages(req, res) {
         { sender: b, receiver: a },
       ];
     } else if (isObjId(participant)) {
+      // Check if participant is a client employee
+      const Client = require("../models/ClientInfo");
+      const clientDoc = await Client.findOne({
+        _id: client,
+        "companyEmployees._id": participant,
+      }).lean();
+
+      if (clientDoc) {
+        const employee = clientDoc.companyEmployees.find(
+          (emp) => emp._id.toString() === participant,
+        );
+        if (employee) {
+          q.isClientEmployeeMessage = true;
+          q.clientEmployeeId = employee._id;
+        }
+      }
+
       q.$or = [
         { sender: participant },
         { receiver: participant },
         { receiver: { $in: [participant] } },
       ];
     } else {
-      if (isObjId(sender)) q.sender = sender;
+      if (isObjId(sender)) {
+        // Check if sender is client employee
+        const Client = require("../models/ClientInfo");
+        const clientDoc = await Client.findOne({
+          _id: client,
+          "companyEmployees._id": sender,
+        }).lean();
+
+        if (clientDoc) {
+          const employee = clientDoc.companyEmployees.find(
+            (emp) => emp._id.toString() === sender,
+          );
+          if (employee) {
+            q.isClientEmployeeMessage = true;
+            q.clientEmployeeId = employee._id;
+          }
+        }
+
+        q.sender = sender;
+      }
+
       if (isObjId(receiver)) {
+        // Check if receiver is client employee
+        const Client = require("../models/ClientInfo");
+        const clientDoc = await Client.findOne({
+          _id: client,
+          "companyEmployees._id": receiver,
+        }).lean();
+
+        if (clientDoc) {
+          const employee = clientDoc.companyEmployees.find(
+            (emp) => emp._id.toString() === receiver,
+          );
+          if (employee) {
+            q.isClientEmployeeMessage = true;
+            q.clientEmployeeId = employee._id;
+          }
+        }
+
         q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
       }
-    }
-
-    // Must have at least one scope
-    if (
-      !q.owner &&
-      !q.client &&
-      !q.sender &&
-      !q.receiver &&
-      !q.$or &&
-      !q.status &&
-      q.isScheduled === undefined &&
-      !q.approvalStatus
-    ) {
-      return res.status(400).json({
-        error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, or isScheduled",
-      });
     }
 
     // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
-    // 🎯 NEW: Cursor-based pagination logic
+    // 🎯 Cursor-based pagination logic
     if (cursor && isObjId(cursor)) {
       const cursorMessage = await WhatsAppMessage.findById(cursor)
         .select("createdAt")
@@ -395,7 +482,7 @@ exports.listMessages = async function listMessages(req, res) {
       direction === "before" ? { createdAt: -1 } : { createdAt: -1 };
     const lim = Math.min(Math.max(parseInt(limit, 10) || 5, 1), 50);
 
-    // 🎯 Fetch with limit + 1 for pagination check
+    // Fetch with limit + 1 for pagination check
     const items = await WhatsAppMessage.find(qFinal)
       .sort(sortOrder)
       .limit(lim + 1)
@@ -414,7 +501,7 @@ exports.listMessages = async function listMessages(req, res) {
       ])
       .lean();
 
-    // 🎯 NEW: Pagination metadata
+    // 🎯 Pagination metadata
     let hasMore = false;
     let nextCursor = null;
     let prevCursor = null;
@@ -439,19 +526,114 @@ exports.listMessages = async function listMessages(req, res) {
       items.reverse();
     }
 
-    // CRITICAL FIX: Ensure receiver is always treated as array for consistency
-    const normalizedItems = items.map((item) => ({
-      ...item,
-      receiver: Array.isArray(item.receiver)
-        ? item.receiver
-        : [item.receiver].filter(Boolean),
-    }));
+    // 🔥 ENHANCED: Get client supervision info and employee data
+    const Client = require("../models/ClientInfo");
+
+    const normalizedItems = await Promise.all(
+      items.map(async (item) => {
+        // Get client supervision info
+        let clientSupervision = "direct";
+        let clientName = "Unknown";
+        let displayName = clientName;
+        let employeeData = null;
+        let conversationType = "client";
+
+        if (item.client) {
+          const clientDoc = await Client.findById(item.client)
+            .select("supervision clientName companyEmployees")
+            .lean();
+          clientSupervision = clientDoc?.supervision || "direct";
+          clientName = clientDoc?.clientName || "Unknown";
+          displayName = clientName;
+
+          // 🔥 CRITICAL FIX: Check if this is a client employee message
+          if (item.isClientEmployeeMessage && item.clientEmployeeId) {
+            // Find the employee in the companyEmployees array
+            if (
+              clientDoc.companyEmployees &&
+              clientDoc.companyEmployees.length > 0
+            ) {
+              const employee = clientDoc.companyEmployees.find(
+                (emp) =>
+                  emp._id.toString() === item.clientEmployeeId.toString(),
+              );
+
+              if (employee) {
+                // 🔥 SET EMPLOYEE NAME AS DISPLAY NAME
+                displayName = employee.name;
+                employeeData = {
+                  name: employee.name,
+                  designation: employee.designation,
+                  email: employee.email,
+                  phone: employee.phone,
+                  department: employee.department,
+                  isPrimaryContact: employee.isPrimaryContact,
+                };
+                conversationType = "client_employee";
+              }
+            }
+          }
+
+          // Also check sender/receiver for employee IDs
+          if (!employeeData && item.isClientEmployeeMessage) {
+            const senderId = item.sender?._id?.toString();
+            const receiverId = item.receiver?._id?.toString();
+
+            if (
+              clientDoc.companyEmployees &&
+              clientDoc.companyEmployees.length > 0
+            ) {
+              const employee = clientDoc.companyEmployees.find(
+                (emp) =>
+                  emp._id.toString() === senderId ||
+                  emp._id.toString() === receiverId,
+              );
+
+              if (employee) {
+                displayName = employee.name;
+                employeeData = {
+                  name: employee.name,
+                  designation: employee.designation,
+                  email: employee.email,
+                  phone: employee.phone,
+                  department: employee.department,
+                  isPrimaryContact: employee.isPrimaryContact,
+                };
+                conversationType = "client_employee";
+              }
+            }
+          }
+        }
+
+        return {
+          ...item,
+          receiver: Array.isArray(item.receiver)
+            ? item.receiver
+            : [item.receiver].filter(Boolean),
+          // 🔥 ADD CONVERSATION TYPE INFO
+          clientSupervision: clientSupervision,
+          requiresApproval: clientSupervision === "needs_approval",
+          clientName: clientName,
+          // 🔥 CRITICAL: Use employee name for display if it's an employee conversation
+          displayName: displayName, // This will be employee name for employee chats
+          // 🔥 ENHANCED: Add conversation type identification
+          parentClientId: item.client?._id || item.client, // Ensure parentClientId is present
+          conversationType: conversationType,
+          isClientEmployeeMessage: conversationType === "client_employee",
+          clientEmployeeData: employeeData,
+        };
+      }),
+    );
 
     const total = await WhatsAppMessage.countDocuments(qFinal);
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
 
     res.json({
-      items: normalizedItems,
+      items: normalizedItems, // 🔥 ALWAYS return flat array for compatibility
+      separatedItems: {
+        clientMessages: normalizedItems.filter(i => i.conversationType === "client"),
+        clientEmployeeMessages: normalizedItems.filter(i => i.conversationType === "client_employee")
+      },
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
@@ -464,16 +646,22 @@ exports.listMessages = async function listMessages(req, res) {
       },
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
+      // 🔥 NEW: Add conversation context
+      conversationContext: {
+        clientId: client,
+        clientEmployeeId: clientEmployeeId,
+        conversationType:
+          conversationType || (clientEmployeeId ? "client_employee" : "client"),
+      },
     });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
-
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
-  res
+  res,
 ) {
   try {
     const clientId =
@@ -618,13 +806,14 @@ exports.listMessagesForManager = async function listMessagesForManager(
             .lean();
           return {
             ...message,
+            parentClientId: message.client?._id || message.client, // Ensure parentClientId is present
             clientSupervision: clientDoc?.supervision || "direct",
             clientName: clientDoc?.clientName || "Unknown",
             requiresApproval: clientDoc?.supervision === "needs_approval",
           };
         }
         return message;
-      })
+      }),
     );
 
     return res.json({
@@ -642,595 +831,106 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
-
-exports.createMessage = async function createMessage(req, res) {
+exports.searchMessages = async function searchMessages(req, res) {
   try {
-    const {
-      owner: ownerBody,
-      client,
-      sender: senderBody,
-      receiver: receiverBody,
-      receivers: receiversBody,
-      subject,
-      note,
-      isScheduled: isScheduledBody,
-      scheduledFor,
-      isReply,
-      repliedTo,
-      replyContent,
-    } = req.body;
+    const { query, limit = 20 } = req.query;
 
-    const owner = ownerBody || req.employee?.owner;
-    const sender = senderBody || req.employee?._id;
-
-    if (!isObjId(owner) || !isObjId(client) || !isObjId(sender)) {
-      return res.status(400).json({
-        error: "owner, client, and sender are required (ObjectId strings)",
-      });
+    if (!query || !query.trim()) {
+      return res.json({ items: [] });
     }
 
-    // Start with ONLY the explicitly specified receivers
-    let receivers = [];
-    if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
-    if (receiversBody)
-      receivers = receivers.concat(normalizeIds(receiversBody));
+    const searchQuery = query.trim();
 
-    // Remove sender from receivers
-    receivers = receivers.filter((id) => id !== String(sender));
-
-    const senderDoc = await Employee.findById(sender)
-      .select("_id role supervisor owner")
-      .lean();
-    const senderRole = normalizeRole(senderDoc?.role || "");
-
-    let approvalStatus;
-
-    // 🔥 CLIENT-BASED SUPERVISION: Get supervision mode from CLIENT, not employee
-    const Client = require("../models/ClientInfo");
-    const clientDoc = await Client.findById(client)
-      .populate("assignedTo", "_id role name companyEmail")
-      .lean();
-
-    // Use client's supervision setting, fallback to "direct" if not set
-    const clientSupervision = clientDoc?.supervision || "direct";
-    const needsApproval = clientSupervision === "needs_approval";
-    const isDirect = clientSupervision === "direct";
-
-    const { tls, managers } = await findTLsAndManagersByOwner(owner);
-
-    // 🔥 GET ASSIGNED EMPLOYEES FROM CLIENT (NOW AN ARRAY)
-    let assignedEmployeeIds = [];
-    if (clientDoc?.assignedTo && Array.isArray(clientDoc.assignedTo)) {
-      // Filter out any null/undefined values and convert to string IDs
-      assignedEmployeeIds = clientDoc.assignedTo
-        .filter(emp => emp && emp._id) // Filter out null/undefined
-        .map(emp => String(emp._id));
-    }
-    // Handle single assigned employee (backward compatibility)
-    else if (clientDoc?.assignedTo && clientDoc.assignedTo._id) {
-      assignedEmployeeIds = [String(clientDoc.assignedTo._id)];
-    }
-
-    // 🔥 CRITICAL UPDATE: TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEES
-    if (senderRole === "team_lead") {
-      // Clear any existing receivers (don't use arbitrary receivers)
-      receivers = [];
-
-      // Add managers as receivers
-      if (managers.length > 0) {
-        managers.forEach((managerId) => {
-          if (!receivers.includes(managerId) && managerId !== String(sender)) {
-            receivers.push(managerId);
-          }
-        });
-      }
-
-      // 🔥 CRITICAL FIX: ADD ALL ASSIGNED EMPLOYEES AS RECEIVERS
-      if (assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-
-      // Get CRM employee ID from environment or database
-      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-
-      // Option 2: Find CRM user by role or email from database
-      let crmUser = null;
-      if (!crmEmployeeId) {
-        crmUser = await Employee.findOne({
-          owner: owner,
-          $or: [
-            { role: /crm/i },
-            { role: /customer relationship/i },
-            { companyEmail: /crm/i },
-            { name: /CRM/i },
-          ],
-        })
-          .select("_id")
-          .lean();
-      }
-
-      const crmId = crmEmployeeId || (crmUser ? String(crmUser._id) : null);
-
-      if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
-        receivers.push(crmId);
-      }
-
-      // Team leads don't need approval
-      approvalStatus = null;
-    }
-    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEES
-    else if (senderRole === "manager") {
-      // Add team leads to receivers for supervision visibility
-      tls.forEach((teamLeadId) => {
-        if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
-          receivers.push(teamLeadId);
-        }
-      });
-
-      // 🔥 ADD ALL ASSIGNED EMPLOYEES AS RECEIVERS
-      if (assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-
-      // Managers don't need approval
-      approvalStatus = null;
-    }
-    // 👷 EMPLOYEE LOGIC: Use assigned employees and CLIENT-BASED supervision rules
-    else if (senderRole === "employee") {
-      // ✅ Include assignedTo employees if present (but only if not already included)
-      if (assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-    }
-
-    // 🔥 FIXED: Handle reply scenario - RE-EVALUATE SUPERVISION FOR REPLIES
-    if (isReply && repliedTo) {
-      try {
-        // Get the original message being replied to
-        const originalMessage = await WhatsAppMessage.findById(repliedTo)
-          .populate("sender receiver", "_id role name companyEmail")
-          .lean();
-
-        if (originalMessage) {
-          // Extract original receivers
-          const originalReceivers = originalMessage.receiver.map((r) =>
-            typeof r === "object" ? String(r._id) : String(r)
-          );
-
-          // Add original receivers (excluding sender)
-          originalReceivers.forEach((receiverId) => {
-            if (
-              receiverId !== String(sender) &&
-              !receivers.includes(receiverId)
-            ) {
-              receivers.push(receiverId);
-            }
-          });
-
-          // 🔥 CRITICAL FIX 1: Get original sender's role
-          const originalSenderId = originalMessage.sender
-            ? typeof originalMessage.sender === "object"
-              ? String(originalMessage.sender._id)
-              : String(originalMessage.sender)
-            : null;
-
-          let originalSenderRole = "";
-          if (originalSenderId) {
-            const originalSenderDoc = await Employee.findById(originalSenderId)
-              .select("role")
-              .lean();
-            originalSenderRole = normalizeRole(originalSenderDoc?.role || "");
-          }
-
-          // 🔥 CRITICAL FIX 2: If Employee is replying to a Manager's message
-          if (senderRole === "employee" && originalSenderRole === "manager") {
-            // Clear any receivers that might have been added incorrectly
-            receivers = receivers.filter(
-              (id) => id !== String(originalSenderId)
-            );
-
-            // 🔥 EMPLOYEE REPLY TO MANAGER LOGIC:
-            if (needsApproval) {
-              // Client requires approval: Send ONLY to Team Leads for approval first
-              if (tls.length > 0) {
-                // Clear all existing receivers
-                receivers = [];
-                // Add ONLY team leads for approval
-                receivers = [...tls];
-                approvalStatus = "pending";
-
-                msgData.originalManagerReceiver = originalSenderId;
-                msgData.isEmployeeReplyToManager = true;
-              }
-            } else if (isDirect) {
-              // Direct supervision: Send directly to manager
-              if (originalSenderId && !receivers.includes(originalSenderId)) {
-                receivers.push(originalSenderId);
-              }
-              approvalStatus = "approved";
-            }
-          }
-          // 🔥 If Team Lead is replying to Manager
-          else if (
-            senderRole === "team_lead" &&
-            originalSenderRole === "manager"
-          ) {
-            approvalStatus = null;
-            if (assignedEmployeeIds.length > 0) {
-              assignedEmployeeIds.forEach((employeeId) => {
-                if (employeeId && !receivers.includes(employeeId)) {
-                  receivers.push(employeeId);
-                }
-              });
-            }
-          }
-          // 🔥 If Manager is replying to Employee message
-          else if (
-            senderRole === "manager" &&
-            originalSenderRole === "employee"
-          ) {
-            approvalStatus = null;
-            if (assignedEmployeeIds.length > 0) {
-              assignedEmployeeIds.forEach((employeeId) => {
-                if (employeeId && !receivers.includes(employeeId)) {
-                  receivers.push(employeeId);
-                }
-              });
-            }
-          }
-          else if (
-            senderRole === "employee" &&
-            originalSenderRole === "employee"
-          ) {
-          }
-          else if (
-            senderRole === "team_lead" &&
-            assignedEmployeeIds.length > 0
-          ) {
-            assignedEmployeeIds.forEach((employeeId) => {
-              if (employeeId && !receivers.includes(employeeId)) {
-                receivers.push(employeeId);
-              }
-            });
-          }
-          
-          if (
-            originalSenderId &&
-            originalSenderId !== String(sender) &&
-            !receivers.includes(originalSenderId) &&
-            !(
-              senderRole === "employee" &&
-              originalSenderRole === "manager" &&
-              needsApproval
-            )
-          ) {
-            receivers.push(originalSenderId);
-          }
-        }
-      } catch (replyError) {
-        console.warn("Failed to process reply context:", replyError);
-      }
-    }
-
-    // 🔑 CORRECTED Approval status logic - NOW CLIENT-BASED
-    // Only set approval status if not already set by reply logic above
-    if (approvalStatus === undefined) {
-      if (senderRole === "manager") {
-        approvalStatus = null;
-        // Managers don't need approval, but team leads are now included as receivers
-      } else if (senderRole === "team_lead") {
-        approvalStatus = null;
-        // Team leads don't need approval, and we send to managers + assigned employees + CRM
-      } else if (needsApproval) {
-        // 🔥 CLIENT-BASED: Client needs approval - add team leads for review
-        approvalStatus = "pending";
-        // Add team leads only if the client requires approval
-        if (tls.length > 0) {
-          receivers = [...receivers, ...tls.map((id) => String(id))];
-        }
-      } else if (isDirect) {
-        // 🔥 CLIENT-BASED: DIRECT SUPERVISION - NO TEAM LEADS INVOLVED
-        approvalStatus = "approved";
-        // Don't add any team leads or managers - message goes directly to intended receivers
-      }
-    }
-
-    // 🔥 Fallback logic if no receivers are still found
-    if (receivers.length === 0) {
-      if (senderRole === "employee") {
-        if (isDirect) {
-          // For client with direct mode, add managers for visibility
-          receivers = [...managers];
-          approvalStatus = "approved";
-        } else {
-          // For client with needs_approval mode, add team leads
-          receivers = [...tls];
-          approvalStatus = "pending";
-        }
-      } else if (senderRole === "team_lead") {
-        // Team lead with no receivers - add managers and assigned employees as fallback
-        receivers = [...managers];
-
-        // Add assigned employees in fallback too
-        if (assignedEmployeeIds.length > 0) {
-          assignedEmployeeIds.forEach((employeeId) => {
-            if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
-              receivers.push(employeeId);
-            }
-          });
-        }
-
-        // Try to add CRM again in fallback
-        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-        if (crmEmployeeId && !receivers.includes(crmEmployeeId)) {
-          receivers.push(crmEmployeeId);
-        }
-
-        approvalStatus = null;
-      } else if (senderRole === "manager") {
-        // Manager with no receivers - add team leads and assigned employees
-        receivers = [...tls];
-
-        // Add assigned employees in fallback
-        if (assignedEmployeeIds.length > 0) {
-          assignedEmployeeIds.forEach((employeeId) => {
-            if (employeeId && employeeId !== String(sender) && !receivers.includes(employeeId)) {
-              receivers.push(employeeId);
-            }
-          });
-        }
-
-        approvalStatus = null;
-      }
-    }
-
-    // ✅ CRITICAL FIX: Filter out any undefined, null, or invalid IDs
-    receivers = Array.from(new Set(receivers.map((id) => String(id))))
-      .filter((id) => id && id !== "undefined" && id !== "null" && id !== String(sender) && isObjId(id));
-
-    if (receivers.length === 0) {
-      return res.status(400).json({ error: "No valid receivers found" });
-    }
-
-    // Handle scheduling logic
-    const isScheduled = isScheduledBody === true || isScheduledBody === "true";
-    let status = "sent";
-    let scheduledAt = null;
-    let scheduledBy = null;
-    let sentAt = new Date();
-
-    if (isScheduled) {
-      const validation = validateScheduleTime(scheduledFor);
-      if (!validation.valid) {
-        return res.status(400).json({ error: validation.error });
-      }
-
-      status = "scheduled";
-      scheduledAt = new Date();
-      scheduledBy = sender;
-      sentAt = null;
-    }
-
-    const msgData = {
-      owner,
-      client,
-      sender,
-      receiver: receivers,
-      subject: subject || "",
-      note: note || "",
-      approvalStatus: approvalStatus,
-      isScheduled,
-      status,
-      scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
-      attachments: [],
-      scheduledAt,
-      scheduledBy,
-      sentAt: !isScheduled ? new Date() : undefined,
-      isReply: isReply || false,
-      repliedTo: isReply ? repliedTo : null,
-      replyContent: isReply ? replyContent : null,
-      // 🔥 Store metadata for Employee → Manager replies
-      originalManagerReceiver: null,
-      isEmployeeReplyToManager:
-        senderRole === "employee" && isReply && needsApproval,
+    // Build base query - exclude drafts
+    const q = {
+      status: { $ne: "draft" },
+      $or: [
+        { note: { $regex: searchQuery, $options: "i" } },
+        { subject: { $regex: searchQuery, $options: "i" } },
+      ],
     };
 
-    // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval
-    if (senderRole === "employee" && isReply && needsApproval && repliedTo) {
+    // Apply visibility rules safely
+    let qFinal = q;
+    if (req.employee && req.employee._id) {
       try {
-        const originalMessage = await WhatsAppMessage.findById(repliedTo)
-          .populate("sender", "_id role")
-          .lean();
-
-        if (originalMessage && originalMessage.sender) {
-          const originalSenderRole = normalizeRole(
-            originalMessage.sender.role || ""
-          );
-          if (originalSenderRole === "manager") {
-            // Store the manager ID for later forwarding after approval
-            msgData.originalManagerReceiver = String(
-              originalMessage.sender._id
-            );
-            msgData.isEmployeeReplyToManager = true;
-          }
-        }
-      } catch (error) {
-        console.warn("Failed to store manager ID for forwarding:", error);
+        qFinal = await applyVisibility(q, req);
+      } catch (visibilityError) {
+        console.warn("Visibility filter skipped:", visibilityError.message);
       }
     }
 
-    const msg = await WhatsAppMessage.create(msgData);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 20);
 
-    const populated = await msg.populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName assignedTo" },
-      { path: "scheduledBy", select: "_id name companyEmail" },
-      { path: "repliedTo", select: "_id note message sender attachments" },
-      { path: "replyContent.originalSender", select: "_id name companyEmail" },
-    ]);
+    const messages = await WhatsAppMessage.find(qFinal)
+      .sort({ createdAt: -1 })
+      .limit(lim)
+      .populate([
+        { path: "client", select: "_id clientName" },
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "owner", select: "_id name companyEmail" },
+      ])
+      .select(
+        "_id note message subject sender client createdAt receiver status isClientEmployeeMessage clientEmployeeData",
+      )
+      .lean();
 
-    // Get assigned employees info for response
-    const assignedEmployeesInfo = assignedEmployeeIds.length > 0 ? 
-      clientDoc?.assignedTo?.map(emp => ({
-        id: emp._id,
-        name: emp.name,
-        email: emp.companyEmail,
-        role: emp.role,
-      })) || [] : [];
+    // 🔥 Format response with client employee info
+    const items = messages.map((m) => {
+      // Extract client employee name if available
+      let displayClientName = m.client?.clientName || "Unknown";
+      let isClientEmployee = m.isClientEmployeeMessage || false;
+      let clientEmployeeName = null;
 
-    // Add client supervision info to response
-    const responseWithSupervision = {
-      ...populated.toObject(),
-      clientSupervision: clientSupervision,
-      requiresApproval: needsApproval,
-      teamLeadsIncluded: senderRole === "manager",
-      assignedEmployeesIncluded: assignedEmployeeIds.length > 0,
-      assignedEmployeesCount: assignedEmployeeIds.length,
-      crmIncluded: senderRole === "team_lead",
-      managersIncluded: senderRole === "team_lead",
-      totalReceivers: receivers.length,
-      assignedEmployees: assignedEmployeesInfo,
-      receiverSummary: {
-        role: senderRole,
-        sentToManagers: senderRole === "team_lead",
-        sentToTeamLeads: senderRole === "manager",
-        sentToAssignedEmployees: assignedEmployeeIds.length > 0,
-        assignedEmployeesCount: assignedEmployeeIds.length,
-        sentToCRM: senderRole === "team_lead",
-        isReply: isReply || false,
-        replyToMessageId: isReply ? repliedTo : null,
-        // 🔥 ADD REPLY SPECIFIC INFO
-        isEmployeeReplyToManager:
-          senderRole === "employee" && isReply && needsApproval,
-        needsTeamLeadApproval: approvalStatus === "pending",
-        originalManagerStoredForForwarding: !!msgData.originalManagerReceiver,
-      },
-    };
-
-    // FIXED: Emit real-time events ONLY to relevant users
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
-
-      // Notify ALL receivers
-      receivers.forEach((receiverId) => {
-        io.to(`employee_${receiverId}`).emit("new_message", {
-          message: responseWithSupervision,
-          type: "new_assignment",
-          // 🔥 ADD SPECIFIC TYPE FOR REPLY WORKFLOW
-          subType: approvalStatus === "pending" ? "needs_approval" : "direct",
-        });
-      });
-
-      // Notify sender
-      io.to(`employee_${sender}`).emit("new_message", {
-        message: responseWithSupervision,
-        type: "message_created",
-      });
-
-      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies, notify assigned employees
-      if (
-        senderRole === "team_lead" &&
-        assignedEmployeeIds.length > 0
-      ) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (receivers.includes(employeeId)) {
-            io.to(`employee_${employeeId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "team_lead_direct_message",
-              note: "Team Lead has sent you a direct message regarding this client",
-              clientName: clientDoc?.clientName || "Unknown Client",
-            });
-          }
-        });
+      if (isClientEmployee && m.clientEmployeeData) {
+        clientEmployeeName = m.clientEmployeeData.clientEmployeeName;
+        // Show client employee name in search results
+        displayClientName = `${clientEmployeeName} (${displayClientName} employee)`;
       }
 
-      // Special notification for managers when team lead sends message
-      if (senderRole === "team_lead") {
-        managers.forEach((managerId) => {
-          if (receivers.includes(managerId)) {
-            io.to(`employee_${managerId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "team_lead_message_to_manager",
-              note: "Team Lead has sent you a message regarding client communication",
-            });
+      return {
+        _id: m._id,
+        note: m.note || m.message || "",
+        subject: m.subject || "",
+        sender: m.sender
+          ? {
+            _id: m.sender._id,
+            name: m.sender.name || "Unknown",
           }
-        });
+          : { _id: null, name: "Unknown" },
+        clientId: m.client?._id || m.client || null,
+        parentClientId: m.client?._id || m.client || null,
+        clientEmployeeId: m.clientEmployeeId || (m.clientEmployeeData ? m.clientEmployeeData.clientEmployeeId : null),
+        clientName: displayClientName,
+        // 🔥 ADD ORIGINAL CLIENT INFO
+        originalClientName: m.client?.clientName || "Unknown",
+        isClientEmployeeMessage: isClientEmployee,
+        clientEmployeeName: clientEmployeeName,
+        clientEmployeeData: m.clientEmployeeData,
+        time: m.createdAt
+          ? new Date(m.createdAt).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          })
+          : "",
+        timestamp: m.createdAt || new Date(),
+        status: m.status || "sent",
+      };
+    });
 
-        // Special notification for CRM when team lead sends message
-        const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-        if (crmEmployeeId && receivers.includes(crmEmployeeId)) {
-          io.to(`employee_${crmEmployeeId}`).emit("new_message", {
-            message: responseWithSupervision,
-            type: "team_lead_message_to_crm",
-            note: "Team Lead has sent a message that requires CRM attention",
-          });
-        }
-      }
-
-      // Special notification for team leads when manager sends message
-      if (senderRole === "manager") {
-        tls.forEach((teamLeadId) => {
-          if (receivers.includes(teamLeadId)) {
-            io.to(`employee_${teamLeadId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "manager_message_visibility",
-              note: "You are included as a receiver for manager message visibility",
-            });
-          }
-        });
-
-        // Special notification for assigned employees when manager sends message
-        if (assignedEmployeeIds.length > 0) {
-          assignedEmployeeIds.forEach((employeeId) => {
-            if (receivers.includes(employeeId)) {
-              io.to(`employee_${employeeId}`).emit("new_message", {
-                message: responseWithSupervision,
-                type: "manager_direct_message",
-                note: "Manager has sent you a direct message",
-              });
-            }
-          });
-        }
-      }
-
-      // 🔥 NEW: Notify Team Leads when Employee replies to Manager (pending approval)
-      if (senderRole === "employee" && approvalStatus === "pending") {
-        tls.forEach((teamLeadId) => {
-          if (receivers.includes(teamLeadId)) {
-            io.to(`employee_${teamLeadId}`).emit("new_message", {
-              message: responseWithSupervision,
-              type: "reply_needs_approval",
-              note: "Employee has replied to a Manager's message - needs approval",
-              requiresApproval: true,
-              isEmployeeReplyToManager: true,
-              originalManagerId: msgData.originalManagerReceiver,
-            });
-          }
-        });
-      }
-    }
-
-    res.status(201).json(responseWithSupervision);
+    return res.json({
+      items,
+      count: items.length,
+      query: searchQuery,
+    });
   } catch (e) {
-    console.error("❌ Create message error:", e);
-    res.status(500).json({ error: "Failed to create assignment message" });
+    console.error("❌ Search failed:", e);
+    res.status(500).json({
+      error: "Search failed",
+      items: [],
+    });
   }
 };
-
 // SCHEDULE AN EXISTING MESSAGE
 exports.scheduleMessage = async function scheduleMessage(req, res) {
   try {
@@ -1374,9 +1074,8 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${
-        action === "send" ? "sent immediately" : "converted to draft"
-      }`,
+      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
+        }`,
       data: populated,
     });
   } catch (e) {
@@ -1500,7 +1199,7 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
 
 // BULK SEND SCHEDULED MESSAGES (for cron job)
 exports.sendScheduledMessages = async function sendScheduledMessages(
-  io = null
+  io = null,
 ) {
   try {
     const now = new Date();
@@ -1530,7 +1229,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
         // Send real-time notifications ONLY to relevant users via Socket.IO
         if (io) {
           const receiverIds = message.receiver.map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver._id
+            typeof receiver === "string" ? receiver : receiver._id,
           );
 
           // Notify each receiver using new_message event
@@ -1557,7 +1256,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
       } catch (error) {
         console.error(
           `Failed to send scheduled message ${message._id}:`,
-          error
+          error,
         );
         results.failed++;
         results.errors.push({
@@ -1573,7 +1272,6 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
-// PATCH /api/assignment-messages/:id/approve
 // PATCH /api/assignment-messages/:id/approve
 exports.approveMessage = async function approveMessage(req, res) {
   try {
@@ -1671,7 +1369,9 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       });
 
-      // Also emit to the client room for real-time chat updates
+      // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
+      // Realtime updates should only go to specific involved users (Sender, Receiver, Managers)
+      /* 
       if (msg.client && msg.client._id) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: updatedMessage,
@@ -1679,6 +1379,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           action: "approved",
         });
       }
+      */
     }
 
     // ✅ Forward only if sender was an Employee under supervision
@@ -1687,6 +1388,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       const { managers } = await findTLsAndManagersByOwner(msg.owner);
       if (managers.length > 0) {
         // 🔥 CRITICAL FIX: Include replyContent and repliedTo in forwarded message
+        // 🔥 ALSO CRITICAL: Preserve client employee information
         const forwardMsgData = {
           owner: msg.owner,
           client: msg.client,
@@ -1700,6 +1402,10 @@ exports.approveMessage = async function approveMessage(req, res) {
           isReply: msg.isReply,
           repliedTo: msg.repliedTo,
           replyContent: msg.replyContent,
+          // 🔥 PRESERVE CLIENT EMPLOYEE INFORMATION
+          isClientEmployeeMessage: msg.isClientEmployeeMessage,
+          clientEmployeeId: msg.clientEmployeeId,
+          clientEmployeeData: msg.clientEmployeeData,
           // Add metadata to identify this as a forwarded message
           isForwarded: true,
           originalMessage: msg._id,
@@ -1723,13 +1429,21 @@ exports.approveMessage = async function approveMessage(req, res) {
           { path: "repliedTo", select: "_id note message sender attachments" },
         ]);
 
+        // 🔥 Add client employee info to populated response
+        const populatedForwardWithEmployeeInfo = {
+          ...populatedForward.toObject(),
+          isClientEmployeeMessage: msg.isClientEmployeeMessage,
+          clientEmployeeId: msg.clientEmployeeId,
+          clientEmployeeData: msg.clientEmployeeData,
+        };
+
         // 🎯 CRITICAL: Emit new message event for the forwarded message to managers
         if (req.app.get("io")) {
           const io = req.app.get("io");
           // Notify managers about the new forwarded message
           managers.forEach((managerId) => {
             io.to(`employee_${managerId}`).emit("new_message", {
-              message: populatedForward,
+              message: populatedForwardWithEmployeeInfo,
               type: "new_message",
               action: "forwarded_approved",
               forwardedBy: req.employee._id,
@@ -1738,10 +1452,20 @@ exports.approveMessage = async function approveMessage(req, res) {
               // Include context about the reply chain
               replyContext: msg.isReply
                 ? {
-                    hasOriginalThread: true,
-                    originalSender: msg.replyContent?.originalSender,
-                    repliedToMessage: msg.repliedTo?._id,
-                  }
+                  hasOriginalThread: true,
+                  originalSender: msg.replyContent?.originalSender,
+                  repliedToMessage: msg.repliedTo?._id,
+                }
+                : null,
+              // 🔥 Include client employee context
+              clientEmployeeContext: msg.isClientEmployeeMessage
+                ? {
+                  isClientEmployeeMessage: true,
+                  clientEmployeeId: msg.clientEmployeeId,
+                  clientEmployeeName:
+                    msg.clientEmployeeData?.clientEmployeeName,
+                  parentClientId: msg.clientEmployeeData?.parentClientId,
+                }
                 : null,
             });
           });
@@ -1750,15 +1474,23 @@ exports.approveMessage = async function approveMessage(req, res) {
         return res.json({
           ...updatedMessage,
           forwardedToManagers: true,
-          forwardedMessage: populatedForward,
+          forwardedMessage: populatedForwardWithEmployeeInfo,
           message: "Message approved and forwarded to managers",
           clientSupervision: clientSupervision,
           // Include reply context in response
           replyContext: msg.isReply
             ? {
-                includedReplyContent: true,
-                originalThreadPreserved: true,
-              }
+              includedReplyContent: true,
+              originalThreadPreserved: true,
+            }
+            : null,
+          // 🔥 Include client employee context
+          clientEmployeeContext: msg.isClientEmployeeMessage
+            ? {
+              preserved: true,
+              isClientEmployeeMessage: true,
+              clientEmployeeId: msg.clientEmployeeId,
+            }
             : null,
         });
       }
@@ -1868,7 +1600,8 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         });
       });
 
-      // Also emit to the client room for real-time chat updates
+      // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
+      /*
       if (msg.client && msg.client._id) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: updatedMessage,
@@ -1876,6 +1609,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
           action: "disapproved",
         });
       }
+      */
     }
 
     res.json({
@@ -1944,7 +1678,9 @@ exports.editMessage = async function editMessage(req, res) {
     const isSender = msg.sender && String(msg.sender._id) === currentUserId;
 
     // 🔥 CRITICAL FIX 3: Get original sender's role
-    const originalSenderRole = msg.sender ? normalizeRole(msg.sender.role || "") : "";
+    const originalSenderRole = msg.sender
+      ? normalizeRole(msg.sender.role || "")
+      : "";
     const isOriginalSenderManager = originalSenderRole === "manager";
     const isOriginalSenderTeamLead = originalSenderRole === "team_lead";
     const isOriginalSenderEmployee = originalSenderRole === "employee";
@@ -2036,7 +1772,9 @@ exports.editMessage = async function editMessage(req, res) {
         else if (isOriginalSenderEmployee) {
           if (msg.approvalStatus === "disapproved") {
             // Employee's message was disapproved - needs re-approval
-            msg.approvalStatus = clientRequiresApproval ? "pending" : "approved";
+            msg.approvalStatus = clientRequiresApproval
+              ? "pending"
+              : "approved";
           } else if (msg.approvalStatus === "approved") {
             // Already approved - keep it approved
             msg.approvalStatus = "approved";
@@ -2063,12 +1801,13 @@ exports.editMessage = async function editMessage(req, res) {
           msg.approvalStatus = null;
         }
       }
-      
+
       // 🔥 ADDITIONAL FIX: Ensure Managers and Team Leads never get "pending" status
       if (msg.approvalStatus === "pending") {
-        const isSenderManagerOrLead = isOriginalSenderManager || isOriginalSenderTeamLead;
+        const isSenderManagerOrLead =
+          isOriginalSenderManager || isOriginalSenderTeamLead;
         const isEditorManagerOrLead = isManager || isTeamLead;
-        
+
         if (isSenderManagerOrLead || isEditorManagerOrLead) {
           msg.approvalStatus = null;
         }
@@ -2177,7 +1916,7 @@ exports.editMessage = async function editMessage(req, res) {
           } catch (forwardError) {
             console.error(
               "❌ Failed to forward message to managers:",
-              forwardError
+              forwardError,
             );
             // Don't fail the whole request if forwarding fails
           }
@@ -2226,7 +1965,8 @@ exports.editMessage = async function editMessage(req, res) {
         });
       });
 
-      // Also emit to the client room for real-time chat updates
+      // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
+      /*
       if (msg.client && msg.client._id) {
         io.to(`client_${msg.client._id}`).emit("new_message", {
           message: responseData,
@@ -2234,6 +1974,7 @@ exports.editMessage = async function editMessage(req, res) {
           action: "edited",
         });
       }
+      */
 
       // 🔥 NEW: Emit forwarded message to managers
       if (forwardedMessage) {
@@ -2252,10 +1993,10 @@ exports.editMessage = async function editMessage(req, res) {
               // Include reply context
               replyContext: msg.isReply
                 ? {
-                    hasOriginalThread: true,
-                    originalSender: msg.replyContent?.originalSender,
-                    repliedToMessage: msg.repliedTo?._id,
-                  }
+                  hasOriginalThread: true,
+                  originalSender: msg.replyContent?.originalSender,
+                  repliedToMessage: msg.repliedTo?._id,
+                }
                 : null,
             });
           }
@@ -2334,7 +2075,8 @@ exports.editMessage = async function editMessage(req, res) {
       responseMessage =
         "Message updated (direct supervision - no approval needed)";
     } else if (msg.approvalStatus === null && (isManager || isTeamLead)) {
-      responseMessage = "Message updated (no approval needed for manager/team lead)";
+      responseMessage =
+        "Message updated (no approval needed for manager/team lead)";
     }
 
     // Build final response
@@ -2352,7 +2094,7 @@ exports.editMessage = async function editMessage(req, res) {
         isSender,
         hasContentChanges,
         clientRequiresApproval,
-      }
+      },
     };
 
     // Add forwarding info to response if applicable
@@ -2586,7 +2328,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const limit = Math.min(
       Math.max(parseInt(req.query.limit, 10) || 50, 1),
-      200
+      200,
     );
 
     const me = req.employee?._id ? String(req.employee._id) : null;
@@ -2650,7 +2392,7 @@ exports.markAsSeen = async function markAsSeen(req, res) {
 
     // Check if user is a receiver of this message
     const isReceiver = msg.receiver.some(
-      (receiverId) => String(receiverId) === String(currentUserId)
+      (receiverId) => String(receiverId) === String(currentUserId),
     );
 
     if (!isReceiver) {
@@ -2661,7 +2403,7 @@ exports.markAsSeen = async function markAsSeen(req, res) {
 
     // Check if already seen
     const alreadySeen = msg.seenBy.some(
-      (seen) => String(seen.employee) === String(currentUserId)
+      (seen) => String(seen.employee) === String(currentUserId),
     );
 
     if (!alreadySeen) {
@@ -2732,7 +2474,7 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
     let totalUnread = 0;
     unreadMessages.forEach((message) => {
       const isSeen = message.seenBy.some(
-        (seen) => String(seen.employee) === String(currentUserId)
+        (seen) => String(seen.employee) === String(currentUserId),
       );
       if (!isSeen) {
         totalUnread++;
@@ -2741,9 +2483,8 @@ exports.getUnreadCounts = async function getUnreadCounts(req, res) {
 
     res.json({
       totalUnreadCount: totalUnread,
-      message: `You have ${totalUnread} unread message${
-        totalUnread !== 1 ? "s" : ""
-      }`,
+      message: `You have ${totalUnread} unread message${totalUnread !== 1 ? "s" : ""
+        }`,
     });
   } catch (e) {
     console.error("Error fetching unread counts:", e);
@@ -2757,24 +2498,35 @@ exports.getClientMessagesSeenStatus =
       const { clientId } = req.params;
       const currentUserId = req.employee._id;
 
+      const { clientEmployeeId, isClientEmployeeMessage } = req.query;
+
       if (!isObjId(clientId)) {
         return res.status(400).json({ error: "Valid client ID required" });
       }
 
-      // Get all messages for this client where current user is a receiver
-      const messages = await WhatsAppMessage.find({
+      const q = {
         client: clientId,
         receiver: currentUserId,
         // Exclude messages sent by current user
         sender: { $ne: currentUserId },
-      }).select("_id seenBy");
+      };
+
+      if (isClientEmployeeMessage === "true" && clientEmployeeId) {
+        q.isClientEmployeeMessage = true;
+        q.clientEmployeeId = clientEmployeeId;
+      } else if (isClientEmployeeMessage === "false") {
+        q.isClientEmployeeMessage = false;
+      }
+
+      // Get all messages for this client/employee where current user is a receiver
+      const messages = await WhatsAppMessage.find(q).select("_id seenBy");
 
       // Check if any message is unread
       const hasUnreadMessages = messages.some(
         (message) =>
           !message.seenBy.some(
-            (seen) => String(seen.employee) === String(currentUserId)
-          )
+            (seen) => String(seen.employee) === String(currentUserId),
+          ),
       );
 
       res.json({
@@ -2784,8 +2536,8 @@ exports.getClientMessagesSeenStatus =
         unreadCount: messages.filter(
           (message) =>
             !message.seenBy.some(
-              (seen) => String(seen.employee) === String(currentUserId)
-            )
+              (seen) => String(seen.employee) === String(currentUserId),
+            ),
         ).length,
       });
     } catch (e) {
@@ -2797,25 +2549,35 @@ exports.getClientMessagesSeenStatus =
 exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
   try {
     const { clientId } = req.params;
+    const { clientEmployeeId, isClientEmployeeMessage } = req.body || {};
     const currentUserId = req.employee._id;
 
     if (!isObjId(clientId)) {
       return res.status(400).json({ error: "Valid client ID required" });
     }
 
-    // Find all unread messages for this client where current user is a receiver
-    const unreadMessages = await WhatsAppMessage.find({
+    const q = {
       client: clientId,
       receiver: currentUserId,
       sender: { $ne: currentUserId }, // Exclude own messages
       "seenBy.employee": { $ne: currentUserId }, // Not already seen
-    });
+    };
+
+    if (isClientEmployeeMessage === true && clientEmployeeId) {
+      q.isClientEmployeeMessage = true;
+      q.clientEmployeeId = clientEmployeeId;
+    } else if (isClientEmployeeMessage === false) {
+      q.isClientEmployeeMessage = false;
+    }
+
+    // Find all unread messages for this client/employee where current user is a receiver
+    const unreadMessages = await WhatsAppMessage.find(q);
 
     // Mark each message as seen
     const updatePromises = unreadMessages.map(async (message) => {
       // Check if user already seen this message (double check)
       const alreadySeen = message.seenBy.some(
-        (seen) => String(seen.employee) === String(currentUserId)
+        (seen) => String(seen.employee) === String(currentUserId),
       );
 
       if (!alreadySeen) {
@@ -2906,13 +2668,13 @@ exports.searchMessages = async function searchMessages(req, res) {
         { path: "owner", select: "_id name companyEmail" },
       ])
       .select(
-        "_id note message subject sender client createdAt receiver status"
+        "_id note message subject sender client createdAt receiver status",
       )
       .lean();
 
     // Debug: Log first few messages
     if (messages.length > 0) {
-      messages.slice(0, 3).forEach((msg, i) => {});
+      messages.slice(0, 3).forEach((msg, i) => { });
     }
 
     // Format response
@@ -2922,17 +2684,17 @@ exports.searchMessages = async function searchMessages(req, res) {
       subject: m.subject || "",
       sender: m.sender
         ? {
-            _id: m.sender._id,
-            name: m.sender.name || "Unknown",
-          }
+          _id: m.sender._id,
+          name: m.sender.name || "Unknown",
+        }
         : { _id: null, name: "Unknown" },
       clientId: m.client?._id || null,
       clientName: m.client?.clientName || "Unknown",
       time: m.createdAt
         ? new Date(m.createdAt).toLocaleTimeString([], {
-            hour: "2-digit",
-            minute: "2-digit",
-          })
+          hour: "2-digit",
+          minute: "2-digit",
+        })
         : "",
       timestamp: m.createdAt || new Date(),
       status: m.status || "sent",
@@ -2950,5 +2712,612 @@ exports.searchMessages = async function searchMessages(req, res) {
       error: "Search failed",
       items: [],
     });
+  }
+};
+exports.createMessage = async function createMessage(req, res) {
+  try {
+    const {
+      owner: ownerBody,
+      client,
+      sender: senderBody,
+      receiver: receiverBody,
+      receivers: receiversBody,
+      subject,
+      note,
+      isScheduled: isScheduledBody,
+      scheduledFor,
+      isReply,
+      repliedTo,
+      replyContent,
+      // 🔥 NEW: Add client employee fields
+      isClientEmployeeMessage,
+      clientEmployeeId,
+      parentClientId,
+      clientEmployeeName,
+      clientEmployeeDesignation,
+    } = req.body;
+
+    const owner = ownerBody || req.employee?.owner;
+    const sender = senderBody || req.employee?._id;
+
+    if (!isObjId(owner) || !isObjId(sender)) {
+      return res.status(400).json({
+        error: "owner and sender are required (ObjectId strings)",
+      });
+    }
+
+    // 🔥 CRITICAL: Determine if this is a client employee message
+    let actualClientId = client;
+    let isClientEmployeeChat = false;
+    let clientEmployeeData = null;
+
+    // Check if this is a client employee chat
+    if (isClientEmployeeMessage && clientEmployeeId && parentClientId) {
+      isClientEmployeeChat = true;
+      actualClientId = parentClientId; // Use parent client ID for storage
+
+      // Store client employee info in message metadata
+      clientEmployeeData = {
+        clientEmployeeId,
+        clientEmployeeName,
+        clientEmployeeDesignation,
+        parentClientId,
+        parentClientName: null, // Will be populated below
+      };
+    }
+
+    // Validate client ID based on message type
+    if (!isObjId(actualClientId)) {
+      return res.status(400).json({
+        error: isClientEmployeeChat
+          ? "parentClientId is required for client employee messages"
+          : "client is required (ObjectId string)",
+      });
+    }
+
+    // Start with ONLY the explicitly specified receivers
+    let receivers = [];
+    if (receiverBody) receivers = receivers.concat(normalizeIds(receiverBody));
+    if (receiversBody)
+      receivers = receivers.concat(normalizeIds(receiversBody));
+
+    // Remove sender from receivers
+    receivers = receivers.filter((id) => id !== String(sender));
+
+    const senderDoc = await Employee.findById(sender)
+      .select("_id role supervisor owner")
+      .lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+
+    let approvalStatus;
+
+    // 🔥 CLIENT-BASED SUPERVISION: Get supervision mode from CLIENT
+    const Client = require("../models/ClientInfo");
+    const clientDoc = await Client.findById(actualClientId)
+      .populate("assignedTo", "_id role name companyEmail")
+      .lean();
+
+    if (!clientDoc) {
+      return res.status(404).json({
+        error: isClientEmployeeChat
+          ? "Parent client not found"
+          : "Client not found",
+      });
+    }
+
+    // Use client's supervision setting, fallback to "direct" if not set
+    const clientSupervision = clientDoc?.supervision || "direct";
+    const needsApproval = clientSupervision === "needs_approval";
+    const isDirect = clientSupervision === "direct";
+
+    // 🔥 UPDATE: Populate parent client name for client employee messages
+    if (isClientEmployeeChat) {
+      clientEmployeeData.parentClientName = clientDoc.clientName;
+    }
+
+    const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+    // 🔥 GET ASSIGNED EMPLOYEES FROM CLIENT
+    let assignedEmployeeIds = [];
+    if (clientDoc?.assignedTo && Array.isArray(clientDoc.assignedTo)) {
+      assignedEmployeeIds = clientDoc.assignedTo
+        .filter((emp) => emp && emp._id)
+        .map((emp) => String(emp._id));
+    } else if (clientDoc?.assignedTo && clientDoc.assignedTo._id) {
+      assignedEmployeeIds = [String(clientDoc.assignedTo._id)];
+    }
+
+    // 🔥 TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEES
+    if (senderRole === "team_lead") {
+      receivers = [];
+
+      // Add managers as receivers
+      if (managers.length > 0) {
+        managers.forEach((managerId) => {
+          if (!receivers.includes(managerId) && managerId !== String(sender)) {
+            receivers.push(managerId);
+          }
+        });
+      }
+
+      // Add assigned employees as receivers
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (
+            employeeId &&
+            employeeId !== String(sender) &&
+            !receivers.includes(employeeId)
+          ) {
+            receivers.push(employeeId);
+          }
+        });
+      }
+
+      // Get CRM employee ID
+      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+      let crmUser = null;
+      if (!crmEmployeeId) {
+        crmUser = await Employee.findOne({
+          owner: owner,
+          $or: [
+            { role: /crm/i },
+            { role: /customer relationship/i },
+            { companyEmail: /crm/i },
+            { name: /CRM/i },
+          ],
+        })
+          .select("_id")
+          .lean();
+      }
+
+      const crmId = crmEmployeeId || (crmUser ? String(crmUser._id) : null);
+      if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
+        receivers.push(crmId);
+      }
+
+      approvalStatus = null;
+    }
+    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEES
+    else if (senderRole === "manager") {
+      // Add team leads to receivers
+      tls.forEach((teamLeadId) => {
+        if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
+          receivers.push(teamLeadId);
+        }
+      });
+
+      // Add assigned employees
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (
+            employeeId &&
+            employeeId !== String(sender) &&
+            !receivers.includes(employeeId)
+          ) {
+            receivers.push(employeeId);
+          }
+        });
+      }
+
+      approvalStatus = null;
+    }
+    // 👷 EMPLOYEE LOGIC: Use assigned employees
+    else if (senderRole === "employee") {
+      if (assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (
+            employeeId &&
+            employeeId !== String(sender) &&
+            !receivers.includes(employeeId)
+          ) {
+            receivers.push(employeeId);
+          }
+        });
+      }
+    }
+
+    // 🔥 FIXED: Handle reply scenario
+    if (isReply && repliedTo) {
+      try {
+        const originalMessage = await WhatsAppMessage.findById(repliedTo)
+          .populate("sender receiver", "_id role name companyEmail")
+          .lean();
+
+        if (originalMessage) {
+          const originalReceivers = originalMessage.receiver.map((r) =>
+            typeof r === "object" ? String(r._id) : String(r),
+          );
+
+          originalReceivers.forEach((receiverId) => {
+            if (
+              receiverId !== String(sender) &&
+              !receivers.includes(receiverId)
+            ) {
+              receivers.push(receiverId);
+            }
+          });
+
+          const originalSenderId = originalMessage.sender
+            ? typeof originalMessage.sender === "object"
+              ? String(originalMessage.sender._id)
+              : String(originalMessage.sender)
+            : null;
+
+          let originalSenderRole = "";
+          if (originalSenderId) {
+            const originalSenderDoc = await Employee.findById(originalSenderId)
+              .select("role")
+              .lean();
+            originalSenderRole = normalizeRole(originalSenderDoc?.role || "");
+          }
+
+          // Employee replying to Manager
+          if (senderRole === "employee" && originalSenderRole === "manager") {
+            receivers = receivers.filter(
+              (id) => id !== String(originalSenderId),
+            );
+
+            if (needsApproval) {
+              if (tls.length > 0) {
+                receivers = [];
+                receivers = [...tls];
+                approvalStatus = "pending";
+              }
+            } else if (isDirect) {
+              if (originalSenderId && !receivers.includes(originalSenderId)) {
+                receivers.push(originalSenderId);
+              }
+              approvalStatus = "approved";
+            }
+          }
+          // Team Lead replying to Manager
+          else if (
+            senderRole === "team_lead" &&
+            originalSenderRole === "manager"
+          ) {
+            approvalStatus = null;
+            if (assignedEmployeeIds.length > 0) {
+              assignedEmployeeIds.forEach((employeeId) => {
+                if (employeeId && !receivers.includes(employeeId)) {
+                  receivers.push(employeeId);
+                }
+              });
+            }
+          }
+          // Manager replying to Employee
+          else if (
+            senderRole === "manager" &&
+            originalSenderRole === "employee"
+          ) {
+            approvalStatus = null;
+            if (assignedEmployeeIds.length > 0) {
+              assignedEmployeeIds.forEach((employeeId) => {
+                if (employeeId && !receivers.includes(employeeId)) {
+                  receivers.push(employeeId);
+                }
+              });
+            }
+          }
+          // Employee replying to Employee
+          else if (
+            senderRole === "employee" &&
+            originalSenderRole === "employee"
+          ) {
+            // No special handling needed
+          }
+          // Team Lead replying (add assigned employees)
+          else if (
+            senderRole === "team_lead" &&
+            assignedEmployeeIds.length > 0
+          ) {
+            assignedEmployeeIds.forEach((employeeId) => {
+              if (employeeId && !receivers.includes(employeeId)) {
+                receivers.push(employeeId);
+              }
+            });
+          }
+
+          if (
+            originalSenderId &&
+            originalSenderId !== String(sender) &&
+            !receivers.includes(originalSenderId) &&
+            !(
+              senderRole === "employee" &&
+              originalSenderRole === "manager" &&
+              needsApproval
+            )
+          ) {
+            receivers.push(originalSenderId);
+          }
+        }
+      } catch (replyError) {
+        console.warn("Failed to process reply context:", replyError);
+      }
+    }
+
+    // 🔥 CORRECTED Approval status logic
+    if (approvalStatus === undefined) {
+      if (senderRole === "manager") {
+        approvalStatus = null;
+      } else if (senderRole === "team_lead") {
+        approvalStatus = null;
+      } else if (needsApproval) {
+        approvalStatus = "pending";
+        if (tls.length > 0) {
+          receivers = [...receivers, ...tls.map((id) => String(id))];
+        }
+      } else if (isDirect) {
+        approvalStatus = "approved";
+      }
+    }
+
+    // 🔥 Filter out invalid receiver IDs
+    receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
+      (id) =>
+        id &&
+        id !== "undefined" &&
+        id !== "null" &&
+        id !== String(sender) &&
+        isObjId(id),
+    );
+
+    if (receivers.length === 0) {
+      return res.status(400).json({ error: "No valid receivers found" });
+    }
+
+    // Handle scheduling logic
+    const isScheduled = isScheduledBody === true || isScheduledBody === "true";
+    let status = "sent";
+    let scheduledAt = null;
+    let scheduledBy = null;
+    let sentAt = new Date();
+
+    if (isScheduled) {
+      const validation = validateScheduleTime(scheduledFor);
+      if (!validation.valid) {
+        return res.status(400).json({ error: validation.error });
+      }
+
+      status = "scheduled";
+      scheduledAt = new Date();
+      scheduledBy = sender;
+      sentAt = null;
+    }
+
+    // 🔥 CRITICAL: Create message data with client employee metadata
+    const msgData = {
+      owner,
+      client: actualClientId, // Store parent client ID
+      sender,
+      receiver: receivers,
+      subject: subject || "",
+      note: note || "",
+      approvalStatus: approvalStatus,
+      isScheduled,
+      status,
+      scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
+      attachments: [],
+      scheduledAt,
+      scheduledBy,
+      sentAt: !isScheduled ? new Date() : undefined,
+      isReply: isReply || false,
+      repliedTo: isReply ? repliedTo : null,
+      replyContent: isReply ? replyContent : null,
+      // 🔥 NEW: Store client employee metadata if applicable
+      clientEmployeeData: isClientEmployeeChat ? clientEmployeeData : null,
+      isClientEmployeeMessage: isClientEmployeeChat,
+      clientEmployeeId: isClientEmployeeChat ? clientEmployeeId : null,
+      // Store metadata for Employee → Manager replies
+      originalManagerReceiver: null,
+      isEmployeeReplyToManager:
+        senderRole === "employee" && isReply && needsApproval,
+    };
+
+    // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval
+    if (senderRole === "employee" && isReply && needsApproval && repliedTo) {
+      try {
+        const originalMessage = await WhatsAppMessage.findById(repliedTo)
+          .populate("sender", "_id role")
+          .lean();
+
+        if (originalMessage && originalMessage.sender) {
+          const originalSenderRole = normalizeRole(
+            originalMessage.sender.role || "",
+          );
+          if (originalSenderRole === "manager") {
+            msgData.originalManagerReceiver = String(
+              originalMessage.sender._id,
+            );
+            msgData.isEmployeeReplyToManager = true;
+          }
+        }
+      } catch (error) {
+        console.warn("Failed to store manager ID for forwarding:", error);
+      }
+    }
+
+    const msg = await WhatsAppMessage.create(msgData);
+
+    const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName assignedTo" },
+      { path: "scheduledBy", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
+    ]);
+
+    // Get assigned employees info
+    const assignedEmployeesInfo =
+      assignedEmployeeIds.length > 0
+        ? clientDoc?.assignedTo?.map((emp) => ({
+          id: emp._id,
+          name: emp.name,
+          email: emp.companyEmail,
+          role: emp.role,
+        })) || []
+        : [];
+
+    // 🔥 ENHANCED RESPONSE: Include client employee info in response
+    const responseWithSupervision = {
+      ...populated.toObject(),
+      parentClientId: populated.client?._id || populated.client, // Ensure parentClientId is present
+      clientSupervision: clientSupervision,
+      requiresApproval: needsApproval,
+      teamLeadsIncluded: senderRole === "manager",
+      assignedEmployeesIncluded: assignedEmployeeIds.length > 0,
+      assignedEmployeesCount: assignedEmployeeIds.length,
+      crmIncluded: senderRole === "team_lead",
+      managersIncluded: senderRole === "team_lead",
+      totalReceivers: receivers.length,
+      assignedEmployees: assignedEmployeesInfo,
+      // 🔥 ADD CLIENT EMPLOYEE INFO TO RESPONSE
+      isClientEmployeeMessage: isClientEmployeeChat,
+      clientEmployeeData: clientEmployeeData,
+      receiverSummary: {
+        role: senderRole,
+        sentToManagers: senderRole === "team_lead",
+        sentToTeamLeads: senderRole === "manager",
+        sentToAssignedEmployees: assignedEmployeeIds.length > 0,
+        assignedEmployeesCount: assignedEmployeeIds.length,
+        sentToCRM: senderRole === "team_lead",
+        isReply: isReply || false,
+        replyToMessageId: isReply ? repliedTo : null,
+        isEmployeeReplyToManager:
+          senderRole === "employee" && isReply && needsApproval,
+        needsTeamLeadApproval: approvalStatus === "pending",
+        originalManagerStoredForForwarding: !!msgData.originalManagerReceiver,
+        // 🔥 ADD CLIENT EMPLOYEE FLAG
+        isClientEmployeeChat: isClientEmployeeChat,
+        actualClientId: actualClientId,
+      },
+    };
+
+    // 🔥 CRITICAL FIX: Emit real-time events for client employees - FIXED VERSION
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+
+      // Always emit to sender first
+      io.to(`employee_${sender}`).emit("new_message", {
+        message: responseWithSupervision,
+        type: "message_created",
+        action: "sent",
+        isClientEmployeeChat: isClientEmployeeChat,
+        approvalStatus: responseWithSupervision.approvalStatus,
+      });
+
+      // 🎯 CRITICAL FIX: Only notify receivers if message is approved OR if they are Team Leads for pending approval
+      receivers.forEach((receiverId) => {
+        // Check if this receiver is a Team Lead (for pending approval messages)
+        const isReceiverTeamLead = tls.includes(receiverId);
+
+        // Determine if we should notify this receiver:
+        // 1. If message is approved (approvalStatus === "approved") - notify everyone
+        // 2. If message is pending (approvalStatus === "pending") - only notify Team Leads
+        // 3. If message has no approval status (null) - notify everyone (for Team Lead/Manager messages)
+
+        const shouldNotify =
+          responseWithSupervision.approvalStatus === "approved" ||
+          responseWithSupervision.approvalStatus === null ||
+          (responseWithSupervision.approvalStatus === "pending" &&
+            isReceiverTeamLead);
+
+        if (shouldNotify) {
+          io.to(`employee_${receiverId}`).emit("new_message", {
+            message: responseWithSupervision,
+            type:
+              responseWithSupervision.approvalStatus === "pending"
+                ? "reply_needs_approval"
+                : "new_assignment",
+            action: "received",
+            isClientEmployeeChat: isClientEmployeeChat,
+            clientEmployeeName: clientEmployeeData?.clientEmployeeName,
+            requiresApproval:
+              responseWithSupervision.approvalStatus === "pending",
+          });
+        }
+      });
+
+      // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
+      // Only Receivers and Senders should get the event via their personal rooms
+      /*
+      if (isClientEmployeeChat) {
+        // Emit to parent client room
+        io.to(`client_${parentClientId}`).emit("new_message", {
+          message: responseWithSupervision,
+          type: "new_message",
+          action: "client_received",
+          isClientEmployeeChat: true,
+          clientEmployeeId: clientEmployeeId,
+          clientId: parentClientId,
+          isClientEmployeeMessage: true,
+        });
+
+        // 🔥 NEW: Emit to client employee specific room
+        io.to(`client_employee_${clientEmployeeId}`).emit("new_message", {
+          message: responseWithSupervision,
+          type: "client_employee_message",
+          action: "client_employee_received",
+          clientEmployeeId: clientEmployeeId,
+          parentClientId: parentClientId,
+          isClientEmployeeMessage: true,
+        });
+      } else {
+        // Regular client message - only emit if approved or no approval needed
+        if (responseWithSupervision.approvalStatus !== "pending") {
+          io.to(`client_${actualClientId}`).emit("new_message", {
+            message: responseWithSupervision,
+            type: "new_message",
+            action: "client_received",
+            isClientEmployeeChat: false,
+            clientId: actualClientId,
+          });
+        }
+      }
+      */
+
+      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies to client employee chat
+      if (senderRole === "team_lead" && assignedEmployeeIds.length > 0) {
+        assignedEmployeeIds.forEach((employeeId) => {
+          if (receivers.includes(employeeId)) {
+            io.to(`employee_${employeeId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "team_lead_direct_message",
+              note: isClientEmployeeChat
+                ? `Team Lead has sent a message to client employee ${clientEmployeeData?.clientEmployeeName}`
+                : "Team Lead has sent you a direct message regarding this client",
+              clientName: clientDoc?.clientName || "Unknown Client",
+              clientEmployeeName: clientEmployeeData?.clientEmployeeName,
+            });
+          }
+        });
+      }
+
+      // 🎯 FIXED: Special notification for managers when team lead sends message
+      // Only send to managers if message is approved OR has no approval status
+      if (
+        senderRole === "team_lead" &&
+        responseWithSupervision.approvalStatus !== "pending"
+      ) {
+        managers.forEach((managerId) => {
+          if (receivers.includes(managerId)) {
+            io.to(`employee_${managerId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "team_lead_message_to_manager",
+              note: isClientEmployeeChat
+                ? `Team Lead has sent a message to client employee ${clientEmployeeData?.clientEmployeeName}`
+                : "Team Lead has sent you a message regarding client communication",
+              clientEmployeeName: clientEmployeeData?.clientEmployeeName,
+            });
+          }
+        });
+      }
+    }
+
+    res.status(201).json(responseWithSupervision);
+  } catch (e) {
+    console.error("❌ Create message error:", e);
+    res.status(500).json({ error: "Failed to create assignment message" });
   }
 };

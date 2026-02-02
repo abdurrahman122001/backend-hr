@@ -8,19 +8,20 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const cron = require("node-cron");
+const moment = require("moment-timezone");
+const EmployeeSession = require("./models/EmployeeSession");
 
 // ---------- Models used in cron / elsewhere ----------
 const AttendanceConfig = require("./models/AttendanceConfig");
 const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
-const empAuth = require("./middleware/empAuth");
-const puppeteer = require("puppeteer");
 const ProbationPeriod = require("./models/ProbationPeriod");
-const EmployeeSession = require("./models/EmployeeSession");
-const { getLeaveYear } = require("./utils/leaveEntitlement");
-const LeaveTransaction = require("./models/LeaveTransaction");
 const LeaveYearBalance = require("./models/LeaveYearBalance");
+const LeaveTransaction = require("./models/LeaveTransaction");
+const AssignmentMessage = require("./models/AssignmentMessage");
+const empAuth = require("./middleware/empAuth");
+const { getLeaveYear } = require("./utils/leaveEntitlement");
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
@@ -67,13 +68,13 @@ const pageRoute = require("./routes/page");
 const taxRoutes = require("./routes/taxRoutes");
 const employeeDocsRouter = require("./routes/employeeDocs");
 const attendanceLeaveSummaryRouter = require("./routes/attendanceLeaveSummary");
+const employeeLeaveSummary = require("./routes/empLeaveBalanceRoutes");
 const managerRoutes = require("./routes/manager");
 const taskRoutes = require("./routes/tasks");
 const clientInfoRoutes = require("./routes/clientInfo");
 const assignMessageRoutes = require("./routes/assignmentMessage");
 const employeeLeavesRouter = require("./routes/employeeLeaves");
 const generateRouter = require("./routes/generate-pdfs");
-const AssignmentMessage = require("./models/AssignmentMessage");
 const assignmentMessageController = require("./controllers/assignmentMessageController");
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
@@ -90,17 +91,17 @@ const hierarchyRoute = require("./routes/hierarchy"); // (not mounted here, impo
 const threadChatRoutes = require("./routes/threadChatRoutes");
 const ThreadChatMessage = require("./models/ThreadChatMessage");
 const employeeShiftRoutes = require("./routes/employeeShiftRoute");
+const emailReceiverRoutes = require("./routes/emailReceiverRoutes");
+const emailPollingService = require("./services/emailPollingService");
+const emailReceiverService = require("./services/emailReceiverService");
 const labelRoutes = require("./routes/labelRoutes");
-const employeeLeaveSummary = require("./routes/empLeaveBalanceRoutes");
 const adminWorkSpaceManagementRoute = require("./routes/adminWorkSpaceManagementRoute");
 const employeeWorkSpaceManagementRoute = require("./routes/employeeTaskRoutes");
 const penaltyRoutes = require("./routes/penaltyRoutes");
 const warningRoutes = require("./routes/warningRoutes");
+const unifiedAuth = require("./middleware/unifiedAuth");
 const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
-
 const app = express();
-const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
-const moment = require("moment-timezone");
 
 // ---------- Static ----------
 app.use(
@@ -138,7 +139,6 @@ const ALLOWED_ORIGINS = [
   "https://apis.innand.com",
   "http://employee.virsme.com",
   "https://employee.virsme.com",
-  "https://attendance.virsme.com",
   "http://hr.virsme.com",
   "https://hr.virsme.com",
   "http://innand.com",
@@ -149,6 +149,7 @@ const ALLOWED_ORIGINS = [
   "http://localhost:8080",
   "http://localhost:8081",
   "http://localhost:8082",
+  "http://localhost:8083",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
@@ -188,7 +189,7 @@ app.use("/api/leaves", requireAuth, leavesRouter);
 app.use("/api/settings", requireAuth, settingsRouter);
 app.use("/api/payroll-periods", requireAuth, payrollPeriodsRouter);
 app.use("/api/staff", requireAuth, staffRouter);
-app.use("/api/salary-slips", requireAuth, salarySlipsRouter);
+app.use("/api/salary-slips", unifiedAuth, salarySlipsRouter);
 app.use("/api/shifts", requireAuth, shiftsRouter);
 app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
@@ -204,7 +205,8 @@ app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
+app.use("/api/attendance", attendanceLeaveSummaryRouter);
+app.use("/api", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
@@ -248,13 +250,13 @@ app.use("/api/hierarchy", requireAuth, hierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);
+app.use("/api/email", emailReceiverRoutes);
 app.use("/api", employeeLeaveSummary);
 app.use("/api/admin", adminWorkSpaceManagementRoute);
 app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
 app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
-
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
@@ -267,10 +269,29 @@ mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(async () => {
     console.log("▶ MongoDB connected");
+    // ✅ ADDED: Start email receiver once DB is connected
+    if (process.env.ENABLE_EMAIL_RECEIVER === "true") {
+      console.log("🚀 Starting email receiver service...");
+      setTimeout(() => {
+        try {
+          emailReceiverService.connect();
+          console.log("✅ Email receiver service initialized");
 
+          // Start polling after 5 seconds
+          setTimeout(() => {
+            emailPollingService.startPolling();
+          }, 5000);
+        } catch (e) {
+          console.warn(
+            "⚠️ Email receiver service failed to start:",
+            e?.message || e,
+          );
+        }
+      }, 3000);
+    }
     // Start IMAP watcher once DB is up (wrap to avoid crashing if it throws)
     try {
-      startWatcher();
+      // startWatcher();
     } catch (e) {
       console.warn("⚠️ IMAP watcher failed to start:", e?.message || e);
     }
@@ -282,6 +303,79 @@ mongoose
     console.error("❌ MongoDB connection error:", err);
     process.exit(1);
   });
+function parseJoiningDate(joiningDate) {
+  if (!joiningDate) return null;
+
+  // joiningDate might be stored as string. Try Date constructor.
+  const d = new Date(joiningDate);
+  if (isNaN(d.getTime())) return null;
+
+  // normalize to date-only (midnight)
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + Number(days || 0));
+  return d;
+}
+
+/**
+ * Month-based prorating with partial current month
+ * yearlyLeaves = 22 by your business rule
+ * If probation ends mid-month, include remaining days fraction of current month.
+ *
+ * Round off:
+ * 9.6 => 10, 9.4 => 9  (Math.round)
+ */
+function calculateProratedLeavesFrom(probationEndDate, yearlyLeaves = 22) {
+  const end = new Date(probationEndDate);
+  end.setHours(0, 0, 0, 0);
+
+  const year = end.getFullYear();
+
+  // end of current month
+  const lastDayOfMonth = new Date(year, end.getMonth() + 1, 0); // last date in month
+  const daysInMonth = lastDayOfMonth.getDate();
+
+  // remaining days in current month INCLUDING the probation end date
+  const remainingDaysInMonth = daysInMonth - end.getDate() + 1;
+  const monthFraction = remainingDaysInMonth / daysInMonth;
+
+  // full months remaining after current month
+  const remainingFullMonths = 11 - end.getMonth(); // if Jan (0) => 11 months after Jan
+  const monthly = yearlyLeaves / 12;
+
+  const raw = remainingFullMonths * monthly + monthFraction * monthly;
+
+  // round rule
+  return Math.round(raw);
+}
+
+/**
+ * Decide if employee is "already regular" so we don't overwrite.
+ * You said: "those employees which already has leaves will as regular"
+ *
+ * This checks if leaveEntitlement.total is already set to something meaningful
+ * OR if they've already used paid/unpaid leaves.
+ *
+ * Adjust if your schema differs.
+ */
+function alreadyHasLeaveEntitlement(emp) {
+  const le = emp.leaveEntitlement || {};
+  const total = Number(le.total || 0);
+  const usedPaid = Number(le.usedPaid || 0);
+  const usedUnpaid = Number(le.usedUnpaid || 0);
+
+  // If total already non-zero, or any usage exists, treat as regular
+  if (total > 0) return true;
+  if (usedPaid > 0 || usedUnpaid > 0) return true;
+
+  return false;
+}
+
+const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 
 // ---------- Change Streams: Watch Employee inserts/updates ----------
 function setupEmployeeChangeStream() {
@@ -348,191 +442,289 @@ app.get("/api/employees/count", async (_req, res) => {
 // ---------- Cron: auto-fill YESTERDAY’s attendance ----------
 // Runs at 00:00 in configured timezone (default Asia/Karachi)
 const ATTENDANCE_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
-// cron.schedule(
-//   "0 0 * * *",
-//   async () => {
-//     try {
-//       // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
-//       const yesterday = new Date();
-//       yesterday.setDate(yesterday.getDate() - 1);
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    try {
+      // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
 
-//       const y = yesterday.getFullYear();
-//       const m = String(yesterday.getMonth() + 1).padStart(2, "0");
-//       const d = String(yesterday.getDate()).padStart(2, "0");
-//       const date = `${y}-${m}-${d}`;
+      const y = yesterday.getFullYear();
+      const m = String(yesterday.getMonth() + 1).padStart(2, "0");
+      const d = String(yesterday.getDate()).padStart(2, "0");
+      const date = `${y}-${m}-${d}`;
 
-//       const config = await AttendanceConfig.findOne({}).lean();
-//       if (config && config.markAbsentManually === true) {
-//         return;
-//       }
+      const config = await AttendanceConfig.findOne({}).lean();
+      if (config && config.markAbsentManually === true) {
+        return;
+      }
 
-//       // Skip holidays
-//       const holiday = await Attendance.findOne({
-//         date,
-//         isHoliday: true,
-//       }).lean();
-//       if (holiday) {
-//         return;
-//       }
-//       const done = await Attendance.find({ date }).select("employee").lean();
-//       const doneIds = new Set(done.map((r) => String(r.employee)));
+      // Skip holidays
+      const holiday = await Attendance.findOne({
+        date,
+        isHoliday: true,
+      }).lean();
+      if (holiday) {
+        return;
+      }
 
-//       // All employees
-//       const allEmps = await Employee.find({}).select("_id owner shifts").lean();
+      // Employees already recorded for that date
+      const done = await Attendance.find({ date }).select("employee").lean();
+      const doneIds = new Set(done.map((r) => String(r.employee)));
 
-//       // Payroll periods
-//       const allPayrolls = await PayrollPeriod.find({}).lean();
+      // All employees
+      const allEmps = await Employee.find({}).select("_id owner shifts").lean();
 
-//       // Day name for yesterday (lowercase long weekday)
-//       const dayName = yesterday
-//         .toLocaleDateString("en-US", { weekday: "long" })
-//         .toLowerCase();
+      // Payroll periods
+      const allPayrolls = await PayrollPeriod.find({}).lean();
 
-//       const ops = [];
+      // Day name for yesterday (lowercase long weekday)
+      const dayName = yesterday
+        .toLocaleDateString("en-US", { weekday: "long" })
+        .toLowerCase();
+      const ops = [];
 
-//       for (const e of allEmps) {
-//         if (doneIds.has(String(e._id))) continue;
+      for (const e of allEmps) {
+        if (doneIds.has(String(e._id))) continue;
 
-//         const payroll = allPayrolls.find(
-//           (p) =>
-//             Array.isArray(p.shifts) &&
-//             Array.isArray(e.shifts) &&
-//             e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
-//         );
+        const payroll = allPayrolls.find(
+          (p) =>
+            Array.isArray(p.shifts) &&
+            Array.isArray(e.shifts) &&
+            e.shifts.some((s) => p.shifts.map(String).includes(String(s))),
+        );
 
-//         // If no payroll period or no nonWorkingDays config → mark absent
-//         if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
-//           ops.push({
-//             updateOne: {
-//               filter: { employee: e._id, date },
-//               update: {
-//                 $setOnInsert: {
-//                   employee: e._id,
-//                   date,
-//                   owner: e.owner || null,
-//                   status: "Absent",
-//                   checkIn: null,
-//                   checkOut: null,
-//                   notes: null,
-//                   markedByHR: false,
-//                 },
-//               },
-//               upsert: true,
-//             },
-//           });
-//           continue;
-//         }
+        // If no payroll period or no nonWorkingDays config → mark absent
+        if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
+          ops.push({
+            updateOne: {
+              filter: { employee: e._id, date },
+              update: {
+                $setOnInsert: {
+                  employee: e._id,
+                  date,
+                  owner: e.owner || null,
+                  status: "Absent",
+                  checkIn: null,
+                  checkOut: null,
+                  notes: null,
+                  markedByHR: false,
+                },
+              },
+              upsert: true,
+            },
+          });
+          continue;
+        }
 
-//         // Respect non-working days
-//         const nonWorking = payroll.nonWorkingDays.map((n) =>
-//           String(n).toLowerCase().trim()
-//         );
-//         if (nonWorking.includes(dayName)) {
-//           // It's a non-working day for this employee; skip
-//           continue;
-//         }
+        // Respect non-working days
+        const nonWorking = payroll.nonWorkingDays.map((n) =>
+          String(n).toLowerCase().trim(),
+        );
+        if (nonWorking.includes(dayName)) {
+          // It's a non-working day for this employee; skip
+          continue;
+        }
 
-//         // Otherwise, mark absent
-//         ops.push({
-//           updateOne: {
-//             filter: { employee: e._id, date },
-//             update: {
-//               $setOnInsert: {
-//                 employee: e._id,
-//                 date,
-//                 owner: e.owner || null,
-//                 status: "Absent",
-//                 checkIn: null,
-//                 checkOut: null,
-//                 notes: null,
-//                 markedByHR: false,
-//               },
-//             },
-//             upsert: true,
-//           },
-//         });
-//       }
+        // Otherwise, mark absent
+        ops.push({
+          updateOne: {
+            filter: { employee: e._id, date },
+            update: {
+              $setOnInsert: {
+                employee: e._id,
+                date,
+                owner: e.owner || null,
+                status: "Absent",
+                checkIn: null,
+                checkOut: null,
+                notes: null,
+                markedByHR: false,
+              },
+            },
+            upsert: true,
+          },
+        });
+      }
 
-//       if (ops.length) {
-//         const result = await Attendance.bulkWrite(ops);
-//         const upserted = result?.upsertedCount || 0;
-//       } else {
-//       }
-//     } catch (err) {
-//       console.error("[cron] Error auto-filling attendance:", err);
-//     }
-//   },
-//   { timezone: ATTENDANCE_CRON_TZ }
-// );
+      if (ops.length) {
+        const result = await Attendance.bulkWrite(ops);
+        const upserted = result?.upsertedCount || 0;
+      } else {
+      }
+    } catch (err) {
+      console.error("[cron] Error auto-filling attendance:", err);
+    }
+  },
+  { timezone: ATTENDANCE_CRON_TZ },
+);
+cron.schedule(
+  "0 0 * * *",
+  async () => {
+    try {
+      // ✅ normalize today to DATE ONLY
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const todayStr = today.toISOString().slice(0, 10);
+      const owners = await Employee.distinct("owner", { isTrashed: false });
+
+      for (const ownerId of owners) {
+        const policy = await ProbationPeriod.findOne({ owner: ownerId })
+          .sort({ createdAt: -1 })
+          .lean();
+
+        if (!policy) continue;
+        if (!policy.leaveAfterProbation) continue;
+        if (policy.leaveDuringProbation) continue;
+
+        const probationDays = Number(policy.days || 0);
+        if (probationDays < 1) continue;
+
+        // ✅ ONLY ACTIVE EMPLOYEES
+        const employees = await Employee.find({
+          owner: ownerId,
+          isTrashed: false,
+          status: "active",
+        })
+          .select("_id joiningDate")
+          .lean();
+
+        for (const emp of employees) {
+          if (!emp.joiningDate) continue;
+
+          const joiningDate = new Date(emp.joiningDate);
+          if (isNaN(joiningDate)) continue;
+
+          // probation end = joiningDate + probationDays
+          const probationEnd = new Date(joiningDate);
+          probationEnd.setDate(probationEnd.getDate() + probationDays);
+          probationEnd.setHours(0, 0, 0, 0);
+
+          const probationEndStr = probationEnd.toISOString().slice(0, 10);
+
+          // ✅ DATE-ONLY comparison
+          if (probationEndStr > todayStr) continue;
+
+          const leaveYear = getLeaveYear(probationEnd);
+
+          // ⛔ prevent double credit
+          const existingTx = await LeaveTransaction.findOne({
+            owner: ownerId,
+            employee: emp._id,
+            year: leaveYear,
+            type: "PAID_LEAVE_CREDITED",
+            sourceModel: "PROBATION",
+          }).lean();
+
+          if (existingTx) continue;
+
+          const leaveYearEnd = new Date(leaveYear, 11, 25); // 25 Dec of leaveYear
+          leaveYearEnd.setHours(0, 0, 0, 0);
+
+          // total days in leave year (Dec 26 → Dec 25)
+          const leaveYearStart = new Date(leaveYear - 1, 11, 26); // 26 Dec prev year
+          leaveYearStart.setHours(0, 0, 0, 0);
+
+          const totalDaysInYear =
+            (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
+
+          // remaining days from probation end → leave year end
+          const remainingDays =
+            (leaveYearEnd - probationEnd) / (1000 * 60 * 60 * 24) + 1;
+
+          // per-day leave value
+          const dailyRate = 22 / totalDaysInYear;
+
+          function customRound(value) {
+            const decimal = value - Math.floor(value);
+
+            if (decimal > 0.5) return Math.ceil(value);
+            if (decimal < 0.5) return Math.floor(value);
+
+            return value;
+          }
+          const rawLeaves = dailyRate * remainingDays;
+
+          const proratedLeaves = Math.max(0, customRound(rawLeaves));
+          if (proratedLeaves <= 0) continue;
+
+          // ✅ upsert LeaveYearBalance
+          const balance = await LeaveYearBalance.findOneAndUpdate(
+            {
+              owner: ownerId,
+              employee: emp._id,
+              year: leaveYear,
+            },
+            {
+              $inc: { total: proratedLeaves },
+              lastRecalculatedAt: new Date(),
+            },
+            {
+              upsert: true,
+              new: true,
+              setDefaultsOnInsert: true,
+            },
+          );
+
+          // 🧾 transaction record
+          await LeaveTransaction.create({
+            owner: ownerId,
+            employee: emp._id,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: probationEnd,
+            type: "PAID_LEAVE_CREDITED",
+            value: proratedLeaves,
+            sourceModel: "PROBATION",
+            sourceId: emp._id,
+            createdBy: null, // system
+          });
+        }
+      }
+    } catch (err) {
+      console.error("[cron][leave] ❌ error:", err);
+    }
+  },
+  { timezone: "Asia/Karachi" },
+);
+
+cron.schedule(
+  "0 0 * * *", // 12:00 AM
+  async () => {
+    const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
+    const logoutTimeUTC = nowKarachi.utc().toDate();
+    const actualLogoutTime = nowKarachi.format("YYYY-MM-DD HH:mm");
+
+    const sessions = await EmployeeSession.find({ active: true });
+
+    for (const session of sessions) {
+      const loginTimeKarachi = moment(session.loginTime).tz(ATTENDANCE_CRON_TZ);
+      const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
+
+      await EmployeeSession.findByIdAndUpdate(session._id, {
+        logoutTime: logoutTimeUTC,
+        actualLogoutTime,
+        totalHours: parseFloat(totalHours.toFixed(2)),
+        active: false,
+        status: totalHours < 6 ? "half-day" : session.status,
+        isAutoLogout: true,
+      });
+    }
+  },
+  { timezone: "Asia/Karachi" },
+);
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------
-const ENABLE_HTTPS =
-  (process.env.ENABLE_HTTPS || "true").toLowerCase() !== "false";
-const DEFAULT_DOMAIN = process.env.DOMAIN || "innand.com";
+const ENABLE_HTTPS = false;
+const HTTP_PORT = 4000;
 
-const CERT_FULLCHAIN =
-  process.env.CERT_FULLCHAIN ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/fullchain.pem`;
-const CERT_PRIVKEY =
-  process.env.CERT_PRIVKEY ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
+const httpServer = http.createServer(app);
+primaryServer = httpServer;
 
-const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
-
-let primaryServer; // the server we attach socket.io to
-let httpsEnabled = false;
-
-if (
-  ENABLE_HTTPS &&
-  fs.existsSync(CERT_FULLCHAIN) &&
-  fs.existsSync(CERT_PRIVKEY)
-) {
-  // Start HTTPS server
-  const httpsServer = https.createServer(
-    {
-      cert: fs.readFileSync(CERT_FULLCHAIN),
-      key: fs.readFileSync(CERT_PRIVKEY),
-    },
-    app,
-  );
-  primaryServer = httpsServer;
-  httpsEnabled = true;
-
-  httpsServer.listen(HTTPS_PORT, () => {
-    console.log(
-      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`,
-    );
-  });
-
-  // Lightweight HTTP → HTTPS redirect
-  http
-    .createServer((req, res) => {
-      const host = req.headers.host || DEFAULT_DOMAIN;
-      const location = `https://${host}${req.url}`;
-      res.writeHead(301, { Location: location });
-      res.end();
-    })
-    .listen(HTTP_PORT, () => {
-      console.log(
-        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`,
-      );
-    });
-} else {
-  // Fallback to HTTP only (useful for local/dev or when cert files missing)
-  const httpServer = http.createServer(app);
-  primaryServer = httpServer;
-
-  httpServer.listen(HTTP_PORT, () => {
-    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
-    if (ENABLE_HTTPS) {
-      console.warn(
-        "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
-      );
-    }
-  });
-}
+httpServer.listen(HTTP_PORT, () => {
+  console.log(`🔓 Server running locally on http://localhost:${HTTP_PORT}`);
+});
 
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
@@ -1542,7 +1734,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`thread_chat_${threadId}`);
-    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
   });
 
   socket.on("join_thread_chat", (threadId) => {
@@ -1551,7 +1742,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`thread_chat_${threadId}`);
-    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
   });
 
   /**
@@ -2471,47 +2661,133 @@ io.on("connection", (socket) => {
     socket.join(`conversation_${conversationId}`);
   });
 
-  // 🎯 CRITICAL FIX: Handle WhatsApp message events specifically
+  // 🔥 FIXED: Join client employee room - KEEP ONLY THIS ONE
+  socket.on("join_client_employee", (employeeId) => {
+    if (!employeeId) {
+      console.error("❌ join_client_employee: employeeId is required");
+      return;
+    }
+    // Join BOTH employee room AND client employee room
+    socket.join(`employee_${employeeId}`);
+    socket.join(`client_employee_${employeeId}`);
+  });
+  // 🔥 UPDATED: Handle whatsapp_send_message from frontend with approval filtering
+  // 🔥 FIXED: whatsapp_send_message handler
   socket.on("whatsapp_send_message", async (data) => {
     try {
-      const { message, clientId, senderId, receivers } = data;
+      const { message, clientId, senderId, receivers, clientEmployeeId } = data;
 
-      if (!message || !clientId || !senderId) {
+      if (!message || !senderId) {
         console.error(
-          "❌ whatsapp_send_message: message, clientId, and senderId are required",
+          "❌ whatsapp_send_message: message and senderId are required",
         );
         socket.emit("message_error", { error: "Missing required fields" });
         return;
       }
-      // Notify sender
+
+      // 🔥 CRITICAL: Only notify sender about their own message
       socket.emit("new_message", {
         message: message,
         type: "message_sent",
         action: "sent",
+        approvalStatus: message.approvalStatus,
       });
 
-      // Notify all receivers
+      // 🔥 IMPORTANT: Filter receivers to only notify actual recipients
       if (receivers && Array.isArray(receivers)) {
         receivers.forEach((receiverId) => {
-          socket.to(`employee_${receiverId}`).emit("new_message", {
-            message: message,
-            type: "new_assignment",
-            action: "received",
-          });
+          // Check if this receiver is the actual sender (should already be handled)
+          if (receiverId === senderId) return;
+
+          // Check approval status for filtering
+          let shouldNotify = false;
+
+          if (
+            message.approvalStatus === "approved" ||
+            message.approvalStatus === null
+          ) {
+            // Approved messages or Team Lead/Manager messages
+            shouldNotify = true;
+          } else if (message.approvalStatus === "pending") {
+            // Only notify Team Leads for pending approval
+            const isReceiverTeamLead = checkIfTeamLead(receiverId);
+            shouldNotify = isReceiverTeamLead;
+          }
+
+          if (shouldNotify) {
+            // 🔥 Use io.to instead of socket.to to ensure proper delivery
+            io.to(`employee_${receiverId}`).emit("new_message", {
+              message: message,
+              type:
+                message.approvalStatus === "pending"
+                  ? "reply_needs_approval"
+                  : "new_assignment",
+              action: "received",
+              requiresApproval: message.approvalStatus === "pending",
+              // 🔥 ADD: Explicitly mark as for this receiver
+              forReceiver: receiverId,
+            });
+          }
         });
       }
 
-      // Also broadcast to client room for real-time chat
-      socket.to(`client_${clientId}`).emit("new_message", {
-        message: message,
-        type: "new_message",
-        action: "client_received",
-      });
+      // 🎯 FIXED: Check approval status before emitting to client rooms
+      if (clientEmployeeId) {
+        // Only emit to rooms if message is approved or has no approval status
+        if (message.approvalStatus !== "pending") {
+          // Emit to the parent client room
+          if (clientId) {
+            io.to(`client_${clientId}`).emit("new_message", {
+              message: message,
+              type: "new_message",
+              action: "client_received",
+              isClientEmployeeMessage: true,
+              clientEmployeeId: clientEmployeeId,
+              clientId: clientId,
+            });
+          }
+
+          // Emit to the specific client employee room
+          io.to(`client_employee_${clientEmployeeId}`).emit("new_message", {
+            message: message,
+            type: "client_employee_message",
+            action: "client_employee_received",
+            isClientEmployeeMessage: true,
+            clientEmployeeId: clientEmployeeId,
+            clientId: clientId,
+          });
+        }
+      } else {
+        // Only emit if message is approved or has no approval status
+        if (message.approvalStatus !== "pending" && clientId) {
+          io.to(`client_${clientId}`).emit("new_message", {
+            message: message,
+            type: "new_message",
+            action: "client_received",
+            isClientEmployeeMessage: false,
+            clientId: clientId,
+          });
+        }
+      }
     } catch (error) {
       console.error("❌ Error in whatsapp_send_message:", error);
       socket.emit("message_error", { error: "Failed to send message" });
     }
   });
+  async function checkIfTeamLead(userId) {
+    try {
+      const user = await User.findById(userId).select("role").lean();
+      if (user && user.role) {
+        const role = user.role.toLowerCase();
+        return role.includes("lead") || role === "team_lead";
+      }
+      return false;
+    } catch (error) {
+      console.error("Error checking team lead status:", error);
+      return false;
+    }
+  }
+
   socket.on("join:message", (messageId) => {
     if (!messageId) return;
     socket.join(`message:${messageId}`);
@@ -2591,10 +2867,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Update comment in database
-      // const updatedComment = await updateCommentInDatabase(commentId, text, editedBy);
-
-      // Mock updated comment
       const updatedComment = {
         _id: commentId,
         text,
@@ -2647,10 +2919,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Add reaction to database
-      // const updatedReaction = await addReactionToComment(commentId, reaction, userId);
-
-      // Mock reaction
       const updatedReaction = {
         emoji: reaction,
         userId,
@@ -2687,7 +2955,7 @@ io.on("connection", (socket) => {
       console.error("❌ Error in comment:typing:", error);
     }
   });
-  // 🎯 CRITICAL FIX: Handle message approval events
+
   socket.on("whatsapp_approve_message", async (data) => {
     try {
       const { message, approvedBy, receivers, clientId } = data;
@@ -2702,9 +2970,11 @@ io.on("connection", (socket) => {
       const updatedMessage = {
         ...message,
         approvalStatus: "approved",
+        isForwarded: true,
+        forwardedBy: approvedBy,
+        forwardedAt: new Date(),
       };
 
-      // 🎯 Notify ALL involved users about approval
       const allInvolvedUsers = new Set();
 
       // Add sender
@@ -2712,7 +2982,7 @@ io.on("connection", (socket) => {
         allInvolvedUsers.add(String(message.sender._id));
       }
 
-      // Add all receivers from original message
+      // Add all receivers
       if (message.receiver && Array.isArray(message.receiver)) {
         message.receiver.forEach((receiver) => {
           const receiverId =
@@ -2723,21 +2993,21 @@ io.on("connection", (socket) => {
         });
       }
 
-      // Add the team lead who approved
+      // Add the approver
       allInvolvedUsers.add(String(approvedBy));
 
-      // Add any additional receivers from approval
+      // Add additional receivers if provided
       if (receivers && Array.isArray(receivers)) {
         receivers.forEach((receiverId) => {
           allInvolvedUsers.add(String(receiverId));
         });
       }
 
-      // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
+      // Notify all involved users
       involvedUsersArray.forEach((userId) => {
-        socket.to(`employee_${userId}`).emit("new_message", {
+        io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
@@ -2748,7 +3018,7 @@ io.on("connection", (socket) => {
 
       // Also emit to the client room for real-time chat updates
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("new_message", {
+        io.to(`client_${clientId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
@@ -2766,7 +3036,6 @@ io.on("connection", (socket) => {
       socket.emit("message_error", { error: "Failed to approve message" });
     }
   });
-
   // 🎯 CRITICAL FIX: Handle forwarded approved messages to managers
   socket.on("whatsapp_forward_to_managers", async (data) => {
     try {
@@ -2785,11 +3054,12 @@ io.on("connection", (socket) => {
         isForwarded: true,
         forwardedBy: forwardedBy,
         originalMessageId: message._id,
+        approvalStatus: "approved", // Ensure it's marked as approved
       };
 
       // Notify each manager about the new forwarded message
       managers.forEach((managerId) => {
-        socket.to(`employee_${managerId}`).emit("new_message", {
+        io.to(`employee_${managerId}`).emit("new_message", {
           message: forwardedMessage,
           type: "new_approved_message",
           action: "forwarded_approved",
@@ -2851,7 +3121,7 @@ io.on("connection", (socket) => {
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
       involvedUsersArray.forEach((userId) => {
-        socket.to(`employee_${userId}`).emit("new_message", {
+        io.to(`employee_${userId}`).emit("new_message", {
           message: message,
           type: "message_updated",
           action: "edited",
@@ -2862,7 +3132,7 @@ io.on("connection", (socket) => {
 
       // Also emit to the client room for real-time chat updates
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("new_message", {
+        io.to(`client_${clientId}`).emit("new_message", {
           message: message,
           type: "message_updated",
           action: "edited",
@@ -2885,6 +3155,7 @@ io.on("connection", (socket) => {
         );
         return;
       }
+
       // Notify relevant users about status change
       socket.emit("message_status", {
         messageId: messageId,
@@ -2893,7 +3164,7 @@ io.on("connection", (socket) => {
 
       // If there's a specific user who triggered the status update, notify them
       if (userId) {
-        socket.to(`employee_${userId}`).emit("message_status", {
+        io.to(`employee_${userId}`).emit("message_status", {
           messageId: messageId,
           status: status,
         });
@@ -2901,7 +3172,7 @@ io.on("connection", (socket) => {
 
       // Also notify client room if applicable
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("message_status", {
+        io.to(`client_${clientId}`).emit("message_status", {
           messageId: messageId,
           status: status,
         });
@@ -3179,17 +3450,15 @@ const emitForwardToManagers = (io, data) => {
     });
   });
 };
-// In your socket.io initialization file
-// Export the emission functions for use in controllers
+
 module.exports = {
   emitWhatsAppMessage,
   emitForwardToManagers,
 };
 cron.schedule(
-  "* * * * *", // Every minute
+  "* * * * *",
   async () => {
     try {
-      console.log("[cron] Checking for scheduled messages to send...");
       const results =
         await assignmentMessageController.sendScheduledMessages(io);
 
@@ -3208,142 +3477,7 @@ cron.schedule(
   { timezone: "UTC" },
 );
 cron.schedule(
-  "23 21 * * *",
-  async () => {
-    try {
-      // ✅ normalize today to DATE ONLY
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const todayStr = today.toISOString().slice(0, 10);
-
-      console.log("[cron][leave] checking probation completions…");
-
-      const owners = await Employee.distinct("owner", { isTrashed: false });
-
-      for (const ownerId of owners) {
-        const policy = await ProbationPeriod.findOne({ owner: ownerId })
-          .sort({ createdAt: -1 })
-          .lean();
-
-        if (!policy) continue;
-        if (!policy.leaveAfterProbation) continue;
-        if (policy.leaveDuringProbation) continue;
-
-        const probationDays = Number(policy.days || 0);
-        if (probationDays < 1) continue;
-
-        // ✅ ONLY ACTIVE EMPLOYEES
-        const employees = await Employee.find({
-          owner: ownerId,
-          isTrashed: false,
-          status: "active",
-        })
-          .select("_id joiningDate")
-          .lean();
-
-        for (const emp of employees) {
-          if (!emp.joiningDate) continue;
-
-          const joiningDate = new Date(emp.joiningDate);
-          if (isNaN(joiningDate)) continue;
-
-          // probation end = joiningDate + probationDays
-          const probationEnd = new Date(joiningDate);
-          probationEnd.setDate(probationEnd.getDate() + probationDays);
-          probationEnd.setHours(0, 0, 0, 0);
-
-          const probationEndStr = probationEnd.toISOString().slice(0, 10);
-
-          // ✅ DATE-ONLY comparison
-          if (probationEndStr > todayStr) continue;
-
-          const leaveYear = getLeaveYear(probationEnd);
-
-          // ⛔ prevent double credit
-          const existingTx = await LeaveTransaction.findOne({
-            owner: ownerId,
-            employee: emp._id,
-            year: leaveYear,
-            type: "PAID_LEAVE_CREDITED",
-            sourceModel: "PROBATION",
-          }).lean();
-
-          if (existingTx) continue;
-
-          const leaveYearEnd = new Date(leaveYear, 11, 25); // 25 Dec of leaveYear
-          leaveYearEnd.setHours(0, 0, 0, 0);
-
-          // months remaining until leave-year end
-          const monthsLeft =
-            (leaveYearEnd.getFullYear() - probationEnd.getFullYear()) * 12 +
-            (leaveYearEnd.getMonth() - probationEnd.getMonth()) +
-            (leaveYearEnd.getDate() >= probationEnd.getDate() ? 1 : 0);
-
-          const proratedLeaves = Math.max(
-            0,
-            Math.round((22 / 12) * monthsLeft),
-          );
-
-          console.log(
-            `[cron][leave][proration] probationEnd=${probationEnd
-              .toISOString()
-              .slice(0, 10)}, leaveYearEnd=${leaveYearEnd
-              .toISOString()
-              .slice(
-                0,
-                10,
-              )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`,
-          );
-          if (proratedLeaves <= 0) continue;
-
-          // ✅ upsert LeaveYearBalance
-          const balance = await LeaveYearBalance.findOneAndUpdate(
-            {
-              owner: ownerId,
-              employee: emp._id,
-              year: leaveYear,
-            },
-            {
-              $inc: { total: proratedLeaves },
-              lastRecalculatedAt: new Date(),
-            },
-            {
-              upsert: true,
-              new: true,
-              setDefaultsOnInsert: true,
-            },
-          );
-
-          // 🧾 transaction record
-          await LeaveTransaction.create({
-            owner: ownerId,
-            employee: emp._id,
-            leaveYearBalance: balance._id,
-            year: leaveYear,
-            date: probationEnd,
-            type: "PAID_LEAVE_CREDITED",
-            value: proratedLeaves,
-            sourceModel: "PROBATION",
-            sourceId: emp._id,
-            createdBy: null, // system
-          });
-
-          console.log(
-            `[cron][leave] credited ${proratedLeaves} leaves → employee ${emp._id}`,
-          );
-        }
-      }
-
-      console.log("[cron][leave] ✅ completed");
-    } catch (err) {
-      console.error("[cron][leave] ❌ error:", err);
-    }
-  },
-  { timezone: PROBATION_CRON_TZ },
-);
-
-cron.schedule(
-  "42 21 26 12 *", // 9:25 PM, 26 December, every year
+  "15 21 26 12 *",
   async () => {
     try {
       const year = new Date().getFullYear();
@@ -3427,10 +3561,6 @@ cron.schedule(
           );
         }
       }
-
-      console.log(
-        `✅ Yearly leave entitlement reset completed for ${totalUpdated} employees`,
-      );
     } catch (error) {
       console.error("❌ Yearly leave entitlement reset failed:", error);
     }
@@ -3438,35 +3568,6 @@ cron.schedule(
   {
     timezone: "Asia/Karachi",
   },
-);
-
-cron.schedule(
-  "0 0 * * *", // 12:00 AM Karachi
-  async () => {
-    const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
-
-    const logoutTime = nowKarachi.toDate(); // Karachi time
-    const actualLogoutTime = nowKarachi.format("YYYY-MM-DD HH:mm");
-
-    const sessions = await EmployeeSession.find({ active: true });
-
-    for (const session of sessions) {
-      const loginTimeKarachi = moment(session.loginTime).tz(ATTENDANCE_CRON_TZ);
-      const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
-
-      await EmployeeSession.findByIdAndUpdate(session._id, {
-        logoutTime, // stored in Karachi timezone
-        actualLogoutTime,
-        totalHours: Number(totalHours.toFixed(2)),
-        active: false,
-        status: totalHours < 6 ? "half-day" : session.status,
-        isAutoLogout: true,
-      });
-    }
-
-    console.log("✅ Auto logout completed at 12:07 AM (Asia/Karachi)");
-  },
-  { timezone: "Asia/Karachi" },
 );
 
 // ---------- Optional root route ----------

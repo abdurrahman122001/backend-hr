@@ -41,7 +41,7 @@ async function getCompanyHolidays(ownerId) {
   return [];
 }
 
-// Helper function to analyze leave with HR policy
+// Helper function to analyze leave with HR policy (AI-ONLY ANALYSIS - NO AUTO DECISIONS)
 async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
   try {
     // Fetch HR policy for the company
@@ -57,6 +57,7 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
         isPaid: true,
         violations: [],
         rulesChecked: {},
+        recommendation: "MANUAL_REVIEW",
       };
     }
 
@@ -64,12 +65,21 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
     const rules = extractLeaveRules(hrPolicy.content);
 
     const analysis = {
-      decision: "pending",
+      decision: "pending", // Always pending for AI analysis
       isPaid: true,
       reason: "",
-      isAutoDecision: false,
+      isAutoDecision: false, // Set to false as we're not auto-deciding
       violations: [],
-      rulesChecked: rules,
+      rulesChecked: {
+        paidLeaveAdvanceNoticeDays: rules.paidLeaveAdvanceNoticeDays || null,
+        totalPaidLeavesPerYear: rules.totalPaidLeavesPerYear || null,
+        hasSandwichPolicy: rules.hasSandwichPolicy || false,
+        probationPeriodMonths: rules.probationPeriodMonths || null,
+        annualLeaveEntitlement: rules.annualLeaveEntitlement || null,
+      },
+      recommendation: "APPROVE", // Default recommendation
+      severity: "LOW", // Severity level: LOW, MEDIUM, HIGH
+      analyzedAt: new Date(),
     };
 
     // Check if employee is on probation
@@ -78,24 +88,27 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
         isEmployeeOnProbation(employee.joiningDate, rules.probationPeriodMonths)
       ) {
         analysis.violations.push({
-          type: "PROBATION",
+          type: "PROBATION", // This matches your enum
           message: `Employee is on probation (${rules.probationPeriodMonths} months probation period)`,
-          impact: "Leave requires supervisor approval",
+          impact: "Requires supervisor approval",
+          severity: "MEDIUM",
+          rule: `Probation period: ${rules.probationPeriodMonths} months`,
         });
+        analysis.severity = "MEDIUM";
+        analysis.recommendation = "MANUAL_REVIEW";
       }
     }
 
     // Calculate working days notice for ALL PAID LEAVES
-    // The policy says "Before taking a paid leave, employees must obtain approval at least 7 working days in advance"
     if (rules.paidLeaveAdvanceNoticeDays) {
       const today = new Date();
-      today.setHours(0, 0, 0, 0); // Normalize to start of day
+      today.setHours(0, 0, 0, 0);
       const leaveStartDate = new Date(leaveData.dates[0].date);
-      leaveStartDate.setHours(0, 0, 0, 0); // Normalize to start of day
+      leaveStartDate.setHours(0, 0, 0, 0);
 
       // Don't include the leave start date in the notice calculation
       const noticeEndDate = new Date(leaveStartDate);
-      noticeEndDate.setDate(noticeEndDate.getDate() - 1); // Day before leave starts
+      noticeEndDate.setDate(noticeEndDate.getDate() - 1);
 
       const holidays = await getCompanyHolidays(employee.owner);
       const workingDaysNotice = calculateWorkingDays(
@@ -112,25 +125,38 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
         isPaidLeaveType &&
         workingDaysNotice < rules.paidLeaveAdvanceNoticeDays
       ) {
-        analysis.isPaid = false; // Mark as unpaid due to insufficient notice
+        // Mark as unpaid due to insufficient notice but don't auto-decide
+        const requiredDays = rules.paidLeaveAdvanceNoticeDays;
+        const shortByDays = requiredDays - workingDaysNotice;
 
         analysis.violations.push({
-          type: "ADVANCE_NOTICE",
-          message: `Paid leave requires at least ${rules.paidLeaveAdvanceNoticeDays} working days advance notice. Only ${workingDaysNotice} working days notice given.`,
-          impact: "Leave will be unpaid",
+          type: "ADVANCE_NOTICE", // This matches your enum
+          message: `Paid leave requires at least ${requiredDays} working days advance notice. Only ${workingDaysNotice} working days notice given (short by ${shortByDays} days).`,
+          impact:
+            leaveData.leaveType === "annual"
+              ? "Leave should be unpaid or require special approval"
+              : "Consider marking as unpaid",
+          severity: leaveData.leaveType === "annual" ? "HIGH" : "MEDIUM",
+          rule: `Paid leave advance notice: ${requiredDays} working days`,
+          data: {
+            required: requiredDays,
+            given: workingDaysNotice,
+            shortBy: shortByDays,
+          },
         });
 
-        // For non-annual leaves with insufficient notice, auto-approve but mark as unpaid
-        if (leaveData.leaveType !== "annual") {
-          analysis.decision = "auto_approved";
-          analysis.reason = `Leave approved but marked as unpaid due to insufficient advance notice (${workingDaysNotice} days instead of required ${rules.paidLeaveAdvanceNoticeDays} days)`;
-          analysis.isAutoDecision = true;
-        }
-        // For annual leaves with insufficient notice, auto-reject
-        else if (leaveData.leaveType === "annual") {
-          analysis.decision = "auto_rejected";
-          analysis.reason = `Insufficient advance notice for paid annual leave. Requires ${rules.paidLeaveAdvanceNoticeDays} working days notice.`;
-          analysis.isAutoDecision = true;
+        analysis.isPaid = false; // Suggest unpaid due to insufficient notice
+
+        if (leaveData.leaveType === "annual") {
+          analysis.severity = "HIGH";
+          analysis.recommendation = "REJECT_OR_UNPAID";
+        } else {
+          analysis.severity =
+            analysis.severity === "LOW" ? "MEDIUM" : analysis.severity;
+          analysis.recommendation =
+            analysis.recommendation === "APPROVE"
+              ? "APPROVE_AS_UNPAID"
+              : analysis.recommendation;
         }
       }
     }
@@ -158,10 +184,15 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
           );
           if (gapDays > 0) {
             analysis.violations.push({
-              type: "SANDWICH_POLICY",
+              type: "SANDWICH_POLICY", // This matches your enum
               message:
                 "Leave includes non-working days between leave dates. According to sandwich policy, these will be counted as leave.",
-              impact: "Additional days may be deducted",
+              impact: "Additional days may be deducted from leave balance",
+              severity: "LOW",
+              rule: "Sandwich policy is active",
+              data: {
+                gapDays: gapDays,
+              },
             });
             break;
           }
@@ -175,38 +206,96 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       const usedAnnual = leaveSummary.annual
         ? leaveSummary.annual.totalDays
         : 0;
+      const requestedDays = leaveData.dates.length;
+      const availableDays = rules.totalPaidLeavesPerYear - usedAnnual;
 
-      if (usedAnnual + leaveData.dates.length > rules.totalPaidLeavesPerYear) {
+      if (usedAnnual + requestedDays > rules.totalPaidLeavesPerYear) {
+        const exceedBy =
+          usedAnnual + requestedDays - rules.totalPaidLeavesPerYear;
+
         analysis.violations.push({
-          type: "LEAVE_BALANCE",
-          message: `Exceeds annual leave entitlement. Only ${rules.totalPaidLeavesPerYear - usedAnnual} days available out of ${leaveData.dates.length} requested.`,
-          impact: "Leave may be partially paid or unpaid",
+          type: "LEAVE_BALANCE", // This matches your enum
+          message: `Exceeds annual leave entitlement. Only ${availableDays} days available but ${requestedDays} days requested (exceeds by ${exceedBy} days).`,
+          impact: "Leave may be partially paid, unpaid, or rejected",
+          severity: "HIGH",
+          rule: `Total paid leaves per year: ${rules.totalPaidLeavesPerYear} days`,
+          data: {
+            used: usedAnnual,
+            available: availableDays,
+            requested: requestedDays,
+            exceedBy: exceedBy,
+            totalEntitlement: rules.totalPaidLeavesPerYear,
+          },
         });
 
-        if (analysis.decision !== "auto_rejected") {
-          analysis.decision = "auto_rejected";
-          analysis.reason = `Exceeds annual leave entitlement. Available: ${rules.totalPaidLeavesPerYear - usedAnnual} days`;
-          analysis.isAutoDecision = true;
+        analysis.severity = "HIGH";
+        analysis.recommendation = "REJECT_OR_PARTIAL";
+
+        // If exceeding significantly, suggest rejection
+        if (exceedBy > 5) {
+          analysis.recommendation = "REJECT";
         }
+      } else if (availableDays < requestedDays) {
+        // This shouldn't happen but as a safety check
+        analysis.violations.push({
+          type: "OTHER", // Using OTHER for warnings
+          message: `Low leave balance: ${availableDays} days available for ${requestedDays} days requested.`,
+          impact: "Consider partial approval or unpaid days",
+          severity: "MEDIUM",
+          rule: `Total paid leaves per year: ${rules.totalPaidLeavesPerYear} days`,
+          data: {
+            available: availableDays,
+            requested: requestedDays,
+          },
+        });
+        analysis.severity =
+          analysis.severity === "LOW" ? "MEDIUM" : analysis.severity;
       }
     }
 
-    // If no violations and not auto-decided yet, auto-approve
-    if (
-      analysis.decision !== "auto_rejected" &&
-      analysis.decision !== "auto_approved"
-    ) {
-      if (analysis.violations.length === 0) {
-        analysis.decision = "auto_approved";
-        analysis.reason = "Leave complies with all HR policy rules";
-        analysis.isAutoDecision = true;
-      } else if (analysis.decision === "pending") {
-        analysis.reason = "Requires manual review due to policy considerations";
-        analysis.isAutoDecision = false;
+    // Determine final recommendation based on violations
+    if (analysis.violations.length === 0) {
+      analysis.recommendation = "APPROVE";
+      analysis.reason = "Complies with all HR policy rules";
+      analysis.severity = "LOW";
+    } else {
+      // Count violations by severity
+      const highViolations = analysis.violations.filter(
+        (v) => v.severity === "HIGH",
+      );
+      const mediumViolations = analysis.violations.filter(
+        (v) => v.severity === "MEDIUM",
+      );
+
+      if (highViolations.length > 0) {
+        analysis.recommendation = "REJECT_OR_UNPAID";
+        analysis.reason = `${highViolations.length} high-severity policy violations detected`;
+      } else if (mediumViolations.length > 0) {
+        analysis.recommendation = "MANUAL_REVIEW";
+        analysis.reason = `${mediumViolations.length} policy violations require manual review`;
+      } else {
+        analysis.recommendation = "APPROVE_WITH_NOTES";
+        analysis.reason = "Minor policy considerations noted";
       }
     }
 
-    analysis.analyzedAt = new Date();
+    // Add summary statistics
+    analysis.summary = {
+      totalViolations: analysis.violations.length,
+      highSeverityCount: analysis.violations.filter(
+        (v) => v.severity === "HIGH",
+      ).length,
+      mediumSeverityCount: analysis.violations.filter(
+        (v) => v.severity === "MEDIUM",
+      ).length,
+      lowSeverityCount: analysis.violations.filter((v) => v.severity === "LOW")
+        .length,
+      complianceScore:
+        analysis.violations.length === 0
+          ? 100
+          : Math.max(0, 100 - analysis.violations.length * 10),
+    };
+
     return analysis;
   } catch (error) {
     console.error("❌ Policy analysis error:", error);
@@ -217,18 +306,20 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       isPaid: true,
       violations: [
         {
-          type: "OTHER",
+          type: "OTHER", // Using OTHER for system errors
           message: error.message,
           impact: "Manual review required",
+          severity: "MEDIUM",
         },
       ],
       rulesChecked: {},
+      recommendation: "MANUAL_REVIEW",
+      severity: "MEDIUM",
       analyzedAt: new Date(),
     };
   }
 }
-
-// @desc    Apply for leave with auto-decision based on HR policy
+// @desc    Apply for leave with AI analysis (NO AUTO-DECISION)
 // @route   POST /api/leaves
 // @access  Private
 exports.applyLeave = async (req, res) => {
@@ -281,7 +372,7 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
-    // Check leave balance (for annual leaves)
+    // Check leave balance (for annual leaves) - but don't block application
     if (leaveType === "annual") {
       const leaveSummary = await Leave.getLeaveSummary(employeeId);
       const usedAnnual = leaveSummary.annual
@@ -290,15 +381,14 @@ exports.applyLeave = async (req, res) => {
       const totalEntitlement = employee.leaveEntitlement.total;
 
       if (usedAnnual + totalDays > totalEntitlement) {
-        return res.status(400).json({
-          message: `Insufficient annual leave balance. Available: ${totalEntitlement - usedAnnual} days`,
-          available: totalEntitlement - usedAnnual,
-          requested: totalDays,
-        });
+        // Just add a warning but don't block - let admin decide
+        console.warn(
+          `⚠️ Leave balance warning: Employee ${employeeId} requesting ${totalDays} days but only ${totalEntitlement - usedAnnual} available`,
+        );
       }
     }
 
-    // Analyze leave with HR policy
+    // Analyze leave with HR policy (AI ANALYSIS ONLY - NO AUTO DECISION)
     const policyAnalysis = await analyzeLeaveWithPolicy(
       employee,
       { dates, leaveType, totalDays, startDate, endDate },
@@ -317,22 +407,8 @@ exports.applyLeave = async (req, res) => {
       supervisor = superAdmin || employee.owner;
     }
 
-    // Determine status based on policy analysis
-    let status = "pending";
-    let isAutoDecision = false;
-    let autoDecisionNotes = "";
-
-    if (policyAnalysis.isAutoDecision) {
-      if (policyAnalysis.decision === "auto_approved") {
-        status = "auto_approved"; // Use "auto_approved" for auto-decisions
-        isAutoDecision = true;
-        autoDecisionNotes = policyAnalysis.reason;
-      } else if (policyAnalysis.decision === "auto_rejected") {
-        status = "auto_rejected"; // Use "auto_rejected" for auto-decisions
-        isAutoDecision = true;
-        autoDecisionNotes = policyAnalysis.reason;
-      }
-    }
+    // ALWAYS set status to "pending" - NO AUTO-APPROVAL/REJECTION
+    const status = "pending";
 
     // Create leave request
     const leave = new Leave({
@@ -348,72 +424,53 @@ exports.applyLeave = async (req, res) => {
       startDate,
       endDate,
       appliedDate: new Date(),
-      status: status,
-      isPaid: policyAnalysis.isPaid,
+      status: status, // Always pending
+      isPaid: policyAnalysis.isPaid, // Initial payment status based on analysis
       policyAnalysis: policyAnalysis,
     });
 
-    // Handle auto-approved leaves
-    if (status === "auto_approved" && isAutoDecision) {
-      leave.approvedBy = null; // System approval
-      leave.approvedDate = new Date();
-      leave.approvalNotes = autoDecisionNotes;
+    // IMPORTANT: Use "submitted" instead of "applied" to match your enum
+    // Add to workflow history
+    leave.workflowHistory.push({
+      action: "submitted", // Changed from "applied" to "submitted"
+      performedBy: employeeId,
+      performedByName: employee.name || "Employee",
+      notes: "Leave request submitted",
+      timestamp: new Date(),
+    });
 
+    // If policy analysis suggests unpaid, add a system note
+    if (!policyAnalysis.isPaid && policyAnalysis.violations.length > 0) {
+      const noticeViolation = policyAnalysis.violations.find(
+        (v) => v.type === "ADVANCE_NOTICE",
+      );
       leave.workflowHistory.push({
-        action: "auto_approved",
+        action: "system_approved", // Using system_approved for system notes
         performedBy: null,
-        performedByName: "System (HR Policy)",
-        notes: autoDecisionNotes,
+        performedByName: "System Analysis",
+        notes: noticeViolation
+          ? `Policy analysis suggests leave should be unpaid due to: ${noticeViolation.message}`
+          : "Policy analysis suggests leave should be unpaid due to policy violations",
         timestamp: new Date(),
       });
-
-      // Update employee's used leave balance if it's annual leave AND paid
-      if (leave.leaveType === "annual" && leave.isPaid) {
-        await Employee.findByIdAndUpdate(employee._id, {
-          $inc: { "leaveEntitlement.usedPaid": leave.totalDays },
-        });
-      }
-    }
-    // Handle auto-rejected leaves
-    else if (status === "auto_rejected" && isAutoDecision) {
-      leave.rejectedBy = null; // System rejection
-      leave.rejectedDate = new Date();
-      leave.rejectionReason = autoDecisionNotes;
-
-      leave.workflowHistory.push({
-        action: "auto_rejected",
-        performedBy: null,
-        performedByName: "System (HR Policy)",
-        notes: autoDecisionNotes,
-        timestamp: new Date(),
-      });
-    }
-    // Handle pending leaves (needs supervisor approval)
-    else {
-      // If no supervisor, auto-approve as regular approval
-      if (!supervisor) {
-        leave.status = "approved";
-        leave.approvedBy = employee.owner;
-        leave.approvedDate = new Date();
-        leave.approvalNotes = "Auto-approved (no supervisor assigned)";
-
-        leave.workflowHistory.push({
-          action: "approved",
-          performedBy: employee.owner,
-          notes: "Auto-approved (no supervisor assigned)",
-          timestamp: new Date(),
-        });
-
-        // Update employee's used leave balance if it's annual leave
-        if (leave.leaveType === "annual" && leave.isPaid) {
-          await Employee.findByIdAndUpdate(employee._id, {
-            $inc: { "leaveEntitlement.usedPaid": leave.totalDays },
-          });
-        }
-      }
     }
 
     await leave.save();
+
+    // Prepare response message based on analysis
+    let message = "Leave request submitted for approval";
+    let warning = null;
+
+    if (policyAnalysis.violations.length > 0) {
+      const highViolations = policyAnalysis.violations.filter(
+        (v) => v.severity === "HIGH",
+      );
+      if (highViolations.length > 0) {
+        warning = `⚠️ High-severity policy violations detected. This leave may be rejected or marked unpaid.`;
+      } else {
+        warning = `ℹ️ Policy considerations noted. Supervisor will review.`;
+      }
+    }
 
     res.status(201).json({
       success: true,
@@ -421,22 +478,375 @@ exports.applyLeave = async (req, res) => {
         ...leave.toObject(),
         policyAnalysis: leave.policyAnalysis,
       },
-      message: isAutoDecision
-        ? `Leave request ${status.replace("auto_", "")} by system: ${policyAnalysis.reason}`
-        : supervisor
-          ? "Leave request submitted for approval"
-          : "Leave request auto-approved (no supervisor)",
-      isAutoDecision: isAutoDecision,
-      decision: status,
-      isPaid: leave.isPaid,
+      message: message,
+      warning: warning,
+      isAutoDecision: false, // Always false now
+      requiresManualApproval: true, // Always true
+      analysisSummary: {
+        violations: policyAnalysis.violations.length,
+        recommendation: policyAnalysis.recommendation,
+        severity: policyAnalysis.severity,
+      },
     });
   } catch (error) {
     console.error("❌ Apply leave error:", error);
+
+    // More detailed error logging
+    if (error.name === "ValidationError") {
+      console.error("Validation errors:", error.errors);
+      return res.status(400).json({
+        message: "Validation failed",
+        errors: Object.keys(error.errors).map((key) => ({
+          field: key,
+          message: error.errors[key].message,
+        })),
+      });
+    }
+
+    res.status(500).json({
+      message: error.message,
+      error: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+};
+
+// @desc    Approve leave request (Admin/Supervisor only)
+// @route   PUT /api/leaves/:id/approve
+// @access  Private (Supervisors/Admins)
+exports.approveLeave = async (req, res) => {
+  try {
+    // Check if user exists
+    if (!req.user) {
+      console.error("❌ [approveLeave] req.user is null!");
+      return res.status(401).json({
+        message: "Authentication required - User not found in request",
+        error: "Please log in again",
+      });
+    }
+
+    const {
+      notes,
+      overridePolicy = false,
+      markAsPaid = null, // null = use system suggestion, true/false = override
+      partialApproval = null, // { approvedDays: number, unpaidDays: number }
+    } = req.body;
+    const user = req.user;
+
+    const leave = await Leave.findById(req.params.id)
+      .populate(
+        "employee",
+        "name email role department supervisor photographUrl leaveEntitlement",
+      )
+      .populate("supervisor", "name email");
+
+    if (!leave) {
+      return res.status(404).json({ message: "Leave request not found" });
+    }
+
+    // Check if leave is in a state that can be approved
+    if (leave.status !== "pending") {
+      return res.status(400).json({
+        message: `Cannot approve a ${leave.status} leave request`,
+        currentStatus: leave.status,
+      });
+    }
+
+    // Authorization check
+    let approver;
+    let userRole = user.role || "employee";
+    let isSuperAdmin =
+      user.isAdmin || userRole === "admin" || userRole === "hr";
+    let isSupervisor = false;
+
+    if (user.isEmployee) {
+      // User is an employee (not admin/HR)
+      const employeeId = user.employeeId || user._id;
+      approver = await Employee.findById(employeeId);
+      if (!approver) {
+        return res.status(404).json({
+          message: "Employee record not found for approver",
+        });
+      }
+
+      // Check if this employee is the supervisor for this leave
+      isSupervisor =
+        leave.supervisor &&
+        leave.supervisor._id.toString() === employeeId.toString();
+    } else if (user.isAdmin) {
+      // User is an admin/HR
+      approver = {
+        _id: user._id,
+        role: user.role,
+        name: user.name,
+        email: user.email,
+      };
+      isSuperAdmin = true;
+    }
+
+    // Only admins/HR or supervisors can approve
+    if (!isSuperAdmin && !isSupervisor) {
+      return res.status(403).json({
+        message: "Not authorized to approve this leave",
+        details: {
+          userRole: userRole,
+          isAdmin: isSuperAdmin,
+          isSupervisor: isSupervisor,
+          required: "Must be admin/HR or the assigned supervisor",
+        },
+      });
+    }
+
+    // Determine approver ID
+    let approverId;
+    if (user.isEmployee) {
+      approverId = user.employeeId || approver._id;
+    } else {
+      approverId = user._id;
+    }
+
+    // Handle policy violations warning
+    let policyOverrideNotes = "";
+    if (leave.policyAnalysis && leave.policyAnalysis.violations.length > 0) {
+      const highSeverityViolations = leave.policyAnalysis.violations.filter(
+        (v) => v.severity === "HIGH",
+      );
+
+      if (highSeverityViolations.length > 0 && !overridePolicy) {
+        return res.status(200).json({
+          success: false,
+          requiresConfirmation: true,
+          message: "This leave has high-severity policy violations",
+          violations: highSeverityViolations,
+          analysis: {
+            recommendation: leave.policyAnalysis.recommendation,
+            severity: leave.policyAnalysis.severity,
+          },
+          suggestion:
+            "Add 'overridePolicy: true' in request body to approve despite violations",
+        });
+      }
+
+      if (overridePolicy) {
+        policyOverrideNotes = " (Policy override)";
+      }
+    }
+
+    // Determine payment status
+    let finalIsPaid = leave.isPaid;
+    let paymentNotes = "";
+
+    if (markAsPaid !== null) {
+      // Admin is explicitly setting payment status
+      finalIsPaid = markAsPaid;
+      paymentNotes = markAsPaid
+        ? "Manually marked as paid"
+        : "Manually marked as unpaid";
+    } else if (
+      overridePolicy &&
+      leave.policyAnalysis &&
+      !leave.policyAnalysis.isPaid
+    ) {
+      // If overriding policy and system suggested unpaid, make it paid
+      finalIsPaid = true;
+      paymentNotes = "Marked as paid despite policy violation";
+    }
+
+    // Handle partial approval
+    let partialApprovalNotes = "";
+    let actualApprovedDays = leave.totalDays;
+
+    if (partialApproval && partialApproval.approvedDays > 0) {
+      if (partialApproval.approvedDays > leave.totalDays) {
+        return res.status(400).json({
+          message: `Cannot approve more days (${partialApproval.approvedDays}) than requested (${leave.totalDays})`,
+        });
+      }
+
+      actualApprovedDays = partialApproval.approvedDays;
+      partialApprovalNotes = `Partially approved: ${partialApproval.approvedDays} out of ${leave.totalDays} days`;
+
+      if (partialApproval.unpaidDays > 0) {
+        partialApprovalNotes += ` (${partialApproval.unpaidDays} days unpaid)`;
+      }
+    }
+
+    // Update leave
+    leave.status = "approved";
+    leave.approvedBy = approverId;
+    leave.approvedDate = new Date();
+    leave.isPaid = finalIsPaid;
+    leave.approvalNotes = notes || "Leave approved";
+
+    // Add to workflow history
+    const historyEntry = {
+      action: "approved",
+      performedBy: approverId,
+      performedByName: approver.name || user.name,
+      notes: (notes || "Leave approved") + policyOverrideNotes,
+      timestamp: new Date(),
+    };
+
+    if (paymentNotes) {
+      historyEntry.paymentNote = paymentNotes;
+    }
+
+    if (partialApprovalNotes) {
+      historyEntry.partialApproval = partialApprovalNotes;
+    }
+
+    if (overridePolicy) {
+      historyEntry.policyOverride = true;
+      historyEntry.originalRecommendation = leave.policyAnalysis.recommendation;
+    }
+
+    leave.workflowHistory.push(historyEntry);
+
+    await leave.save();
+
+    // Update employee's used leave balance if it's annual leave and paid
+    if (leave.leaveType === "annual" && finalIsPaid) {
+      await Employee.findByIdAndUpdate(leave.employee._id, {
+        $inc: { "leaveEntitlement.usedPaid": actualApprovedDays },
+      });
+    }
+
+    // Get updated leave with populated fields
+    const updatedLeave = await Leave.findById(leave._id)
+      .populate("employee", "name email department photographUrl")
+      .populate("approvedBy", "name email")
+      .lean();
+
+    // Process employee data
+    const processedLeave = {
+      ...updatedLeave,
+      employee: processEmployeeWithPhoto(updatedLeave.employee, req),
+    };
+
+    res.json({
+      success: true,
+      data: processedLeave,
+      message: "Leave request approved successfully",
+      approvedBy: {
+        id: approverId,
+        name: approver.name || user.name,
+        role: approver.role || userRole,
+        isAdmin: isSuperAdmin,
+      },
+      policyOverride: overridePolicy,
+      paymentStatus: finalIsPaid ? "paid" : "unpaid",
+      partialApproval: partialApproval
+        ? {
+          approvedDays: actualApprovedDays,
+          totalDays: leave.totalDays,
+        }
+        : null,
+    });
+  } catch (error) {
+    console.error("❌ [approveLeave] Error:", error);
+    res.status(500).json({
+      message: error.message,
+      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+    });
+  }
+};
+
+// @desc    Reject leave request
+// @route   PUT /api/leaves/:id/reject
+// @access  Private (Supervisors/Admins)
+exports.rejectLeave = async (req, res) => {
+  try {
+    const { reason, basedOnPolicy = false } = req.body;
+    const user = req.user;
+
+    if (!reason || reason.trim().length < 5) {
+      return res.status(400).json({
+        message: "Rejection reason is required (minimum 5 characters)",
+      });
+    }
+
+    if (!req.user) {
+      return res.status(401).json({
+        message: "Authentication required - User not found in request",
+      });
+    }
+
+    const leave = await Leave.findById(req.params.id)
+      .populate("employee", "name email photographUrl")
+      .populate("supervisor", "name email");
+
+    if (!leave) {
+      return res.status(404).json({ message: "Leave request not found" });
+    }
+
+    if (leave.status !== "pending") {
+      return res.status(400).json({
+        message: `Cannot reject a ${leave.status} leave request`,
+      });
+    }
+
+    // Authorization check
+    let isSuperAdmin =
+      user.isAdmin || user.role === "admin" || user.role === "hr";
+    let isSupervisor = false;
+    let rejectorId;
+
+    if (user.isEmployee) {
+      const employeeId = user.employeeId || user._id;
+      isSupervisor =
+        leave.supervisor &&
+        leave.supervisor._id.toString() === employeeId.toString();
+      rejectorId = employeeId;
+    } else if (user.isAdmin) {
+      isSuperAdmin = true;
+      rejectorId = user._id;
+    }
+
+    if (!isSuperAdmin && !isSupervisor) {
+      return res
+        .status(403)
+        .json({ message: "Not authorized to reject this leave" });
+    }
+
+    // Update leave
+    leave.status = "rejected";
+    leave.rejectedBy = rejectorId;
+    leave.rejectedDate = new Date();
+    leave.rejectionReason = reason;
+
+    // Add policy-based rejection note if applicable
+    let rejectionNotes = `Rejected: ${reason}`;
+    if (basedOnPolicy && leave.policyAnalysis) {
+      rejectionNotes += " (Based on HR policy violations)";
+    }
+
+    // Add to workflow history
+    leave.workflowHistory.push({
+      action: "rejected",
+      performedBy: rejectorId,
+      notes: rejectionNotes,
+      timestamp: new Date(),
+    });
+
+    await leave.save();
+
+    const processedLeave = {
+      ...leave.toObject(),
+      employee: processEmployeeWithPhoto(leave.employee, req),
+    };
+
+    res.json({
+      success: true,
+      data: processedLeave,
+      message: "Leave request rejected",
+      basedOnPolicy: basedOnPolicy,
+    });
+  } catch (error) {
+    console.error("Reject leave error:", error);
     res.status(500).json({ message: error.message });
   }
 };
 
-// backend/src/controllers/leaveController.js - getLeaves function
+// Get leaves function remains the same...
 exports.getLeaves = async (req, res) => {
   try {
     if (!req.user) {
@@ -460,12 +870,11 @@ exports.getLeaves = async (req, res) => {
     // Build filter
     let filter = {};
 
-    // ADMIN LOGIC: If user is admin/HR, they can see ALL leaves
+    // ADMIN LOGIC
     const isAdmin =
       req.user.isAdmin || req.user.role === "admin" || req.user.role === "hr";
 
     if (isAdmin) {
-      // If admin explicitly wants to see all leaves without pagination
       if (getAll === "true") {
         const allLeaves = await Leave.find(filter)
           .sort({ createdAt: -1 })
@@ -475,7 +884,6 @@ exports.getLeaves = async (req, res) => {
           )
           .lean();
 
-        // Process employee data to include full photo URLs
         const processedLeaves = allLeaves.map((leave) => ({
           ...leave,
           employee: processEmployeeWithPhoto(leave.employee, req),
@@ -489,11 +897,9 @@ exports.getLeaves = async (req, res) => {
         });
       }
 
-      // If employeeId is provided in query, filter by that specific employee
       if (employeeId) {
         filter.employee = employeeId;
       }
-      // Otherwise, admin sees ALL leaves (no employee filter)
     } else {
       if (!req.user._id && !req.user.id) {
         return res.status(400).json({
@@ -505,7 +911,6 @@ exports.getLeaves = async (req, res) => {
       const userId = req.user._id || req.user.id;
       filter.employee = userId;
 
-      // Employees can't filter by other employee IDs
       if (employeeId && employeeId !== userId.toString()) {
         return res.status(403).json({
           error: "Forbidden",
@@ -542,7 +947,6 @@ exports.getLeaves = async (req, res) => {
       .populate("rejectedBy", "name email")
       .lean();
 
-    // Process employee data to include full photo URLs
     const processedLeaves = leaves.map((leave) => ({
       ...leave,
       employee: processEmployeeWithPhoto(leave.employee, req),
@@ -595,7 +999,6 @@ exports.getPendingLeaves = async (req, res) => {
       .populate("appliedBy", "name email")
       .sort({ appliedDate: -1 });
 
-    // Process employee data to include full photo URLs
     const processedPendingLeaves = pendingLeaves.map((leave) => ({
       ...leave.toObject(),
       employee: processEmployeeWithPhoto(leave.employee, req),
@@ -644,7 +1047,6 @@ exports.getLeaveById = async (req, res) => {
         .json({ message: "Not authorized to view this leave" });
     }
 
-    // Process employee data to include full photo URLs
     const processedLeave = {
       ...leave.toObject(),
       employee: processEmployeeWithPhoto(leave.employee, req),
@@ -656,301 +1058,6 @@ exports.getLeaveById = async (req, res) => {
     });
   } catch (error) {
     console.error("Get leave by ID error:", error);
-    res.status(500).json({ message: error.message });
-  }
-};
-
-// @desc    Approve leave request
-// @route   PUT /api/leaves/:id/approve
-// @access  Private (Supervisors/Admins)
-exports.approveLeave = async (req, res) => {
-  try {
-    // Check if user exists
-    if (!req.user) {
-      console.error("❌ [approveLeave] req.user is null!");
-      return res.status(401).json({
-        message: "Authentication required - User not found in request",
-        error: "Please log in again",
-      });
-    }
-
-    const { notes, overridePolicy = false, markAsPaid = true } = req.body;
-    const user = req.user;
-
-    const leave = await Leave.findById(req.params.id)
-      .populate(
-        "employee",
-        "name email role department supervisor photographUrl",
-      )
-      .populate("supervisor", "name email");
-
-    if (!leave) {
-      return res.status(404).json({ message: "Leave request not found" });
-    }
-
-    let approver;
-    let userRole = user.role || "employee";
-    let isSuperAdmin =
-      user.isAdmin || userRole === "admin" || userRole === "hr";
-    let isSupervisor = false;
-
-    // Check if user can approve this leave
-    if (user.isEmployee) {
-      // User is an employee (not admin/HR)
-      // For employees, we need to use user.employeeId (their personal ID)
-      const employeeId = user.employeeId || user._id;
-
-      // Find the employee record
-      approver = await Employee.findById(employeeId);
-      if (!approver) {
-        return res.status(404).json({
-          message: "Employee record not found for approver",
-        });
-      }
-
-      // Check if this employee is the supervisor for this leave
-      isSupervisor =
-        leave.supervisor &&
-        leave.supervisor._id.toString() === employeeId.toString();
-    } else if (user.isAdmin) {
-      // User is an admin/HR
-      // For admins, user._id is the admin's ID (company ID)
-      approver = {
-        _id: user._id,
-        role: user.role,
-        name: user.name,
-        email: user.email,
-      };
-
-      // Admins/HR can approve any leave
-      isSuperAdmin = true;
-      isSupervisor = false; // Admins don't need supervisor check
-    }
-
-    // Authorization check
-    if (!isSuperAdmin && !isSupervisor) {
-      console.warn("⚠️ [approveLeave] Unauthorized approval attempt:", {
-        userId: user._id,
-        userRole: userRole,
-        userEmployeeId: user.employeeId,
-        isAdmin: user.isAdmin,
-        isEmployee: user.isEmployee,
-        leaveId: leave._id,
-        leaveSupervisor: leave.supervisor?._id,
-        isSuperAdmin: isSuperAdmin,
-        isSupervisor: isSupervisor,
-      });
-
-      return res.status(403).json({
-        message: "Not authorized to approve this leave",
-        details: {
-          userRole: userRole,
-          isAdmin: isSuperAdmin,
-          isSupervisor: isSupervisor,
-          required: "Must be admin/HR or the assigned supervisor",
-        },
-      });
-    }
-
-    // Validate leave status
-    if (leave.status !== "pending") {
-      return res.status(400).json({
-        message: `Leave request is already ${leave.status}`,
-        currentStatus: leave.status,
-      });
-    }
-
-    // Check policy violations and require confirmation if needed
-    if (
-      leave.policyAnalysis &&
-      leave.policyAnalysis.violations &&
-      leave.policyAnalysis.violations.length > 0 &&
-      !overridePolicy
-    ) {
-      const seriousViolations = leave.policyAnalysis.violations.filter(
-        (v) => v.type === "ADVANCE_NOTICE" || v.type === "LEAVE_BALANCE",
-      );
-
-      if (seriousViolations.length > 0) {
-        return res.status(200).json({
-          success: false,
-          requiresConfirmation: true,
-          message: "This leave has policy violations that require confirmation",
-          violations: seriousViolations,
-          suggestion:
-            "Add 'overridePolicy: true' in request body to approve despite violations",
-        });
-      }
-    }
-
-    // Determine approver ID to save in the leave record
-    let approverId;
-    if (user.isEmployee) {
-      // For employees, use their employeeId (personal ID)
-      approverId = user.employeeId || approver._id;
-    } else {
-      // For admins, use their user ID
-      approverId = user._id;
-    }
-
-    // Update leave - change status from auto_approved to approved when supervisor approves
-    const newStatus =
-      leave.status === "auto_approved" ? "approved" : "approved";
-    leave.status = newStatus;
-    leave.approvedBy = approverId;
-    leave.approvedDate = new Date();
-
-    // Update payment status if supervisor is overriding
-    if (markAsPaid && !leave.isPaid) {
-      leave.isPaid = true; // Supervisor can override to paid
-    }
-
-    // Add to workflow history
-    const historyEntry = {
-      action: "approved",
-      performedBy: approverId,
-      notes: notes || "Leave approved",
-      timestamp: new Date(),
-    };
-
-    if (overridePolicy) {
-      historyEntry.notes += " (Policy override)";
-      historyEntry.policyOverride = true;
-    }
-
-    if (!leave.isPaid) {
-      historyEntry.notes += " (Unpaid leave)";
-    }
-
-    leave.workflowHistory.push(historyEntry);
-
-    await leave.save();
-
-    // Update employee's used leave balance if it's annual leave and paid
-    if (leave.leaveType === "annual" && leave.isPaid) {
-      await Employee.findByIdAndUpdate(leave.employee._id, {
-        $inc: { "leaveEntitlement.usedPaid": leave.totalDays },
-      });
-    }
-
-    // Get updated leave with populated fields
-    const updatedLeave = await Leave.findById(leave._id)
-      .populate("employee", "name email department photographUrl")
-      .populate("approvedBy", "name email")
-      .lean();
-
-    // Process employee data to include full photo URLs
-    const processedLeave = {
-      ...updatedLeave,
-      employee: processEmployeeWithPhoto(updatedLeave.employee, req),
-    };
-
-    res.json({
-      success: true,
-      data: processedLeave,
-      message: "Leave request approved successfully",
-      approvedBy: {
-        id: approverId,
-        name: approver.name,
-        role: approver.role || userRole,
-        isAdmin: isSuperAdmin,
-      },
-    });
-  } catch (error) {
-    console.error("❌ [approveLeave] Error:", error);
-    res.status(500).json({
-      message: error.message,
-      stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-    });
-  }
-};
-
-exports.rejectLeave = async (req, res) => {
-  try {
-    const { reason } = req.body;
-    const user = req.user;
-
-    if (!reason || reason.trim().length < 5) {
-      return res.status(400).json({
-        message: "Rejection reason is required (minimum 5 characters)",
-      });
-    }
-
-    // Check if user exists
-    if (!req.user) {
-      return res.status(401).json({
-        message: "Authentication required - User not found in request",
-      });
-    }
-
-    const leave = await Leave.findById(req.params.id)
-      .populate("employee", "name email photographUrl")
-      .populate("supervisor", "name email");
-
-    if (!leave) {
-      return res.status(404).json({ message: "Leave request not found" });
-    }
-
-    // Authorization check (similar to approveLeave)
-    let isSuperAdmin =
-      user.isAdmin || user.role === "admin" || user.role === "hr";
-    let isSupervisor = false;
-    let rejectorId;
-
-    if (user.isEmployee) {
-      // For employees, check if they are the supervisor
-      const employeeId = user.employeeId || user._id;
-      isSupervisor =
-        leave.supervisor &&
-        leave.supervisor._id.toString() === employeeId.toString();
-      rejectorId = employeeId;
-    } else if (user.isAdmin) {
-      // Admins can reject any leave
-      isSuperAdmin = true;
-      rejectorId = user._id;
-    }
-
-    if (!isSuperAdmin && !isSupervisor) {
-      return res
-        .status(403)
-        .json({ message: "Not authorized to reject this leave" });
-    }
-
-    if (leave.status !== "pending" && leave.status !== "auto_approved") {
-      return res.status(400).json({
-        message: `Cannot reject a ${leave.status} leave request`,
-      });
-    }
-
-    // Update leave
-    leave.status = "rejected";
-    leave.rejectedBy = rejectorId;
-    leave.rejectedDate = new Date();
-    leave.rejectionReason = reason;
-
-    // Add to workflow history
-    leave.workflowHistory.push({
-      action: "rejected",
-      performedBy: rejectorId,
-      notes: `Rejected: ${reason}`,
-      timestamp: new Date(),
-    });
-
-    await leave.save();
-
-    // Process employee data to include full photo URLs
-    const processedLeave = {
-      ...leave.toObject(),
-      employee: processEmployeeWithPhoto(leave.employee, req),
-    };
-
-    res.json({
-      success: true,
-      data: processedLeave,
-      message: "Leave request rejected",
-    });
-  } catch (error) {
-    console.error("Reject leave error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -971,7 +1078,6 @@ exports.cancelLeave = async (req, res) => {
 
     // Check if user can cancel this leave
     const employee = await Employee.findById(user.employeeId || user.id);
-
     const isLeaveOwner = leave.employee.toString() === employee._id.toString();
     const isSuperAdmin = employee.role === "admin" || employee.role === "hr";
 
@@ -981,7 +1087,7 @@ exports.cancelLeave = async (req, res) => {
         .json({ message: "Not authorized to cancel this leave" });
     }
 
-    if (leave.status !== "pending" && leave.status !== "auto_approved") {
+    if (leave.status !== "pending") {
       return res.status(400).json({
         message: `Cannot cancel a ${leave.status} leave request`,
       });
@@ -1008,19 +1114,16 @@ exports.cancelLeave = async (req, res) => {
 
 exports.getLeaveStats = async (req, res) => {
   try {
-    // Check if user exists
     if (!req.user) {
       return res.status(401).json({
         error: "Authentication required - User not found in request",
       });
     }
 
-    // Determine if user is admin
     const isAdmin =
       req.user.isAdmin || req.user.role === "admin" || req.user.role === "hr";
     const userId = req.user._id || req.user.id;
 
-    // Check if user has ID (for non-admin users)
     if (!isAdmin && !userId) {
       return res.status(400).json({
         error: "User ID not found",
@@ -1028,8 +1131,6 @@ exports.getLeaveStats = async (req, res) => {
       });
     }
 
-    // For admin: get stats for all employees
-    // For employee: get stats only for themselves
     const employeeFilter = isAdmin ? {} : { employee: userId };
 
     // Get leave statistics
@@ -1040,27 +1141,38 @@ exports.getLeaveStats = async (req, res) => {
     });
     const approvedLeaves = await Leave.countDocuments({
       ...employeeFilter,
-      status: { $in: ["approved", "auto_approved"] },
+      status: "approved",
     });
     const rejectedLeaves = await Leave.countDocuments({
       ...employeeFilter,
-      status: { $in: ["rejected", "auto_rejected"] },
+      status: "rejected",
     });
-    const autoApprovedLeaves = await Leave.countDocuments({
+    const cancelledLeaves = await Leave.countDocuments({
       ...employeeFilter,
-      status: "auto_approved",
-    });
-    const autoRejectedLeaves = await Leave.countDocuments({
-      ...employeeFilter,
-      status: "auto_rejected",
+      status: "cancelled",
     });
 
-    // If admin, also get breakdown by department or employee
-    let departmentStats = [];
-    let employeeStats = [];
+    // Get leaves with policy violations (for admin)
+    let leavesWithViolations = 0;
+    let leavesRequiringAttention = 0;
 
     if (isAdmin) {
-      // Get department-wise stats
+      leavesWithViolations = await Leave.countDocuments({
+        "policyAnalysis.violations.0": { $exists: true },
+        status: "pending",
+      });
+
+      leavesRequiringAttention = await Leave.countDocuments({
+        "policyAnalysis.severity": { $in: ["HIGH", "MEDIUM"] },
+        status: "pending",
+      });
+    }
+
+    // Get department stats for admin
+    let departmentStats = [];
+    let recentLeaves = [];
+
+    if (isAdmin) {
       departmentStats = await Leave.aggregate([
         {
           $lookup: {
@@ -1079,43 +1191,26 @@ exports.getLeaveStats = async (req, res) => {
               $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
             },
             approved: {
-              $sum: {
-                $cond: [
-                  { $in: ["$status", ["approved", "auto_approved"]] },
-                  1,
-                  0,
-                ],
-              },
+              $sum: { $cond: [{ $eq: ["$status", "approved"] }, 1, 0] },
             },
             rejected: {
-              $sum: {
-                $cond: [
-                  { $in: ["$status", ["rejected", "auto_rejected"]] },
-                  1,
-                  0,
-                ],
-              },
+              $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] },
             },
-            auto_approved: {
-              $sum: { $cond: [{ $eq: ["$status", "auto_approved"] }, 1, 0] },
-            },
-            auto_rejected: {
-              $sum: { $cond: [{ $eq: ["$status", "auto_rejected"] }, 1, 0] },
+            cancelled: {
+              $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] },
             },
           },
         },
         { $sort: { total: -1 } },
       ]);
 
-      // Get recent leaves for admin dashboard
-      const recentLeaves = await Leave.find({})
+      recentLeaves = await Leave.find({})
         .sort({ createdAt: -1 })
         .limit(10)
         .populate("employee", "name email department photographUrl")
         .lean();
 
-      // Process employee data to include full photo URLs
-      employeeStats = recentLeaves.map((leave) => ({
+      recentLeaves = recentLeaves.map((leave) => ({
         ...leave,
         employee: processEmployeeWithPhoto(leave.employee, req),
       }));
@@ -1128,11 +1223,12 @@ exports.getLeaveStats = async (req, res) => {
         pending: pendingLeaves,
         approved: approvedLeaves,
         rejected: rejectedLeaves,
-        auto_approved: autoApprovedLeaves,
-        auto_rejected: autoRejectedLeaves,
+        cancelled: cancelledLeaves,
+        withViolations: leavesWithViolations,
+        requireAttention: leavesRequiringAttention,
       },
       departmentStats: departmentStats,
-      recentLeaves: employeeStats,
+      recentLeaves: recentLeaves,
       isAdmin: isAdmin,
       timestamp: new Date().toISOString(),
     });
@@ -1270,8 +1366,7 @@ exports.deleteLeave = async (req, res) => {
   }
 };
 
-// NEW: Check leave against HR policy before applying
-// @desc    Check leave against HR policy
+// @desc    Check leave against HR policy (AI Analysis)
 // @route   POST /api/leaves/check-policy
 // @access  Private
 exports.checkLeavePolicy = async (req, res) => {
@@ -1298,7 +1393,7 @@ exports.checkLeavePolicy = async (req, res) => {
     const startDate = new Date(sortedDates[0].date);
     const endDate = new Date(sortedDates[sortedDates.length - 1].date);
 
-    // Analyze leave with policy
+    // Analyze leave with policy (AI-only analysis)
     const policyAnalysis = await analyzeLeaveWithPolicy(
       employee,
       { dates, leaveType, totalDays: dates.length, startDate, endDate },
@@ -1308,10 +1403,14 @@ exports.checkLeavePolicy = async (req, res) => {
     res.json({
       success: true,
       data: policyAnalysis,
-      message: "Policy analysis completed",
-      suggestedAction: policyAnalysis.isAutoDecision
-        ? `Leave will be ${policyAnalysis.decision.replace("auto_", "")} automatically`
-        : "Leave requires manual approval",
+      message: "AI policy analysis completed",
+      suggestedAction: "MANUAL_REVIEW_REQUIRED", // Always manual review
+      summary: {
+        violations: policyAnalysis.violations.length,
+        recommendation: policyAnalysis.recommendation,
+        severity: policyAnalysis.severity,
+        complianceScore: policyAnalysis.summary?.complianceScore || 0,
+      },
     });
   } catch (error) {
     console.error("Check leave policy error:", error);
@@ -1319,7 +1418,6 @@ exports.checkLeavePolicy = async (req, res) => {
   }
 };
 
-// NEW: Get HR policy rules for leave
 // @desc    Get HR policy rules for leave
 // @route   GET /api/leaves/policy-rules
 // @access  Private
@@ -1362,12 +1460,17 @@ exports.getLeavePolicyRules = async (req, res) => {
         employeeStatus: {
           isOnProbation: employee.joiningDate
             ? isEmployeeOnProbation(
-                employee.joiningDate,
-                rules.probationPeriodMonths,
-              )
+              employee.joiningDate,
+              rules.probationPeriodMonths,
+            )
             : false,
           joiningDate: employee.joiningDate,
           probationMonths: rules.probationPeriodMonths,
+        },
+        analysisSettings: {
+          autoDecisionEnabled: false, // Always false now
+          aiAnalysisEnabled: true,
+          requiresManualApproval: true,
         },
       },
     });
@@ -1377,50 +1480,52 @@ exports.getLeavePolicyRules = async (req, res) => {
   }
 };
 
-// NEW: Get auto-decision statistics
-// @desc    Get auto-decision statistics
-// @route   GET /api/leaves/auto-decision-stats
+// @desc    Get AI analysis statistics
+// @route   GET /api/leaves/analysis-stats
 // @access  Private (Admin/HR only)
-exports.getAutoDecisionStats = async (req, res) => {
+exports.getAnalysisStats = async (req, res) => {
   try {
     const user = req.user;
     const isAdmin = user.isAdmin || user.role === "admin" || user.role === "hr";
 
     if (!isAdmin) {
       return res.status(403).json({
-        message: "Not authorized to view auto-decision statistics",
+        message: "Not authorized to view analysis statistics",
       });
     }
 
     const { startDate, endDate } = req.query;
 
-    // Get total leaves with auto-decisions
+    // Get leaves with policy analysis
     const match = {
-      "policyAnalysis.isAutoDecision": true,
+      "policyAnalysis.0": { $exists: true },
     };
 
     if (startDate) match.appliedDate = { $gte: new Date(startDate) };
     if (endDate) match.appliedDate = { $lte: new Date(endDate) };
 
-    const autoDecisionStats = await Leave.aggregate([
+    const analysisStats = await Leave.aggregate([
       { $match: match },
       {
         $group: {
-          _id: "$policyAnalysis.decision",
+          _id: "$policyAnalysis.severity",
           count: { $sum: 1 },
-          totalDays: { $sum: "$totalDays" },
-          paidCount: {
-            $sum: { $cond: [{ $eq: ["$isPaid", true] }, 1, 0] },
+          avgComplianceScore: {
+            $avg: "$policyAnalysis.summary.complianceScore",
           },
-          unpaidCount: {
-            $sum: { $cond: [{ $eq: ["$isPaid", false] }, 1, 0] },
+          highRiskLeaves: {
+            $sum: {
+              $cond: [{ $eq: ["$policyAnalysis.severity", "HIGH"] }, 1, 0],
+            },
           },
-          avgAdvanceNotice: {
-            $avg: {
-              $divide: [
-                { $subtract: ["$startDate", "$appliedDate"] },
-                1000 * 60 * 60 * 24,
-              ],
+          mediumRiskLeaves: {
+            $sum: {
+              $cond: [{ $eq: ["$policyAnalysis.severity", "MEDIUM"] }, 1, 0],
+            },
+          },
+          lowRiskLeaves: {
+            $sum: {
+              $cond: [{ $eq: ["$policyAnalysis.severity", "LOW"] }, 1, 0],
             },
           },
         },
@@ -1436,14 +1541,54 @@ exports.getAutoDecisionStats = async (req, res) => {
         $group: {
           _id: "$policyAnalysis.violations.type",
           count: { $sum: 1 },
-          leavesCount: { $addToSet: "$_id" },
+          highSeverity: {
+            $sum: {
+              $cond: [
+                { $eq: ["$policyAnalysis.violations.severity", "HIGH"] },
+                1,
+                0,
+              ],
+            },
+          },
+          mediumSeverity: {
+            $sum: {
+              $cond: [
+                { $eq: ["$policyAnalysis.violations.severity", "MEDIUM"] },
+                1,
+                0,
+              ],
+            },
+          },
+          lowSeverity: {
+            $sum: {
+              $cond: [
+                { $eq: ["$policyAnalysis.violations.severity", "LOW"] },
+                1,
+                0,
+              ],
+            },
+          },
         },
       },
+      { $sort: { count: -1 } },
+    ]);
+
+    // Get recommendation statistics
+    const recommendationStats = await Leave.aggregate([
+      { $match: { "policyAnalysis.recommendation": { $exists: true } } },
       {
-        $project: {
-          violationType: "$_id",
-          count: 1,
-          leavesAffected: { $size: "$leavesCount" },
+        $group: {
+          _id: "$policyAnalysis.recommendation",
+          count: { $sum: 1 },
+          approvedCount: {
+            $sum: { $cond: [{ $eq: ["$status", "approved"] }, 1, 0] },
+          },
+          rejectedCount: {
+            $sum: { $cond: [{ $eq: ["$status", "rejected"] }, 1, 0] },
+          },
+          pendingCount: {
+            $sum: { $cond: [{ $eq: ["$status", "pending"] }, 1, 0] },
+          },
         },
       },
       { $sort: { count: -1 } },
@@ -1452,16 +1597,138 @@ exports.getAutoDecisionStats = async (req, res) => {
     res.json({
       success: true,
       data: {
-        autoDecisionStats,
+        analysisStats,
         violationStats,
+        recommendationStats,
         timeRange: {
           startDate: startDate || "all time",
           endDate: endDate || "all time",
         },
+        settings: {
+          autoDecisionEnabled: false,
+          aiAnalysisEnabled: true,
+          manualApprovalRequired: true,
+        },
       },
     });
   } catch (error) {
-    console.error("Get auto-decision stats error:", error);
+    console.error("Get analysis stats error:", error);
     res.status(500).json({ message: error.message });
+  }
+};
+// In your leaveController.js - Add this function
+
+// @desc    Get employee's own leaves (for employee portal)
+// @route   GET /api/leaves/my-leaves
+// @access  Private (Employee only)
+exports.getMyLeaves = async (req, res) => {
+  try {
+    if (!req.user) {
+      return res.status(401).json({
+        error: "Authentication required - User not found in request",
+        message: "Please log in again",
+      });
+    }
+
+    const {
+      page = 1,
+      limit = 10,
+      status,
+      startDate,
+      endDate,
+    } = req.query;
+
+    const skip = (page - 1) * limit;
+
+    // Get employee ID from user
+    const employeeId = req.user.employeeId || req.user.id;
+
+    if (!employeeId) {
+      return res.status(400).json({
+        error: "Employee ID not found",
+        message: "User data is incomplete",
+      });
+    }
+
+    // Build filter - employee can only see their own leaves
+    const filter = {
+      employee: employeeId,
+      isTrashed: { $ne: true }
+    };
+
+    // Add status filter if provided
+    if (status && status !== "all") {
+      filter.status = status;
+    }
+
+    // Add date range filter if provided
+    if (startDate || endDate) {
+      filter.startDate = {};
+      if (startDate) filter.startDate.$gte = new Date(startDate);
+      if (endDate) filter.startDate.$lte = new Date(endDate);
+    }
+
+    const total = await Leave.countDocuments(filter);
+
+    // Get leaves with pagination
+    const leaves = await Leave.find(filter)
+      .sort({ appliedDate: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .populate(
+        "employee",
+        "name email department position employeeId photographUrl"
+      )
+      .populate("approvedBy", "name email")
+      .populate("rejectedBy", "name email")
+      .populate("cancelledBy", "name email")
+      .lean();
+
+    // Process employee data to include full photo URLs
+    const processedLeaves = leaves.map((leave) => ({
+      ...leave,
+      employee: processEmployeeWithPhoto(leave.employee, req),
+    }));
+
+    // Get leave summary for the employee
+    const leaveSummary = await Leave.getLeaveSummary(employeeId);
+    const usedAnnual = leaveSummary.annual ? leaveSummary.annual.totalDays : 0;
+
+    // Get HR policy for entitlement info
+    const employee = await Employee.findById(employeeId);
+    const hrPolicy = await HrPolicy.findOne({ owner: employee.owner });
+    let totalEntitlement = employee.leaveEntitlement?.total || 0;
+
+    if (hrPolicy) {
+      const rules = extractLeaveRules(hrPolicy.content);
+      totalEntitlement = rules.totalPaidLeavesPerYear || totalEntitlement;
+    }
+
+    res.json({
+      success: true,
+      data: processedLeaves,
+      summary: {
+        totalLeaves: total,
+        usedAnnual: usedAnnual,
+        availableAnnual: Math.max(0, totalEntitlement - usedAnnual),
+        totalEntitlement: totalEntitlement
+      },
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / limit),
+        totalItems: total,
+        itemsPerPage: parseInt(limit),
+      },
+      filtersApplied: {
+        status: status || "all",
+        dateRange: startDate || endDate ? { startDate, endDate } : "all",
+      },
+    });
+  } catch (err) {
+    console.error("❌ [getMyLeaves] Error:", err);
+    res.status(500).json({
+      error: err.message,
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
   }
 };

@@ -11,7 +11,7 @@ const AttachmentSchema = new Schema(
     uploadedAt: { type: Date, default: Date.now },
     uploadedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
   },
-  { _id: true }
+  { _id: true },
 );
 
 const EditHistorySchema = new Schema(
@@ -25,7 +25,7 @@ const EditHistorySchema = new Schema(
     editedAt: { type: Date, default: Date.now },
     editedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
   },
-  { _id: true }
+  { _id: true },
 );
 
 // New: Comment Schema embedded within WhatsAppMessage
@@ -83,7 +83,7 @@ const CommentSchema = new Schema(
   {
     timestamps: true,
     _id: true,
-  }
+  },
 );
 
 const WhatsAppMessageSchema = new Schema(
@@ -122,6 +122,25 @@ const WhatsAppMessageSchema = new Schema(
     scheduledFor: { type: Date },
     scheduledAt: { type: Date },
     scheduledBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    // 🔥 NEW: Client employee message fields
+    isClientEmployeeMessage: {
+      type: Boolean,
+      default: false,
+    },
+    clientEmployeeId: {
+      type: String,
+      default: null,
+    },
+    clientEmployeeData: {
+      type: {
+        clientEmployeeId: String,
+        clientEmployeeName: String,
+        clientEmployeeDesignation: String,
+        parentClientId: Schema.Types.ObjectId,
+        parentClientName: String,
+      },
+      default: null,
+    },
     sentAt: { type: Date },
     status: {
       type: String,
@@ -174,7 +193,7 @@ const WhatsAppMessageSchema = new Schema(
       ref: "Employee",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 /** Helpful query patterns */
@@ -234,7 +253,7 @@ WhatsAppMessageSchema.pre("save", function (next) {
 // NEW: Method to add a comment (FIXED VERSION)
 WhatsAppMessageSchema.methods.addComment = async function (
   commentData,
-  employee
+  employee,
 ) {
   console.log("🔍 Adding comment with employee:", {
     employeeId: employee._id,
@@ -303,7 +322,7 @@ WhatsAppMessageSchema.methods.addComment = async function (
 WhatsAppMessageSchema.methods.editComment = async function (
   commentId,
   updates,
-  employee
+  employee,
 ) {
   const comment = this.comments.id(commentId);
   if (!comment) {
@@ -337,7 +356,7 @@ WhatsAppMessageSchema.methods.editComment = async function (
 // NEW: Method to delete a comment
 WhatsAppMessageSchema.methods.deleteComment = async function (
   commentId,
-  employee
+  employee,
 ) {
   const comment = this.comments.id(commentId);
   if (!comment) {
@@ -358,7 +377,7 @@ WhatsAppMessageSchema.methods.deleteComment = async function (
     if (commentToDelete) {
       // Find replies
       const replies = this.comments.filter(
-        (c) => c.replyTo && c.replyTo.toString() === commentId
+        (c) => c.replyTo && c.replyTo.toString() === commentId,
       );
 
       // Delete replies recursively
@@ -401,7 +420,7 @@ WhatsAppMessageSchema.methods.deleteComment = async function (
 WhatsAppMessageSchema.methods.addReactionToComment = async function (
   commentId,
   emoji,
-  employee
+  employee,
 ) {
   const comment = this.comments.id(commentId);
   if (!comment) {
@@ -410,7 +429,7 @@ WhatsAppMessageSchema.methods.addReactionToComment = async function (
 
   // Remove existing reaction from same user
   comment.reactions = comment.reactions.filter(
-    (reaction) => reaction.userId.toString() !== employee._id.toString()
+    (reaction) => reaction.userId.toString() !== employee._id.toString(),
   );
 
   // Add new reaction

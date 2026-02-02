@@ -11,9 +11,17 @@ router.get("/", UnifiedAuth, leaveController.getLeaves);
 
 // Get leaves pending approval
 router.get("/pending", UnifiedAuth, leaveController.getPendingLeaves);
+router.get("/my-leaves", UnifiedAuth, leaveController.getMyLeaves); // Add this line
 
 // Get leave statistics
 router.get("/stats", UnifiedAuth, leaveController.getLeaveStats);
+
+// NEW ROUTES FOR POLICY-BASED AUTO-DECISION
+// Check leave against HR policy
+router.post("/check-policy", UnifiedAuth, leaveController.checkLeavePolicy);
+
+// Get HR policy rules for leave
+router.get("/policy-rules", UnifiedAuth, leaveController.getLeavePolicyRules);
 
 // Get single leave
 router.get("/:id", UnifiedAuth, leaveController.getLeaveById);
@@ -33,11 +41,6 @@ router.put("/:id/cancel", UnifiedAuth, leaveController.cancelLeave);
 // Delete leave (soft delete)
 router.delete("/:id", UnifiedAuth, leaveController.deleteLeave);
 
-// NEW ROUTES FOR POLICY-BASED AUTO-DECISION
-// Check leave against HR policy
-router.post("/check-policy", UnifiedAuth, leaveController.checkLeavePolicy);
 
-// Get HR policy rules for leave
-router.get("/policy-rules", UnifiedAuth, leaveController.getLeavePolicyRules);
 
 module.exports = router;
