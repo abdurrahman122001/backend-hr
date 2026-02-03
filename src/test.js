@@ -325,7 +325,7 @@ function setupEmployeeChangeStream() {
       );
       try {
         changeStream.close();
-      } catch {}
+      } catch { }
     });
   } catch (e) {
     console.warn(
@@ -528,7 +528,7 @@ if (
     if (ENABLE_HTTPS) {
       console.warn(
         "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
+        "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
       );
     }
   });
@@ -2471,47 +2471,133 @@ io.on("connection", (socket) => {
     socket.join(`conversation_${conversationId}`);
   });
 
-  // 🎯 CRITICAL FIX: Handle WhatsApp message events specifically
+  // 🔥 FIXED: Join client employee room - KEEP ONLY THIS ONE
+  socket.on("join_client_employee", (employeeId) => {
+    if (!employeeId) {
+      console.error("❌ join_client_employee: employeeId is required");
+      return;
+    }
+    // Join BOTH employee room AND client employee room
+    socket.join(`employee_${employeeId}`);
+    socket.join(`client_employee_${employeeId}`);
+  });
+  // 🔥 UPDATED: Handle whatsapp_send_message from frontend with approval filtering
+  // 🔥 FIXED: whatsapp_send_message handler
   socket.on("whatsapp_send_message", async (data) => {
     try {
-      const { message, clientId, senderId, receivers } = data;
+      const { message, clientId, senderId, receivers, clientEmployeeId } = data;
 
-      if (!message || !clientId || !senderId) {
+      if (!message || !senderId) {
         console.error(
-          "❌ whatsapp_send_message: message, clientId, and senderId are required",
+          "❌ whatsapp_send_message: message and senderId are required",
         );
         socket.emit("message_error", { error: "Missing required fields" });
         return;
       }
-      // Notify sender
+
+      // 🔥 CRITICAL: Only notify sender about their own message
       socket.emit("new_message", {
         message: message,
         type: "message_sent",
         action: "sent",
+        approvalStatus: message.approvalStatus,
       });
 
-      // Notify all receivers
+      // 🔥 IMPORTANT: Filter receivers to only notify actual recipients
       if (receivers && Array.isArray(receivers)) {
         receivers.forEach((receiverId) => {
-          socket.to(`employee_${receiverId}`).emit("new_message", {
-            message: message,
-            type: "new_assignment",
-            action: "received",
-          });
+          // Check if this receiver is the actual sender (should already be handled)
+          if (receiverId === senderId) return;
+
+          // Check approval status for filtering
+          let shouldNotify = false;
+
+          if (
+            message.approvalStatus === "approved" ||
+            message.approvalStatus === null
+          ) {
+            // Approved messages or Team Lead/Manager messages
+            shouldNotify = true;
+          } else if (message.approvalStatus === "pending") {
+            // Only notify Team Leads for pending approval
+            const isReceiverTeamLead = checkIfTeamLead(receiverId);
+            shouldNotify = isReceiverTeamLead;
+          }
+
+          if (shouldNotify) {
+            // 🔥 Use io.to instead of socket.to to ensure proper delivery
+            io.to(`employee_${receiverId}`).emit("new_message", {
+              message: message,
+              type:
+                message.approvalStatus === "pending"
+                  ? "reply_needs_approval"
+                  : "new_assignment",
+              action: "received",
+              requiresApproval: message.approvalStatus === "pending",
+              // 🔥 ADD: Explicitly mark as for this receiver
+              forReceiver: receiverId,
+            });
+          }
         });
       }
 
-      // Also broadcast to client room for real-time chat
-      socket.to(`client_${clientId}`).emit("new_message", {
-        message: message,
-        type: "new_message",
-        action: "client_received",
-      });
+      // 🎯 FIXED: Check approval status before emitting to client rooms
+      if (clientEmployeeId) {
+        // Only emit to rooms if message is approved or has no approval status
+        if (message.approvalStatus !== "pending") {
+          // Emit to the parent client room
+          if (clientId) {
+            io.to(`client_${clientId}`).emit("new_message", {
+              message: message,
+              type: "new_message",
+              action: "client_received",
+              isClientEmployeeMessage: true,
+              clientEmployeeId: clientEmployeeId,
+              clientId: clientId,
+            });
+          }
+
+          // Emit to the specific client employee room
+          io.to(`client_employee_${clientEmployeeId}`).emit("new_message", {
+            message: message,
+            type: "client_employee_message",
+            action: "client_employee_received",
+            isClientEmployeeMessage: true,
+            clientEmployeeId: clientEmployeeId,
+            clientId: clientId,
+          });
+        }
+      } else {
+        // Only emit if message is approved or has no approval status
+        if (message.approvalStatus !== "pending" && clientId) {
+          io.to(`client_${clientId}`).emit("new_message", {
+            message: message,
+            type: "new_message",
+            action: "client_received",
+            isClientEmployeeMessage: false,
+            clientId: clientId,
+          });
+        }
+      }
     } catch (error) {
       console.error("❌ Error in whatsapp_send_message:", error);
       socket.emit("message_error", { error: "Failed to send message" });
     }
   });
+  async function checkIfTeamLead(userId) {
+    try {
+      const user = await User.findById(userId).select("role").lean();
+      if (user && user.role) {
+        const role = user.role.toLowerCase();
+        return role.includes("lead") || role === "team_lead";
+      }
+      return false;
+    } catch (error) {
+      console.error("Error checking team lead status:", error);
+      return false;
+    }
+  }
+
   socket.on("join:message", (messageId) => {
     if (!messageId) return;
     socket.join(`message:${messageId}`);
@@ -2591,10 +2677,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Update comment in database
-      // const updatedComment = await updateCommentInDatabase(commentId, text, editedBy);
-
-      // Mock updated comment
       const updatedComment = {
         _id: commentId,
         text,
@@ -2647,10 +2729,6 @@ io.on("connection", (socket) => {
         return;
       }
 
-      // Add reaction to database
-      // const updatedReaction = await addReactionToComment(commentId, reaction, userId);
-
-      // Mock reaction
       const updatedReaction = {
         emoji: reaction,
         userId,
@@ -2687,7 +2765,7 @@ io.on("connection", (socket) => {
       console.error("❌ Error in comment:typing:", error);
     }
   });
-  // 🎯 CRITICAL FIX: Handle message approval events
+
   socket.on("whatsapp_approve_message", async (data) => {
     try {
       const { message, approvedBy, receivers, clientId } = data;
@@ -2702,9 +2780,11 @@ io.on("connection", (socket) => {
       const updatedMessage = {
         ...message,
         approvalStatus: "approved",
+        isForwarded: true,
+        forwardedBy: approvedBy,
+        forwardedAt: new Date(),
       };
 
-      // 🎯 Notify ALL involved users about approval
       const allInvolvedUsers = new Set();
 
       // Add sender
@@ -2712,7 +2792,7 @@ io.on("connection", (socket) => {
         allInvolvedUsers.add(String(message.sender._id));
       }
 
-      // Add all receivers from original message
+      // Add all receivers
       if (message.receiver && Array.isArray(message.receiver)) {
         message.receiver.forEach((receiver) => {
           const receiverId =
@@ -2723,21 +2803,21 @@ io.on("connection", (socket) => {
         });
       }
 
-      // Add the team lead who approved
+      // Add the approver
       allInvolvedUsers.add(String(approvedBy));
 
-      // Add any additional receivers from approval
+      // Add additional receivers if provided
       if (receivers && Array.isArray(receivers)) {
         receivers.forEach((receiverId) => {
           allInvolvedUsers.add(String(receiverId));
         });
       }
 
-      // Convert to array and emit to each user
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
+      // Notify all involved users
       involvedUsersArray.forEach((userId) => {
-        socket.to(`employee_${userId}`).emit("new_message", {
+        io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
@@ -2748,7 +2828,7 @@ io.on("connection", (socket) => {
 
       // Also emit to the client room for real-time chat updates
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("new_message", {
+        io.to(`client_${clientId}`).emit("new_message", {
           message: updatedMessage,
           type: "message_updated",
           action: "approved",
@@ -2766,7 +2846,6 @@ io.on("connection", (socket) => {
       socket.emit("message_error", { error: "Failed to approve message" });
     }
   });
-
   // 🎯 CRITICAL FIX: Handle forwarded approved messages to managers
   socket.on("whatsapp_forward_to_managers", async (data) => {
     try {
@@ -2785,11 +2864,12 @@ io.on("connection", (socket) => {
         isForwarded: true,
         forwardedBy: forwardedBy,
         originalMessageId: message._id,
+        approvalStatus: "approved", // Ensure it's marked as approved
       };
 
       // Notify each manager about the new forwarded message
       managers.forEach((managerId) => {
-        socket.to(`employee_${managerId}`).emit("new_message", {
+        io.to(`employee_${managerId}`).emit("new_message", {
           message: forwardedMessage,
           type: "new_approved_message",
           action: "forwarded_approved",
@@ -2851,7 +2931,7 @@ io.on("connection", (socket) => {
       const involvedUsersArray = Array.from(allInvolvedUsers);
 
       involvedUsersArray.forEach((userId) => {
-        socket.to(`employee_${userId}`).emit("new_message", {
+        io.to(`employee_${userId}`).emit("new_message", {
           message: message,
           type: "message_updated",
           action: "edited",
@@ -2862,7 +2942,7 @@ io.on("connection", (socket) => {
 
       // Also emit to the client room for real-time chat updates
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("new_message", {
+        io.to(`client_${clientId}`).emit("new_message", {
           message: message,
           type: "message_updated",
           action: "edited",
@@ -2885,6 +2965,7 @@ io.on("connection", (socket) => {
         );
         return;
       }
+
       // Notify relevant users about status change
       socket.emit("message_status", {
         messageId: messageId,
@@ -2893,7 +2974,7 @@ io.on("connection", (socket) => {
 
       // If there's a specific user who triggered the status update, notify them
       if (userId) {
-        socket.to(`employee_${userId}`).emit("message_status", {
+        io.to(`employee_${userId}`).emit("message_status", {
           messageId: messageId,
           status: status,
         });
@@ -2901,7 +2982,7 @@ io.on("connection", (socket) => {
 
       // Also notify client room if applicable
       if (clientId) {
-        socket.to(`client_${clientId}`).emit("message_status", {
+        io.to(`client_${clientId}`).emit("message_status", {
           messageId: messageId,
           status: status,
         });
@@ -3288,11 +3369,11 @@ cron.schedule(
             `[cron][leave][proration] probationEnd=${probationEnd
               .toISOString()
               .slice(0, 10)}, leaveYearEnd=${leaveYearEnd
-              .toISOString()
-              .slice(
-                0,
-                10,
-              )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`,
+                .toISOString()
+                .slice(
+                  0,
+                  10,
+                )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`,
           );
           if (proratedLeaves <= 0) continue;
 

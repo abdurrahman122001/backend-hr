@@ -3209,14 +3209,7 @@ exports.createMessage = async function createMessage(req, res) {
 
       // 🎯 CRITICAL FIX: Only notify receivers if message is approved OR if they are Team Leads for pending approval
       receivers.forEach((receiverId) => {
-        // Check if this receiver is a Team Lead (for pending approval messages)
         const isReceiverTeamLead = tls.includes(receiverId);
-
-        // Determine if we should notify this receiver:
-        // 1. If message is approved (approvalStatus === "approved") - notify everyone
-        // 2. If message is pending (approvalStatus === "pending") - only notify Team Leads
-        // 3. If message has no approval status (null) - notify everyone (for Team Lead/Manager messages)
-
         const shouldNotify =
           responseWithSupervision.approvalStatus === "approved" ||
           responseWithSupervision.approvalStatus === null ||
@@ -3239,44 +3232,6 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
 
-      // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
-      // Only Receivers and Senders should get the event via their personal rooms
-      /*
-      if (isClientEmployeeChat) {
-        // Emit to parent client room
-        io.to(`client_${parentClientId}`).emit("new_message", {
-          message: responseWithSupervision,
-          type: "new_message",
-          action: "client_received",
-          isClientEmployeeChat: true,
-          clientEmployeeId: clientEmployeeId,
-          clientId: parentClientId,
-          isClientEmployeeMessage: true,
-        });
-
-        // 🔥 NEW: Emit to client employee specific room
-        io.to(`client_employee_${clientEmployeeId}`).emit("new_message", {
-          message: responseWithSupervision,
-          type: "client_employee_message",
-          action: "client_employee_received",
-          clientEmployeeId: clientEmployeeId,
-          parentClientId: parentClientId,
-          isClientEmployeeMessage: true,
-        });
-      } else {
-        // Regular client message - only emit if approved or no approval needed
-        if (responseWithSupervision.approvalStatus !== "pending") {
-          io.to(`client_${actualClientId}`).emit("new_message", {
-            message: responseWithSupervision,
-            type: "new_message",
-            action: "client_received",
-            isClientEmployeeChat: false,
-            clientId: actualClientId,
-          });
-        }
-      }
-      */
-
       // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies to client employee chat
       if (senderRole === "team_lead" && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
@@ -3294,8 +3249,6 @@ exports.createMessage = async function createMessage(req, res) {
         });
       }
 
-      // 🎯 FIXED: Special notification for managers when team lead sends message
-      // Only send to managers if message is approved OR has no approval status
       if (
         senderRole === "team_lead" &&
         responseWithSupervision.approvalStatus !== "pending"
