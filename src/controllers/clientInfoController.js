@@ -18,7 +18,7 @@ exports.createClientInfo = async (req, res) => {
     }
 
     const { ownerId, companyEmployees = [], ...rest } = req.body;
-    
+
     if (!ownerId) return res.status(400).json({ error: "ownerId is required" });
 
     // Validate companyEmployees if provided during creation
@@ -26,11 +26,11 @@ exports.createClientInfo = async (req, res) => {
     if (Array.isArray(companyEmployees) && companyEmployees.length > 0) {
       for (const empData of companyEmployees) {
         if (!empData.name || !empData.designation) {
-          return res.status(400).json({ 
-            error: "Each company employee must have name and designation" 
+          return res.status(400).json({
+            error: "Each company employee must have name and designation"
           });
         }
-        
+
         validatedEmployees.push({
           name: empData.name.trim(),
           designation: empData.designation.trim(),
@@ -50,7 +50,7 @@ exports.createClientInfo = async (req, res) => {
       createdBy: emp._id,
       companyEmployees: validatedEmployees,
     });
-    
+
 
     res.status(201).json(doc);
   } catch (err) {
@@ -116,7 +116,7 @@ exports.updateClientInfo = async (req, res) => {
 
     const { id } = req.params;
     const { companyEmployees, ...updates } = req.body;
-    
+
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -135,15 +135,15 @@ exports.updateClientInfo = async (req, res) => {
       if (!Array.isArray(companyEmployees)) {
         return res.status(400).json({ error: "companyEmployees must be an array" });
       }
-      
+
       const validatedEmployees = [];
       for (const empData of companyEmployees) {
         if (!empData.name || !empData.designation) {
-          return res.status(400).json({ 
-            error: "Each company employee must have name and designation" 
+          return res.status(400).json({
+            error: "Each company employee must have name and designation"
           });
         }
-        
+
         validatedEmployees.push({
           name: empData.name.trim(),
           designation: empData.designation.trim(),
@@ -155,13 +155,13 @@ exports.updateClientInfo = async (req, res) => {
           addedAt: empData.addedAt || new Date()
         });
       }
-      
+
       updates.companyEmployees = validatedEmployees;
     }
 
     const updated = await ClientInfo.findByIdAndUpdate(
-      id, 
-      updates, 
+      id,
+      updates,
       { new: true }
     ).populate("assignedTo", "_id name companyEmail");
 
@@ -180,7 +180,7 @@ exports.addCompanyEmployee = async (req, res) => {
 
     const { id } = req.params;
     const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
-    
+
     if (!name || !designation) {
       return res.status(400).json({ error: "Name and designation are required" });
     }
@@ -229,7 +229,7 @@ exports.removeCompanyEmployee = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id, employeeIndex } = req.params;
-    
+
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -270,7 +270,7 @@ exports.updateCompanyEmployee = async (req, res) => {
 
     const { id, employeeIndex } = req.params;
     const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
-    
+
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -522,7 +522,7 @@ exports.hasNewClients = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const role = String(emp.role || "").trim().toLowerCase();
-    
+
     // 🚫 Managers never see new clients indicator
     if (role === "manager") {
       return res.json({ hasNewClients: false, unreadCount: 0 });
@@ -536,7 +536,7 @@ exports.hasNewClients = async (req, res) => {
         return res.status(400).json({ error: "Owner ID missing in profile" });
       }
       query = { owner: emp.owner };
-    } 
+    }
     // Employee: Only their assigned clients
     else {
       query = { assignedTo: emp._id };
@@ -544,16 +544,16 @@ exports.hasNewClients = async (req, res) => {
 
     // Find clients that match the query
     const clients = await ClientInfo.find(query).select("_id readBy");
-    
+
     // Check if any client is unread (not in readBy array)
     const hasUnread = clients.some(client => {
-      return !client.readBy?.some(read => 
+      return !client.readBy?.some(read =>
         String(read.employee) === String(emp._id)
       );
     });
 
     const unreadCount = clients.filter(client => {
-      return !client.readBy?.some(read => 
+      return !client.readBy?.some(read =>
         String(read.employee) === String(emp._id)
       );
     }).length;
@@ -583,7 +583,7 @@ exports.searchClientByEmail = async (req, res) => {
 
     // Build query based on role
     let query = { owner: emp.owner };
-    
+
     // For non-managers, only search assigned clients
     if (emp.role?.toLowerCase() !== "manager") {
       query.assignedTo = emp._id;
@@ -616,7 +616,7 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
 
     // Build query based on role
     let query = { owner: emp.owner };
-    
+
     // For non-managers, only search within assigned clients
     if (emp.role?.toLowerCase() !== "manager") {
       query.assignedTo = emp._id;

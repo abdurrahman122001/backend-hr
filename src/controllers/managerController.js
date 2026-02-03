@@ -1,5 +1,6 @@
 // controllers/managerController.js
 const path = require("path");
+const mongoose = require("mongoose");
 const Employee = require("../models/Employees");
 const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
@@ -15,68 +16,123 @@ const isManagerLike = (role) => {
     r === "teamlead"
   );
 };
+
 exports.getRoster = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select(
-      "_id owner role",
+      "_id owner role supervisor supervise supervisionMode supervisorMode"
     );
+
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "Access denied" });
     if (!me.owner)
-      return res
-        .status(400)
-        .json({ error: "Your profile is missing owner id" });
+      return res.status(400).json({ error: "Your profile is missing owner id" });
 
-    const [employees, clients] = await Promise.all([
-      Employee.find({
-        owner: me.owner,
-        status: "active",
-        $or: [
-          { department: "Operations" },
-          { role: { $in: ["Employee", "Manager", "Team Lead"] } },
-        ],
-      })
-        .select(
-          "_id name email companyEmail role department designation supervisionMode supervisor photographUrl",
-        )
-        .populate("supervisor", "_id name companyEmail")
-        .sort({ name: 1 }),
-      ClientInfo.find({ owner: me.owner })
-        .select(
-          "_id clientName legalBusinessName industry taxStatus companyLocation assignedTo companyEmployees clientEmail",
-        )
-        .populate("assignedTo", "_id name companyEmail")
-        .sort({ createdAt: -1 }),
-    ]);
+    const role = (me.role || "").trim().toLowerCase();
+    const isEmployee = role === "employee";
+    const isTeamLead = role === "team lead" || role === "team_lead";
+    const isManager = role === "manager";
 
-    // Extract and format client employees from all clients
-    const allClientEmployees = [];
-    clients.forEach((client) => {
-      if (client.companyEmployees && client.companyEmployees.length > 0) {
-        client.companyEmployees.forEach((emp) => {
-          allClientEmployees.push({
-            _id: `${client._id}_${emp.email || emp.name.replace(/\s+/g, "_")}`, // Composite ID
-            name: emp.name,
-            email: emp.email,
-            designation: emp.designation,
-            phone: emp.phone,
-            department: emp.department,
-            isPrimaryContact: emp.isPrimaryContact,
-            clientId: client._id,
-            clientName: client.clientName,
-            clientEmail: client.clientEmail,
-            type: "company_employee",
-            addedAt: emp.addedAt,
-          });
-        });
-      }
+    /* ------------------ EMPLOYEES (VISIBLE TO ALL) ------------------ */
+    let employeeQuery = {
+      owner: me.owner,
+      status: "active",
+    };
+
+    // Regular employees can only see team leads, managers, and their supervisor
+    if (isEmployee && !isTeamLead && !isManager) {
+      employeeQuery.$or = [
+        { _id: me.supervisor }, // Their supervisor
+        { role: { $in: ["Manager", "Team Lead"] } }, // All managers and team leads
+        { _id: { $in: me.supervise || [] } }, // People they supervise
+      ];
+    } else {
+      // Team leads and managers can see all operations employees
+      employeeQuery.$or = [
+        { department: "Operations" },
+        { role: { $in: ["Employee", "Manager", "Team Lead"] } },
+      ];
+    }
+
+    const employees = await Employee.find(employeeQuery)
+      .select(
+        "_id name email companyEmail role department designation supervisionMode supervisor supervisorMode photographUrl"
+      )
+      .populate("supervisor", "_id name companyEmail")
+      .sort({ name: 1 });
+
+    /* ------------------ CLIENT FILTER ------------------ */
+    let clientQuery = { owner: me.owner };
+
+    // If it's NOT a manager or team lead, only show clients they're directly assigned to
+    if (!isManager && !isTeamLead) {
+      // Ensure we are using a valid ObjectId for the query
+      const myId = new mongoose.Types.ObjectId(me._id);
+
+      clientQuery = {
+        ...clientQuery,
+        assignedTo: myId, // Mongo 'contains' query for arrays
+      };
+    }
+
+    const clients = await ClientInfo.find(clientQuery)
+      .select(
+        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision owner readBy companyEmployees clientEmail createdAt updatedAt"
+      )
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("owner", "_id name companyEmail")
+      .sort({ isActive: -1, createdAt: -1 });
+
+    // Add readBy tracking for employees
+    const clientsWithReadStatus = clients.map(client => {
+      const clientObj = client.toObject();
+      const isRead = client.readBy?.some(r => r.employee.toString() === me._id.toString());
+      return {
+        ...clientObj,
+        readBy: client.readBy || [],
+        isNewForEmployee: !isRead && !isManager && !isTeamLead,
+      };
     });
 
+    /* ------------------ CLIENT EMPLOYEES ------------------ */
+    const clientEmployees = [];
+
+    // For regular employees, only show client employees from their assigned clients
+    const allowedClientIds = isEmployee && !isTeamLead && !isManager
+      ? clients.map(c => c._id.toString())
+      : null;
+
+    clients.forEach((client) => {
+      if (!client.companyEmployees?.length) return;
+
+      // Filter for regular employees
+      if (allowedClientIds && !allowedClientIds.includes(client._id.toString())) {
+        return;
+      }
+
+      client.companyEmployees.forEach((emp) => {
+        clientEmployees.push({
+          _id: `${client._id}_${emp.email || emp.name.replace(/\s+/g, "_")}`,
+          name: emp.name,
+          email: emp.email,
+          designation: emp.designation,
+          phone: emp.phone,
+          department: emp.department,
+          isPrimaryContact: emp.isPrimaryContact,
+          clientId: client._id,
+          clientName: client.clientName,
+          clientEmail: client.clientEmail,
+          type: "company_employee",
+          addedAt: emp.addedAt,
+        });
+      });
+    });
+
+    /* ------------------ RESPONSE ------------------ */
     res.json({
       employees,
-      clients,
-      clientEmployees: allClientEmployees,
+      clients: clientsWithReadStatus,
+      clientEmployees,
+      userRole: role,
     });
   } catch (err) {
     console.error("getRoster error:", err);
@@ -125,7 +181,7 @@ exports.getEmployeeRoster = async (req, res) => {
 
     // For non-managers, show only clients assigned to them
     if (!isManagerLike) {
-      clientQuery.assignedTo = me._id;
+      clientQuery.assignedTo = { $in: [me._id, me._id.toString()] };
     }
 
     // Optional name filter
@@ -415,8 +471,8 @@ exports.assignClient = async (req, res) => {
               clientMessages.forEach((msg) => {
                 const msgReceivers = Array.isArray(msg.receiver)
                   ? msg.receiver.map((r) =>
-                      r._id ? r._id.toString() : r.toString(),
-                    )
+                    r._id ? r._id.toString() : r.toString(),
+                  )
                   : msg.receiver
                     ? [msg.receiver.toString()]
                     : [];
