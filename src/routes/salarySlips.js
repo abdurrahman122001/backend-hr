@@ -4,6 +4,8 @@ const router = express.Router();
 const requireAuth = require("../middleware/auth");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
+const mongoose = require("mongoose");
+const { ObjectId } = mongoose.Types;
 const { encrypt, decrypt } = require("../utils/encryption");
 const { createSalarySlip } = require("../controllers/salarySlipController");
 
@@ -61,20 +63,24 @@ router.get("/", requireAuth, async (req, res) => {
     limit = parseInt(limit);
     skip = parseInt(skip);
 
+    const currentUserRole = req.user.role?.toLowerCase();
     const baseMatch = {};
+
+    // 🔒 SECURTY SCOPE: Apply filter immediately to SalarySlip collection
+    if (currentUserRole === "super-admin") {
+      baseMatch.owner = new ObjectId(req.user._id);
+    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+      baseMatch.owner = new ObjectId(req.user.owner);
+    } else {
+      // Regular employee sees only their own slips
+      const targetEmpId = req.user.employeeId || req.user._id;
+      baseMatch.employee = new ObjectId(targetEmpId);
+    }
+
+    // Apply optional month/year filters
     if (month && year) {
       baseMatch.month = month;
       baseMatch.year = year;
-    }
-
-    let employeeScope = {};
-
-    if (req.user.role === "super-admin") {
-      employeeScope = { "employee.owner": req.user._id };
-    } else if (req.user.role === "admin" || req.user.role === "hr") {
-      employeeScope = { "employee.owner": req.user.createdBy };
-    } else {
-      employeeScope = { "employee._id": req.user._id };
     }
 
     const pipeline = [
@@ -88,7 +94,6 @@ router.get("/", requireAuth, async (req, res) => {
         }
       },
       { $unwind: "$employee" },
-      { $match: employeeScope },
       { $sort: { createdAt: -1 } },
       { $skip: skip },
       { $limit: limit }
@@ -98,16 +103,6 @@ router.get("/", requireAuth, async (req, res) => {
 
     const countPipeline = [
       { $match: baseMatch },
-      {
-        $lookup: {
-          from: "employees",
-          localField: "employee",
-          foreignField: "_id",
-          as: "employee"
-        }
-      },
-      { $unwind: "$employee" },
-      { $match: employeeScope },
       { $count: "total" }
     ];
 
@@ -120,6 +115,7 @@ router.get("/", requireAuth, async (req, res) => {
       total
     });
   } catch (err) {
+    console.error("Error fetching salary slips:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
@@ -137,20 +133,28 @@ router.post("/", requireAuth, async (req, res) => {
     }
 
     // Role-based: Only allow if user is allowed to create for this employee
-    let userFilter = {};
-    if (req.user.role === "super-admin") {
+    let userFilter = { _id: employeeId };
+    const currentUserRole = req.user.role?.toLowerCase();
+
+    if (currentUserRole === "super-admin") {
       // Can create for anyone
-    } else if (req.user.role === "admin" && req.user.createdBy) {
-      userFilter = { _id: employeeId, owner: req.user.createdBy };
+    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+      userFilter.owner = req.user.owner;
     } else {
-      userFilter = { _id: employeeId, owner: req.user._id };
+      userFilter.owner = req.user._id;
     }
+
     const allowed = await Employee.findOne(userFilter);
     if (!allowed) {
       return res.status(403).json({
         status: "error",
         message: "Not allowed to create salary slip for this employee.",
       });
+    }
+
+    // Ensure owner is set in slipData
+    if (!slipData.owner) {
+      slipData.owner = allowed.owner;
     }
 
     const slip = await createSalarySlip(employeeId, slipData);
@@ -190,13 +194,16 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
 
     let ownerAllowed = false;
-    if (req.user.role === "super-admin") {
+    const currentUserRole = req.user.role?.toLowerCase();
+
+    if (currentUserRole === "super-admin") {
       ownerAllowed = true;
-    } else if (req.user.role === "admin" && req.user.createdBy) {
-      ownerAllowed = String(slip.employee.owner) === String(req.user.createdBy);
+    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+      ownerAllowed = String(slip.employee.owner) === String(req.user.owner);
     } else {
-      ownerAllowed = String(slip.employee.owner) === String(req.user._id);
+      ownerAllowed = String(slip.employee._id) === String(req.user.employeeId);
     }
+
     if (!ownerAllowed) {
       return res
         .status(403)
@@ -333,13 +340,16 @@ router.get("/:id/download", requireAuth, async (req, res) => {
 
     // Role-based: Only allow if user is allowed to download this slip
     let ownerAllowed = false;
-    if (req.user.role === "super-admin") {
+    const currentUserRole = req.user.role?.toLowerCase();
+
+    if (currentUserRole === "super-admin") {
       ownerAllowed = true;
-    } else if (req.user.role === "admin" && req.user.createdBy) {
-      ownerAllowed = String(slip.employee.owner) === String(req.user.createdBy);
+    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+      ownerAllowed = String(slip.employee.owner) === String(req.user.owner);
     } else {
-      ownerAllowed = String(slip.employee.owner) === String(req.user._id);
+      ownerAllowed = String(slip.employee._id) === String(req.user.employeeId);
     }
+
     if (!ownerAllowed) {
       return res.status(403).json({
         status: "error",
@@ -384,10 +394,9 @@ router.get("/:id/download", requireAuth, async (req, res) => {
       .text(`Department: ${slip.employee.department || "N/A"}`, 320, y0)
       .text(`Designation: ${slip.employee.designation || "N/A"}`, 40, y0 + 15)
       .text(
-        `Joining Date: ${
-          slip.employee.joiningDate
-            ? slip.employee.joiningDate.toISOString().slice(0, 10)
-            : "N/A"
+        `Joining Date: ${slip.employee.joiningDate
+          ? slip.employee.joiningDate.toISOString().slice(0, 10)
+          : "N/A"
         }`,
         320,
         y0 + 15

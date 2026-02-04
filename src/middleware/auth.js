@@ -37,14 +37,21 @@ module.exports = async function requireAuth(req, res, next) {
         { email: user.email },
         { companyEmail: user.companyEmail }
       ]
-    }).select("role permissions name department designation");
+    }).select("role permissions name department designation owner");
+
+    // Normalize role string
+    const rawRole = employee?.role || user.role || "";
+    const normalizedRole = rawRole.toLowerCase().replace("_", "-");
 
     // Build user object with employee data
+    const effectiveOwner = employee?.owner || user.createdBy || user._id;
+    const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;
+
     req.user = {
       _id: user._id,
-      role: employee?.role || user.role, // Use employee role if available
+      role: normalizedRole,
       createdBy: user.createdBy,
-      owner: user.owner,
+      owner: finalOwnerId,
       // Add employee info if found
       ...(employee && {
         employeeId: employee._id,

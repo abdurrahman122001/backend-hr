@@ -3,7 +3,81 @@ const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+
+/** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
+
+/**
+ * Find the supervisor(s) of an employee using the EmployeeHierarchy model.
+ * This is used when supervision is enabled for a client to properly route
+ * approval messages up the hierarchy chain.
+ * @param {string} ownerId - The owner ID (organization)
+ * @param {string} employeeId - The employee whose supervisor(s) we're looking for
+ * @returns {Promise<string[]>} - Array of supervisor (senior) employee IDs
+ */
+async function findSupervisorsFromHierarchy(ownerId, employeeId) {
+  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+
+  try {
+    // Find all hierarchy links where the employee is the junior
+    const hierarchyLinks = await EmployeeHierarchy.find({
+      owner: ownerId,
+      junior: employeeId,
+    })
+      .select("senior")
+      .lean();
+
+    const supervisorIds = hierarchyLinks.map((link) => String(link.senior));
+    return supervisorIds;
+  } catch (error) {
+    console.error("Error finding supervisors from hierarchy:", error);
+    return [];
+  }
+}
+
+/**
+ * Get the full management chain for an employee (all seniors up to root).
+ * This traverses the hierarchy tree upward.
+ * @param {string} ownerId - The owner ID (organization)
+ * @param {string} employeeId - The starting employee
+ * @returns {Promise<string[]>} - Array of all supervisor IDs in the chain
+ */
+async function getManagementChainFromHierarchy(ownerId, employeeId) {
+  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+
+  try {
+    const chain = [];
+    let currentEmployee = employeeId;
+    const visited = new Set();
+
+    // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops)
+    for (let i = 0; i < 10; i++) {
+      if (visited.has(currentEmployee)) break;
+      visited.add(currentEmployee);
+
+      const hierarchyLink = await EmployeeHierarchy.findOne({
+        owner: ownerId,
+        junior: currentEmployee,
+      })
+        .select("senior")
+        .lean();
+
+      if (!hierarchyLink || !hierarchyLink.senior) break;
+
+      const seniorId = String(hierarchyLink.senior);
+      chain.push(seniorId);
+      currentEmployee = seniorId;
+    }
+
+    return chain;
+  } catch (error) {
+    console.error("Error getting management chain:", error);
+    return [];
+  }
+}
+
 const isObjId = (v) => mongoose.isValidObjectId(v);
+
 /** ---------- SOCKET.IO UTILITIES ---------- **/
 function getIO(req) {
   return req.app.get("io");
@@ -12,237 +86,150 @@ const oid = (v) =>
   mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 
 async function applyVisibility(q, req) {
-  // 🚨 CRITICAL: Return impossible query if no authenticated user
-  if (!req.employee?._id) {
-    return { _id: null };
-  }
+  if (!req.employee?._id) return { _id: null };
 
   const me = oid(String(req.employee._id));
-  if (!me) {
-    return { _id: null };
-  }
+  if (!me) return { _id: null };
 
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🚨 CRITICAL: Base visibility - user must ALWAYS be participant
+  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+  if (
+    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    ownerId
+  ) {
+    return { ...q, owner: ownerId };
+  }
+
+  // Define base participant filter for this user
   const participantFilter = {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // 🧑‍💼 MANAGER: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
-  if (currentUserRole === "manager" && ownerId) {
-    const managerQuery = {
-      $and: [
-        { owner: ownerId }, // Within their organization
-        participantFilter, // AND they are participant
-      ],
-    };
+  // 🔥 HIERARCHY-BASED: Get all juniors where this user is the senior
+  const juniorLinks = await EmployeeHierarchy.find({
+    owner: ownerId,
+    senior: me,
+  })
+    .select("junior")
+    .lean();
+  const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
-    // For thread-based queries, maintain thread context but ensure participation
-    if (q.threadId) {
-      managerQuery.$and.push({ threadId: q.threadId });
-
-      // Verify manager has access to this thread
-      const threadAccess = await AssignmentMessage.findOne({
-        threadId: q.threadId,
-        $and: [{ owner: ownerId }, participantFilter],
-      });
-
-      if (!threadAccess) {
-        return { _id: null }; // No access to this thread
-      }
-    }
-
-    // Handle scheduled messages for managers
-    if (q.isScheduled === true && q.status === "scheduled") {
-      const now = new Date();
-      return {
-        ...managerQuery,
-        isScheduled: true,
-        status: "scheduled",
-        $or: [
-          { scheduledFor: { $lte: now } }, // Past scheduled messages they can see
-          { sender: me }, // Or their own future scheduled messages
-        ],
-      };
-    }
-
-    // Apply trash/spam filters if present
-    if (q.isTrashed !== undefined) {
-      managerQuery.$and.push({ isTrashed: q.isTrashed });
-    }
-    if (q.isSpam !== undefined) {
-      managerQuery.$and.push({ isSpam: q.isSpam });
-    }
-
-    return managerQuery;
-  }
-
-  // 🎯 TEAM LEAD: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
-  if (currentUserRole === "team_lead" && ownerId) {
-    const teamLeadQuery = {
-      $and: [
-        { owner: ownerId }, // Within their organization
-        participantFilter, // AND they are participant
-      ],
-    };
-
-    // For thread-based queries
-    if (q.threadId) {
-      teamLeadQuery.$and.push({ threadId: q.threadId });
-
-      // Verify team lead has access to this thread
-      const threadAccess = await AssignmentMessage.findOne({
-        threadId: q.threadId,
-        $and: [{ owner: ownerId }, participantFilter],
-      });
-
-      if (!threadAccess) {
-        return { _id: null };
-      }
-    }
-
-    // Special case: Team leads can see pending approval messages from their organization
-    // but ONLY if they are participants OR if they need to review them
-    if (q.approvalStatus === "pending" || q.filter === "review") {
-      // For review filter, team leads can see pending messages from their org
-      // that require their approval (direct supervision mode)
-      const reviewQuery = {
-        $and: [
-          { owner: ownerId },
-          { approvalStatus: "pending" },
-          {
-            $or: [
-              participantFilter, // They are participant
-              // OR it's a message from employees under their supervision
-              {
-                sender: {
-                  $in: await getEmployeesUnderSupervision(ownerId, "team_lead"),
-                },
-              },
-            ],
-          },
-        ],
-      };
-
-      // Apply additional filters
-      if (q.threadId) reviewQuery.$and.push({ threadId: q.threadId });
-      if (q.isTrashed !== undefined)
-        reviewQuery.$and.push({ isTrashed: q.isTrashed });
-      if (q.isSpam !== undefined) reviewQuery.$and.push({ isSpam: q.isSpam });
-
-      return reviewQuery;
-    }
-
-    // Handle scheduled messages for team leads
-    if (q.isScheduled === true && q.status === "scheduled") {
-      const now = new Date();
-      return {
-        ...teamLeadQuery,
-        isScheduled: true,
-        status: "scheduled",
-        $or: [{ scheduledFor: { $lte: now } }, { sender: me }],
-      };
-    }
-
-    // Apply filters
-    if (q.isTrashed !== undefined) {
-      teamLeadQuery.$and.push({ isTrashed: q.isTrashed });
-    }
-    if (q.isSpam !== undefined) {
-      teamLeadQuery.$and.push({ isSpam: q.isSpam });
-    }
-
-    return teamLeadQuery;
-  }
-
-  // 👷 NORMAL EMPLOYEE: STRICT participant-based visibility ONLY
-  const employeeQuery = {
-    $and: [participantFilter],
-  };
-
-  // For thread-based queries, verify access to the thread
-  if (q.threadId) {
-    employeeQuery.$and.push({ threadId: q.threadId });
-
-    const threadAccess = await AssignmentMessage.findOne({
-      threadId: q.threadId,
-      $or: participantFilter.$or,
-    });
-
-    if (!threadAccess) {
-      return { _id: null }; // No access to this thread
-    }
-  }
-
-  // Handle scheduled messages specifically for employees
-  const now = new Date();
-  if (q.isScheduled === true && q.status === "scheduled") {
-    return {
-      $and: [
-        participantFilter,
-        { isScheduled: true },
-        { status: "scheduled" },
+  // 🧑‍🤝‍🧑 TEAM LEAD: Can see their own plus messages from their juniors if pending
+  if (currentUserRole === "team_lead") {
+    const visibilityConditions = {
+      $or: [
+        { sender: me },
+        { receiver: me },
+        { receiver: { $in: [me] } },
+        // 🔥 HIERARCHY-BASED: Supervisors can see pending messages from their juniors
+        ...(juniorIds.length > 0
+          ? [
+            {
+              sender: { $in: juniorIds },
+              approvalStatus: "pending",
+              owner: ownerId,
+            },
+          ]
+          : []),
+        // Team leads can see all pending messages that need approval in their organization
         {
-          $or: [
-            { scheduledFor: { $lte: now } }, // Past scheduled messages
-            { sender: me }, // Or their own future scheduled messages
-          ],
+          approvalStatus: "pending",
+          owner: ownerId,
         },
       ],
     };
+
+    return { $and: [q, visibilityConditions] };
   }
 
-  // Handle normal messages with scheduled logic
-  const baseConditions = {
+  // 🔥 HIERARCHY-BASED: Any supervisor (even if not Team Lead) can see their juniors' pending messages
+  if (juniorIds.length > 0) {
+    const visOr = [
+      { sender: me },
+      { receiver: me },
+      { receiver: { $in: [me] } },
+      {
+        sender: { $in: juniorIds },
+        approvalStatus: "pending",
+        owner: ownerId,
+      },
+    ];
+
+    if (q.isScheduled === true && q.status === "scheduled") {
+      return { $and: [q, { $or: visOr }] };
+    }
+
+    const now = new Date();
+    const scheduledVisibility = {
+      $or: [
+        {
+          $and: [
+            {
+              $or: [
+                { isScheduled: { $ne: true } },
+                { isScheduled: true, status: "sent" },
+                {
+                  isScheduled: true,
+                  status: "scheduled",
+                  scheduledFor: { $lte: now },
+                },
+              ],
+            },
+            { $or: visOr },
+          ],
+        },
+        {
+          isScheduled: true,
+          status: "scheduled",
+          scheduledFor: { $gt: now },
+          sender: me,
+        },
+      ],
+    };
+
+    return { $and: [q, scheduledVisibility] };
+  }
+
+  // 👷 NORMAL EMPLOYEE
+  const now = new Date();
+  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { $and: [q, { $or: visOr }] };
+  }
+
+  const scheduledVisibility = {
     $or: [
-      { isScheduled: { $ne: true } }, // Not scheduled
-      { isScheduled: true, status: "sent" }, // Scheduled but sent
+      {
+        $and: [
+          {
+            $or: [
+              { isScheduled: { $ne: true } },
+              { isScheduled: true, status: "sent" },
+              {
+                isScheduled: true,
+                status: "scheduled",
+                scheduledFor: { $lte: now },
+              },
+            ],
+          },
+          { $or: visOr },
+        ],
+      },
       {
         isScheduled: true,
         status: "scheduled",
-        scheduledFor: { $lte: now }, // Scheduled but time has passed
+        scheduledFor: { $gt: now },
+        sender: me,
       },
     ],
   };
 
-  employeeQuery.$and.push(baseConditions);
-
-  // Apply additional filters
-  if (q.owner && isObjId(q.owner)) {
-    employeeQuery.$and.push({ owner: q.owner });
-  }
-  if (q.client && isObjId(q.client)) {
-    employeeQuery.$and.push({ client: q.client });
-  }
-  if (q.sender && isObjId(q.sender)) {
-    employeeQuery.$and.push({ sender: q.sender });
-  }
-  if (
-    q.status &&
-    ["draft", "scheduled", "sent", "cancelled"].includes(q.status)
-  ) {
-    employeeQuery.$and.push({ status: q.status });
-  }
-  if (
-    q.approvalStatus &&
-    ["pending", "approved", "disapproved"].includes(q.approvalStatus)
-  ) {
-    employeeQuery.$and.push({ approvalStatus: q.approvalStatus });
-  }
-  if (q.isTrashed !== undefined) {
-    employeeQuery.$and.push({ isTrashed: q.isTrashed });
-  }
-  if (q.isSpam !== undefined) {
-    employeeQuery.$and.push({ isSpam: q.isSpam });
-  }
-  if (q.isScheduled !== undefined) {
-    employeeQuery.$and.push({ isScheduled: q.isScheduled });
-  }
-
-  return employeeQuery;
+  return { $and: [q, scheduledVisibility] };
 }
+
 async function emitMessageUpdate(io, message, action) {
   try {
     const populatedMessage = await AssignmentMessage.findById(message._id)
@@ -837,7 +824,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
       ]);
 
       const threadIds = distinctThreads.map(t => t.threadId);
-      
+
       // If no threads with clients found, return empty result
       if (threadIds.length === 0) {
         return res.json({
@@ -893,7 +880,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
       const threadsArray = Object.keys(groupedThreads).map(threadId => {
         const messages = groupedThreads[threadId];
         const latestMessage = messages[0]; // Already sorted by createdAt: -1
-        
+
         return {
           threadId,
           client: latestMessage.client,
@@ -2064,17 +2051,23 @@ exports.getTeamLeadPendingApprovals =
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      // Get employees under supervision
-      const supervisedEmployees = await getEmployeesUnderSupervision(
-        ownerId,
-        "team_lead"
-      );
+      // 🔥 HIERARCHY-BASED: Get juniors for this supervisor
+      const juniorLinks = await EmployeeHierarchy.find({
+        owner: ownerId,
+        senior: currentUserId,
+      }).select("junior").lean();
 
-      // Base query: Get all pending messages from supervised employees
+      const supervisedEmployeeIds = juniorLinks.map(link => link.junior);
+
+      // Base query: Get pending messages where this user is receiver OR sender is a junior
       const query = {
         owner: ownerId,
         approvalStatus: "pending",
-        sender: { $in: supervisedEmployees },
+        $or: [
+          { receiver: currentUserId },
+          { receiver: { $in: [currentUserId] } },
+          { sender: { $in: supervisedEmployeeIds } }
+        ],
         isTrashed: false,
         isSpam: false,
       };
@@ -2230,7 +2223,7 @@ exports.getTeamLeadPendingApprovals =
       const paginatedThreads = threads.slice(startIndex, endIndex);
 
       // Debug: Log first few threads
-      paginatedThreads.slice(0, 3).forEach((thread, index) => {});
+      paginatedThreads.slice(0, 3).forEach((thread, index) => { });
 
       // Return results
       res.json({
