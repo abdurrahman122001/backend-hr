@@ -1309,6 +1309,27 @@ exports.approveMessage = async function approveMessage(req, res) {
     }
 
     msg.approvalStatus = "approved";
+
+    // ✅ Add managers as receivers to the same message if sender was an Employee under supervision
+    const senderRole = normalizeRole(msg.sender?.role || "");
+    if (senderRole === "employee") {
+      const { managers } = await findTLsAndManagersByOwner(msg.owner);
+      if (managers && managers.length > 0) {
+        msg.isForwarded = true;
+        msg.forwardedBy = req.employee._id;
+
+        // Add managers to existing receiver list without duplicates
+        const existingReceivers = (msg.receiver || []).map((r) =>
+          String(r._id || r),
+        );
+        managers.forEach((managerId) => {
+          if (!existingReceivers.includes(String(managerId))) {
+            msg.receiver.push(managerId);
+          }
+        });
+      }
+    }
+
     await msg.save();
 
     // Get fully populated message for real-time emission
@@ -1382,123 +1403,11 @@ exports.approveMessage = async function approveMessage(req, res) {
       */
     }
 
-    // ✅ Forward only if sender was an Employee under supervision
-    const senderRole = normalizeRole(msg.sender?.role || "");
-    if (senderRole === "employee") {
-      const { managers } = await findTLsAndManagersByOwner(msg.owner);
-      if (managers.length > 0) {
-        // 🔥 CRITICAL FIX: Include replyContent and repliedTo in forwarded message
-        // 🔥 ALSO CRITICAL: Preserve client employee information
-        const forwardMsgData = {
-          owner: msg.owner,
-          client: msg.client,
-          sender: msg.sender,
-          receiver: managers,
-          subject: `Approved: ${msg.subject || "No Subject"}`,
-          note: msg.note || "",
-          attachments: msg.attachments,
-          approvalStatus: "approved",
-          // 🔥 INCLUDE REPLY CONTENT AND THREAD INFO
-          isReply: msg.isReply,
-          repliedTo: msg.repliedTo,
-          replyContent: msg.replyContent,
-          // 🔥 PRESERVE CLIENT EMPLOYEE INFORMATION
-          isClientEmployeeMessage: msg.isClientEmployeeMessage,
-          clientEmployeeId: msg.clientEmployeeId,
-          clientEmployeeData: msg.clientEmployeeData,
-          // Add metadata to identify this as a forwarded message
-          isForwarded: true,
-          originalMessage: msg._id,
-          forwardedBy: req.employee._id,
-          // Add client supervision info
-          clientSupervision: clientSupervision,
-        };
-
-        const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
-
-        const populatedForward = await forwardMsg.populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
-          { path: "forwardedBy", select: "_id name companyEmail" },
-          {
-            path: "replyContent.originalSender",
-            select: "_id name companyEmail",
-          },
-          { path: "repliedTo", select: "_id note message sender attachments" },
-        ]);
-
-        // 🔥 Add client employee info to populated response
-        const populatedForwardWithEmployeeInfo = {
-          ...populatedForward.toObject(),
-          isClientEmployeeMessage: msg.isClientEmployeeMessage,
-          clientEmployeeId: msg.clientEmployeeId,
-          clientEmployeeData: msg.clientEmployeeData,
-        };
-
-        // 🎯 CRITICAL: Emit new message event for the forwarded message to managers
-        if (req.app.get("io")) {
-          const io = req.app.get("io");
-          // Notify managers about the new forwarded message
-          managers.forEach((managerId) => {
-            io.to(`employee_${managerId}`).emit("new_message", {
-              message: populatedForwardWithEmployeeInfo,
-              type: "new_message",
-              action: "forwarded_approved",
-              forwardedBy: req.employee._id,
-              originalMessageId: msg._id,
-              clientSupervision: clientSupervision,
-              // Include context about the reply chain
-              replyContext: msg.isReply
-                ? {
-                  hasOriginalThread: true,
-                  originalSender: msg.replyContent?.originalSender,
-                  repliedToMessage: msg.repliedTo?._id,
-                }
-                : null,
-              // 🔥 Include client employee context
-              clientEmployeeContext: msg.isClientEmployeeMessage
-                ? {
-                  isClientEmployeeMessage: true,
-                  clientEmployeeId: msg.clientEmployeeId,
-                  clientEmployeeName:
-                    msg.clientEmployeeData?.clientEmployeeName,
-                  parentClientId: msg.clientEmployeeData?.parentClientId,
-                }
-                : null,
-            });
-          });
-        }
-
-        return res.json({
-          ...updatedMessage,
-          forwardedToManagers: true,
-          forwardedMessage: populatedForwardWithEmployeeInfo,
-          message: "Message approved and forwarded to managers",
-          clientSupervision: clientSupervision,
-          // Include reply context in response
-          replyContext: msg.isReply
-            ? {
-              includedReplyContent: true,
-              originalThreadPreserved: true,
-            }
-            : null,
-          // 🔥 Include client employee context
-          clientEmployeeContext: msg.isClientEmployeeMessage
-            ? {
-              preserved: true,
-              isClientEmployeeMessage: true,
-              clientEmployeeId: msg.clientEmployeeId,
-            }
-            : null,
-        });
-      }
-    }
-
     return res.json({
       ...updatedMessage,
-      message: "Message approved successfully",
+      message: msg.isForwarded
+        ? "Message approved and managers added as receivers"
+        : "Message approved successfully",
       clientSupervision: clientSupervision,
     });
   } catch (e) {
@@ -1823,6 +1732,32 @@ exports.editMessage = async function editMessage(req, res) {
       msg.receiver = Array.from(new Set(newReceivers));
     }
 
+    // 🔥 NEW: Add managers to this message if Team Lead edits and auto-approves
+    if (
+      hasContentChanges &&
+      isTeamLead &&
+      !isSender &&
+      msg.approvalStatus === "approved" &&
+      clientRequiresApproval &&
+      isOriginalSenderEmployee
+    ) {
+      const { managers } = await findTLsAndManagersByOwner(msg.owner);
+      if (managers && managers.length > 0) {
+        msg.isForwarded = true;
+        msg.forwardedBy = req.employee._id;
+
+        // Add managers to existing receiver list without duplicates
+        const existingReceivers = (msg.receiver || []).map((r) =>
+          String(r._id || r),
+        );
+        managers.forEach((managerId) => {
+          if (!existingReceivers.includes(String(managerId))) {
+            msg.receiver.push(managerId);
+          }
+        });
+      }
+    }
+
     await msg.save();
 
     const populated = await msg.populate([
@@ -1848,81 +1783,7 @@ exports.editMessage = async function editMessage(req, res) {
       requiresApproval: clientRequiresApproval,
     };
 
-    // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
-    // Only forward if client requires approval
-    let forwardedMessage = null;
-    if (
-      hasContentChanges &&
-      isTeamLead &&
-      !isSender &&
-      msg.approvalStatus === "approved" &&
-      clientRequiresApproval
-    ) {
-      // ✅ Forward only if sender was an Employee under supervision
-      if (isOriginalSenderEmployee) {
-        const { managers } = await findTLsAndManagersByOwner(msg.owner);
-
-        if (managers.length > 0) {
-          try {
-            // 🔥 CRITICAL: Include replyTo and replyContent like in approve function
-            const forwardMsgData = {
-              owner: msg.owner,
-              client: msg.client,
-              sender: msg.sender,
-              receiver: managers,
-              subject: `Approved: ${msg.subject || "No Subject"}`,
-              note: msg.note || "",
-              attachments: msg.attachments,
-              approvalStatus: "approved",
-              // 🔥 PRESERVE REPLY CONTENT AND THREAD INFO LIKE IN APPROVE
-              isReply: msg.isReply,
-              repliedTo: msg.repliedTo,
-              replyContent: msg.replyContent,
-              // Add metadata to identify this as a forwarded message
-              isForwarded: true,
-              originalMessage: msg._id,
-              forwardedBy: req.employee._id,
-              // Copy scheduling info if applicable
-              isScheduled: msg.isScheduled,
-              status: msg.status,
-              scheduledFor: msg.scheduledFor,
-              scheduledAt: msg.scheduledAt,
-              scheduledBy: msg.scheduledBy,
-              // Add client supervision info
-              clientSupervision: clientSupervision,
-            };
-
-            const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
-
-            forwardedMessage = await forwardMsg.populate([
-              { path: "owner", select: "_id name companyEmail" },
-              { path: "sender", select: "_id name companyEmail role" },
-              { path: "receiver", select: "_id name companyEmail role" },
-              { path: "client", select: "_id clientName" },
-              { path: "forwardedBy", select: "_id name companyEmail" },
-              {
-                path: "replyContent.originalSender",
-                select: "_id name companyEmail",
-              },
-              {
-                path: "repliedTo",
-                select: "_id note message sender attachments",
-              },
-            ]);
-
-            // Add forwarding info to response
-            responseData.forwardedToManagers = true;
-            responseData.forwardedMessage = forwardedMessage;
-          } catch (forwardError) {
-            console.error(
-              "❌ Failed to forward message to managers:",
-              forwardError,
-            );
-            // Don't fail the whole request if forwarding fails
-          }
-        }
-      }
-    }
+    // Forwarding to managers is now handled by adding them as receivers to the same message
 
     // 🔥 ENHANCED REAL-TIME NOTIFICATION SYSTEM FOR EDITS
     if (req.app.get("io")) {
@@ -1976,32 +1837,7 @@ exports.editMessage = async function editMessage(req, res) {
       }
       */
 
-      // 🔥 NEW: Emit forwarded message to managers
-      if (forwardedMessage) {
-        // Notify managers about the new forwarded message
-        forwardedMessage.receiver.forEach((manager) => {
-          const managerId = typeof manager === "object" ? manager._id : manager;
-          if (managerId) {
-            io.to(`employee_${managerId}`).emit("new_message", {
-              message: forwardedMessage,
-              type: "new_message",
-              action: "forwarded_approved",
-              forwardedBy: req.employee._id,
-              originalMessageId: msg._id,
-              source: "team_lead_edit",
-              clientSupervision: clientSupervision,
-              // Include reply context
-              replyContext: msg.isReply
-                ? {
-                  hasOriginalThread: true,
-                  originalSender: msg.replyContent?.originalSender,
-                  repliedToMessage: msg.repliedTo?._id,
-                }
-                : null,
-            });
-          }
-        });
-      }
+      // Managers were added to receivers list, so they will be notified by the existing emission logic above
 
       // Special notifications based on approval status changes
       if (msg.approvalStatus === "approved") {
@@ -2020,7 +1856,7 @@ exports.editMessage = async function editMessage(req, res) {
         if (
           isTeamLead &&
           !isSender &&
-          !forwardedMessage &&
+          msg.isForwarded &&
           clientRequiresApproval
         ) {
           const { managers } = await findTLsAndManagersByOwner(msg.owner);
@@ -2061,9 +1897,9 @@ exports.editMessage = async function editMessage(req, res) {
     // Response messages based on the workflow
     let responseMessage = "Message updated successfully";
     if (msg.approvalStatus === "approved" && isTeamLead && !isSender) {
-      if (forwardedMessage) {
+      if (msg.isForwarded) {
         responseMessage =
-          "Message updated, automatically approved, and forwarded to managers";
+          "Message updated, automatically approved, and managers added as receivers";
       } else {
         responseMessage = "Message updated and automatically approved";
       }
@@ -2098,10 +1934,7 @@ exports.editMessage = async function editMessage(req, res) {
     };
 
     // Add forwarding info to response if applicable
-    if (forwardedMessage) {
-      finalResponse.forwardedToManagers = true;
-      finalResponse.forwardedMessage = forwardedMessage;
-    }
+    // Forwarding info is now part of the main message
 
     // 🔥 ADD REPLY CONTEXT TO RESPONSE LIKE IN APPROVE FUNCTION
     if (msg.isReply) {

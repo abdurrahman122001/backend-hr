@@ -741,7 +741,7 @@ exports.createMessage = async function createMessage(req, res) {
             .limit(50)
             .lean();
           isNewThread = threadMessages.length === 0;
-          
+
           // Check if thread already has team lead as receiver
           threadHasTeamLead = threadMessages.some(msg => {
             if (Array.isArray(msg.receiver)) {
@@ -758,7 +758,7 @@ exports.createMessage = async function createMessage(req, res) {
           if (threadMessages.length > 0) {
             const firstMessage = threadMessages[threadMessages.length - 1]; // Oldest message
             threadOriginalSenderRole = normalizeRole(firstMessage.role || '');
-            
+
             // Check if any message in thread is from an employee
             threadHasEmployeeWithSupervision = threadMessages.some(msg => {
               const msgRole = normalizeRole(msg.role || '');
@@ -778,7 +778,7 @@ exports.createMessage = async function createMessage(req, res) {
               .limit(50)
               .lean();
             isNewThread = false;
-            
+
             // Check if thread already has team lead as receiver
             threadHasTeamLead = threadMessages.some(msg => {
               if (Array.isArray(msg.receiver)) {
@@ -795,7 +795,7 @@ exports.createMessage = async function createMessage(req, res) {
             if (threadMessages.length > 0) {
               const firstMessage = threadMessages[threadMessages.length - 1];
               threadOriginalSenderRole = normalizeRole(firstMessage.role || '');
-              
+
               // Check if any message in thread is from an employee
               threadHasEmployeeWithSupervision = threadMessages.some(msg => {
                 const msgRole = normalizeRole(msg.role || '');
@@ -962,14 +962,14 @@ exports.createMessage = async function createMessage(req, res) {
             receivers = [...receivers, ...tls.map((id) => String(id))];
           }
           approvalStatus = "pending";
-          
+
           // 🔥 UPDATE ALL PREVIOUS MESSAGES IN THREAD TO INCLUDE TEAM LEADS
           if (threadMessages.length > 0 && !threadHasTeamLead) {
             console.log(`🔄 Employee with supervision replying - updating thread history for team leads`);
             try {
               // Get all message IDs in the thread
               const threadMessageIds = threadMessages.map(msg => msg._id);
-              
+
               // Update all previous messages to include team leads as receivers
               await AssignmentMessage.updateMany(
                 {
@@ -981,7 +981,7 @@ exports.createMessage = async function createMessage(req, res) {
                   $addToSet: { receiver: { $each: tls } }
                 }
               );
-              
+
               console.log(`✅ Updated ${threadMessageIds.length} previous messages in thread to include team leads`);
             } catch (updateError) {
               console.error("❌ Error updating thread history:", updateError);
@@ -997,7 +997,7 @@ exports.createMessage = async function createMessage(req, res) {
 
     if (senderRole === "manager") {
       approvalStatus = null;
-      
+
       if (isNewThread) {
         // For new threads from managers, NEVER include team leads automatically
         receivers = receivers.filter((receiverId) => {
@@ -1007,7 +1007,7 @@ exports.createMessage = async function createMessage(req, res) {
           const isAssignedTeamMember = receiverId === assignedTeamMemberId;
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
-          
+
           // For new threads, team leads are ONLY included if explicitly specified
           const includeTeamLead = isTeamLead && isExplicitReceiver;
 
@@ -1022,7 +1022,7 @@ exports.createMessage = async function createMessage(req, res) {
           const isAssignedTeamMember = receiverId === assignedTeamMemberId;
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
-          
+
           // For existing threads, team leads are included if:
           // 1. They're explicitly specified OR
           // 2. They're already in the thread
@@ -1054,14 +1054,14 @@ exports.createMessage = async function createMessage(req, res) {
               receivers = [...receivers, ...tls];
               approvalStatus = "pending";
             }
-            
+
             // 🔥 UPDATE ALL PREVIOUS MESSAGES IN THREAD TO INCLUDE TEAM LEADS
             if (threadMessages.length > 0 && !threadHasTeamLead) {
               console.log(`🔄 Employee with supervision replying - updating thread history for team leads`);
               try {
                 // Get all message IDs in the thread
                 const threadMessageIds = threadMessages.map(msg => msg._id);
-                
+
                 // Update all previous messages to include team leads as receivers
                 await AssignmentMessage.updateMany(
                   {
@@ -1073,7 +1073,7 @@ exports.createMessage = async function createMessage(req, res) {
                     $addToSet: { receiver: { $each: tls } }
                   }
                 );
-                
+
                 console.log(`✅ Updated ${threadMessageIds.length} previous messages in thread to include team leads`);
               } catch (updateError) {
                 console.error("❌ Error updating thread history:", updateError);
@@ -1329,7 +1329,7 @@ exports.createMessage = async function createMessage(req, res) {
     const io = getIO(req);
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
-      
+
       // 🔥 EMIT THREAD UPDATE EVENT FOR TEAM LEADS
       if (senderRole === "employee" && clientSupervisionMode === "needs_approval" && tls.length > 0) {
         // Notify team leads about thread update
@@ -1472,9 +1472,8 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${
-        action === "send" ? "sent immediately" : "converted to draft"
-      }`,
+      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
+        }`,
       data: populated,
     });
   } catch (e) {
@@ -3696,7 +3695,7 @@ exports.markAsRead = async function markAsRead(req, res) {
     if (io) {
       // Get all participants
       const allParticipants = new Set();
-      
+
       // Add sender
       const senderId = String(message.sender);
       allParticipants.add(senderId);
@@ -3802,7 +3801,7 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     if (io) {
       // Get all participants in this thread
       const allParticipants = new Set();
-      
+
       threadMessages.forEach((message) => {
         // Add sender
         const senderId = String(message.sender);
@@ -3924,7 +3923,7 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
 
     // Get unique thread IDs
     const threadIds = [...new Set(messages.map(msg => msg.threadId))];
-    
+
     let threadMarkedCount = 0;
 
     // 🔥 NEW: Mark entire threads if requested
@@ -3992,7 +3991,7 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
 
     res.json({
       success: true,
-      message: markThreads 
+      message: markThreads
         ? `Marked ${threadMarkedCount} messages across ${threadIds.length} threads as read`
         : `Marked ${threadMarkedCount} messages as read`,
       data: {
