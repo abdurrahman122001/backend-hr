@@ -1,12 +1,17 @@
 const Leave = require("../models/ApplyLeave");
 const Employee = require("../models/Employees");
+const SalarySlip = require("../models/SalarySlip");
 const HrPolicy = require("../models/HrPolicy");
+const LeaveYearBalance = require("../models/LeaveYearBalance");
+const LeaveTransaction = require("../models/LeaveTransaction");
+const { encrypt, decrypt } = require("../utils/encryption");
 const mongoose = require("mongoose");
 const {
   extractLeaveRules,
-  calculateWorkingDays,
   isEmployeeOnProbation,
 } = require("../utils/policyParser");
+const { getLeaveYear } = require("../utils/leaveEntitlement");
+const salaryController = require("./employeeSalaryController");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -99,7 +104,7 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       }
     }
 
-    // Calculate working days notice for ALL PAID LEAVES
+    // Calculate calendar days notice for ALL PAID LEAVES
     if (rules.paidLeaveAdvanceNoticeDays) {
       const today = new Date();
       today.setHours(0, 0, 0, 0);
@@ -110,12 +115,7 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       const noticeEndDate = new Date(leaveStartDate);
       noticeEndDate.setDate(noticeEndDate.getDate() - 1);
 
-      const holidays = await getCompanyHolidays(employee.owner);
-      const workingDaysNotice = calculateWorkingDays(
-        today,
-        noticeEndDate,
-        holidays,
-      );
+      const daysNotice = Math.max(0, Math.ceil((noticeEndDate.getTime() - today.getTime()) / (1000 * 3600 * 24)) + 1);
 
       // Check if this is a paid leave type (annual, personal, etc.)
       const paidLeaveTypes = ["annual", "personal", "sick", "emergency"];
@@ -123,24 +123,24 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
 
       if (
         isPaidLeaveType &&
-        workingDaysNotice < rules.paidLeaveAdvanceNoticeDays
+        daysNotice < rules.paidLeaveAdvanceNoticeDays
       ) {
         // Mark as unpaid due to insufficient notice but don't auto-decide
         const requiredDays = rules.paidLeaveAdvanceNoticeDays;
-        const shortByDays = requiredDays - workingDaysNotice;
+        const shortByDays = requiredDays - daysNotice;
 
         analysis.violations.push({
           type: "ADVANCE_NOTICE", // This matches your enum
-          message: `Paid leave requires at least ${requiredDays} working days advance notice. Only ${workingDaysNotice} working days notice given (short by ${shortByDays} days).`,
+          message: `Paid leave requires at least ${requiredDays} days advance notice. Only ${daysNotice} days notice given (short by ${shortByDays} days).`,
           impact:
             leaveData.leaveType === "annual"
               ? "Leave should be unpaid or require special approval"
               : "Consider marking as unpaid",
           severity: leaveData.leaveType === "annual" ? "HIGH" : "MEDIUM",
-          rule: `Paid leave advance notice: ${requiredDays} working days`,
+          rule: `Paid leave advance notice: ${requiredDays} days`,
           data: {
             required: requiredDays,
-            given: workingDaysNotice,
+            given: daysNotice,
             shortBy: shortByDays,
           },
         });
@@ -177,16 +177,12 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
         prevDate.setDate(prevDate.getDate() + 1);
 
         if (prevDate.toDateString() !== currDate.toDateString()) {
-          const gapDays = calculateWorkingDays(
-            prevDate,
-            new Date(currDate.getTime() - 24 * 60 * 60 * 1000),
-            [],
-          );
+          const gapDays = Math.max(0, Math.ceil((new Date(currDate.getTime() - 24 * 60 * 60 * 1000).getTime() - prevDate.getTime()) / (1000 * 3600 * 24)) + 1);
           if (gapDays > 0) {
             analysis.violations.push({
               type: "SANDWICH_POLICY", // This matches your enum
               message:
-                "Leave includes non-working days between leave dates. According to sandwich policy, these will be counted as leave.",
+                "Leave includes dates with gaps in between. According to sandwich policy, these gaps will be counted as leave.",
               impact: "Additional days may be deducted from leave balance",
               severity: "LOW",
               rule: "Sandwich policy is active",
@@ -535,7 +531,7 @@ exports.approveLeave = async (req, res) => {
     const leave = await Leave.findById(req.params.id)
       .populate(
         "employee",
-        "name email role department supervisor photographUrl leaveEntitlement",
+        "name email role department supervisor photographUrl leaveEntitlement owner",
       )
       .populate("supervisor", "name email");
 
@@ -703,11 +699,73 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
-    // Update employee's used leave balance if it's annual leave and paid
-    if (leave.leaveType === "annual" && finalIsPaid) {
-      await Employee.findByIdAndUpdate(leave.employee._id, {
-        $inc: { "leaveEntitlement.usedPaid": actualApprovedDays },
-      });
+    // Update employee's leave balance in both Employee and LeaveYearBalance models
+    const leaveYear = getLeaveYear(leave.startDate);
+    const ownerId = leave.employee.owner || (user.isEmployee ? user.owner : user._id);
+
+    try {
+      if (finalIsPaid) {
+        // Increment usedPaid in Employee model
+        await Employee.findByIdAndUpdate(leave.employee._id, {
+          $inc: { "leaveEntitlement.usedPaid": actualApprovedDays },
+        });
+
+        // Update LeaveYearBalance
+        const balance = await LeaveYearBalance.findOneAndUpdate(
+          { employee: leave.employee._id, year: leaveYear },
+          {
+            $inc: { usedPaid: actualApprovedDays },
+            $set: { owner: ownerId } // Ensure owner is set
+          },
+          { upsert: true, new: true }
+        );
+
+        // Create Transaction for audit trail
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: leave.employee._id,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: leave.startDate,
+          type: "PAID_LEAVE_USED",
+          value: actualApprovedDays,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId
+        });
+      } else {
+        // Increment usedUnpaid in Employee model
+        await Employee.findByIdAndUpdate(leave.employee._id, {
+          $inc: { "leaveEntitlement.usedUnpaid": actualApprovedDays },
+        });
+
+        // Update LeaveYearBalance
+        const balance = await LeaveYearBalance.findOneAndUpdate(
+          { employee: leave.employee._id, year: leaveYear },
+          {
+            $inc: { usedUnpaid: actualApprovedDays },
+            $set: { owner: ownerId } // Ensure owner is set
+          },
+          { upsert: true, new: true }
+        );
+
+        // Create Transaction for audit trail
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: leave.employee._id,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: leave.startDate,
+          type: "UNPAID_LEAVE_USED",
+          value: actualApprovedDays,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId
+        });
+      }
+    } catch (balanceError) {
+      console.error("⚠️ [approveLeave] Failed to update leave balance:", balanceError);
+      // We don't block the whole approval if balance update fails, but we log it
     }
 
     // Get updated leave with populated fields
@@ -828,6 +886,81 @@ exports.rejectLeave = async (req, res) => {
     });
 
     await leave.save();
+
+    // IMPLEMENT SALARY DEDUCTION FOR REJECTED LEAVE
+    try {
+      const leaveDate = new Date(leave.startDate);
+      const now = new Date();
+
+      const leaveMonthNum = (leaveDate.getMonth() + 1).toString();
+      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      const leaveMonthName = monthNames[leaveDate.getMonth()];
+      const yearStr = leaveDate.getFullYear().toString();
+
+      console.log(`[rejectLeave] Searching slip for Emp: ${leave.employee._id}, Month: ${leaveMonthName}/${leaveMonthNum}, Year: ${yearStr}`);
+
+      const salarySlip = await SalarySlip.findOne({
+        employee: leave.employee._id,
+        $or: [
+          { month: leaveMonthNum, year: yearStr },
+          { month: leaveMonthName, year: yearStr },
+          { month: (now.getMonth() + 1).toString(), year: now.getFullYear().toString() },
+          { month: monthNames[now.getMonth()], year: now.getFullYear().toString() }
+        ]
+      }).sort({ updatedAt: -1 });
+
+      if (salarySlip) {
+        // Try to get Gross, fallback to Basic
+        let decryptedAmt = "";
+        if (salarySlip.grossSalary && salarySlip.grossSalary !== "") {
+          decryptedAmt = await decrypt(salarySlip.grossSalary);
+        }
+
+        // If gross decryption failed or was empty, try basic
+        if ((!decryptedAmt || decryptedAmt === "[Decryption Error]") && salarySlip.basic) {
+          decryptedAmt = await decrypt(salarySlip.basic);
+        }
+
+        const baseSalary = Number(decryptedAmt) || 0;
+        console.log(`[rejectLeave] Found slip. Base Salary decoded: ${baseSalary}`);
+
+        if (baseSalary > 0) {
+          const perDaySalary = baseSalary / 22;
+          const deductionAmount = Math.round(perDaySalary * leave.totalDays);
+          console.log(`[rejectLeave] Deduction calculation (on 22 working days): ${baseSalary}/22 * ${leave.totalDays} = ${deductionAmount}`);
+
+          // Read current leave deduction
+          let currentDeduction = 0;
+          if (salarySlip.leaveDeductions) {
+            try {
+              const decDed = await decrypt(salarySlip.leaveDeductions);
+              currentDeduction = Number(decDed) || 0;
+            } catch (e) {
+              currentDeduction = 0;
+            }
+          }
+
+          const totalDeduction = currentDeduction + deductionAmount;
+          salarySlip.leaveDeductions = await encrypt(totalDeduction.toString());
+
+          // Use the exported controller function to recalculate tax, total deductions, and net payable
+          if (salaryController && salaryController.autoCalculateAndSaveTax) {
+            await salaryController.autoCalculateAndSaveTax(salarySlip);
+            console.log(`✅ [rejectLeave] Salary deduction of ${deductionAmount} applied and slip recalculated.`);
+          } else {
+            // Fallback if controller method is not available (should not happen now)
+            await salarySlip.save();
+            console.log(`✅ [rejectLeave] Salary deduction applied but full recalculation skipped.`);
+          }
+        } else {
+          console.error(`[rejectLeave] Could not determine base salary for slip ${salarySlip._id}. Decrypted: ${decryptedAmt}`);
+        }
+      } else {
+        console.warn(`⚠️ [rejectLeave] No salary slip found for employee ${leave.employee._id} for month ${leaveMonthName}.`);
+      }
+    } catch (deductionError) {
+      console.error("⚠️ [rejectLeave] Salary deduction failed:", deductionError);
+    }
 
     const processedLeave = {
       ...leave.toObject(),
@@ -1423,14 +1556,38 @@ exports.checkLeavePolicy = async (req, res) => {
 // @access  Private
 exports.getLeavePolicyRules = async (req, res) => {
   try {
-    const employeeId = req.user.employeeId || req.user.id;
+    console.log("🔍 getLeavePolicyRules req.user:", JSON.stringify(req.user, null, 2));
 
-    const employee = await Employee.findById(employeeId);
-    if (!employee) {
-      return res.status(404).json({ message: "Employee not found" });
+    const employeeId = req.user.employeeId || req.user._id;
+    let employee = null;
+
+    if (req.user.isEmployee || req.user.employeeId) {
+      employee = await Employee.findById(employeeId);
     }
 
-    const hrPolicy = await HrPolicy.findOne({ owner: employee.owner });
+    let ownerId;
+
+    if (employee) {
+      ownerId = employee.owner;
+    } else {
+      // Check if admin/hr
+      const role = (req.user.role || "").toLowerCase();
+      const isAdmin = req.user.isAdmin === true || role === 'admin' || role === 'hr';
+
+      if (isAdmin) {
+        ownerId = req.user._id; // Admin's ID is the owner ID
+      } else {
+        console.warn("❌ getLeavePolicyRules: User is neither employee nor admin", req.user);
+        return res.status(404).json({ message: "Employee not found. Please ensure you are logged in as an Employee or Admin." });
+      }
+    }
+
+    if (!ownerId) {
+      console.warn("❌ getLeavePolicyRules: Could not determine ownerId");
+      return res.status(404).json({ message: "Owner not identified for policy lookup." });
+    }
+
+    const hrPolicy = await HrPolicy.findOne({ owner: ownerId });
 
     if (!hrPolicy) {
       return res.status(404).json({
@@ -1441,34 +1598,43 @@ exports.getLeavePolicyRules = async (req, res) => {
 
     const rules = extractLeaveRules(hrPolicy.content);
 
-    // Get employee's leave summary
-    const leaveSummary = await Leave.getLeaveSummary(employeeId);
-    const usedAnnual = leaveSummary.annual ? leaveSummary.annual.totalDays : 0;
+    // Calculate summaries only if employee exists
+    let leaveSummaryData = null;
+    let employeeStatusData = null;
+
+    if (employee) {
+      const leaveSummary = await Leave.getLeaveSummary(employeeId);
+      const usedAnnual = leaveSummary.annual ? leaveSummary.annual.totalDays : 0;
+
+      leaveSummaryData = {
+        usedAnnual,
+        available: rules.totalPaidLeavesPerYear
+          ? rules.totalPaidLeavesPerYear - usedAnnual
+          : null,
+        totalEntitlement: rules.totalPaidLeavesPerYear,
+      };
+
+      employeeStatusData = {
+        isOnProbation: employee.joiningDate
+          ? isEmployeeOnProbation(
+            employee.joiningDate,
+            rules.probationPeriodMonths,
+          )
+          : false,
+        joiningDate: employee.joiningDate,
+        probationMonths: rules.probationPeriodMonths,
+      };
+    }
 
     res.json({
       success: true,
       data: {
         policyTitle: hrPolicy.title,
         policyRules: rules,
-        leaveSummary: {
-          usedAnnual,
-          available: rules.totalPaidLeavesPerYear
-            ? rules.totalPaidLeavesPerYear - usedAnnual
-            : null,
-          totalEntitlement: rules.totalPaidLeavesPerYear,
-        },
-        employeeStatus: {
-          isOnProbation: employee.joiningDate
-            ? isEmployeeOnProbation(
-              employee.joiningDate,
-              rules.probationPeriodMonths,
-            )
-            : false,
-          joiningDate: employee.joiningDate,
-          probationMonths: rules.probationPeriodMonths,
-        },
+        leaveSummary: leaveSummaryData,
+        employeeStatus: employeeStatusData,
         analysisSettings: {
-          autoDecisionEnabled: false, // Always false now
+          autoDecisionEnabled: false,
           aiAnalysisEnabled: true,
           requiresManualApproval: true,
         },

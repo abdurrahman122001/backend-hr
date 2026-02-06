@@ -26,10 +26,11 @@ const leaveSchema = new Schema(
         date: { type: Date, required: true },
         type: {
           type: String,
-          enum: ["full", "half"],
+          enum: ["full", "half", "late", "early_leave"],
           default: "full",
         },
         hours: { type: Number, default: 8 },
+        time: { type: String }, // For late arrival or early departure time (e.g., "10:30")
         _id: false,
       },
     ],
@@ -37,7 +38,7 @@ const leaveSchema = new Schema(
     // Leave Details
     leaveType: {
       type: String,
-      enum: ["annual", "sick", "personal", "emergency", "other"],
+      enum: ["annual", "sick", "personal", "emergency", "late", "early_leave", "other"],
       required: true,
     },
     customLeaveType: {
@@ -199,6 +200,8 @@ leaveSchema.virtual("leaveTypeLabel").get(function () {
     sick: "Sick Leave",
     personal: "Personal Leave",
     emergency: "Emergency Leave",
+    late: "Late Arrival",
+    early_leave: "Early Departure",
     other: this.customLeaveType || "Other Leave",
   };
   return typeMap[this.leaveType] || "Unknown";
@@ -231,7 +234,7 @@ leaveSchema.pre("save", function (next) {
       notes: "Leave request created",
     });
   }
-  
+
   // Handle auto-decision workflow history
   if (this.isModified("policyAnalysis") && this.policyAnalysis?.isAutoDecision) {
     if (this.policyAnalysis.decision === "auto_approved") {
@@ -252,12 +255,12 @@ leaveSchema.pre("save", function (next) {
       });
     }
   }
-  
+
   // Handle status changes
   if (this.isModified("status")) {
     let action = "updated";
     let performedByName = "Unknown";
-    
+
     if (this.status === "approved") {
       action = "approved";
       performedByName = "Supervisor";
@@ -287,8 +290,8 @@ leaveSchema.pre("save", function (next) {
 });
 
 // Helper method to get who performed the status change
-leaveSchema.methods.getPerformedByForStatus = function() {
-  switch(this.status) {
+leaveSchema.methods.getPerformedByForStatus = function () {
+  switch (this.status) {
     case "approved":
       return this.approvedBy;
     case "rejected":
@@ -304,7 +307,7 @@ leaveSchema.methods.getPerformedByForStatus = function() {
 };
 
 // Helper method to get notes for status change
-leaveSchema.methods.getStatusChangeNotes = function() {
+leaveSchema.methods.getStatusChangeNotes = function () {
   if (this.rejectionReason) {
     return `Rejected: ${this.rejectionReason}`;
   }
@@ -422,12 +425,14 @@ leaveSchema.statics.getAutoDecisionStats = async function (ownerId, startDate, e
         _id: "$policyAnalysis.decision",
         count: { $sum: 1 },
         totalDays: { $sum: "$totalDays" },
-        avgNoticeDays: { $avg: { 
-          $divide: [
-            { $subtract: ["$startDate", "$appliedDate"] },
-            1000 * 60 * 60 * 24
-          ]
-        }}
+        avgNoticeDays: {
+          $avg: {
+            $divide: [
+              { $subtract: ["$startDate", "$appliedDate"] },
+              1000 * 60 * 60 * 24
+            ]
+          }
+        }
       },
     },
   ]);

@@ -34,6 +34,7 @@ const COMP_FIELDS = [
 const TAX_FIELDS = [
   "taxDeduction",
   "annualTaxDeduction",
+  "leaveDeductions",
   "totalAllowances",
   "totalDeductions",
   "netPayable",
@@ -118,8 +119,7 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
       const tax = Math.round(s.fixed + over * s.rate);
 
       console.log(
-        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${
-          s.fixed
+        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${s.fixed
         }, Rate ${s.rate * 100}%, Over ${over}, Annual Tax=${tax}`
       );
 
@@ -134,8 +134,7 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
     const tax = Math.round(last.fixed + over * last.rate);
 
     console.log(
-      `[TAX-CALC] Top slab: FROM ${last.from}+ : Fixed ${last.fixed}, Rate ${
-        last.rate * 100
+      `[TAX-CALC] Top slab: FROM ${last.from}+ : Fixed ${last.fixed}, Rate ${last.rate * 100
       }%, Over ${over}, Annual Tax=${tax}`
     );
 
@@ -167,7 +166,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     /* ------------------------------------------------------------
        2) MEDICAL EXEMPTION (Pakistan Law)
     ------------------------------------------------------------ */
-const medExemptMonthly = taxCfg?.enableMedicalExemption
+    const medExemptMonthly = taxCfg?.enableMedicalExemption
       ? medMonthly   // FULL medical allowance exempt
       : 0;
 
@@ -240,8 +239,9 @@ const medExemptMonthly = taxCfg?.enableMedicalExemption
     /* ------------------------------------------------------------
        7) Allowances & Net Payable
     ------------------------------------------------------------ */
+    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
     const totalAllowances = finalGrossMonthly - basic;
-    const totalDeductions = monthlyTax;
+    const totalDeductions = monthlyTax + leaveDeductions;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
     return {
@@ -253,6 +253,7 @@ const medExemptMonthly = taxCfg?.enableMedicalExemption
       annualTaxable,
       annualTax,
       monthlyTax,
+      leaveDeductions,
       totalAllowances,
       totalDeductions,
       netPayable,
@@ -263,7 +264,7 @@ const medExemptMonthly = taxCfg?.enableMedicalExemption
   }
 }
 
-async function autoCalculateAndSaveTax(salarySlip) {
+exports.autoCalculateAndSaveTax = async function (salarySlip) {
   try {
     let taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
     if (!taxCfg)
@@ -275,6 +276,7 @@ async function autoCalculateAndSaveTax(salarySlip) {
     await writeEnc(salarySlip, "grossSalary", taxCalculation.grossMonthly);
     await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
     await writeEnc(salarySlip, "annualTaxDeduction", taxCalculation.annualTax);
+    await writeEnc(salarySlip, "leaveDeductions", taxCalculation.leaveDeductions);
     await writeEnc(
       salarySlip,
       "totalAllowances",
@@ -305,7 +307,7 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     }
 
     const employee = await Employee.findById(req.params.id)
-    .populate("shifts", "_id name start end timezone");
+      .populate("shifts", "_id name start end timezone");
     if (!employee) {
       return res.status(404).json({ error: "Employee not found" });
     }
@@ -601,12 +603,12 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       salarySlip: decryptedSalarySlip,
       taxCalculation: taxCalculationResult
         ? {
-            monthlyTax: taxCalculationResult.monthlyTax,
-            annualTax: taxCalculationResult.annualTax,
-            netPayable: taxCalculationResult.netPayable,
-            annualTaxable: taxCalculationResult.annualTaxable,
-            grossMonthly: taxCalculationResult.grossMonthly,
-          }
+          monthlyTax: taxCalculationResult.monthlyTax,
+          annualTax: taxCalculationResult.annualTax,
+          netPayable: taxCalculationResult.netPayable,
+          annualTaxable: taxCalculationResult.annualTaxable,
+          grossMonthly: taxCalculationResult.grossMonthly,
+        }
         : null,
       message:
         "Employee and salary slip updated successfully with auto tax calculation.",

@@ -63,16 +63,16 @@ const SalarySlipSchema = new Schema(
   },
   { timestamps: true }
 );
-SalarySlipSchema.methods.toJSON = function() {
+SalarySlipSchema.methods.toJSON = function () {
   const obj = this.toObject();
-  
+
   // Convert manuallyEditedFields Map to plain object
   if (obj.manuallyEditedFields && obj.manuallyEditedFields instanceof Map) {
     obj.manuallyEditedFields = Object.fromEntries(obj.manuallyEditedFields);
   } else if (!obj.manuallyEditedFields) {
     obj.manuallyEditedFields = {};
   }
-  
+
   return obj;
 };
 

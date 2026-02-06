@@ -23,14 +23,14 @@ const SalarySchema = new Schema({
   fuelAllowance: { type: String, default: "" },
   othersAllowances: { type: String, default: "" },
   grossSalary: { type: String, default: "" },
-  
+
   // Tax Deduction Fields (encrypted)
   taxDeduction: { type: String, default: "" }, // Monthly tax
   annualTaxDeduction: { type: String, default: "" }, // Annual tax
   totalAllowances: { type: String, default: "" },
   totalDeductions: { type: String, default: "" },
   netPayable: { type: String, default: "" },
-  
+
   isActive: { type: Boolean, default: true },
   month: { type: String, required: true },
   year: { type: String, required: true }
