@@ -58,6 +58,13 @@ const ClientInfoSchema = new Schema(
       default: "direct",
     },
 
+    supervisedBy: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
+
     // 🔹 CLIENT'S COMPANY EMPLOYEES (NEW)
     companyEmployees: [
       {

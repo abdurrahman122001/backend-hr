@@ -378,12 +378,29 @@ exports.deleteHierarchy = async (req, res) => {
       });
     }
 
+    // 🔥 SYNC: Remove senior from junior's clients supervisedBy
+    const ClientInfo = require('../models/ClientInfo');
+    const juniorClients = await ClientInfo.find({
+      owner: req.user._id,
+      assignedTo: id
+    });
+
+    const seniorIdStr = String(senior);
+    for (const client of juniorClients) {
+      if (client.supervisedBy?.some(sid => String(sid._id || sid) === seniorIdStr)) {
+        client.supervisedBy = client.supervisedBy.filter(sid => String(sid._id || sid) !== seniorIdStr);
+        client.supervision = client.supervisedBy.length > 0 ? 'needs_approval' : 'direct';
+        client.markModified('supervisedBy');
+        await client.save();
+      }
+    }
+
     // ✅ rebuild after delete to keep metadata consistent
     await rebuildHierarchy(req.user._id);
 
     res.json({
       status: 'success',
-      message: 'Relationship deleted',
+      message: 'Relationship deleted and supervision updated',
       data: deleted
     });
   } catch (err) {
@@ -394,3 +411,4 @@ exports.deleteHierarchy = async (req, res) => {
     });
   }
 };
+

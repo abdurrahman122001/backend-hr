@@ -105,6 +105,51 @@ async function findSupervisorsFromHierarchy(ownerId, employeeId) {
 }
 
 /**
+ * Find the next active supervisor(s) in the hierarchy chain for an employee.
+ * This checks the management chain upward and returns the first senior(s)
+ * who have supervision ENABLED for the specific client.
+ * @param {string} ownerId - The owner ID (organization)
+ * @param {string} employeeId - The employee whose supervisor we're looking for
+ * @param {string[]} supervisedByList - Array of supervisor IDs who have supervision ON for this client
+ * @returns {Promise<string[]>} - Array of active supervisor ID(s)
+ */
+async function findNextActiveSupervisors(ownerId, employeeId, supervisedByList) {
+  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+  // If no one is supervising this client, return empty
+  if (!Array.isArray(supervisedByList) || supervisedByList.length === 0) return [];
+
+  const supervisedByStrs = supervisedByList.map((id) => String(id));
+  let currentEmployeeId = employeeId;
+  const visited = new Set();
+
+  // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops)
+  for (let i = 0; i < 10; i++) {
+    const currentIdStr = String(currentEmployeeId);
+    if (visited.has(currentIdStr)) break;
+    visited.add(currentIdStr);
+
+    // Find immediate seniors
+    const seniors = await findSupervisorsFromHierarchy(ownerId, currentEmployeeId);
+    if (!seniors || seniors.length === 0) break;
+
+    // Check if any of these seniors have supervision ON
+    const activeSeniors = seniors.filter((sId) => supervisedByStrs.includes(sId));
+
+    if (activeSeniors.length > 0) {
+      // Found the next active level!
+      return activeSeniors;
+    }
+
+    // None of these seniors are active - move up the chain from the first one
+    // (In most cases, an employee has exactly one supervisor)
+    currentEmployeeId = seniors[0];
+  }
+
+  return [];
+}
+
+
+/**
  * Get the full management chain for an employee (all seniors up to root).
  * This traverses the hierarchy tree upward.
  * @param {string} ownerId - The owner ID (organization)
@@ -1445,7 +1490,7 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     const Client = require("../models/ClientInfo");
     const client = await Client.findById(msg.client)
-      .select("supervision")
+      .select("supervision supervisedBy")
       .lean();
     const clientSupervision = client?.supervision || "direct";
 
@@ -1461,15 +1506,22 @@ exports.approveMessage = async function approveMessage(req, res) {
     const ownerId = msg.owner;
     const isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
 
-    if (userRole !== "team_lead" && !isReceiver) {
+    const isManagerOrOwner = userRole === "manager" || userRole === "owner";
+    if (!isManagerOrOwner && !isReceiver) {
       return res
         .status(403)
-        .json({ error: "Only Team Leads or designated supervisors can approve messages" });
+        .json({ error: "Only designated supervisors or managers can approve messages" });
     }
 
-    // 🔥 HIERARCHY-BASED: Check if current approver has a senior in hierarchy
-    const nextSupervisors = await findSupervisorsFromHierarchy(ownerId, currentUserId);
+
+    // 🔥 HIERARCHY-BASED: Check if current approver has a senior in hierarchy who is ACTIVE for this client
+    const nextSupervisors = await findNextActiveSupervisors(
+      ownerId,
+      currentUserId,
+      client?.supervisedBy || []
+    );
     const hasNextLevel = nextSupervisors.length > 0;
+
 
     let approvalFinalized = false;
     let responseStatusMessage = "Message approved successfully";
@@ -1665,11 +1717,13 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     const currentUserId = String(req.employee?._id);
     const isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
 
-    if (userRole !== "team_lead" && !isReceiver) {
+    const isManagerOrOwner = userRole === "manager" || userRole === "owner";
+    if (!isManagerOrOwner && !isReceiver) {
       return res
         .status(403)
-        .json({ error: "Only Team Leads or designated supervisors can disapprove messages" });
+        .json({ error: "Only designated supervisors or managers can disapprove messages" });
     }
+
 
     msg.approvalStatus = "disapproved";
     await msg.save();
@@ -1913,7 +1967,29 @@ exports.editMessage = async function editMessage(req, res) {
             // No approval status yet and client requires approval
             msg.approvalStatus = "pending";
           }
-          // If pending, remains pending
+
+          // 🔥 NEW: Re-calculate receivers if status is pending
+          if (msg.approvalStatus === "pending") {
+            const nextActive = await findNextActiveSupervisors(
+              msg.owner,
+              currentUserId,
+              client?.supervisedBy || []
+            );
+            if (nextActive.length > 0) {
+              msg.receiver = nextActive;
+            } else {
+              // No active supervisors found
+              const anySeniors = await findSupervisorsFromHierarchy(msg.owner, currentUserId);
+              if (anySeniors.length === 0) {
+                const { tls } = await findTLsAndManagersByOwner(msg.owner);
+                if (tls.length > 0) msg.receiver = tls;
+                else msg.approvalStatus = "approved";
+              } else {
+                msg.approvalStatus = "approved";
+              }
+            }
+          }
+
         }
       }
       // CASE 3: Team Lead editing their own message
@@ -1927,7 +2003,28 @@ exports.editMessage = async function editMessage(req, res) {
         if (isOriginalSenderEmployee) {
           // Manager editing an employee's message - needs approval if client requires it
           msg.approvalStatus = "pending";
+
+          // 🔥 NEW: Find next active supervisor for the message
+          const nextActiveForEdit = await findNextActiveSupervisors(
+            msg.owner,
+            String(msg.sender._id),
+            client?.supervisedBy || []
+          );
+          if (nextActiveForEdit.length > 0) {
+            msg.receiver = nextActiveForEdit;
+          } else {
+            // Fallback for no active supervisors
+            const anySeniors = await findSupervisorsFromHierarchy(msg.owner, String(msg.sender._id));
+            if (anySeniors.length === 0) {
+              const { tls } = await findTLsAndManagersByOwner(msg.owner);
+              if (tls.length > 0) msg.receiver = tls;
+              else msg.approvalStatus = "approved";
+            } else {
+              msg.approvalStatus = "approved";
+            }
+          }
         } else {
+
           // Manager editing another manager or team lead's message - no approval needed
           msg.approvalStatus = null;
         }
@@ -2926,7 +3023,9 @@ exports.createMessage = async function createMessage(req, res) {
     const Client = require("../models/ClientInfo");
     const clientDoc = await Client.findById(actualClientId)
       .populate("assignedTo", "_id role name companyEmail")
+      .select("supervision supervisedBy clientName assignedTo")
       .lean();
+
 
     if (!clientDoc) {
       return res.status(404).json({
@@ -3089,10 +3188,11 @@ exports.createMessage = async function createMessage(req, res) {
             );
 
             if (needsApproval) {
-              // 🔥 HIERARCHY-BASED: Find supervisor from hierarchy first
-              const hierarchySupervisors = await findSupervisorsFromHierarchy(
+              // 🔥 HIERARCHY-BASED: Find the next ACTIVE supervisor from hierarchy
+              const hierarchySupervisors = await findNextActiveSupervisors(
                 owner,
-                String(sender)
+                String(sender),
+                clientDoc?.supervisedBy || []
               );
 
               if (hierarchySupervisors.length > 0) {
@@ -3100,13 +3200,21 @@ exports.createMessage = async function createMessage(req, res) {
                 receivers = [];
                 receivers = [...hierarchySupervisors];
                 approvalStatus = "pending";
-              } else if (tls.length > 0) {
-                // Fallback to all team leads if no hierarchy is set
-                receivers = [];
-                receivers = [...tls];
-                approvalStatus = "pending";
+              } else {
+                // No ACTIVE supervisors in hierarchy. Check if hierarchy exists at all.
+                const anyHierarchy = await findSupervisorsFromHierarchy(owner, String(sender));
+                if (anyHierarchy.length === 0 && tls.length > 0) {
+                  // No hierarchy at all -> fallback to legacy TLS behavior
+                  receivers = [];
+                  receivers = [...tls];
+                  approvalStatus = "pending";
+                } else {
+                  // Hierarchy exists but inactive, or no TLS -> auto-approve
+                  approvalStatus = "approved";
+                }
               }
             } else if (isDirect) {
+
               if (originalSenderId && !receivers.includes(originalSenderId)) {
                 receivers.push(originalSenderId);
               }
@@ -3185,21 +3293,31 @@ exports.createMessage = async function createMessage(req, res) {
       } else if (senderRole === "team_lead") {
         approvalStatus = null;
       } else if (needsApproval) {
-        approvalStatus = "pending";
-        // 🔥 HIERARCHY-BASED: Find supervisor from hierarchy first
-        const senderHierarchySupervisors = await findSupervisorsFromHierarchy(
+        // 🔥 HIERARCHY-BASED: Find the next ACTIVE supervisor from hierarchy
+        const senderHierarchySupervisors = await findNextActiveSupervisors(
           owner,
-          String(sender)
+          String(sender),
+          clientDoc?.supervisedBy || []
         );
 
         if (senderHierarchySupervisors.length > 0) {
           // Use hierarchy-based supervisors
+          approvalStatus = "pending";
           receivers = [...receivers, ...senderHierarchySupervisors];
-        } else if (tls.length > 0) {
-          // Fallback to all team leads if no hierarchy is set
-          receivers = [...receivers, ...tls.map((id) => String(id))];
+        } else {
+          // No ACTIVE supervisors in hierarchy. Check if hierarchy exists at all.
+          const allSeniors = await findSupervisorsFromHierarchy(owner, String(sender));
+          if (allSeniors.length === 0 && tls.length > 0) {
+            // No hierarchy link exists for this employee -> Fallback to legacy Team Lead behavior
+            approvalStatus = "pending";
+            receivers = [...receivers, ...tls.map((id) => String(id))];
+          } else {
+            // Hierarchy exists but seniors are inactive -> Auto-approve (goes to CRM/managers)
+            approvalStatus = "approved";
+          }
         }
       } else if (isDirect) {
+
         approvalStatus = "approved";
       }
     }

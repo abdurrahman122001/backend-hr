@@ -1,8 +1,8 @@
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
-/* ---------- helpers ---------- */
 const isManagerLike = (role) => {
   const r = String(role || "").trim().toLowerCase();
   return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
@@ -82,7 +82,9 @@ exports.getClientInfo = async (req, res) => {
 
     const clients = await ClientInfo.find(q)
       .sort({ createdAt: -1 })
-      .populate("assignedTo", "_id name companyEmail");
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
+
 
     res.json(clients);
   } catch (err) {
@@ -98,7 +100,8 @@ exports.getMyClients = async (req, res) => {
 
     const clients = await ClientInfo.find({ assignedTo: asObjectId })
       .sort({ createdAt: -1 })
-      .populate("assignedTo", "_id name companyEmail");
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     console.log(`[getMyClients] emp=${employeeId} -> ${clients.length} clients`);
 
@@ -163,7 +166,8 @@ exports.updateClientInfo = async (req, res) => {
       id,
       updates,
       { new: true }
-    ).populate("assignedTo", "_id name companyEmail");
+    ).populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     res.json(updated);
   } catch (err) {
@@ -213,7 +217,8 @@ exports.addCompanyEmployee = async (req, res) => {
     await client.save();
 
     const updatedClient = await ClientInfo.findById(id)
-      .populate("assignedTo", "_id name companyEmail");
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     res.json(updatedClient);
   } catch (err) {
@@ -253,7 +258,8 @@ exports.removeCompanyEmployee = async (req, res) => {
     await client.save();
 
     const updatedClient = await ClientInfo.findById(id)
-      .populate("assignedTo", "_id name companyEmail");
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     res.json(updatedClient);
   } catch (err) {
@@ -301,7 +307,8 @@ exports.updateCompanyEmployee = async (req, res) => {
     await client.save();
 
     const updatedClient = await ClientInfo.findById(id)
-      .populate("assignedTo", "_id name companyEmail");
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     res.json(updatedClient);
   } catch (err) {
@@ -316,10 +323,9 @@ exports.getClientById = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
-    const client = await ClientInfo.findById(id).populate(
-      "assignedTo",
-      "_id name companyEmail"
-    );
+    const client = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
 
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -445,7 +451,8 @@ exports.searchClientByName = async (req, res) => {
     }
 
     const clients = await ClientInfo.find(query)
-      .populate("assignedTo", "_id name companyEmail")
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role")
       .limit(10)
       .sort({ clientName: 1 });
 
@@ -593,7 +600,8 @@ exports.searchClientByEmail = async (req, res) => {
     query.clientEmail = { $regex: email, $options: "i" };
 
     const clients = await ClientInfo.find(query)
-      .populate("assignedTo", "_id name companyEmail")
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role")
       .limit(10);
 
     res.json(clients);
@@ -626,7 +634,8 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
     query["companyEmployees.email"] = { $regex: email, $options: "i" };
 
     const clients = await ClientInfo.find(query)
-      .populate("assignedTo", "_id name companyEmail")
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role")
       .limit(10);
 
     const results = [];
@@ -682,22 +691,18 @@ exports.searchTeamMembers = async (req, res) => {
       ]
     };
 
+    const isSenior = await EmployeeHierarchy.exists({ owner: emp.owner, senior: emp._id });
+
     /* ---------------- ROLE RULES ---------------- */
 
-    // ✅ Manager → see all employees
-    if (role === "manager") {
+    // ✅ Manager/Team Lead or Hierarchy Senior → see all employees
+    if (role === "manager" || role === "team lead" || role === "team_lead" || isSenior) {
       // no extra restriction
     }
 
-    // ✅ Team Lead → see all employees (IMPORTANT FIX)
-    else if (role === "team lead" || role === "team_lead") {
-      // no restriction — same as manager for internal search
-    }
-
-    // 🔒 Team Member → only their Team Lead
-    else if (role === "team member") {
+    // 🔒 Others → only their Team Lead (if any)
+    else {
       if (!emp.teamLead) {
-        // no team lead → no results
         employeesQuery._id = { $eq: null };
       } else {
         employeesQuery._id = emp.teamLead;
@@ -720,7 +725,6 @@ exports.updateClientSupervision = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role)) return res.status(403).json({ error: "Access denied" });
 
     const { id } = req.params; // client id
     const { supervision } = req.body;
@@ -729,14 +733,48 @@ exports.updateClientSupervision = async (req, res) => {
       return res.status(400).json({ error: "Invalid supervision value" });
     }
 
-    const updatedClient = await ClientInfo.findOneAndUpdate(
-      { _id: id, owner: me.owner },
-      { $set: { supervision } },
-      { new: true, runValidators: true }
-    ).select("_id clientName supervision assignedTo");
+    // 🔥 HIERARCHY-BASED: Check if current user is senior to ANYONE assigned to this client
+    const client = await ClientInfo.findOne({ _id: id, owner: me.owner }).populate("assignedTo");
+    if (!client) return res.status(404).json({ error: "Client not found" });
 
-    if (!updatedClient)
-      return res.status(404).json({ error: "Client not found" });
+    const assignedIds = client.assignedTo?.map(emp => emp._id) || [];
+    const isSeniorToAny = await EmployeeHierarchy.exists({
+      owner: me.owner,
+      senior: me._id,
+      junior: { $in: assignedIds }
+    });
+
+    if (!isManagerLike(me.role) && !isSeniorToAny) {
+      return res.status(403).json({ error: "Unauthorized: You don't supervise anyone assigned to this client" });
+    }
+
+    // Initialize supervisedBy if missing
+    if (!client.supervisedBy) client.supervisedBy = [];
+
+    const myIdStr = String(me._id);
+    const currentlySupervising = client.supervisedBy.some(id => String(id._id || id) === myIdStr);
+
+    if (supervision === "needs_approval") {
+      if (!currentlySupervising) {
+        client.supervisedBy.push(me._id);
+      }
+    } else if (supervision === "direct") {
+      client.supervisedBy = client.supervisedBy.filter(id => String(id._id || id) !== myIdStr);
+    }
+
+    // Ensure Mongoose tracks the array change
+    client.markModified("supervisedBy");
+
+    // Keep legacy supervision field in sync (needs_approval if ANYONE supervises)
+    client.supervision = client.supervisedBy.length > 0 ? "needs_approval" : "direct";
+
+    await client.save();
+
+    const updatedClient = await ClientInfo.findById(id)
+      .select("_id clientName supervision supervisedBy assignedTo")
+      .populate("supervisedBy", "_id name companyEmail")
+      .populate("assignedTo", "_id name companyEmail role");
+
 
     return res.json({
       status: "success",
@@ -752,7 +790,7 @@ exports.updateClientSupervision = async (req, res) => {
 exports.updateAllClientSupervisionForEmployee = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
-    if (!me || !me.owner || !isManagerLike(me.role)) {
+    if (!me || !me.owner) {
       return res.status(403).json({ error: "Access denied" });
     }
 
@@ -763,21 +801,53 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
       return res.status(400).json({ error: "Invalid supervision value" });
     }
 
-    // Get affected clients
+    // 🔥 HIERARCHY-BASED: Check if current user is senior to this employee
+    const isSenior = await EmployeeHierarchy.exists({
+      owner: me.owner,
+      senior: me._id,
+      junior: employeeId
+    });
+
+    if (!isManagerLike(me.role) && !isSenior) {
+      return res.status(403).json({ error: "Unauthorized: You don't supervise this employee" });
+    }
+
+    // Get all clients assigned to this employee
     const clients = await ClientInfo.find({
       assignedTo: employeeId,
       owner: me.owner
-    }).select("_id supervision");
+    });
 
-    // Update all
-    await ClientInfo.updateMany(
-      { assignedTo: employeeId, owner: me.owner },
-      { supervision }
+    const myIdStr = String(me._id);
+    const updatedIds = [];
+
+    // 🔥 SYNC: Update the hierarchy link flag
+    await EmployeeHierarchy.findOneAndUpdate(
+      { owner: me.owner, senior: me._id, junior: employeeId },
+      { $set: { supervisionEnabled: supervision === "needs_approval" } }
     );
 
-    // Return affected
+    for (const client of clients) {
+      if (!client.supervisedBy) client.supervisedBy = [];
+      const currentlySupervising = client.supervisedBy.some(id => String(id._id || id) === myIdStr);
+
+      if (supervision === "needs_approval" && !currentlySupervising) {
+        client.supervisedBy.push(me._id);
+        client.supervision = "needs_approval";
+        client.markModified("supervisedBy");
+        await client.save();
+        updatedIds.push(client._id);
+      } else if (supervision === "direct" && currentlySupervising) {
+        client.supervisedBy = client.supervisedBy.filter(id => String(id._id || id) !== myIdStr);
+        client.supervision = client.supervisedBy.length > 0 ? "needs_approval" : "direct";
+        client.markModified("supervisedBy");
+        await client.save();
+        updatedIds.push(client._id);
+      }
+    }
+
     res.json({
-      updated: clients.map(c => c._id),
+      updated: updatedIds,
       supervision
     });
   } catch (err) {
@@ -785,3 +855,4 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
     res.status(500).json({ error: "Failed to update supervision" });
   }
 };
+

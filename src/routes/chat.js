@@ -8,6 +8,8 @@ const upload = chatController.upload;
 
 // Search and basic routes
 router.get("/search", empAuth, chatController.searchMessages);
+// Employee lookup for mentions
+router.get("/employees/:userId", empAuth, chatController.getEmployeeForMention);
 router.get("/conversations", empAuth, chatController.getConversations);
 router.get("/direct-messages", empAuth, chatController.getDirectMessages);
 router.get(

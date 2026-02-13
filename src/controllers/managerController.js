@@ -1,9 +1,9 @@
-// controllers/managerController.js
 const path = require("path");
 const mongoose = require("mongoose");
 const Employee = require("../models/Employees");
 const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isManagerLike = (role) => {
   const r = String(role || "")
@@ -28,22 +28,37 @@ exports.getRoster = async (req, res) => {
       return res.status(400).json({ error: "Your profile is missing owner id" });
 
     const role = (me.role || "").trim().toLowerCase();
-    const isEmployee = role === "employee";
     const isTeamLead = role === "team lead" || role === "team_lead";
     const isManager = role === "manager";
+
+    // 🔥 HIERARCHY-BASED: Check if current user is a senior in the hierarchy
+    const myJuniorsLinks = await EmployeeHierarchy.find({
+      owner: me.owner,
+      senior: me._id
+    }).select("junior supervisionEnabled").lean();
+    const juniorIds = myJuniorsLinks.map(link => String(link.junior));
+    const juniorMap = new Map();
+    myJuniorsLinks.forEach(link => {
+      juniorMap.set(String(link.junior), link.supervisionEnabled);
+    });
+    const isSenior = juniorIds.length > 0;
+
+    const canSeeManagementTabs = isManager || isTeamLead || isSenior;
+    const isEmployee = !isManager && !isTeamLead; // but could be a senior staff
 
     /* ------------------ EMPLOYEES (VISIBLE TO ALL) ------------------ */
     let employeeQuery = {
       owner: me.owner,
       status: "active",
+      _id: { $ne: me._id } // Exclude self from contact list
     };
 
-    // Regular employees can only see team leads, managers, and their supervisor
+    // Regular employees can only see team leads, managers, their supervisor, and their juniors
     if (isEmployee && !isTeamLead && !isManager) {
       employeeQuery.$or = [
         { _id: me.supervisor }, // Their supervisor
         { role: { $in: ["Manager", "Team Lead"] } }, // All managers and team leads
-        { _id: { $in: me.supervise || [] } }, // People they supervise
+        { _id: { $in: juniorIds } }, // People they supervise (juniors)
       ];
     } else {
       // Team leads and managers can see all operations employees
@@ -63,20 +78,20 @@ exports.getRoster = async (req, res) => {
     /* ------------------ CLIENT FILTER ------------------ */
     let clientQuery = { owner: me.owner };
 
-    // If it's NOT a manager or team lead, only show clients they're directly assigned to
+    // If it's NOT a manager or team lead, only show clients they're directly assigned to (or their juniors)
     if (!isManager && !isTeamLead) {
-      // Ensure we are using a valid ObjectId for the query
       const myId = new mongoose.Types.ObjectId(me._id);
+      const targetIds = [myId, ...juniorIds.map(id => new mongoose.Types.ObjectId(id))];
 
       clientQuery = {
         ...clientQuery,
-        assignedTo: myId, // Mongo 'contains' query for arrays
+        assignedTo: { $in: targetIds },
       };
     }
 
     const clients = await ClientInfo.find(clientQuery)
       .select(
-        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision owner readBy companyEmployees clientEmail createdAt updatedAt"
+        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail createdAt updatedAt"
       )
       .populate("assignedTo", "_id name companyEmail role")
       .populate("owner", "_id name companyEmail")
@@ -128,10 +143,22 @@ exports.getRoster = async (req, res) => {
     });
 
     /* ------------------ RESPONSE ------------------ */
+    const employeesWithHierarchyStatus = employees.map(emp => {
+      const empObj = emp.toObject();
+      if (juniorMap.has(String(emp._id))) {
+        empObj.supervisionEnabled = juniorMap.get(String(emp._id));
+      }
+      return empObj;
+    });
+
     res.json({
-      employees,
+      employees: employeesWithHierarchyStatus,
+      teamMembers: employeesWithHierarchyStatus.filter(emp =>
+        isManager || isTeamLead ? String(emp._id) !== String(me._id) : juniorIds.includes(String(emp._id))
+      ),
       clients: clientsWithReadStatus,
       clientEmployees,
+      isSenior,
       userRole: role,
     });
   } catch (err) {
@@ -254,31 +281,59 @@ exports.getMentionedEmployees = async (req, res) => {
 // PATCH /manager/employee/:id/supervision  { supervisionMode }
 exports.updateEmployeeSupervision = async (req, res) => {
   try {
-    const me = await Employee.findById(req.employee._id).select(
-      "_id owner role",
-    );
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role)) return res.status(403).json({ error: "" });
-    if (!me.owner)
-      return res
-        .status(400)
-        .json({ error: "Your profile is missing owner id" });
 
-    const { id } = req.params;
+    const { id } = req.params; // junior id
     const { supervisionMode } = req.body;
-    if (!["direct", "needs_approval"].includes(String(supervisionMode))) {
-      return res.status(400).json({ error: "Invalid supervision mode" });
+
+    if (!me.owner)
+      return res.status(400).json({ error: "Your profile is missing owner id" });
+
+    const isApproval = supervisionMode === "needs_approval";
+
+    // 1. Update Hierarchy link
+    const hierarchyLink = await EmployeeHierarchy.findOneAndUpdate(
+      { owner: me.owner, senior: me._id, junior: id },
+      { $set: { supervisionEnabled: isApproval } },
+      { new: true }
+    );
+
+    // 2. Update all clients assigned to this junior
+    const juniorClients = await ClientInfo.find({
+      owner: me.owner,
+      assignedTo: id
+    });
+
+    const myIdStr = String(me._id);
+    for (const client of juniorClients) {
+      if (!client.supervisedBy) client.supervisedBy = [];
+      const currentlySupervising = client.supervisedBy.some(sid => String(sid._id || sid) === myIdStr);
+
+      if (isApproval && !currentlySupervising) {
+        client.supervisedBy.push(me._id);
+      } else if (!isApproval && currentlySupervising) {
+        client.supervisedBy = client.supervisedBy.filter(sid => String(sid._id || sid) !== myIdStr);
+      }
+
+      // Update legacy field
+      client.supervision = client.supervisedBy.length > 0 ? "needs_approval" : "direct";
+      client.markModified("supervisedBy");
+      await client.save();
     }
 
+    // 3. Update legacy Employee field for compatibility
     const updated = await Employee.findOneAndUpdate(
       { _id: id, owner: me.owner },
       { $set: { supervisionMode } },
-      { new: true, runValidators: true },
+      { new: true }
     ).select("_id name supervisionMode supervisor");
 
-    if (!updated) return res.status(404).json({ error: "Employee not found" });
-
-    res.json(updated);
+    res.json({
+      status: "success",
+      employee: updated,
+      hierarchyEnabled: hierarchyLink?.supervisionEnabled
+    });
   } catch (err) {
     console.error("updateEmployeeSupervision error:", err);
     res.status(500).json({ error: "Failed to update supervision" });

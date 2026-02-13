@@ -199,9 +199,8 @@ exports.uploadFile = async (req, res) => {
         originalName: req.file.originalname,
         mimetype: req.file.mimetype,
         size: req.file.size,
-        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-          req.file.filename
-        }`, // Full URL
+        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${req.file.filename
+          }`, // Full URL
         uploadedAt: new Date(),
       };
 
@@ -245,9 +244,8 @@ exports.uploadFiles = async (req, res) => {
         originalName: file.originalname,
         mimetype: file.mimetype,
         size: file.size,
-        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-          file.filename
-        }`,
+        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename
+          }`,
         uploadedAt: new Date(),
       }));
 
@@ -582,8 +580,8 @@ exports.getSpaceConversations = async (req, res) => {
         isPinned: isPinned,
         pinnedAt: isPinned
           ? conv.pinnedBy.find(
-              (pin) => pin.employee.toString() === req.employee._id.toString()
-            )?.pinnedAt
+            (pin) => pin.employee.toString() === req.employee._id.toString()
+          )?.pinnedAt
           : null,
         type: "group",
       };
@@ -667,8 +665,8 @@ exports.getSpaces = async (req, res) => {
           isPinned: space.isPinnedBy(req.employee._id),
           pinnedAt: space.isPinnedBy(req.employee._id)
             ? space.pinnedBy.find(
-                (pin) => pin.employee.toString() === req.employee._id.toString()
-              )?.pinnedAt
+              (pin) => pin.employee.toString() === req.employee._id.toString()
+            )?.pinnedAt
             : null,
         };
       })
@@ -799,14 +797,14 @@ exports.getMessages = async (req, res) => {
             // Include the reader info for space messages
             reader: isSpace
               ? {
-                  employee: {
-                    _id: req.employee._id,
-                    name: req.employee.name,
-                    avatar: req.employee.avatar,
-                    photographUrl: req.employee.photographUrl,
-                  },
-                  readAt: new Date(),
-                }
+                employee: {
+                  _id: req.employee._id,
+                  name: req.employee.name,
+                  avatar: req.employee.avatar,
+                  photographUrl: req.employee.photographUrl,
+                },
+                readAt: new Date(),
+              }
               : undefined,
           });
         });
@@ -941,9 +939,8 @@ exports.sendMessage = async (req, res) => {
           originalName: file.originalname,
           mimetype: file.mimetype,
           size: file.size,
-          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-            file.filename
-          }`,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename
+            }`,
         }))
       );
     }
@@ -1218,9 +1215,8 @@ exports.sendDirectMessage = async (req, res) => {
           originalName: file.originalname,
           mimetype: file.mimetype,
           size: file.size,
-          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-            file.filename
-          }`,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename
+            }`,
         }))
       );
     }
@@ -1498,14 +1494,14 @@ exports.markAsRead = async (req, res) => {
           isSpace: isSpace,
           reader: isSpace
             ? {
-                employee: {
-                  _id: req.employee._id,
-                  name: req.employee.name,
-                  avatar: req.employee.avatar,
-                  photographUrl: req.employee.photographUrl,
-                },
-                readAt: new Date(),
-              }
+              employee: {
+                _id: req.employee._id,
+                name: req.employee.name,
+                avatar: req.employee.avatar,
+                photographUrl: req.employee.photographUrl,
+              },
+              readAt: new Date(),
+            }
             : undefined,
         });
       });
@@ -2123,9 +2119,8 @@ exports.sendSpaceMessage = async (req, res) => {
           originalName: file.originalname,
           mimetype: file.mimetype,
           size: file.size,
-          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-            file.filename
-          }`,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename
+            }`,
         }))
       );
     }
@@ -4408,9 +4403,8 @@ exports.updateMessage = async (req, res) => {
       const newAttachments = req.files.map((file) => ({
         filename: file.filename,
         originalName: file.originalname,
-        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${
-          file.filename
-        }`,
+        url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename
+          }`,
         mimetype: file.mimetype,
         size: file.size,
         uploadedAt: new Date(),
@@ -5585,9 +5579,9 @@ exports.searchMessages = async (req, res) => {
         },
         space: message.space
           ? {
-              _id: message.space._id,
-              name: message.space.name,
-            }
+            _id: message.space._id,
+            name: message.space.name,
+          }
           : null,
         createdAt: message.createdAt,
         // Simple highlight - frontend can handle proper highlighting
@@ -5887,9 +5881,9 @@ exports.getStarredMessages = async (req, res) => {
         },
         space: message.space
           ? {
-              _id: message.space._id,
-              name: message.space.name,
-            }
+            _id: message.space._id,
+            name: message.space.name,
+          }
           : null,
         starredAt: userStar ? userStar.starredAt : null,
         totalStars: message.starredBy.length,
@@ -6311,10 +6305,10 @@ exports.getPinnedMessages = async (req, res) => {
           },
           space: spaceData
             ? {
-                _id: spaceData._id,
-                name: spaceData.name,
-                description: spaceData.description,
-              }
+              _id: spaceData._id,
+              name: spaceData.name,
+              description: spaceData.description,
+            }
             : null,
           pinnedBy: message.pinnedBy,
           pinnedAt: userPin ? userPin.pinnedAt : message.pinnedBy[0]?.pinnedAt,
@@ -6595,9 +6589,9 @@ exports.getMentionedMessages = async (req, res) => {
         },
         space: message.space
           ? {
-              _id: message.space._id,
-              name: message.space.name,
-            }
+            _id: message.space._id,
+            name: message.space.name,
+          }
           : null,
         mentionedAt: userMention ? userMention.mentionedAt : null,
         mentionText: userMention ? userMention.mentionText : null,
@@ -6932,6 +6926,54 @@ exports.unpinSpace = async (req, res) => {
     res.status(500).json({
       success: false,
       error: "Failed to unpin space",
+    });
+  }
+};
+
+// Get employee details for mentions (used by UserMentionHoverCard)
+exports.getEmployeeForMention = async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    // Validate userId
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid user ID",
+      });
+    }
+
+    // Fetch employee with only necessary fields
+    const employee = await Employee.findById(userId)
+      .select("_id name email companyEmail photographUrl department designation role")
+      .lean();
+
+    if (!employee) {
+      return res.status(404).json({
+        success: false,
+        error: "Employee not found",
+      });
+    }
+
+    // Return employee data
+    res.json({
+      success: true,
+      employee: {
+        _id: employee._id,
+        name: employee.name,
+        email: employee.email,
+        companyEmail: employee.companyEmail,
+        photographUrl: employee.photographUrl,
+        department: employee.department,
+        designation: employee.designation,
+        role: employee.role,
+      },
+    });
+  } catch (error) {
+    console.error("Get employee for mention error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to fetch employee details",
     });
   }
 };

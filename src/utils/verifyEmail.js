@@ -35,7 +35,7 @@ async function verifyEmail(email) {
       '10minutemail.com', 'throwawaymail.com', 'yopmail.com',
       'temp-mail.org', 'sharklasers.com', 'getairmail.com'
     ];
-    
+
     const domain = email.split('@')[1].toLowerCase();
     if (disposableDomains.includes(domain)) {
       console.warn(`⚠️ Disposable email detected: ${email}`);
@@ -59,7 +59,7 @@ async function verifyEmail(email) {
 
       // Consider 'valid', 'catch-all', and 'unknown' as acceptable
       const isValid = ['valid', 'catch-all', 'unknown'].includes(result.status);
-      
+
       verificationCache.set(email, { isValid, timestamp: Date.now() });
       return isValid;
     }
@@ -78,7 +78,7 @@ async function verifyEmail(email) {
 
   } catch (err) {
     console.error("Email verification error for", email, ":", err.message);
-    
+
     // Fail-safe: allow email when verification fails
     // This prevents blocking legitimate emails due to API issues
     verificationCache.set(email, { isValid: true, timestamp: Date.now() });
