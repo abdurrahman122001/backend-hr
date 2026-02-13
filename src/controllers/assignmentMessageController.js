@@ -52,13 +52,15 @@ async function getManagementChainFromHierarchy(ownerId, employeeId) {
 
     // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops)
     for (let i = 0; i < 10; i++) {
-      if (visited.has(currentEmployee)) break;
-      visited.add(currentEmployee);
+      const currentIdStr = String(currentEmployee);
+      if (visited.has(currentIdStr)) break;
+      visited.add(currentIdStr);
 
       const hierarchyLink = await EmployeeHierarchy.findOne({
         owner: ownerId,
-        junior: currentEmployee,
+        junior: currentIdStr,
       })
+
         .select("senior")
         .lean();
 
@@ -1015,14 +1017,6 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔥 HIERARCHY-BASED: Find the first active supervisor in the hierarchy for the sender
     const hierarchySupervisors = await findNextActiveSupervisor(owner, sender, client);
     const hasHierarchy = hierarchySupervisors.length > 0;
-
-    // 🔥 CRITICAL FIX: Hierarchy-based supervision routing logic
-    // Logic:
-    // 1. Check if ANYONE has enabled supervision for this client (client.supervisedBy)
-    // 2. If yes, check the hierarchy to find the *closest* supervisor who has enabled supervision
-    // 3. If a supervisor is found -> Send to them ("pending")
-    // 4. If no supervisor has enabled supervision -> Send to CRM ("approved")
-
     if (client && isObjId(client)) {
       if (senderRole === "employee" || senderRole === "team_lead" || senderRole === "manager") {
 
@@ -1030,15 +1024,7 @@ exports.createMessage = async function createMessage(req, res) {
         const clientDoc = await ClientInfo.findById(client).select("supervision supervisedBy").lean();
         const activeSupervisors = (clientDoc?.supervisedBy || []).map(id => String(id));
 
-        // Check finding hierarchy supervisors
         const hierarchySupervisors = await findSupervisorsFromHierarchy(owner, sender);
-
-        // Find the closest supervisor in the hierarchy who has enabled supervision
-        // We iterate up the hierarchy (hierarchySupervisors is usually direct seniors, 
-        // but we might need a recursive check if we want multi-level skip. 
-        // For now, let's assume hierarchySupervisors contains the direct senior).
-
-        // Actually, we need to check the full chain to support "Abdur off, Abdullah on"
         const managementChain = await getManagementChainFromHierarchy(owner, sender); // Function defined below/locally
 
         let targetSupervisor = null;
@@ -1047,7 +1033,7 @@ exports.createMessage = async function createMessage(req, res) {
         for (const supervisorId of managementChain) {
           if (activeSupervisors.includes(String(supervisorId))) {
             targetSupervisor = supervisorId;
-            break; // Found the closest supervisor who wants to supervise
+            break; //
           }
         }
 
@@ -1055,7 +1041,6 @@ exports.createMessage = async function createMessage(req, res) {
           // Case: A supervisor (Abdur or Abdullah) has enabled supervision
           receivers = [String(targetSupervisor)];
           approvalStatus = "pending";
-          console.log(`🔄 Supervision Active: Routing message to supervisor ${targetSupervisor}`);
 
           // Update thread history
           if (threadMessages.length > 0 && !threadHasTeamLead) {
@@ -1076,7 +1061,6 @@ exports.createMessage = async function createMessage(req, res) {
             receivers = [...receivers, ...managers.map((id) => String(id))];
           }
           approvalStatus = "approved"; // Auto-approve if no supervision
-          console.log(`✅ Supervision Inactive: Auto-approving and routing to Managers`);
         }
       }
     }
@@ -1117,11 +1101,6 @@ exports.createMessage = async function createMessage(req, res) {
           return isExplicitReceiver || isAssignedTeamMember || isClientEmployee || includeTeamLead;
         });
       }
-
-      // 🔥 REMOVED: Automatic team lead addition for isFromClient/isFromCompanyEmployee
-      // Managers should NOT automatically include team leads when sending as client/company employee
-      // Only include team leads if they're explicitly specified or already in the thread
-      console.log(`👨‍💼 Manager sending message - team leads NOT automatically added for client/company employee messages`);
 
     } else if (senderRole === "team_lead") {
       if (approvalStatus !== "pending") approvalStatus = null;
@@ -1381,14 +1360,11 @@ exports.createMessage = async function createMessage(req, res) {
       const matchingEmployees = await findEmployeesByEmails(owner, ccEmailAddresses);
 
       if (matchingEmployees.length > 0) {
-        console.log(`📧 Found ${matchingEmployees.length} employee(s) matching CC emails:`, matchingEmployees.map(emp => emp.email || emp.companyEmail));
-
         // Add matching employee IDs to receivers array
         matchingEmployees.forEach(employee => {
           const employeeId = String(employee._id);
           if (!receivers.includes(employeeId) && employeeId !== String(sender)) {
             receivers.push(employeeId);
-            console.log(`➕ Added CC employee ${employee.name} (${employee.email || employee.companyEmail}) as receiver`);
           }
         });
       }
@@ -1756,16 +1732,15 @@ exports.approveMessage = async function approveMessage(req, res) {
     const currentUserId = String(req.employee?._id);
     const ownerId = msg.owner;
 
-    // Check if current user is one of the receivers or a team lead
+    // Check if current user is one of the receivers or a manager/owner
     const isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
-
     const isManagerOrOwner = userRole === "manager" || userRole === "owner";
+
     if (!isManagerOrOwner && !isReceiver) {
       return res
         .status(403)
         .json({ error: "Only designated supervisors or managers can approve messages" });
     }
-
 
     // Prevent double approval
     if (msg.approvalStatus === "approved") {
@@ -1773,6 +1748,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     }
 
     // 🔥 HIERARCHY-BASED: Find the next active supervisor in hierarchy
+
     // We need to check who has enabled supervision for this client.
     // If the next supervisor in the chain has supervision OFF, we should skip them and check the next one.
 

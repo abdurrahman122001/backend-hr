@@ -172,7 +172,7 @@ async function getImmediateThreadParticipants(threadId, req) {
 
     // Also get participants from chat messages (if any)
     const chatParticipants = await ThreadChatMessage.getThreadParticipants(threadId);
-    
+
     if (chatParticipants.length > 0) {
       const employeeDetails = await Employee.find(
         { _id: { $in: chatParticipants } },
@@ -471,7 +471,7 @@ exports.getThreadInfo = async function (req, res) {
 
     // Get immediate participants (fast version)
     const participants = [];
-    
+
     // Add sender
     if (thread.sender) {
       participants.push({
