@@ -4,6 +4,7 @@ const SalarySlip = require("../models/SalarySlip");
 const HrPolicy = require("../models/HrPolicy");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { encrypt, decrypt } = require("../utils/encryption");
 const mongoose = require("mongoose");
 const {
@@ -12,6 +13,9 @@ const {
 } = require("../utils/policyParser");
 const { getLeaveYear } = require("../utils/leaveEntitlement");
 const salaryController = require("./employeeSalaryController");
+const Attendance = require("../models/Attendance");
+const EmployeeSession = require("../models/EmployeeSession");
+const moment = require("moment-timezone");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -24,13 +28,15 @@ function buildPublicUrl(req, filename) {
 function processEmployeeWithPhoto(employee, req) {
   if (!employee) return employee;
 
-  const processedEmployee = { ...employee };
+  // Ensure we have a plain object if it's a Mongoose document
+  const employeeObj = employee.toObject ? employee.toObject() : employee;
+  const processedEmployee = { ...employeeObj };
 
   // Add full photo URL if photographUrl exists
-  if (employee.photographUrl) {
+  if (employeeObj.photographUrl) {
     processedEmployee.fullPhotoUrl = buildPublicUrl(
       req,
-      employee.photographUrl,
+      employeeObj.photographUrl,
     );
   } else {
     processedEmployee.fullPhotoUrl = null;
@@ -391,17 +397,55 @@ exports.applyLeave = async (req, res) => {
       employee.owner,
     );
 
-    // Determine supervisor based on supervision mode
-    let supervisor = null;
-    if (employee.supervisionMode === "needs_approval") {
-      supervisor = employee.supervisor;
-    } else {
-      // Find super admin or HR for direct supervision mode
-      const superAdmin = await Employee.findOne({ role: "admin" }).sort({
-        createdAt: 1,
-      });
-      supervisor = superAdmin || employee.owner;
+    // Build approval chain based on hierarchy (using EmployeeHierarchy model)
+    let approvalChain = [];
+
+    try {
+      let currentJuniorId = employeeId;
+      const visited = new Set();
+
+      // Traverse up the hierarchy (limit to 10 levels)
+      for (let i = 0; i < 10; i++) {
+        if (visited.has(String(currentJuniorId))) break;
+        visited.add(String(currentJuniorId));
+
+        // Find the senior for this junior
+        const link = await EmployeeHierarchy.findOne({
+          owner: employee.owner,
+          junior: currentJuniorId
+        }).populate("senior");
+
+        if (!link || !link.senior) break;
+
+        approvalChain.push(link.senior._id);
+
+        // Stop if senior is Admin or HR
+        if (link.senior.role === "admin" || link.senior.role === "hr") {
+          break;
+        }
+
+        currentJuniorId = link.senior._id;
+      }
+
+      // If no chain found from EmployeeHierarchy, fallback to employee.supervisor
+      if (approvalChain.length === 0 && employee.supervisor) {
+        approvalChain.push(employee.supervisor);
+      }
+
+      // If still no chain and direct mode, use super admin
+      if (approvalChain.length === 0) {
+        const superAdmin = await Employee.findOne({ role: "admin" }).sort({ createdAt: 1 });
+        const adminId = superAdmin ? superAdmin._id : employee.owner;
+        approvalChain = [adminId];
+      }
+    } catch (hierarchyError) {
+      console.error("❌ Error building hierarchy chain:", hierarchyError);
+      // Fallback
+      if (employee.supervisor) approvalChain = [employee.supervisor];
     }
+
+    // Set first supervisor from the chain
+    let supervisor = approvalChain[0];
 
     // ALWAYS set status to "pending" - NO AUTO-APPROVAL/REJECTION
     const status = "pending";
@@ -423,6 +467,8 @@ exports.applyLeave = async (req, res) => {
       status: status, // Always pending
       isPaid: policyAnalysis.isPaid, // Initial payment status based on analysis
       policyAnalysis: policyAnalysis,
+      approvalChain: approvalChain,
+      currentApprovalIndex: 0,
     });
 
     // IMPORTANT: Use "submitted" instead of "applied" to match your enum
@@ -666,7 +712,45 @@ exports.approveLeave = async (req, res) => {
       }
     }
 
-    // Update leave
+    // Check if there's someone next in the hierarchy chain
+    const isLastInChain = !leave.approvalChain || leave.approvalChain.length === 0 ||
+      leave.currentApprovalIndex >= leave.approvalChain.length - 1;
+
+    // If user is Admin or HR, we'll treat it as final approval regardless of where they are in the chain
+    // UNLESS they are specifically the current supervisor and NOT the last one, but usually admins want final say.
+    // For now, let's say Admin/HR approval is ALWAYS final to give them power.
+    const isFinalApproval = isSuperAdmin || isLastInChain;
+
+    if (!isFinalApproval) {
+      // Move to next level in hierarchy
+      leave.currentApprovalIndex += 1;
+      const nextSupervisorId = leave.approvalChain[leave.currentApprovalIndex];
+      leave.supervisor = nextSupervisorId;
+      leave.status = "pending"; // Stay pending
+
+      const nextSupervisor = await Employee.findById(nextSupervisorId);
+
+      // Add to workflow history
+      const historyEntry = {
+        action: "updated",
+        performedBy: approverId,
+        performedByName: approver.name || user.name,
+        notes: (notes || "Leave approved") + policyOverrideNotes + `. Sent to ${nextSupervisor ? nextSupervisor.name : "next level"} for final approval.`,
+        timestamp: new Date(),
+      };
+      leave.workflowHistory.push(historyEntry);
+
+      await leave.save();
+
+      return res.json({
+        success: true,
+        data: leave,
+        message: `Leave approved by you and moved to ${nextSupervisor ? nextSupervisor.name : "next supervisor"} for final approval.`,
+        nextApprover: nextSupervisor ? { id: nextSupervisor._id, name: nextSupervisor.name } : null,
+      });
+    }
+
+    // FINAL APPROVAL LOGIC
     leave.status = "approved";
     leave.approvedBy = approverId;
     leave.approvedDate = new Date();
@@ -698,6 +782,76 @@ exports.approveLeave = async (req, res) => {
     leave.workflowHistory.push(historyEntry);
 
     await leave.save();
+
+    // Mark Attendance and Sessions for each approved date
+    try {
+      const TIMEZONE = "Asia/Karachi";
+      const ownerId = leave.employee.owner || (user.isEmployee ? user.owner : user._id);
+
+      for (const dateEntry of leave.dates) {
+        const dateStr = moment(dateEntry.date).tz(TIMEZONE).format("YYYY-MM-DD");
+
+        // Determine status based on dateEntry.type
+        // Leave model has enum: ["full", "half", "late", "early_leave"]
+        // Attendance model status enum: ['Present', 'Late', 'Absent', 'Half Day', 'Leave']
+        // EmployeeSession status enum: ["on-time", "late", "half-day", "absent", "leave"]
+
+        let attendanceStatus = "Leave";
+        let sessionStatus = "leave";
+
+        if (dateEntry.type === "half") {
+          attendanceStatus = "Half Day";
+          sessionStatus = "half-day";
+        } else if (dateEntry.type === "late" || dateEntry.type === "early_leave") {
+          // For late arrival/early departure, they are still present but we mark it
+          attendanceStatus = "Late";
+          sessionStatus = "late";
+        }
+
+        // Upsert Attendance
+        await Attendance.findOneAndUpdate(
+          { owner: ownerId, employee: leave.employee._id, date: dateStr },
+          {
+            $set: {
+              owner: ownerId,
+              employee: leave.employee._id,
+              date: dateStr,
+              status: attendanceStatus,
+              leaveType: finalIsPaid ? "Paid" : "Unpaid",
+              markedByHR: true,
+              notes: (notes || "Leave approved") + (dateEntry.type !== "full" ? ` (${dateEntry.type})` : ""),
+              createdBy: approverId,
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+
+        // Upsert EmployeeSession
+        await EmployeeSession.findOneAndUpdate(
+          { employeeId: leave.employee._id, date: dateStr },
+          {
+            $set: {
+              employeeId: leave.employee._id,
+              date: dateStr,
+              status: sessionStatus,
+              active: false,
+              totalHours: dateEntry.type === "half" ? 4 : (dateEntry.type === "full" ? 0 : 8),
+              notes: notes || "Leave approved",
+              actualLoginTime: null,
+              actualLogoutTime: null,
+              // Set login/logout to start/end of day in UTC for consistency
+              loginTime: moment(dateEntry.date).tz(TIMEZONE).startOf("day").toDate(),
+              logoutTime: moment(dateEntry.date).tz(TIMEZONE).endOf("day").toDate(),
+            }
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+      }
+      console.log(`✅ [approveLeave] Automatically marked attendance/sessions for ${leave.dates.length} days for employee ${leave.employee._id}`);
+    } catch (markingError) {
+      console.error("⚠️ [approveLeave] Failed to mark attendance/sessions:", markingError);
+      // We don't block the approval even if attendance marking fails
+    }
 
     // Update employee's leave balance in both Employee and LeaveYearBalance models
     const leaveYear = getLeaveYear(leave.startDate);
@@ -1074,10 +1228,11 @@ exports.getLeaves = async (req, res) => {
       .limit(parseInt(limit))
       .populate(
         "employee",
-        "name email department position employeeId photographUrl",
+        "name email department designation position employeeId photographUrl",
       )
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
+      .populate("appliedBy", "name email")
       .lean();
 
     const processedLeaves = leaves.map((leave) => ({
@@ -1120,20 +1275,19 @@ exports.getPendingLeaves = async (req, res) => {
 
     const query = { status: "pending" };
 
-    // Supervisors see leaves of their subordinates
+    // Supervisors see leaves where they are the current assigned supervisor
     if (employee.role !== "admin" && employee.role !== "hr") {
-      const subordinates = await Employee.find({ supervisor: employee._id });
-      const subordinateIds = subordinates.map((sub) => sub._id);
-      query.employee = { $in: subordinateIds };
+      query.supervisor = employee._id;
     }
 
     const pendingLeaves = await Leave.find(query)
       .populate("employee", "name email department designation photographUrl")
       .populate("appliedBy", "name email")
-      .sort({ appliedDate: -1 });
+      .sort({ appliedDate: -1 })
+      .lean();
 
     const processedPendingLeaves = pendingLeaves.map((leave) => ({
-      ...leave.toObject(),
+      ...leave,
       employee: processEmployeeWithPhoto(leave.employee, req),
     }));
 
@@ -1155,12 +1309,13 @@ exports.getLeaveById = async (req, res) => {
     const leave = await Leave.findById(req.params.id)
       .populate(
         "employee",
-        "name email department designation phone photographUrl",
+        "name email department designation position phone photographUrl",
       )
       .populate("supervisor", "name email")
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
-      .populate("cancelledBy", "name email");
+      .populate("cancelledBy", "name email")
+      .lean();
 
     if (!leave) {
       return res.status(404).json({ message: "Leave request not found" });
@@ -1181,7 +1336,7 @@ exports.getLeaveById = async (req, res) => {
     }
 
     const processedLeave = {
-      ...leave.toObject(),
+      ...leave,
       employee: processEmployeeWithPhoto(leave.employee, req),
     };
 
@@ -1843,7 +1998,7 @@ exports.getMyLeaves = async (req, res) => {
       .limit(parseInt(limit))
       .populate(
         "employee",
-        "name email department position employeeId photographUrl"
+        "name email department designation position employeeId photographUrl",
       )
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")

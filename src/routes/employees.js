@@ -10,6 +10,8 @@ const {
   getUpcomingAnniversaries,
   getEmployeePermissions,
   updateEmployeePermissions,
+  bulkResign,
+  bulkActivate,
 } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
@@ -52,6 +54,12 @@ function buildEmployeeScope(user, includeTrashed = false) {
 // ============================================
 // Employee Routes
 // ============================================
+
+// Bulk Resign
+router.post("/bulk/resign", requireAuth, bulkResign);
+
+// Bulk Activate
+router.post("/bulk/activate", requireAuth, bulkActivate);
 
 /**
  * GET /api/employees

@@ -79,6 +79,51 @@ async function getManagementChainFromHierarchy(ownerId, employeeId) {
 }
 
 /**
+ * Get all juniors recursively under a senior employee.
+ * This traverses the hierarchy tree downward.
+ * @param {string} ownerId - The owner ID (organization)
+ * @param {string} seniorId - The senior employee ID
+ * @returns {Promise<string[]>} - Array of all junior employee IDs (including nested juniors)
+ */
+async function getAllJuniorsRecursively(ownerId, seniorId) {
+  if (!isObjId(ownerId) || !isObjId(seniorId)) return [];
+
+  try {
+    const allJuniors = [];
+    const visited = new Set();
+    
+    async function collectJuniors(currentSeniorId) {
+      const currentIdStr = String(currentSeniorId);
+      if (visited.has(currentIdStr)) return;
+      visited.add(currentIdStr);
+
+      // Find direct juniors
+      const hierarchyLinks = await EmployeeHierarchy.find({
+        owner: ownerId,
+        senior: currentSeniorId,
+      })
+        .select("junior")
+        .lean();
+
+      for (const link of hierarchyLinks) {
+        const juniorId = String(link.junior);
+        if (!visited.has(juniorId)) {
+          allJuniors.push(juniorId);
+          // Recursively get juniors of this junior
+          await collectJuniors(juniorId);
+        }
+      }
+    }
+
+    await collectJuniors(seniorId);
+    return allJuniors;
+  } catch (error) {
+    console.error("Error getting all juniors recursively:", error);
+    return [];
+  }
+}
+
+/**
  * Find the next supervisor(s) in the hierarchy who have 'supervisedBy' enabled for this client.
  * If no one in the chain is found, returns an empty array (meaning it should go to managers).
  * @param {string} ownerId 

@@ -5,7 +5,7 @@ const AttendanceSchema = new Schema({
   owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   employee: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   date: { type: String, required: true },
-  status: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day'], required: true },
+  status: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day', 'Leave'], required: true },
   checkIn: { type: String },
   checkOut: { type: String },
   notes: { type: String },

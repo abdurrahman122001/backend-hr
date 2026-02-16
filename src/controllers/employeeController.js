@@ -348,3 +348,99 @@ exports.getEmployeePermissions = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
+
+/**
+ * Bulk Resign employees
+ */
+exports.bulkResign = async (req, res) => {
+  try {
+    const { employeeIds, resignationDate, resignationReason, noticePeriod } = req.body;
+    const ownerId = getEffectiveOwnerId(req.user);
+
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) {
+      return res.status(400).json({ message: "No employees selected" });
+    }
+
+    const noticePeriodDays = noticePeriod || 30;
+
+    // Simple helper inside since we need it for bulk
+    const calculateNoticeEndDate = (dateStr, days) => {
+      const date = new Date(dateStr);
+      date.setDate(date.getDate() + days);
+      return date.toISOString().split("T")[0];
+    };
+
+    const noticePeriodEndDate = calculateNoticeEndDate(resignationDate, noticePeriodDays);
+
+    const updateData = {
+      status: "resigned",
+      resignationDate,
+      resignationReason: resignationReason || "",
+      noticePeriodEndDate,
+      leavingDate: noticePeriodEndDate,
+    };
+
+    const result = await Employee.updateMany(
+      {
+        _id: { $in: employeeIds },
+        $or: [
+          { owner: ownerId },
+          { createdBy: ownerId }
+        ]
+      },
+      { $set: updateData }
+    );
+
+    res.json({
+      status: "success",
+      message: `${result.modifiedCount} employees marked as resigned`,
+      data: result,
+    });
+  } catch (err) {
+    console.error("Bulk resign error:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+};
+
+/**
+ * Bulk Activate employees
+ */
+exports.bulkActivate = async (req, res) => {
+  try {
+    const { employeeIds } = req.body;
+    const ownerId = getEffectiveOwnerId(req.user);
+
+    if (!Array.isArray(employeeIds) || employeeIds.length === 0) {
+      return res.status(400).json({ message: "No employees selected" });
+    }
+
+    const updateData = {
+      status: "active",
+      resignationDate: null,
+      noticePeriodEndDate: null,
+      resignationReason: null,
+      leavingDate: null,
+      terminationDate: null,
+    };
+
+    const result = await Employee.updateMany(
+      {
+        _id: { $in: employeeIds },
+        $or: [
+          { owner: ownerId },
+          { createdBy: ownerId }
+        ]
+      },
+      { $set: updateData }
+    );
+
+    res.json({
+      status: "success",
+      message: `${result.modifiedCount} employees activated successfully`,
+      data: result,
+    });
+  } catch (err) {
+    console.error("Bulk activate error:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+};

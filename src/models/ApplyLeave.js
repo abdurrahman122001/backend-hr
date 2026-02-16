@@ -165,6 +165,16 @@ const leaveSchema = new Schema(
         _id: false,
       },
     ],
+    approvalChain: [
+      {
+        type: Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
+    currentApprovalIndex: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,

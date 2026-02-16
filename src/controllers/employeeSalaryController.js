@@ -95,10 +95,6 @@ const readFirstNumAsync = async (obj, keys) => {
 function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   const A = Math.max(0, toNum(annualTaxable));
 
-  console.log(
-    `[TAX-CALC] Calculating tax for annual taxable: ${A.toLocaleString()}`
-  );
-
   const slabs = (rawSlabs || [])
     .map((s) => ({
       from: toNum(s.from),
@@ -117,12 +113,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
       // annualTax = fixed + (A - s.from) * rate
       const over = Math.max(0, A - s.from);
       const tax = Math.round(s.fixed + over * s.rate);
-
-      console.log(
-        `[TAX-CALC] Slab match: FROM ${s.from}–${s.to}, Fixed ${s.fixed
-        }, Rate ${s.rate * 100}%, Over ${over}, Annual Tax=${tax}`
-      );
-
       return tax;
     }
   }
@@ -132,11 +122,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   if (last.to === Infinity) {
     const over = Math.max(0, A - last.from);
     const tax = Math.round(last.fixed + over * last.rate);
-
-    console.log(
-      `[TAX-CALC] Top slab: FROM ${last.from}+ : Fixed ${last.fixed}, Rate ${last.rate * 100
-      }%, Over ${over}, Annual Tax=${tax}`
-    );
 
     return tax;
   }
@@ -264,7 +249,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   }
 }
 
-exports.autoCalculateAndSaveTax = async function (salarySlip) {
+async function autoCalculateAndSaveTax(salarySlip) {
   try {
     let taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
     if (!taxCfg)
@@ -297,6 +282,7 @@ exports.autoCalculateAndSaveTax = async function (salarySlip) {
     return null;
   }
 }
+exports.autoCalculateAndSaveTax = autoCalculateAndSaveTax;
 
 /* ---------------------- Existing Functions (Updated) ---------------------- */
 
@@ -452,6 +438,11 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       "isAdmin",
       "userAccount",
       "role",
+      "status",
+      "resignationDate",
+      "noticePeriodEndDate",
+      "terminationDate",
+      "resignationReason",
     ];
 
     for (const k of shallowKeys) {
