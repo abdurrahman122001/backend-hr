@@ -101,6 +101,8 @@ const penaltyRoutes = require("./routes/penaltyRoutes");
 const warningRoutes = require("./routes/warningRoutes");
 const unifiedAuth = require("./middleware/unifiedAuth");
 const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
+const promotionRoutes = require("./routes/promotion");
+const salaryStructureRoutes = require("./routes/salaryStructure");
 const app = express();
 
 // ---------- Static ----------
@@ -257,6 +259,8 @@ app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
 app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
+app.use("/api/promotion", requireAuth, promotionRoutes);
+app.use("/api/salary-structure", salaryStructureRoutes);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {

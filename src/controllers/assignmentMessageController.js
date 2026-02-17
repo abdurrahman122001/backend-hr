@@ -4171,3 +4171,360 @@ exports.markMultipleAsRead = async function markMultipleAsRead(req, res) {
     });
   }
 };
+
+/**
+ * Get email activity for employees based on hierarchy
+ * Shows activity of juniors to their seniors
+ * Admin can see all employees' activity
+ */
+exports.getActivity = async function getActivity(req, res) {
+  try {
+    // This endpoint uses empAuth middleware, so req.employee is always available
+    if (!req.employee || !req.employee._id) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized: Employee not found",
+      });
+    }
+
+    const currentEmployeeId = req.employee._id;
+    let ownerId = req.employee.owner;
+    const role = (req.employee.role || "").trim().toLowerCase();
+    const isAdmin = role === "admin" || role === "hr";
+
+    if (!ownerId) {
+      return res.status(400).json({
+        success: false,
+        error: "Owner ID is missing",
+      });
+    }
+
+    // Convert ownerId to string if it's an ObjectId
+    ownerId = String(ownerId);
+
+    // Ensure ownerId is a valid ObjectId
+    if (!isObjId(ownerId)) {
+      console.error("Invalid ownerId:", ownerId, "Type:", typeof ownerId);
+      return res.status(400).json({
+        success: false,
+        error: "Invalid owner ID format",
+      });
+    }
+
+    // Get current employee info
+    const currentEmployee = await Employee.findById(currentEmployeeId)
+      .select("_id name companyEmail role owner")
+      .lean();
+
+    if (!currentEmployee) {
+      return res.status(404).json({
+        success: false,
+        error: "Employee not found",
+      });
+    }
+
+    let employeeIdsToShow = [];
+
+    if (isAdmin) {
+      // Admin can see all employees' activity
+      const allEmployees = await Employee.find({ owner: ownerId, status: "active" })
+        .select("_id")
+        .lean();
+      employeeIdsToShow = allEmployees.map((emp) => String(emp._id));
+    } else {
+      // Regular employees see their own activity + all their juniors' activity
+      employeeIdsToShow = [String(currentEmployeeId)];
+      const juniors = await getAllJuniorsRecursively(ownerId, currentEmployeeId);
+      employeeIdsToShow = [...employeeIdsToShow, ...juniors];
+    }
+
+    if (employeeIdsToShow.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          activities: [],
+          summary: {
+            totalUnread: 0,
+            totalResponded: 0,
+            totalEmployees: 0,
+          },
+        },
+      });
+    }
+
+    // Convert employeeIdsToShow to ObjectIds for query
+    const employeeObjectIds = employeeIdsToShow
+      .filter(id => isObjId(id))
+      .map(id => oid(id));
+
+    if (employeeObjectIds.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          activities: [],
+          summary: {
+            totalUnread: 0,
+            totalResponded: 0,
+            totalEmployees: 0,
+          },
+        },
+      });
+    }
+
+    // Get employee details first
+    const employeeDetails = await Employee.find({
+      _id: { $in: employeeObjectIds },
+    })
+      .select("_id name companyEmail")
+      .lean();
+
+    // Group activity by employee - simplified approach
+    const activityMap = new Map();
+
+    // Initialize activity for each employee
+    employeeDetails.forEach((emp) => {
+      const empId = String(emp._id);
+      activityMap.set(empId, {
+        employeeId: empId,
+        employeeName: emp.name,
+        employeeEmail: emp.companyEmail,
+        unreadEmails: [],
+        respondedEmails: [],
+        unreadCount: 0,
+        respondedCount: 0,
+      });
+    });
+
+    // Convert ownerId to ObjectId once
+    const ownerObjectId = oid(ownerId);
+
+    // Get unread count per employee (simplified query)
+    for (const empId of employeeIdsToShow) {
+      if (!isObjId(empId)) continue;
+      
+      const empObjectId = oid(empId);
+      
+      // Count unread messages for this employee
+      // Check messages where employee is receiver and hasn't read them
+      const unreadMessages = await AssignmentMessage.find({
+        owner: ownerObjectId,
+        receiver: empObjectId,
+        status: "sent",
+        isTrashed: false,
+        isSpam: false,
+      })
+        .select("_id readBy")
+        .lean();
+      
+      const unreadCount = unreadMessages.filter(msg => {
+        if (!msg.readBy || msg.readBy.length === 0) return true;
+        return !msg.readBy.some(read => String(read.employee) === String(empId));
+      }).length;
+
+      // Get recent unread emails (limit to 5) - filter in memory for accuracy
+      let allRecentMessages = [];
+      try {
+        allRecentMessages = await AssignmentMessage.find({
+          owner: ownerObjectId,
+          receiver: empObjectId,
+          status: "sent",
+          isTrashed: false,
+          isSpam: false,
+          sender: { $exists: true, $ne: null } // Ensure sender exists
+        })
+          .select("_id sender subject createdAt threadId readBy")
+          .populate({
+            path: "sender",
+            select: "name companyEmail",
+            model: "Employee",
+            options: { lean: true }
+          })
+          .sort({ createdAt: -1 })
+          .limit(20) // Get more to filter
+          .lean();
+      } catch (populateError) {
+        console.error("Error populating sender for employee:", empId, populateError.message);
+        // Try without populate if there's an error
+        try {
+          allRecentMessages = await AssignmentMessage.find({
+            owner: ownerObjectId,
+            receiver: empObjectId,
+            status: "sent",
+            isTrashed: false,
+            isSpam: false,
+          })
+            .select("_id sender subject createdAt threadId readBy")
+            .sort({ createdAt: -1 })
+            .limit(20)
+            .lean();
+        } catch (queryError) {
+          console.error("Error querying messages:", queryError.message);
+          allRecentMessages = []; // Set to empty array on error
+        }
+      }
+      
+      const recentUnread = allRecentMessages
+        .filter(msg => {
+          if (!msg.readBy || msg.readBy.length === 0) return true;
+          return !msg.readBy.some(read => String(read.employee) === String(empId));
+        })
+        .slice(0, 5)
+        .map(msg => ({
+          _id: msg._id,
+          sender: msg.sender,
+          subject: msg.subject,
+          createdAt: msg.createdAt,
+          threadId: msg.threadId,
+        }));
+
+      // Count responded messages
+      const respondedCount = await AssignmentMessage.countDocuments({
+        owner: ownerObjectId,
+        sender: empObjectId,
+        replyTo: { $exists: true, $ne: null },
+        status: "sent",
+        isTrashed: false,
+        isSpam: false,
+      });
+
+      // Get recent responded emails (limit to 5)
+      let recentResponded = [];
+      try {
+        recentResponded = await AssignmentMessage.find({
+          owner: ownerObjectId,
+          sender: empObjectId,
+          replyTo: { $exists: true, $ne: null },
+          status: "sent",
+          isTrashed: false,
+          isSpam: false,
+          receiver: { $exists: true, $ne: null } // Ensure receiver exists
+        })
+          .select("_id receiver subject createdAt threadId replyTo")
+          .populate({
+            path: "receiver",
+            select: "name companyEmail",
+            model: "Employee",
+            options: { lean: true }
+          })
+          .sort({ createdAt: -1 })
+          .limit(5)
+          .lean();
+      } catch (populateError) {
+        console.error("Error populating receiver for employee:", empId, populateError.message);
+        // Try without populate if there's an error
+        try {
+          recentResponded = await AssignmentMessage.find({
+            owner: ownerObjectId,
+            sender: empObjectId,
+            replyTo: { $exists: true, $ne: null },
+            status: "sent",
+            isTrashed: false,
+            isSpam: false,
+          })
+            .select("_id receiver subject createdAt threadId replyTo")
+            .sort({ createdAt: -1 })
+            .limit(5)
+            .lean();
+        } catch (queryError) {
+          console.error("Error querying responded messages:", queryError.message);
+          recentResponded = []; // Set to empty array on error
+        }
+      }
+
+      const empIdStr = String(empId);
+      if (activityMap.has(empIdStr)) {
+        const activity = activityMap.get(empIdStr);
+        activity.unreadCount = unreadCount;
+        activity.respondedCount = respondedCount;
+        
+        // Process recent unread
+        activity.unreadEmails = recentUnread.map(msg => {
+          // Handle sender - could be ObjectId or populated object
+          let senderName = "Unknown";
+          let senderEmail = "";
+          
+          if (msg.sender) {
+            if (typeof msg.sender === 'object' && msg.sender.name) {
+              senderName = msg.sender.name || msg.sender.companyEmail || "Unknown";
+              senderEmail = msg.sender.companyEmail || "";
+            } else if (isObjId(msg.sender)) {
+              // It's an ObjectId, we'll need to fetch it separately if needed
+              senderName = "Unknown";
+            }
+          }
+          
+          return {
+            id: String(msg._id),
+            subject: msg.subject || "No Subject",
+            sender: senderName,
+            senderEmail: senderEmail,
+            createdAt: msg.createdAt,
+            threadId: msg.threadId,
+          };
+        });
+
+        // Process recent responded
+        activity.respondedEmails = recentResponded.map(msg => {
+          // Handle receiver - could be ObjectId, array of ObjectIds, or populated objects
+          let receiverName = "Unknown";
+          
+          if (msg.receiver) {
+            if (Array.isArray(msg.receiver)) {
+              receiverName = msg.receiver
+                .map((r) => {
+                  if (typeof r === 'object' && r.name) {
+                    return r.name || r.companyEmail || "Unknown";
+                  }
+                  return "Unknown";
+                })
+                .join(", ");
+            } else if (typeof msg.receiver === 'object' && msg.receiver.name) {
+              receiverName = msg.receiver.name || msg.receiver.companyEmail || "Unknown";
+            }
+          }
+          
+          return {
+            id: String(msg._id),
+            subject: msg.subject || "No Subject",
+            receiver: receiverName,
+            createdAt: msg.createdAt,
+            threadId: msg.threadId,
+            replyTo: msg.replyTo ? String(msg.replyTo) : undefined,
+          };
+        });
+      }
+    }
+
+    // Build final activities array (already has employee details from activityMap)
+    const activities = Array.from(activityMap.values())
+      .filter((activity) => activity.unreadCount > 0 || activity.respondedCount > 0) // Only show employees with activity
+      .sort((a, b) => {
+        // Sort by total activity (unread + responded)
+        const totalA = a.unreadCount + a.respondedCount;
+        const totalB = b.unreadCount + b.respondedCount;
+        return totalB - totalA;
+      });
+
+    // Calculate summary
+    const summary = {
+      totalUnread: activities.reduce((sum, act) => sum + act.unreadCount, 0),
+      totalResponded: activities.reduce((sum, act) => sum + act.respondedCount, 0),
+      totalEmployees: activities.length,
+    };
+
+    res.json({
+      success: true,
+      data: {
+        activities,
+        summary,
+      },
+    });
+  } catch (error) {
+    console.error("Error getting activity:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error while fetching activity",
+      message: error.message,
+    });
+  }
+};
