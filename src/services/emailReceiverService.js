@@ -107,7 +107,7 @@ class EmailReceiverService {
         this.scheduleReconnect();
         return;
       }
-      
+
       console.log(`📥 [EmailReceiver] Inbox opened with ${box.messages.total} messages`);
       this.startListening();
     });
@@ -131,7 +131,7 @@ class EmailReceiverService {
     this.isProcessing = true;
     try {
       console.log('🔄 [EmailReceiver] Processing new emails...');
-      
+
       await new Promise((resolve, reject) => {
         this.imap.search(["UNSEEN"], (err, results) => {
           if (err) {
@@ -152,7 +152,7 @@ class EmailReceiverService {
           console.log(`📨 [EmailReceiver] Found ${results.length} new unseen email(s)`);
           const recentEmails = results.slice(-10);
           console.log(`📨 [EmailReceiver] Processing ${recentEmails.length} most recent email(s)`);
-          
+
           this.processEmailBatch(recentEmails, resolve, reject);
         });
       });
@@ -177,7 +177,7 @@ class EmailReceiverService {
     this.isProcessing = true;
     try {
       console.log('🔍 [EmailReceiver] Checking for new emails...');
-      
+
       await new Promise((resolve, reject) => {
         this.imap.search(["UNSEEN"], (err, results) => {
           if (err) {
@@ -232,7 +232,7 @@ class EmailReceiverService {
     f.on("message", (msg, seqno) => {
       const uid = results[seqno - 1];
       console.log(`📩 [EmailReceiver] Processing message #${seqno} (UID: ${uid})`);
-      
+
       let emailBuffer = "";
 
       msg.on("body", (stream) => {
@@ -279,9 +279,9 @@ class EmailReceiverService {
     try {
       const fromEmail = email.from?.value[0]?.address || email.from?.text || "";
       const fromName = email.from?.value[0]?.name || "";
-      
+
       console.log(`📧 [EmailReceiver] Processing email UID ${uid} from: ${fromName} <${fromEmail}>`);
-      
+
       const emailDetails = {
         uid: uid,
         from: fromEmail,
@@ -359,20 +359,20 @@ class EmailReceiverService {
 
       // STEP 3: Get team leads for this owner
       const teamLeads = await this.getTeamLeadsForOwner(client.owner);
-      
+
       // STEP 4: Check if this is a reply to an existing thread
       let threadId = null;
       let replyToMessage = null;
-      
+
       // Try to find the original message this is replying to
       if (emailDetails.inReplyTo) {
         console.log(`🔍 [EmailReceiver] Checking for reply to message: ${emailDetails.inReplyTo}`);
-        
+
         // Try to find by message ID in emailMetadata
         replyToMessage = await AssignmentMessage.findOne({
           "emailMetadata.messageId": emailDetails.inReplyTo
         });
-        
+
         if (replyToMessage) {
           console.log(`✅ [EmailReceiver] Found original message for reply: ${replyToMessage._id}`);
           threadId = replyToMessage.threadId;
@@ -392,22 +392,22 @@ class EmailReceiverService {
           }
         }
       }
-      
+
       // If no thread found by reply headers, try to find by subject and client
       if (!threadId) {
         // Clean the subject to remove reply prefixes
         const cleanSubject = this.cleanEmailSubject(emailDetails.subject);
         console.log(`🔍 [EmailReceiver] Searching for thread with subject: ${cleanSubject} for client: ${client.clientName}`);
-        
+
         // Look for existing threads from this client with similar subject
         const existingThreads = await AssignmentMessage.find({
           client: client._id,
           sender: client._id, // Client as sender
           subject: { $regex: new RegExp(cleanSubject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
         })
-        .sort({ createdAt: -1 })
-        .limit(1);
-        
+          .sort({ createdAt: -1 })
+          .limit(1);
+
         if (existingThreads.length > 0) {
           threadId = existingThreads[0].threadId;
           replyToMessage = existingThreads[0];
@@ -428,12 +428,12 @@ class EmailReceiverService {
 
       if (assignmentMessage) {
         this.processedMessageIds.add(emailDetails.messageId);
-        
+
         // Send auto-reply if needed (commented out for now)
         // this.sendAutoReply(emailDetails, client, true).catch(err => {
         //   console.error(`❌ [EmailReceiver] Auto-reply failed:`, err.message);
         // });
-        
+
         console.log(`✅ [EmailReceiver] Email processed successfully for client: ${client.clientName}`);
         return "processed";
       }
@@ -450,13 +450,13 @@ class EmailReceiverService {
 
   cleanEmailSubject(subject) {
     if (!subject) return "";
-    
+
     // Remove common reply prefixes
     const cleanSubject = subject
       .replace(/^(Re:|Fwd:|FW:|RE:|fwd:|fw:)\s*/i, '') // Remove reply/forward prefixes
       .replace(/\[.*?\]\s*/g, '') // Remove brackets content
       .trim();
-    
+
     return cleanSubject;
   }
 
@@ -623,7 +623,7 @@ class EmailReceiverService {
       }
 
       console.log(`🔍 [EmailReceiver] Looking for team leads for owner: ${ownerId}`);
-      
+
       // Find all team leads for this owner
       const teamLeads = await Employee.find({
         owner: ownerId,
@@ -631,7 +631,7 @@ class EmailReceiverService {
       }).select("_id name companyEmail role");
 
       console.log(`👥 [EmailReceiver] Found ${teamLeads.length} team lead(s) for owner`);
-      
+
       if (teamLeads.length > 0) {
         teamLeads.forEach(tl => {
           console.log(`   - ${tl.name} (${tl.role})`);
@@ -656,7 +656,7 @@ class EmailReceiverService {
   ) {
     try {
       let threadId = existingThreadId;
-      
+
       // Generate thread ID if not provided
       if (!threadId) {
         threadId = this.generateThreadId(client, emailDetails.subject);
@@ -667,7 +667,7 @@ class EmailReceiverService {
 
       // Prepare receiver list: assigned employee + team leads
       let receivers = [assignedEmployee._id];
-      
+
       // Add team leads to receivers if any exist
       if (teamLeads && teamLeads.length > 0) {
         const teamLeadIds = teamLeads.map(tl => tl._id);
@@ -752,7 +752,7 @@ class EmailReceiverService {
       // Process attachments if any
       if (emailDetails.attachments && emailDetails.attachments.length > 0) {
         console.log(`📎 [EmailReceiver] Processing ${emailDetails.attachments.length} attachment(s)`);
-        
+
         messageData.attachments = await Promise.all(
           emailDetails.attachments.map(async (attachment) => {
             try {
@@ -966,7 +966,7 @@ class EmailReceiverService {
 
       const info = await this.transporter.sendMail(mailOptions);
       console.log(`✅ [EmailReceiver] Auto-reply sent: ${info.messageId}`);
-      
+
       return info;
     } catch (error) {
       console.error("❌ [EmailReceiver] Error sending auto-reply:", error);

@@ -60,7 +60,7 @@ module.exports = async function unifiedAuth(req, res, next) {
         role: employee.role,
         name: employee.name,
         email: employee.companyEmail,
-        owner: employee.owner, // Same as _id for consistency
+        owner: Array.isArray(employee.owner) ? employee.owner[0] : employee.owner,
         department: employee.department,
         permissions: employee.permissions || {},
         isEmployee: true,
@@ -91,11 +91,11 @@ module.exports = async function unifiedAuth(req, res, next) {
         permissions: linkedEmployee?.permissions || {},
         employeeInfo: linkedEmployee
           ? {
-              employeeId: linkedEmployee._id,
-              role: linkedEmployee.role,
-              name: linkedEmployee.name,
-              department: linkedEmployee.department,
-            }
+            employeeId: linkedEmployee._id,
+            role: linkedEmployee.role,
+            name: linkedEmployee.name,
+            department: linkedEmployee.department,
+          }
           : null,
       };
     }

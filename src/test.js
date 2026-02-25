@@ -97,6 +97,9 @@ const employeeWorkSpaceManagementRoute = require("./routes/employeeTaskRoutes");
 const penaltyRoutes = require("./routes/penaltyRoutes");
 const warningRoutes = require("./routes/warningRoutes");
 const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
+const promotionRoutes = require("./routes/promotion");
+const salaryStructureRoutes = require("./routes/salaryStructure");
+const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
 
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
@@ -254,7 +257,9 @@ app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
 app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
-
+app.use("/api/promotion", requireAuth, promotionRoutes);
+app.use("/api/salary-structure", salaryStructureRoutes);
+app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
@@ -1542,7 +1547,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`thread_chat_${threadId}`);
-    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
   });
 
   socket.on("join_thread_chat", (threadId) => {
@@ -1551,7 +1555,6 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`thread_chat_${threadId}`);
-    console.log(`✅ Socket ${socket.id} joined thread_chat_${threadId}`);
   });
 
   /**
@@ -3260,6 +3263,7 @@ const emitForwardToManagers = (io, data) => {
     });
   });
 };
+
 // In your socket.io initialization file
 // Export the emission functions for use in controllers
 module.exports = {

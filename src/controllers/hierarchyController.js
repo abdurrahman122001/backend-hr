@@ -158,6 +158,13 @@ exports.create = async (req, res) => {
       });
     }
 
+    if (['offboarded', 'terminated'].includes(senior.status) || ['offboarded', 'terminated'].includes(junior.status)) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Cannot add offboarded or terminated employees to hierarchy'
+      });
+    }
+
     if (await Hierarchy.exists({ owner: ownerId, senior: seniorId, junior: juniorId })) {
       return res.status(400).json({
         status: 'error',
@@ -219,11 +226,16 @@ exports.bulkCreate = async (req, res) => {
 
       // employees exist?
       const [senior, junior] = await Promise.all([
-        Employee.findById(seniorId).select('_id').lean(),
-        Employee.findById(juniorId).select('_id').lean()
+        Employee.findById(seniorId).select('_id status').lean(),
+        Employee.findById(juniorId).select('_id status').lean()
       ]);
       if (!senior || !junior) {
         invalid.push({ seniorId, juniorId, reason: 'Employee not found' });
+        continue;
+      }
+
+      if (['offboarded', 'terminated'].includes(senior.status) || ['offboarded', 'terminated'].includes(junior.status)) {
+        invalid.push({ seniorId, juniorId, reason: 'Employee is offboarded/terminated' });
         continue;
       }
 
@@ -293,15 +305,22 @@ exports.getHierarchy = async function (req, res) {
   try {
     const ownerId = req.user._id;
 
-    // Load all links with populated names
+    // Load all links with populated names and status
     const links = await Hierarchy.find({ owner: ownerId })
-      .populate('senior', 'name')
-      .populate('junior', 'name')
+      .populate('senior', 'name status')
+      .populate('junior', 'name status')
       .lean();
+
+    // Filter out links where either senior or junior is offboarded or terminated
+    const filteredLinks = links.filter(l => {
+      const seniorActive = l.senior && !['offboarded', 'terminated'].includes(l.senior.status);
+      const juniorActive = l.junior && !['offboarded', 'terminated'].includes(l.junior.status);
+      return seniorActive && juniorActive;
+    });
 
     // Build nodes map
     const map = {};
-    links.forEach(l => {
+    filteredLinks.forEach(l => {
       const sid = l.senior._id.toString();
       const jid = l.junior._id.toString();
 
@@ -315,8 +334,8 @@ exports.getHierarchy = async function (req, res) {
       map[sid].children.push(map[jid]);
     });
 
-    // Find roots (those never appearing as a junior)
-    const juniorIds = new Set(links.map(l => l.junior._id.toString()));
+    // Find roots (those never appearing as a junior in the filtered links)
+    const juniorIds = new Set(filteredLinks.map(l => l.junior._id.toString()));
     const tree = Object.values(map).filter(node => !juniorIds.has(node.id));
 
     res.json({ status: 'success', data: tree });

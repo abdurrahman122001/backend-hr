@@ -200,7 +200,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
 }
 
 // GET /leave-summary/:employeeId?month=&year=
-router.get("/leave-summary/:employeeId", async (req, res) => {
+router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { month, year } = req.query;
@@ -215,7 +215,12 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
             return res.status(404).json({ error: "Employee not found" });
         }
 
-        const ownerId = employee.owner;
+        // Security check: Ensure employee belongs to the requester's company
+        if (String(employee.owner) !== String(req.user.owner)) {
+            return res.status(403).json({ error: "Unauthorized access to employee data" });
+        }
+
+        const ownerId = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
 
 
         const months = [
@@ -269,7 +274,7 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
 });
 
 // GET /leave-summary-history/:employeeId?year=
-router.get("/leave-summary-history/:employeeId", async (req, res) => {
+router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year } = req.query;
@@ -284,7 +289,12 @@ router.get("/leave-summary-history/:employeeId", async (req, res) => {
             return res.status(404).json({ error: "Employee not found" });
         }
 
-        const ownerId = employee.owner;
+        // Security check
+        if (String(employee.owner) !== String(req.user.owner)) {
+            return res.status(403).json({ error: "Unauthorized access to employee data" });
+        }
+
+        const ownerId = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
         const leaveYear = Number(year);
 
         // 2. Calculate monthly balances from transactions
@@ -447,16 +457,15 @@ router.get("/leave-balance/:employeeId", async (req, res) => {
 });
 
 
-router.get("/available-years", async (req, res) => {
+router.get("/available-years", requireAuth, async (req, res) => {
     try {
-        const employees = await Employee.find();
+        const rawOwnerId = req.user.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
 
-        if (!employees || employees.length === 0) {
+        if (!ownerId) {
             const currentYear = new Date().getFullYear();
             return res.json({ years: [currentYear] });
         }
-
-        const ownerId = employees[0].owner;
 
         const years = await LeaveYearBalance.distinct("year", {
             owner: ownerId

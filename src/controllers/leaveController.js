@@ -1157,6 +1157,14 @@ exports.getLeaves = async (req, res) => {
     // Build filter
     let filter = {};
 
+    // Get employees for this company
+    const tenantId = req.user.owner;
+    const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
+    const ownedEmployeeIds = ownedEmployees.map(e => e._id);
+
+    // RESTRICT TO COMPANY
+    filter.employee = { $in: ownedEmployeeIds };
+
     // ADMIN LOGIC
     const isAdmin =
       req.user.isAdmin || req.user.role === "admin" || req.user.role === "hr";
@@ -1167,7 +1175,7 @@ exports.getLeaves = async (req, res) => {
           .sort({ createdAt: -1 })
           .populate(
             "employee",
-            "name email department position employeeId photographUrl",
+            "name email department position employeeId photographUrl status",
           )
           .lean();
 
@@ -1228,7 +1236,7 @@ exports.getLeaves = async (req, res) => {
       .limit(parseInt(limit))
       .populate(
         "employee",
-        "name email department designation position employeeId photographUrl",
+        "name email department designation position employeeId photographUrl status",
       )
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
@@ -1275,13 +1283,19 @@ exports.getPendingLeaves = async (req, res) => {
 
     const query = { status: "pending" };
 
+    // RESTRICT TO COMPANY
+    const tenantId = user.owner;
+    const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
+    const ownedEmployeeIds = ownedEmployees.map(e => e._id);
+    query.employee = { $in: ownedEmployeeIds };
+
     // Supervisors see leaves where they are the current assigned supervisor
     if (employee.role !== "admin" && employee.role !== "hr") {
       query.supervisor = employee._id;
     }
 
     const pendingLeaves = await Leave.find(query)
-      .populate("employee", "name email department designation photographUrl")
+      .populate("employee", "name email department designation photographUrl status")
       .populate("appliedBy", "name email")
       .sort({ appliedDate: -1 })
       .lean();
@@ -1309,7 +1323,7 @@ exports.getLeaveById = async (req, res) => {
     const leave = await Leave.findById(req.params.id)
       .populate(
         "employee",
-        "name email department designation position phone photographUrl",
+        "name email department designation position phone photographUrl status",
       )
       .populate("supervisor", "name email")
       .populate("approvedBy", "name email")
@@ -1419,7 +1433,13 @@ exports.getLeaveStats = async (req, res) => {
       });
     }
 
-    const employeeFilter = isAdmin ? {} : { employee: userId };
+    const tenantId = req.user.owner;
+    const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
+    const ownedEmployeeIds = ownedEmployees.map(e => e._id);
+
+    const employeeFilter = isAdmin
+      ? { employee: { $in: ownedEmployeeIds } }
+      : { employee: userId };
 
     // Get leave statistics
     const totalLeaves = await Leave.countDocuments(employeeFilter);
@@ -1495,7 +1515,7 @@ exports.getLeaveStats = async (req, res) => {
       recentLeaves = await Leave.find({})
         .sort({ createdAt: -1 })
         .limit(10)
-        .populate("employee", "name email department photographUrl")
+        .populate("employee", "name email department photographUrl status")
         .lean();
 
       recentLeaves = recentLeaves.map((leave) => ({
@@ -1503,6 +1523,15 @@ exports.getLeaveStats = async (req, res) => {
         employee: processEmployeeWithPhoto(leave.employee, req),
       }));
     }
+
+    // Add a summary array for easier frontend mapping
+    const summary = [
+      { _id: "total", count: totalLeaves },
+      { _id: "pending", count: pendingLeaves },
+      { _id: "approved", count: approvedLeaves },
+      { _id: "rejected", count: rejectedLeaves },
+      { _id: "cancelled", count: cancelledLeaves },
+    ];
 
     res.json({
       success: true,
@@ -1514,10 +1543,12 @@ exports.getLeaveStats = async (req, res) => {
         cancelled: cancelledLeaves,
         withViolations: leavesWithViolations,
         requireAttention: leavesRequiringAttention,
+        summary: summary,
       },
-      departmentStats: departmentStats,
-      recentLeaves: recentLeaves,
-      isAdmin: isAdmin,
+      summary, // Add at top level for convenience
+      departmentStats,
+      recentLeaves,
+      isAdmin,
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
