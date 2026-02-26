@@ -3293,18 +3293,15 @@ cron.schedule(
   { timezone: "UTC" },
 );
 cron.schedule(
-  "23 21 * * *",
+  "0 0 * * *",
   async () => {
     try {
-      // ✅ normalize today to DATE ONLY
       const today = new Date();
       today.setHours(0, 0, 0, 0);
       const todayStr = today.toISOString().slice(0, 10);
-
-      console.log("[cron][leave] checking probation completions…");
-
       const owners = await Employee.distinct("owner", { isTrashed: false });
 
+      // ── PART 1: Check for new probation completions ──
       for (const ownerId of owners) {
         const policy = await ProbationPeriod.findOne({ owner: ownerId })
           .sort({ createdAt: -1 })
@@ -3317,13 +3314,12 @@ cron.schedule(
         const probationDays = Number(policy.days || 0);
         if (probationDays < 1) continue;
 
-        // ✅ ONLY ACTIVE EMPLOYEES
         const employees = await Employee.find({
           owner: ownerId,
           isTrashed: false,
           status: "active",
         })
-          .select("_id joiningDate")
+          .select("_id joiningDate name")
           .lean();
 
         for (const emp of employees) {
@@ -3332,99 +3328,122 @@ cron.schedule(
           const joiningDate = new Date(emp.joiningDate);
           if (isNaN(joiningDate)) continue;
 
-          // probation end = joiningDate + probationDays
           const probationEnd = new Date(joiningDate);
           probationEnd.setDate(probationEnd.getDate() + probationDays);
           probationEnd.setHours(0, 0, 0, 0);
 
           const probationEndStr = probationEnd.toISOString().slice(0, 10);
-
-          // ✅ DATE-ONLY comparison
           if (probationEndStr > todayStr) continue;
 
-          const leaveYear = getLeaveYear(probationEnd);
-
-          // ⛔ prevent double credit
+          // ⛔ Skip if already has a leave transaction (legacy)
           const existingTx = await LeaveTransaction.findOne({
             owner: ownerId,
             employee: emp._id,
-            year: leaveYear,
             type: "PAID_LEAVE_CREDITED",
             sourceModel: "PROBATION",
           }).lean();
-
           if (existingTx) continue;
 
-          const leaveYearEnd = new Date(leaveYear, 11, 25); // 25 Dec of leaveYear
-          leaveYearEnd.setHours(0, 0, 0, 0);
-
-          // months remaining until leave-year end
-          const monthsLeft =
-            (leaveYearEnd.getFullYear() - probationEnd.getFullYear()) * 12 +
-            (leaveYearEnd.getMonth() - probationEnd.getMonth()) +
-            (leaveYearEnd.getDate() >= probationEnd.getDate() ? 1 : 0);
-
-          const proratedLeaves = Math.max(
-            0,
-            Math.round((22 / 12) * monthsLeft),
-          );
-
-          console.log(
-            `[cron][leave][proration] probationEnd=${probationEnd
-              .toISOString()
-              .slice(0, 10)}, leaveYearEnd=${leaveYearEnd
-                .toISOString()
-                .slice(
-                  0,
-                  10,
-                )}, monthsLeft=${monthsLeft}, leaves=${proratedLeaves}`,
-          );
-          if (proratedLeaves <= 0) continue;
-
-          // ✅ upsert LeaveYearBalance
-          const balance = await LeaveYearBalance.findOneAndUpdate(
-            {
-              owner: ownerId,
-              employee: emp._id,
-              year: leaveYear,
-            },
-            {
-              $inc: { total: proratedLeaves },
-              lastRecalculatedAt: new Date(),
-            },
-            {
-              upsert: true,
-              new: true,
-              setDefaultsOnInsert: true,
-            },
-          );
-
-          // 🧾 transaction record
-          await LeaveTransaction.create({
+          // ⛔ Skip if already has an approval record (any status)
+          const existingApproval = await ProbationLeaveApproval.findOne({
             owner: ownerId,
             employee: emp._id,
-            leaveYearBalance: balance._id,
-            year: leaveYear,
-            date: probationEnd,
-            type: "PAID_LEAVE_CREDITED",
-            value: proratedLeaves,
-            sourceModel: "PROBATION",
-            sourceId: emp._id,
-            createdBy: null, // system
+          }).lean();
+          if (existingApproval) continue;
+
+          // Calculate prorated leaves
+          const leaveYear = getLeaveYear(probationEnd);
+          const leaveYearEnd = new Date(leaveYear, 11, 25);
+          leaveYearEnd.setHours(0, 0, 0, 0);
+          const leaveYearStart = new Date(leaveYear - 1, 11, 26);
+          leaveYearStart.setHours(0, 0, 0, 0);
+          const totalDaysInYear = (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
+          const remainingDays = (leaveYearEnd - probationEnd) / (1000 * 60 * 60 * 24) + 1;
+          const dailyRate = 22 / totalDaysInYear;
+
+          function customRound(value) {
+            const decimal = value - Math.floor(value);
+            if (decimal > 0.5) return Math.ceil(value);
+            if (decimal < 0.5) return Math.floor(value);
+            return value;
+          }
+
+          const proratedLeaves = Math.max(0, customRound(dailyRate * remainingDays));
+          if (proratedLeaves <= 0) continue;
+
+          // ✅ Create pending approval instead of auto-crediting
+          await ProbationLeaveApproval.create({
+            owner: ownerId,
+            employee: emp._id,
+            joiningDate: joiningDate,
+            probationDays: probationDays,
+            probationEndDate: probationEnd,
+            calculatedLeaves: proratedLeaves,
+            leaveYear: leaveYear,
+            status: "pending",
+            effectiveProbationEndDate: probationEnd,
+            workflowHistory: [
+              {
+                action: "created",
+                performedByName: "System",
+                timestamp: new Date(),
+                notes: `Probation ended on ${probationEndStr}. ${proratedLeaves} prorated leaves calculated for year ${leaveYear}. Awaiting admin approval.`,
+                data: { probationDays, proratedLeaves, leaveYear },
+              },
+            ],
           });
 
-          console.log(
-            `[cron][leave] credited ${proratedLeaves} leaves → employee ${emp._id}`,
-          );
+          console.log(`[cron][probation] ✅ Created pending approval for ${emp.name || emp._id} (${proratedLeaves} leaves)`);
         }
       }
 
-      console.log("[cron][leave] ✅ completed");
+      // ── PART 2: Check extended probations whose new end date has passed ──
+      const extendedApprovals = await ProbationLeaveApproval.find({
+        status: "extended",
+        effectiveProbationEndDate: { $lte: today },
+      });
+
+      for (const approval of extendedApprovals) {
+        const effectiveEnd = new Date(approval.effectiveProbationEndDate);
+        effectiveEnd.setHours(0, 0, 0, 0);
+
+        // Recalculate leaves
+        const leaveYear = getLeaveYear(effectiveEnd);
+        const leaveYearEnd = new Date(leaveYear, 11, 25);
+        leaveYearEnd.setHours(0, 0, 0, 0);
+        const leaveYearStart = new Date(leaveYear - 1, 11, 26);
+        leaveYearStart.setHours(0, 0, 0, 0);
+        const totalDaysInYear = (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
+        const remainingDays = (leaveYearEnd - effectiveEnd) / (1000 * 60 * 60 * 24) + 1;
+        const dailyRate = 22 / totalDaysInYear;
+
+        function customRound2(value) {
+          const decimal = value - Math.floor(value);
+          if (decimal > 0.5) return Math.ceil(value);
+          if (decimal < 0.5) return Math.floor(value);
+          return value;
+        }
+
+        const recalculatedLeaves = Math.max(0, customRound2(dailyRate * remainingDays));
+
+        approval.status = "pending";
+        approval.calculatedLeaves = recalculatedLeaves;
+        approval.leaveYear = leaveYear;
+        approval.workflowHistory.push({
+          action: "recalculated",
+          performedByName: "System",
+          timestamp: new Date(),
+          notes: `Extended probation ended on ${effectiveEnd.toISOString().slice(0, 10)}. Recalculated: ${recalculatedLeaves} leaves for year ${leaveYear}. Re-queued for admin approval.`,
+          data: { recalculatedLeaves, leaveYear },
+        });
+        await approval.save();
+        console.log(`[cron][probation] 🔄 Re-queued extended approval for employee ${approval.employee} (${recalculatedLeaves} leaves)`);
+      }
     } catch (err) {
       console.error("[cron][leave] ❌ error:", err);
     }
   },
-  { timezone: PROBATION_CRON_TZ },
+  { timezone: "Asia/Karachi" },
 );
 
 cron.schedule(

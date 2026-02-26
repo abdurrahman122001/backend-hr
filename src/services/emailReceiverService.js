@@ -840,7 +840,8 @@ class EmailReceiverService {
     }
   }
 
-  // 🔥 NEW METHOD: Emit to specific receivers (matching your controller's pattern)
+  // 🔥 FIXED: Emit to specific receivers — emit populated message DIRECTLY
+  // (matching assignmentMessageController.js pattern, not wrapped in emissionData)
   async emitToSpecificReceivers(message, emissionData) {
     try {
       if (!this.io) return;
@@ -870,10 +871,12 @@ class EmailReceiverService {
         });
       }
 
-      // Emit ONLY to actual recipients
+      // 🔥 CRITICAL FIX: Emit the populated message DIRECTLY (not wrapped)
+      // This matches what assignmentMessageController.js does at line 510:
+      //   io.to(`employee_${recipientId}`).emit(eventName, populatedMessage);
       actualRecipients.forEach((recipientId) => {
         if (recipientId) {
-          this.io.to(`employee_${recipientId}`).emit("new_assignment_message", emissionData);
+          this.io.to(`employee_${recipientId}`).emit("new_assignment_message", message);
         }
       });
     } catch (error) {

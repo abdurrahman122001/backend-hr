@@ -662,6 +662,9 @@ exports.listMessages = async function listMessages(req, res) {
     // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
+    // Exclude messages this user has deleted for themselves only
+    qFinal.deletedForUsers = { $nin: [me] };
+
     // 🎯 Cursor-based pagination logic
     if (cursor && isObjId(cursor)) {
       const cursorMessage = await WhatsAppMessage.findById(cursor)
@@ -2396,32 +2399,70 @@ exports.updateMessage = async function updateMessage(req, res) {
   }
 };
 
-// DELETE /api/assignment-messages/:id
+// DELETE /api/whatsapp-messages/:id
+// Query param: ?deleteType=me | everyone (default: me)
 exports.deleteMessage = async function deleteMessage(req, res) {
   try {
-    const msg = await WhatsAppMessage.findByIdAndDelete(req.params.id);
+    const { id } = req.params;
+    const deleteType = req.query.deleteType || "me"; // "me" or "everyone"
+    const currentUserId = String(req.employee._id);
+
+    const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
-    // FIXED: Emit new_message event ONLY to relevant users
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
+    const io = req.app.get("io");
 
-      // Notify ONLY the sender about deletion
-      io.to(`employee_${msg.sender}`).emit("new_message", {
-        message: msg,
-        type: "message_deleted",
-      });
+    if (deleteType === "everyone") {
+      // Only the original sender can delete for everyone
+      const senderId = String(msg.sender);
+      if (senderId !== currentUserId) {
+        return res
+          .status(403)
+          .json({ error: "Only the sender can delete for everyone" });
+      }
 
-      // Notify ONLY the actual receivers about deletion
-      msg.receiver.forEach((receiverId) => {
-        io.to(`employee_${receiverId}`).emit("new_message", {
-          message: msg,
-          type: "message_deleted",
+      // Soft-delete: mark as deleted for everyone, clear content
+      msg.deletedForEveryone = true;
+      msg.deletedAt = new Date();
+      msg.note = "";
+      msg.subject = msg.subject || "";
+      msg.attachments = [];
+      await msg.save();
+
+      const populated = await msg.populate([
+        { path: "sender", select: "_id name companyEmail role" },
+        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "client", select: "_id clientName" },
+      ]);
+
+      // Notify ALL participants in real-time
+      if (io) {
+        const participants = new Set([senderId]);
+        if (Array.isArray(msg.receiver)) {
+          msg.receiver.forEach((r) => participants.add(String(r._id || r)));
+        }
+        participants.forEach((uid) => {
+          io.to(`employee_${uid}`).emit("new_message", {
+            message: populated,
+            type: "message_deleted_for_everyone",
+          });
         });
-      });
-    }
+      }
 
-    res.json({ ok: true });
+      return res.json({ ok: true, deletedForEveryone: true, message: populated });
+    } else {
+      // Delete for me only — add currentUser to deletedForUsers array
+      const alreadyDeleted = msg.deletedForUsers.some(
+        (uid) => String(uid) === currentUserId
+      );
+      if (!alreadyDeleted) {
+        msg.deletedForUsers.push(currentUserId);
+        await msg.save();
+      }
+
+      // No socket emission needed — it's a personal hide-only action
+      return res.json({ ok: true, deletedForMe: true });
+    }
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Failed to delete message" });

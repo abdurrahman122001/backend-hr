@@ -172,6 +172,13 @@ const WhatsAppMessageSchema = new Schema(
     // Files
     attachments: [AttachmentSchema],
 
+    // Delete for Everyone / Delete for Me
+    deletedForEveryone: { type: Boolean, default: false },
+    deletedAt: { type: Date, default: null },
+    deletedForUsers: [
+      { type: Schema.Types.ObjectId, ref: "Employee" },
+    ],
+
     // NEW: Comments system
     comments: [CommentSchema],
     commentCount: {
