@@ -55,7 +55,7 @@ const ClientInfoSchema = new Schema(
     supervision: {
       type: String,
       enum: ["direct", "needs_approval"],
-      default: "direct",
+      default: "needs_approval",
     },
 
     supervisedBy: [
