@@ -1,5 +1,6 @@
 const Employee = require("../models/Employees");
 const Salaries = require("../models/Salaries");
+const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const SalaryStructure = require("../models/SalaryStructure");
 const { decrypt, encrypt } = require("../utils/encryption");
 
@@ -142,6 +143,7 @@ exports.getEmployeeSalaryDetails = async (req, res) => {
             data: {
                 employee,
                 salary: decryptedSalary,
+                encryptedGrossSalary: salary.grossSalary,
             },
         });
     } catch (err) {
@@ -219,6 +221,37 @@ exports.promoteEmployee = async (req, res) => {
                 month: (new Date().getMonth() + 1).toString(),
                 year: new Date().getFullYear().toString(),
             });
+        } else {
+            // --- SALARY REVISION HISTORY ---
+            // Save existing salary record to history before promotion updates it
+            try {
+                await SalaryRevisionHistory.create({
+                    owner: salary.owner,
+                    employee: salary.employee,
+                    designation: employee.designation, // captured before promotion
+                    basic: salary.basic,
+                    dearnessAllowance: salary.dearnessAllowance,
+                    houseRentAllowance: salary.houseRentAllowance,
+                    conveyanceAllowance: salary.conveyanceAllowance,
+                    medicalAllowance: salary.medicalAllowance,
+                    utilityAllowance: salary.utilityAllowance,
+                    overtimeCompensation: salary.overtimeCompensation,
+                    dislocationAllowance: salary.dislocationAllowance,
+                    leaveEncashment: salary.leaveEncashment,
+                    bonus: salary.bonus,
+                    arrears: salary.arrears,
+                    autoAllowance: salary.autoAllowance,
+                    incentive: salary.incentive,
+                    fuelAllowance: salary.fuelAllowance,
+                    othersAllowances: salary.othersAllowances,
+                    grossSalary: salary.grossSalary,
+                    taxDeduction: salary.taxDeduction,
+                    netPayable: salary.netPayable,
+                    revisionDate: new Date()
+                });
+            } catch (historyErr) {
+                console.error("Failed to save salary history during promotion:", historyErr);
+            }
         }
 
         // Calculate new gross salary with increment
@@ -447,6 +480,36 @@ exports.bulkPromoteEmployees = async (req, res) => {
                         month: (new Date().getMonth() + 1).toString(),
                         year: new Date().getFullYear().toString(),
                     });
+                } else {
+                    // --- SALARY REVISION HISTORY ---
+                    try {
+                        await SalaryRevisionHistory.create({
+                            owner: salary.owner,
+                            employee: salary.employee,
+                            designation: employee.designation,
+                            basic: salary.basic,
+                            dearnessAllowance: salary.dearnessAllowance,
+                            houseRentAllowance: salary.houseRentAllowance,
+                            conveyanceAllowance: salary.conveyanceAllowance,
+                            medicalAllowance: salary.medicalAllowance,
+                            utilityAllowance: salary.utilityAllowance,
+                            overtimeCompensation: salary.overtimeCompensation,
+                            dislocationAllowance: salary.dislocationAllowance,
+                            leaveEncashment: salary.leaveEncashment,
+                            bonus: salary.bonus,
+                            arrears: salary.arrears,
+                            autoAllowance: salary.autoAllowance,
+                            incentive: salary.incentive,
+                            fuelAllowance: salary.fuelAllowance,
+                            othersAllowances: salary.othersAllowances,
+                            grossSalary: salary.grossSalary,
+                            taxDeduction: salary.taxDeduction,
+                            netPayable: salary.netPayable,
+                            revisionDate: new Date()
+                        });
+                    } catch (hErr) {
+                        console.error("Bulk history error:", hErr);
+                    }
                 }
 
                 // Calculate new gross salary with increment

@@ -1,5 +1,6 @@
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/Salaries");
+const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
 const { encrypt, decrypt } = require("../utils/encryption");
@@ -367,8 +368,10 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     res.status(200).json({
       employee: employeeObj,
       salarySlip: decryptedSalarySlip,
+      encryptedSalarySlip: salarySlip ? salarySlip.toObject() : null,
       shifts,
     });
+
   } catch (err) {
     console.error("Error in getEmployeeAndSalarySlip:", err);
     res
@@ -506,6 +509,55 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     let taxCalculationResult = null;
 
     if (salarySlipData && Object.keys(salarySlipData).length > 0) {
+      // --- SALARY REVISION HISTORY ---
+      // If any compensation fields are being updated, save the current record to history
+      let hasActualSalaryChange = false;
+      const salaryFieldsToCheck = [...COMP_FIELDS];
+
+      if (existingSalarySlip) {
+        for (const field of salaryFieldsToCheck) {
+          if (field in salarySlipData) {
+            const newVal = safeNumber(salarySlipData[field], 0);
+            const oldVal = await readEncNumberAsync(existingSalarySlip[field]);
+            // If the values are different (ignoring minor precision issues), it's a change
+            if (Math.abs(newVal - oldVal) >= 0.01) {
+              hasActualSalaryChange = true;
+              break;
+            }
+          }
+        }
+      }
+
+      if (hasActualSalaryChange && existingSalarySlip) {
+        try {
+          await SalaryRevisionHistory.create({
+            owner: existingSalarySlip.owner,
+            employee: existingSalarySlip.employee,
+            designation: existingEmployee.designation, // captured before update
+            basic: existingSalarySlip.basic,
+            dearnessAllowance: existingSalarySlip.dearnessAllowance,
+            houseRentAllowance: existingSalarySlip.houseRentAllowance,
+            conveyanceAllowance: existingSalarySlip.conveyanceAllowance,
+            medicalAllowance: existingSalarySlip.medicalAllowance,
+            utilityAllowance: existingSalarySlip.utilityAllowance,
+            overtimeCompensation: existingSalarySlip.overtimeCompensation,
+            dislocationAllowance: existingSalarySlip.dislocationAllowance,
+            leaveEncashment: existingSalarySlip.leaveEncashment,
+            bonus: existingSalarySlip.bonus,
+            arrears: existingSalarySlip.arrears,
+            autoAllowance: existingSalarySlip.autoAllowance,
+            incentive: existingSalarySlip.incentive,
+            fuelAllowance: existingSalarySlip.fuelAllowance,
+            othersAllowances: existingSalarySlip.othersAllowances,
+            grossSalary: existingSalarySlip.grossSalary,
+            taxDeduction: existingSalarySlip.taxDeduction,
+            netPayable: existingSalarySlip.netPayable,
+          });
+        } catch (historyErr) {
+          console.error("Failed to save salary history:", historyErr);
+        }
+      }
+
       const slipSet = {};
 
       const nonCompKeys = [
@@ -592,6 +644,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     res.status(200).json({
       employee: updatedEmployee,
       salarySlip: decryptedSalarySlip,
+      encryptedSalarySlip: updatedSalarySlip ? updatedSalarySlip.toObject() : null,
       taxCalculation: taxCalculationResult
         ? {
           monthlyTax: taxCalculationResult.monthlyTax,
@@ -604,6 +657,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       message:
         "Employee and salary slip updated successfully with auto tax calculation.",
     });
+
   } catch (err) {
     console.error("Error in updateEmployeeAndSalarySlip:", err);
     res
@@ -795,10 +849,23 @@ exports.resendCompleteProfileLink = async (req, res) => {
       message: "Complete-profile email resent.",
     });
   } catch (err) {
-    f;
     console.error("resendCompleteProfileLink error:", err);
     return res
       .status(500)
       .json({ message: err.message || "Failed to resend profile email" });
+  }
+};
+
+// ---------------------- Get Salary Revision History ---------------------- */
+exports.getSalaryHistory = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const history = await SalaryRevisionHistory.find({ employee: id }).sort({ revisionDate: -1 });
+    res.json({
+      status: "success",
+      data: history
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 };
