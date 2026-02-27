@@ -6,15 +6,8 @@ const AssignmentMessage = require("../models/AssignmentMessage");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isManagerLike = (role) => {
-  const r = String(role || "")
-    .trim()
-    .toLowerCase();
-  return (
-    r === "manager" ||
-    r === "team lead" ||
-    r === "team_lead" ||
-    r === "teamlead"
-  );
+  const r = String(role || "").toLowerCase();
+  return /\bmanager\b/.test(r) || /team\s*lead/.test(r);
 };
 
 exports.getRoster = async (req, res) => {
@@ -31,16 +24,28 @@ exports.getRoster = async (req, res) => {
     const isTeamLead = role === "team lead" || role === "team_lead";
     const isManager = role === "manager";
 
-    // 🔥 HIERARCHY-BASED: Check if current user is a senior in the hierarchy
+    const pathRegex = new RegExp(`(^|\\.)${me._id}(\\.|$)`);
     const myJuniorsLinks = await EmployeeHierarchy.find({
       owner: me.owner,
-      senior: me._id
+      path: pathRegex
     }).select("junior supervisionEnabled").lean();
-    const juniorIds = myJuniorsLinks.map(link => String(link.junior));
+
+    // gather unique junior ids and supervision flags from hierarchy
+    const juniorIdsFromHierarchy = myJuniorsLinks.map(link => String(link.junior));
     const juniorMap = new Map();
     myJuniorsLinks.forEach(link => {
       juniorMap.set(String(link.junior), link.supervisionEnabled);
     });
+
+    // also include any employees whose `supervisor` field is me (direct reports)
+    const directJuniors = await Employee.find({
+      owner: me.owner,
+      supervisor: me._id,
+    }).select("_id").lean();
+    const directIds = directJuniors.map(e => String(e._id));
+
+    const juniorIdsSet = new Set([...juniorIdsFromHierarchy, ...directIds]);
+    const juniorIds = [...juniorIdsSet];
     const isSenior = juniorIds.length > 0;
 
     const canSeeManagementTabs = isManager || isTeamLead || isSenior;
@@ -96,6 +101,49 @@ exports.getRoster = async (req, res) => {
       .populate("assignedTo", "_id name companyEmail role")
       .populate("owner", "_id name companyEmail")
       .sort({ isActive: -1, createdAt: -1 });
+
+    // **auto-apply supervision marks based on hierarchy and self-assignments**
+    // Add the current user for clients they should supervise even if the DB
+    // hasn't been updated yet.  The two triggers are:
+    // 1. assigned to one of our juniors with an active supervision flag (from
+    //    juniorMap)
+    // 2. assigned to ourselves (self-supervision)
+    clients.forEach(client => {
+      if (!client.supervisedBy) client.supervisedBy = [];
+      const assignedIds = (client.assignedTo || []).map(a => String(a._id));
+      const meIdStr = String(me._id);
+
+      // managers/team leads automatically supervise everything returned
+      const auto = isManager || isTeamLead;
+      const superviseJunior = assignedIds.some(id => juniorIds.includes(id));
+      const superviseSelf = assignedIds.includes(meIdStr);
+      if (auto || superviseJunior || superviseSelf) {
+        if (!client.supervisedBy.some(sid => String(sid._id || sid) === meIdStr)) {
+          client.supervisedBy.push(me._id);
+          client.supervision = "needs_approval";
+        }
+      }
+    });
+
+    // persist any added supervision back to the database so that subsequent
+    // requests (or other services) see the updated state without relying on
+    // the login sync job.
+    try {
+      const meObjId = new mongoose.Types.ObjectId(me._id);
+      const juniorObjIds = juniorIds.map(id => new mongoose.Types.ObjectId(id));
+      await ClientInfo.updateMany(
+        {
+          owner: me.owner,
+          assignedTo: { $in: [...juniorObjIds, meObjId] }
+        },
+        {
+          $addToSet: { supervisedBy: meObjId },
+          $set: { supervision: "needs_approval" }
+        }
+      );
+    } catch (dbErr) {
+      console.error("getRoster supervision persistence error:", dbErr);
+    }
 
     // Add readBy tracking for employees
     const clientsWithReadStatus = clients.map(client => {

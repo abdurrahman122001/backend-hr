@@ -4,8 +4,9 @@ const Employee = require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isManagerLike = (role) => {
-  const r = String(role || "").trim().toLowerCase();
-  return r === "manager" || r === "team lead" || r === "team_lead" || r === "teamlead";
+  const r = String(role || "").toLowerCase();
+  // treat any role string containing manager or team lead as managerial
+  return /\bmanager\b/.test(r) || /team\s*lead/.test(r);
 };
 
 exports.createClientInfo = async (req, res) => {
@@ -726,6 +727,11 @@ exports.updateClientSupervision = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
+    // Managers should not manually toggle supervision via the panel
+    if (isManagerLike(me.role)) {
+      return res.status(403).json({ error: "Managers cannot modify supervision" });
+    }
+
     const { id } = req.params; // client id
     const { supervision } = req.body;
 
@@ -738,13 +744,33 @@ exports.updateClientSupervision = async (req, res) => {
     if (!client) return res.status(404).json({ error: "Client not found" });
 
     const assignedIds = client.assignedTo?.map(emp => emp._id) || [];
-    const isSeniorToAny = await EmployeeHierarchy.exists({
-      owner: me.owner,
-      senior: me._id,
-      junior: { $in: assignedIds }
-    });
 
-    if (!isManagerLike(me.role) && !isSeniorToAny) {
+    // determine if user is authorized to change supervision on this client
+    let authorized = false;
+
+    // managers and team leads always have permission
+    if (isManagerLike(me.role)) {
+      authorized = true;
+    }
+
+    // if they are already supervising the client (self or via prior toggle)
+    const meIdStr = String(me._id);
+    if (!authorized && client.supervisedBy?.some(id => String(id._id || id) === meIdStr)) {
+      authorized = true;
+    }
+
+    // check hierarchical relationship (any descendant)
+    if (!authorized && assignedIds.length) {
+      const pathRegex = new RegExp(`(^|\\.)${me._id}(\\.|$)`);
+      const hasRelation = await EmployeeHierarchy.exists({
+        owner: me.owner,
+        path: pathRegex,
+        junior: { $in: assignedIds }
+      });
+      if (hasRelation) authorized = true;
+    }
+
+    if (!authorized) {
       return res.status(403).json({ error: "Unauthorized: You don't supervise anyone assigned to this client" });
     }
 
@@ -792,6 +818,11 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me || !me.owner) {
       return res.status(403).json({ error: "Access denied" });
+    }
+
+    // managers should not flip batch supervision either
+    if (isManagerLike(me.role)) {
+      return res.status(403).json({ error: "Managers cannot modify supervision" });
     }
 
     const { employeeId } = req.params;

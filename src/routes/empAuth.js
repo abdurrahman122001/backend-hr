@@ -6,6 +6,8 @@ const Employee = require("../models/Employees");
 const EmployeeSession = require("../models/EmployeeSession");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
+const ClientInfo = require("../models/ClientInfo");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
 
 const router = express.Router();
@@ -84,6 +86,110 @@ async function sendMail({ to, subject, text, html }) {
   return transporter.sendMail({ from, to, subject, text, html });
 }
 
+/**
+ * Automatically ensures supervision for relevant clients.
+ * 1. Current user supervises their juniors' clients.
+ * 2. Seniors supervise current user's clients.
+ */
+async function syncSupervision(employeeId, ownerId) {
+  try {
+    const meId = employeeId;
+
+    // if the user is a manager/team lead they automatically supervise every
+    // client in the org; perform this before any other logic and then return.
+    const meEmp = await Employee.findById(meId).select("role").lean();
+    const roleStr = (meEmp?.role || "").toLowerCase();
+    const isManager = roleStr === "manager";
+    const isTeamLead = roleStr === "team lead" || roleStr === "team_lead";
+    if (isManager || isTeamLead) {
+      await ClientInfo.updateMany(
+        { owner: ownerId },
+        {
+          $addToSet: { supervisedBy: meId },
+          $set: { supervision: "needs_approval" }
+        }
+      );
+      console.log(`[Supervision Sync] ${meId} is manager/teamlead; supervising all clients`);
+      return;
+    }
+
+    // compute regex that matches any hierarchy link whose path contains meId
+    const pathRegex = new RegExp(`(^|\\.)${meId}(\\.|$)`);
+
+    // Part A1: Always supervise any clients assigned to *me* personally.
+    // This makes the global "supervise all assigned clients" checkbox display
+    // correctly on initial login even if the user has never toggled anything.
+    await ClientInfo.updateMany(
+      { owner: ownerId, assignedTo: meId },
+      {
+        $addToSet: { supervisedBy: meId },
+        $set: { supervision: "needs_approval" }
+      }
+    );
+
+    // Part A2: Me as senior → supervise clients of any descendant junior where
+    // the link itself has supervisionEnabled=true.  We intentionally look at all
+    // levels of the tree so senior users automatically gain control over every
+    // subordinate's clients without having to toggle each intermediate branch.
+    // grab all descendant links; seniors should supervise every client
+    // in their subtree regardless of individual link flags
+    const myJuniorsLinks = await EmployeeHierarchy.find({
+      owner: ownerId,
+      path: pathRegex
+    }).select("junior");
+
+    // collect ids from hierarchy
+    let juniorIds = [...new Set(myJuniorsLinks.map(h => String(h.junior)))];
+
+    // also pull direct reports from employees collection in case hierarchy isn't populated
+    const directJuniors = await Employee.find({ owner: ownerId, supervisor: meId }).select("_id").lean();
+    const directIds = directJuniors.map(e => String(e._id));
+    juniorIds = [...new Set([...juniorIds, ...directIds])];
+
+    if (juniorIds.length) {
+      const juniorObjIds = juniorIds.map(id => new mongoose.Types.ObjectId(id));
+      await ClientInfo.updateMany(
+        { owner: ownerId, assignedTo: { $in: juniorObjIds } },
+        {
+          $addToSet: { supervisedBy: meId },
+          $set: { supervision: "needs_approval" }
+        }
+      );
+      console.log(
+        `[Supervision Sync] Added me (${meId}) as supervisor for clients of juniors: ${juniorIds}`
+      );
+    }
+
+    // Part B: My seniors (possibly multiple levels up) should supervise any
+    // clients assigned to me.  We use a similar regex to grab all ancestor
+    // links -- their senior field yields the supervisor ids.
+    // only include ancestors for which supervisionEnabled flag is set
+    const mySeniorLinks = await EmployeeHierarchy.find({
+      owner: ownerId,
+      path: pathRegex,
+      supervisionEnabled: true
+    }).select("senior");
+
+    if (mySeniorLinks.length > 0) {
+      const seniorIds = [...new Set(mySeniorLinks.map(h => String(h.senior)))];
+      if (seniorIds.length) {
+        await ClientInfo.updateMany(
+          { owner: ownerId, assignedTo: meId },
+          {
+            $addToSet: { supervisedBy: { $each: seniorIds } },
+            $set: { supervision: "needs_approval" }
+          }
+        );
+        console.log(
+          `[Supervision Sync] Added seniors (${seniorIds}) for my (${meId}) clients`
+        );
+      }
+    }
+  } catch (err) {
+    console.error("[Supervision Sync Error]", err);
+  }
+}
+
 const codes = new Map();
 
 router.post("/login", async (req, res) => {
@@ -95,10 +201,10 @@ router.post("/login", async (req, res) => {
     const hours = nowKarachi.hours();
     const minutes = nowKarachi.minutes();
     const currentTime = hours * 60 + minutes;
-    
+
     // Get date in Karachi timezone
     const todayKarachi = getDateOnly(nowKarachi);
-    
+
     // ⚠️ TIME RESTRICTION: No login between 12 AM - 8 AM Karachi time
     const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
@@ -142,6 +248,9 @@ router.post("/login", async (req, res) => {
         JWT_SECRET,
         { expiresIn: TOKEN_EXPIRY_SECONDS }
       );
+
+      // even during restricted hours we still want supervision metadata up-to-date
+      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (restricted)", e));
 
       return res.json({
         message: "Login successful (Restricted hours: 12 AM - 8 AM Karachi time. No attendance recorded)",
@@ -232,6 +341,9 @@ router.post("/login", async (req, res) => {
         { expiresIn: TOKEN_EXPIRY_SECONDS }
       );
 
+      // 🔥 Auto-enable supervision on login (trusted device)
+      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (trusted)", e));
+
       return res.json({
         message: existingSession ?
           "Login successful (session already exists)." :
@@ -262,6 +374,11 @@ router.post("/login", async (req, res) => {
     const tempToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
       expiresIn: "10m",
     });
+
+    // 🔥 Also trigger for non-trusted (or wait until confirmed?) 
+    // Usually better after confirmation, but the user said "when token generated"
+    // Sync supervision now so clients are up-to-date as soon as they see the app.
+    await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (untrusted)", e));
 
     const loginIp =
       req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
@@ -368,6 +485,9 @@ router.post("/confirm-code", async (req, res) => {
       { expiresIn: TOKEN_EXPIRY_SECONDS }
     );
 
+    // 🔥 Auto-enable supervision on code confirmation
+    await syncSupervision(emp._id, emp.owner);
+
     // Get Karachi time for session logging
     const nowKarachi = getKarachiTime();
     const loginTimeUTC = nowKarachi.utc().toDate();
@@ -411,7 +531,7 @@ router.post("/logout", requireAuth, async (req, res) => {
     const logoutHour = nowKarachi.hours();
     const logoutMinute = nowKarachi.minutes();
     const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
-    
+
     const halfDayLogoutThreshold = HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60; // 9:00 PM Karachi time
 
     const session = await EmployeeSession.findOne({
@@ -477,17 +597,17 @@ router.get("/sessions", requireAuth, async (req, res) => {
     })
       .sort({ loginTime: -1 })
       .limit(30);
-    
+
     // Convert times to Karachi timezone for display
     const formattedSessions = sessions.map(session => ({
       ...session.toObject(),
       loginTimeLocal: moment(session.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss"),
-      logoutTimeLocal: session.logoutTime ? 
+      logoutTimeLocal: session.logoutTime ?
         moment(session.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
       actualLoginTime: session.actualLoginTime,
       actualLogoutTime: session.actualLogoutTime,
     }));
-    
+
     res.json({ sessions: formattedSessions });
   } catch (err) {
     console.error("Fetch sessions error:", err);
@@ -503,9 +623,9 @@ router.get("/all-sessions", async (req, res) => {
 
     const formatted = sessions.map((s) => {
       const loginTimeLocal = moment(s.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss");
-      const logoutTimeLocal = s.logoutTime ? 
+      const logoutTimeLocal = s.logoutTime ?
         moment(s.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null;
-      
+
       return {
         id: s._id,
         employeeName: s.employeeId?.name || "Unknown",
