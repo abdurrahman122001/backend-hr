@@ -11,28 +11,29 @@ exports.createPenalty = async (req, res) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // DETERMINE who is reporting
-    let reportedBy = null;
-    if (!isAnonymous) {
-      // For employees, use employeeId
-      if (req.user.isEmployee) {
-        reportedBy = req.user.employeeId;
-      }
-      // For admin users, check if they have a linked employee
-      else if (req.user.isAdmin && req.user.employeeInfo) {
-        reportedBy = req.user.employeeInfo.employeeId;
-      }
+    // DETERMINE who is reporting and if it should be auto-approved
+    let reportedBy = req.user.employeeId || null;
+    let status = "pending";
+
+    const adminRoles = ["admin", "super-admin", "owner"];
+    const isPrivileged = adminRoles.includes(req.user.role) || req.user.permissions?.canApprovePenalties;
+
+    if (isPrivileged) {
+      status = "approved";
     }
 
-    const penalty = await Penalty.create({
-      owner: req.user._id,
+    const penaltyData = {
+      owner: req.user.owner || req.user._id,
       employee,
       severity,
       amount,
       reason,
       isAnonymous: !!isAnonymous,
-      reportedBy: reportedBy, // Use the determined value
-    });
+      reportedBy: reportedBy,
+      status: status
+    };
+
+    const penalty = await Penalty.create(penaltyData);
 
     const populated = await penalty.populate([
       { path: "employee", select: "name department" },
@@ -52,7 +53,8 @@ exports.createPenalty = async (req, res) => {
  */
 exports.getAllPenalties = async (req, res) => {
   try {
-    const penalties = await Penalty.find({ owner: req.user._id })
+    const ownerId = req.user.owner || req.user._id;
+    const penalties = await Penalty.find({ owner: ownerId })
       .populate("employee", "name department")
       .populate("reportedBy", "name")
       .sort({ createdAt: -1 });
@@ -68,8 +70,9 @@ exports.getAllPenalties = async (req, res) => {
  */
 exports.getEmployeePenalties = async (req, res) => {
   try {
+    const ownerId = req.user.owner || req.user._id;
     const penalties = await Penalty.find({
-      owner: req.user._id,
+      owner: ownerId,
       employee: req.params.employeeId,
     })
       .populate("reportedBy", "name")
@@ -86,8 +89,9 @@ exports.getEmployeePenalties = async (req, res) => {
  */
 exports.updatePenalty = async (req, res) => {
   try {
+    const ownerId = req.user.owner || req.user._id;
     const penalty = await Penalty.findOneAndUpdate(
-      { _id: req.params.id, owner: req.user._id },
+      { _id: req.params.id, owner: ownerId },
       req.body,
       { new: true }
     )
@@ -109,17 +113,36 @@ exports.updatePenalty = async (req, res) => {
  */
 exports.deletePenalty = async (req, res) => {
   try {
+    const ownerId = req.user.owner || req.user._id;
+
     const penalty = await Penalty.findOneAndDelete({
       _id: req.params.id,
-      owner: req.user._id,
+      owner: ownerId,
     });
 
     if (!penalty) {
       return res.status(404).json({ message: "Penalty not found" });
     }
 
-    res.json({ success: true, message: "Penalty deleted" });
+    // IF this was an auto-generated penalty from a warning threshold,
+    // we should consider marking those warnings back as active.
+    if (penalty.warningGenerated && penalty.warningConfig && penalty.employee) {
+      await require("../models/EmployeeWarning").updateMany(
+        {
+          owner: ownerId,
+          employee: penalty.employee,
+          warning: penalty.warningConfig,
+          status: "resolved",
+          // Only revert if they were resolved around the same time or before penalty creation
+          createdAt: { $lte: penalty.createdAt }
+        },
+        { status: "active" }
+      );
+    }
+
+    res.json({ success: true, message: "Penalty deleted successfully" });
   } catch (error) {
+    console.error("deletePenalty error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -129,14 +152,14 @@ exports.deletePenalty = async (req, res) => {
  */
 exports.getPenaltyStats = async (req, res) => {
   try {
-    const owner = req.user._id;
+    const ownerId = req.user.owner || req.user._id;
 
     const [totalPenalties, pending, approved, employeesAffected] =
       await Promise.all([
-        Penalty.countDocuments({ owner }),
-        Penalty.countDocuments({ owner, status: "pending" }),
-        Penalty.countDocuments({ owner, status: "approved" }),
-        Penalty.distinct("employee", { owner }).then((arr) => arr.length),
+        Penalty.countDocuments({ owner: ownerId }),
+        Penalty.countDocuments({ owner: ownerId, status: "pending" }),
+        Penalty.countDocuments({ owner: ownerId, status: "approved" }),
+        Penalty.distinct("employee", { owner: ownerId }).then((arr) => arr.length),
       ]);
 
     res.json({
@@ -155,15 +178,22 @@ exports.getPenaltyStats = async (req, res) => {
 
 exports.getMyPenalties = async (req, res) => {
   try {
-    // empAuth attaches employee here
-    if (!req.employee || !req.employee._id) {
+    // Support both unifiedAuth (req.user with isEmployee flag) and legacy empAuth (req.employee)
+    let employeeId, ownerId;
+
+    if (req.employee && req.employee._id) {
+      // Legacy empAuth middleware
+      employeeId = req.employee._id;
+      ownerId = req.employee.owner;
+    } else if (req.user && req.user.isEmployee && req.user.employeeId) {
+      // unifiedAuth middleware for employee tokens
+      employeeId = req.user.employeeId;
+      ownerId = req.user.owner || req.user._id;
+    } else {
       return res.status(401).json({
         message: "Unauthorized: employee context missing",
       });
     }
-
-    const employeeId = req.employee._id;
-    const ownerId = req.employee.owner;
 
     const penalties = await Penalty.find({
       employee: employeeId,

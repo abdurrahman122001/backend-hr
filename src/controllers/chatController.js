@@ -4464,24 +4464,26 @@ exports.updateMessage = async (req, res) => {
     // Emit socket event for real-time update
     const io = req.app.get("io");
     if (io) {
-      // Determine room based on conversation or space
-      let room;
+      // Determine rooms to broadcast to
+      const rooms = [];
+      if (message.space) {
+        const spaceId = message.space._id ? message.space._id.toString() : message.space.toString();
+        rooms.push(`space_${spaceId}`);
+      }
       if (message.conversation) {
-        room = `conversation_${message.conversation._id}`;
-      } else if (message.space) {
-        room = `space_${message.space._id}`;
+        const convId = message.conversation._id ? message.conversation._id.toString() : message.conversation.toString();
+        rooms.push(`conversation_${convId}`);
       }
 
-      if (room) {
+      rooms.forEach(room => {
         io.to(room).emit("message_updated", {
-          messageId: message._id,
+          messageId: message._id.toString(),
           message: message,
-          updatedBy: userId,
+          updatedBy: userId.toString(),
           updatedAt: new Date(),
         });
-
-        console.log(`✅ Message update broadcasted to ${room}`);
-      }
+        console.log(`✅ Message update broadcasted to room: ${room}`);
+      });
     }
 
     res.status(200).json({
@@ -4552,13 +4554,21 @@ exports.deleteSingleMessage = async (req, res) => {
     // Broadcast deletion event via socket.io
     const io = req.app.get("io");
     if (io) {
-      const room = message.space
-        ? `space_${message.space._id}`
-        : `conversation_${message.conversation._id}`;
-      io.to(room).emit("message_deleted", {
-        messageId,
-        deletedBy: userId,
-        deletedAt: new Date(),
+      const rooms = [];
+      if (message.space) {
+        rooms.push(`space_${message.space._id.toString()}`);
+      }
+      if (message.conversation) {
+        rooms.push(`conversation_${message.conversation._id.toString()}`);
+      }
+
+      rooms.forEach((room) => {
+        io.to(room).emit("message_deleted", {
+          messageId: messageId.toString(),
+          deletedBy: userId.toString(),
+          deletedAt: new Date(),
+        });
+        console.log(`✅ Message deletion broadcasted to room: ${room}`);
       });
     }
 

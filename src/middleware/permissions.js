@@ -33,8 +33,9 @@ const checkPermission = (permissionName) => {
       let employee = null;
 
       if (req.user.isEmployee) {
-        // Already an employee, use their ID
-        employee = await Employee.findById(req.user._id).select(
+        // Use employeeId if available (from unifiedAuth), otherwise fallback to _id
+        const targetId = req.user.employeeId || req.user._id;
+        employee = await Employee.findById(targetId).select(
           "permissions role"
         );
       } else if (req.user.employeeInfo?.employeeId) {
@@ -88,12 +89,12 @@ const checkPermission = (permissionName) => {
         },
         employee: employee
           ? {
-              id: employee._id,
-              role: employee.role,
-              hasPermission: employee.permissions
-                ? employee.permissions[permissionName]
-                : false,
-            }
+            id: employee._id,
+            role: employee.role,
+            hasPermission: employee.permissions
+              ? employee.permissions[permissionName]
+              : false,
+          }
           : null,
       });
     } catch (error) {
@@ -140,7 +141,10 @@ const checkPermissions = (permissionNames) => {
 
       // Check 3: Get employee record
       const employee = await Employee.findOne({
-        $or: [{ userAccount: req.user._id }, { _id: req.user.employeeId }],
+        $or: [
+          { userAccount: req.user._id },
+          { _id: req.user.employeeId }
+        ],
       }).select("permissions role");
 
       if (!employee) {
