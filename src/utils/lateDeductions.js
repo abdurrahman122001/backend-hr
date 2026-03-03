@@ -36,9 +36,9 @@ async function countLateSessionsInPeriod(employeeId, periodStart, periodEnd) {
     const startStr = periodStart.toISOString().split('T')[0];
     const endStr = periodEnd.toISOString().split('T')[0];
 
-    const lateSessions = await EmployeeSession.countDocuments({
-      employeeId,
-      status: "late",
+    const lateSessions = await Attendance.countDocuments({
+      employee: employeeId,
+      status: "Late",
       date: {
         $gte: startStr,
         $lte: endStr,
@@ -103,11 +103,11 @@ async function processLateDeductionsForPeriod(
     // Get employee info
     const employee = await Employee.findById(employeeId).select("name owner createdBy");
     if (!employee) {
-      return { 
-        processed: false, 
-        lateCount: 0, 
-        leavesDeducted: 0, 
-        message: "Employee not found" 
+      return {
+        processed: false,
+        lateCount: 0,
+        leavesDeducted: 0,
+        message: "Employee not found"
       };
     }
 
@@ -124,11 +124,11 @@ async function processLateDeductionsForPeriod(
 
     if (!payroll) {
       console.log(`[LATE-DEDUCTION] No payroll found for employee ${employeeId}`);
-      return { 
-        processed: false, 
-        lateCount: 0, 
-        leavesDeducted: 0, 
-        message: "Payroll period not found" 
+      return {
+        processed: false,
+        lateCount: 0,
+        leavesDeducted: 0,
+        message: "Payroll period not found"
       };
     }
 
@@ -136,11 +136,11 @@ async function processLateDeductionsForPeriod(
     const alreadyProcessed = await isLateDeductionProcessed(employeeId, periodStart, periodEnd);
     if (alreadyProcessed) {
       console.log(`[LATE-DEDUCTION] Already processed for ${employee.name}`);
-      return { 
-        processed: false, 
-        lateCount: 0, 
-        leavesDeducted: 0, 
-        message: "Late deductions already processed for this period" 
+      return {
+        processed: false,
+        lateCount: 0,
+        leavesDeducted: 0,
+        message: "Late deductions already processed for this period"
       };
     }
 
@@ -149,11 +149,11 @@ async function processLateDeductionsForPeriod(
 
     if (lateCount === 0) {
       console.log(`[LATE-DEDUCTION] [${employee.name}] No late sessions found`);
-      return { 
-        processed: true, 
-        lateCount: 0, 
-        leavesDeducted: 0, 
-        message: "No late sessions to process" 
+      return {
+        processed: true,
+        lateCount: 0,
+        leavesDeducted: 0,
+        message: "No late sessions to process"
       };
     }
 
@@ -162,11 +162,11 @@ async function processLateDeductionsForPeriod(
 
     if (leavesToDeduct === 0) {
       console.log(`[LATE-DEDUCTION] [${employee.name}] ${lateCount} late(s) found but not enough for full day deduction`);
-      return { 
-        processed: true, 
-        lateCount, 
-        leavesDeducted: 0, 
-        message: `${lateCount} late sessions found but need 3 for 1 day deduction` 
+      return {
+        processed: true,
+        lateCount,
+        leavesDeducted: 0,
+        message: `${lateCount} late sessions found but need 3 for 1 day deduction`
       };
     }
 

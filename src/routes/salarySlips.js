@@ -66,10 +66,13 @@ router.get("/", requireAuth, async (req, res) => {
     const currentUserRole = req.user.role?.toLowerCase();
     const baseMatch = {};
 
-    // 🔒 SECURTY SCOPE: Apply filter immediately to SalarySlip collection
-    if (currentUserRole === "super-admin") {
-      baseMatch.owner = new ObjectId(req.user._id);
-    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+    // 🔒 SECURITY SCOPE: Role-based filtering
+    const isAdminOrHR =
+      (currentUserRole && (currentUserRole.includes("admin") || currentUserRole.includes("hr"))) ||
+      (req.user.userRole && (req.user.userRole.includes("admin") || req.user.userRole.includes("hr")));
+
+    if (isAdminOrHR) {
+      // Admins and HR see all slips for their owner (company)
       baseMatch.owner = new ObjectId(req.user.owner);
     } else {
       // Regular employee sees only their own slips
@@ -78,8 +81,9 @@ router.get("/", requireAuth, async (req, res) => {
     }
 
     // Apply optional month/year filters
-    if (month && year) {
-      baseMatch.month = month;
+    if (month && month !== "all" && year && year !== "all") {
+      // Use regex for case-insensitive month matching
+      baseMatch.month = { $regex: new RegExp(`^${month}$`, "i") };
       baseMatch.year = year;
     }
 
@@ -93,7 +97,7 @@ router.get("/", requireAuth, async (req, res) => {
           as: "employee"
         }
       },
-      { $unwind: "$employee" },
+      { $unwind: { path: "$employee", preserveNullAndEmptyArrays: true } },
       { $sort: { createdAt: -1 } },
       { $skip: skip },
       { $limit: limit }

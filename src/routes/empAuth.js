@@ -4,6 +4,7 @@ const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const Employee = require("../models/Employees");
 const Shift = require("../models/Shift");
+const Attendance = require("../models/Attendance");
 const EmployeeSession = require("../models/EmployeeSession");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
@@ -100,6 +101,10 @@ function formatTimeForDisplay(date) {
 
 function formatTimeForStorage(date) {
   return moment(date).tz(TIMEZONE).format("YYYY-MM-DD HH:mm");
+}
+
+function formatTimeOnly(date) {
+  return moment(date).tz(TIMEZONE).format("HH:mm");
 }
 
 function getDateOnly(date) {
@@ -260,7 +265,7 @@ router.post("/login", async (req, res) => {
     const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
     const emp = await Employee.findOne({ companyEmail }).select(
-      "_id companyEmail password role owner name trustedDevices department status rt"
+      "_id companyEmail password role owner name trustedDevices department status rt shifts"
     );
 
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
@@ -319,26 +324,26 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // CHECK FOR EXISTING SESSION TODAY (using Karachi date)
-    const existingSession = await EmployeeSession.findOne({
-      employeeId: emp._id,
+    // CHECK FOR EXISTING ATTENDANCE TODAY (using Karachi date)
+    let existingAttendance = await Attendance.findOne({
+      employee: emp._id,
       date: todayKarachi // Use Karachi date
-    }).sort({ loginTime: -1 });
+    });
 
-    let session;
-    let sessionStatus = "on-time";
+    let attendance;
+    let sessionStatus = "Present";
     let isLoginAfter6PM = false;
 
     // GET EMPLOYEE'S SHIFT AND REPORTING TIME
     const empShift = await getEmployeeShift(emp._id);
     // ✅ PRIORITY: Use Employee.rt field first, then fall back to shift.start
-    const reportingTimeMinutes = emp.rt 
+    const reportingTimeMinutes = emp.rt
       ? timeToMinutes(emp.rt)
-      : (empShift && empShift.start 
-        ? timeToMinutes(empShift.start) 
+      : (empShift && empShift.start
+        ? timeToMinutes(empShift.start)
         : (15 * 60 + 30)); // Default 3:30 PM
-    const shiftEndTimeMinutes = empShift && empShift.end 
-      ? timeToMinutes(empShift.end) 
+    const shiftEndTimeMinutes = empShift && empShift.end
+      ? timeToMinutes(empShift.end)
       : (0 * 60 + 0); // Default midnight
 
     // Store shift info for logging
@@ -348,55 +353,55 @@ router.post("/login", async (req, res) => {
     const shiftStartTimeStr = empShift?.start || "15:30";
     const shiftEndTimeStr = empShift?.end || "00:00";
 
-    // IF NO EXISTING SESSION → CREATE NEW ONE
-    if (!existingSession) {
+    // IF NO EXISTING ATTENDANCE → CREATE NEW ONE
+    if (!existingAttendance) {
       // CALCULATE STATUS BASED ON KARACHI LOGIN TIME AND REPORTING TIME
       const loginTotalMinutes = currentTime;
 
       // Time thresholds in minutes since midnight (Karachi time)
-      const officeStart = reportingTimeMinutes; // From shift reporting time
+      const officeStart = reportingTimeMinutes; // From employee's reporting time
       const gracePeriodEnd = officeStart + GRACE_PERIOD_MINUTES;
       const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60; // 6:00 PM (fixed)
 
-      if (loginTotalMinutes < officeStart) {
-        sessionStatus = "on-time";
-      } else if (loginTotalMinutes <= gracePeriodEnd) {
-        sessionStatus = "on-time";
+      if (loginTotalMinutes <= gracePeriodEnd) {
+        sessionStatus = "Present";
       } else if (loginTotalMinutes < halfDayThreshold) {
-        sessionStatus = "late";
+        sessionStatus = "Late";
       } else {
-        sessionStatus = "half-day";
+        sessionStatus = "Half Day";
         isLoginAfter6PM = true;
       }
 
       // Store times in Karachi timezone
-      const actualLoginTime = formatTimeForStorage(nowKarachi);
+      const actualLoginTime = formatTimeOnly(nowKarachi);
       const loginTimeUTC = nowKarachi.utc().toDate(); // Store UTC for consistent querying
 
       console.log(
         `[LOGIN] [${emp.name}] Status=${sessionStatus}, LoginTime=${actualLoginTime}, ReportingTime=${reportingTimeStr}, ShiftName=${shiftName}`
       );
 
-      // ✅ CREATE NEW SESSION
-      session = await EmployeeSession.create({
-        employeeId: emp._id,
+      // ✅ CREATE NEW ATTENDANCE WITH CHECK-IN TIME
+      attendance = await Attendance.create({
+        employee: emp._id,
+        owner: emp.owner,
+        date: todayKarachi, // Store Karachi date YYYY-MM-DD
+        status: sessionStatus, // Present, Late, Half Day
+        checkIn: actualLoginTime, // Store formatted Karachi login time HH:mm
+        loginTime: loginTimeUTC, // Store UTC for consistent querying
         deviceFingerprint,
-        loginTime: loginTimeUTC, // Store as UTC but calculated from Karachi time
-        date: todayKarachi, // Store Karachi date
         active: true,
-        status: sessionStatus,
-        isLoginAfter6PM: isLoginAfter6PM,
-        actualLoginTime: actualLoginTime, // Store formatted Karachi time
         shiftId: empShift?._id || null,
         shiftName: shiftName,
         shiftStartTime: shiftStartTimeStr,
         shiftEndTime: shiftEndTimeStr,
-        timezone: TIMEZONE // Store timezone for reference
+        timezone: TIMEZONE, // Store timezone for reference
+        isLoginAfter6PM: isLoginAfter6PM,
+        markedByHR: false // System auto-marked
       });
     } else {
-      // ✅ SESSION ALREADY EXISTS
-      session = existingSession;
-      sessionStatus = existingSession.status;
+      // ✅ ATTENDANCE ALREADY EXISTS
+      attendance = existingAttendance;
+      sessionStatus = existingAttendance.status;
     }
 
     // CHECK IF DEVICE IS TRUSTED
@@ -423,8 +428,8 @@ router.post("/login", async (req, res) => {
       await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (trusted)", e));
 
       return res.json({
-        message: existingSession ?
-          "Login successful (session already exists)." :
+        message: existingAttendance ?
+          "Login successful (attendance already marked)." :
           "Login successful (trusted device).",
         token,
         user: {
@@ -435,9 +440,9 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           department: emp.department,
         },
-        sessionId: session._id,
+        attendanceId: attendance._id,
         sessionStatus: sessionStatus,
-        sessionExists: !!existingSession,
+        attendanceExists: !!existingAttendance,
         trusted: true,
         expiresIn: 9 * 60 * 60,
         localLoginTime: formatTimeForDisplay(nowKarachi), // Return local time for display
@@ -478,9 +483,9 @@ router.post("/login", async (req, res) => {
     return res.json({
       message: "Verification code sent to admin email.",
       tempToken,
-      sessionId: session._id,
+      attendanceId: attendance?._id,
       sessionStatus: sessionStatus,
-      sessionExists: !!existingSession,
+      attendanceExists: !!existingAttendance,
       user: {
         id: emp._id,
         name: emp.name,
@@ -567,7 +572,7 @@ router.post("/confirm-code", async (req, res) => {
     const nowKarachi = getKarachiTime();
     const loginTimeUTC = nowKarachi.utc().toDate();
     const todayKarachi = getDateOnly(nowKarachi);
-    const actualLoginTime = formatTimeForStorage(nowKarachi);
+    const actualLoginTime = formatTimeOnly(nowKarachi);
 
     // Get employee's shift for this session
     const empShiftConfirm = await getEmployeeShift(emp._id);
@@ -576,41 +581,51 @@ router.post("/confirm-code", async (req, res) => {
     const shiftEndTimeStrConfirm = empShiftConfirm?.end || "00:00";
 
     // Calculate status based on reporting time
-    const reportingTimeMinutesConfirm = empShiftConfirm && empShiftConfirm.start 
-      ? timeToMinutes(empShiftConfirm.start) 
+    const reportingTimeMinutesConfirm = empShiftConfirm && empShiftConfirm.start
+      ? timeToMinutes(empShiftConfirm.start)
       : (15 * 60 + 0);
-    
+
     const currentHour = nowKarachi.hours();
     const currentMin = nowKarachi.minutes();
     const loginTotalMinutesConfirm = currentHour * 60 + currentMin;
     const gracePeriodEndConfirm = reportingTimeMinutesConfirm + GRACE_PERIOD_MINUTES;
     const halfDayThresholdConfirm = HALF_DAY_THRESHOLD_HOUR * 60;
-    
-    let statusConfirm = "on-time";
+
+    let statusConfirm = "Present";
     let isLoginAfter6PMConfirm = false;
 
-    if (loginTotalMinutesConfirm >= reportingTimeMinutesConfirm && loginTotalMinutesConfirm > gracePeriodEndConfirm && loginTotalMinutesConfirm < halfDayThresholdConfirm) {
-      statusConfirm = "late";
+    if (loginTotalMinutesConfirm > gracePeriodEndConfirm && loginTotalMinutesConfirm < halfDayThresholdConfirm) {
+      statusConfirm = "Late";
     } else if (loginTotalMinutesConfirm >= halfDayThresholdConfirm) {
-      statusConfirm = "half-day";
+      statusConfirm = "Half Day";
       isLoginAfter6PMConfirm = true;
     }
 
-    await EmployeeSession.create({
-      employeeId: emp._id,
-      deviceFingerprint,
-      loginTime: loginTimeUTC,
-      date: todayKarachi,
-      actualLoginTime: actualLoginTime,
-      active: true,
-      status: statusConfirm,
-      isLoginAfter6PM: isLoginAfter6PMConfirm,
-      shiftId: empShiftConfirm?._id || null,
-      shiftName: shiftNameConfirm,
-      shiftStartTime: shiftStartTimeStrConfirm,
-      shiftEndTime: shiftEndTimeStrConfirm,
-      timezone: TIMEZONE
+    // Check for existing attendance to avoid duplicate key error
+    let existingAttendanceConfirm = await Attendance.findOne({
+      employee: emp._id,
+      date: todayKarachi
     });
+
+    if (!existingAttendanceConfirm) {
+      await Attendance.create({
+        employee: emp._id,
+        owner: emp.owner,
+        date: todayKarachi,
+        status: statusConfirm,
+        checkIn: actualLoginTime,
+        loginTime: loginTimeUTC,
+        deviceFingerprint,
+        active: true,
+        isLoginAfter6PM: isLoginAfter6PMConfirm,
+        shiftId: empShiftConfirm?._id || null,
+        shiftName: shiftNameConfirm,
+        shiftStartTime: shiftStartTimeStrConfirm,
+        shiftEndTime: shiftEndTimeStrConfirm,
+        timezone: TIMEZONE,
+        markedByHR: false
+      });
+    }
 
     return res.json({
       message: "Device verified and trusted. Login successful.",
@@ -639,53 +654,70 @@ router.post("/logout", requireAuth, async (req, res) => {
     const logoutHour = nowKarachi.hours();
     const logoutMinute = nowKarachi.minutes();
     const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
+    const todayKarachi = getDateOnly(nowKarachi);
 
     const halfDayLogoutThreshold = HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60; // 9:00 PM Karachi time
 
-    const session = await EmployeeSession.findOne({
-      employeeId: req.employee.id || req.employee._id,
+    // ✅ FIND ATTENDANCE RECORD FOR TODAY (try both active and non-active for robustness)
+    let attendance = await Attendance.findOne({
+      employee: req.employee.id || req.employee._id,
+      date: todayKarachi,
       active: true
     });
 
-    if (!session) {
-      return res.status(400).json({
-        error: "No active session found"
+    if (!attendance) {
+      // Try without active filter to help debugging and recover stale records
+      attendance = await Attendance.findOne({
+        employee: req.employee.id || req.employee._id,
+        date: todayKarachi,
       });
+      if (!attendance) {
+        return res.status(400).json({
+          error: "No attendance record found for today"
+        });
+      }
     }
 
-    let finalStatus = session.status;
+    let finalStatus = attendance.status;
 
-    // If logged out before 9:00 PM Karachi time, change status to half-day
+    // If logged out before 9:00 PM Karachi time, change status to Half Day
     if (logoutTotalMinutes < halfDayLogoutThreshold) {
-      finalStatus = "half-day";
+      finalStatus = "Half Day";
     }
 
     // Calculate total hours worked (convert loginTime from UTC to Karachi for calculation)
-    const loginTimeKarachi = moment(session.loginTime).tz(TIMEZONE);
-    const totalHours = nowKarachi.diff(loginTimeKarachi, 'hours', true);
+    const loginTimeKarachi = attendance.loginTime ? moment(attendance.loginTime).tz(TIMEZONE) : null;
+    const totalHours = loginTimeKarachi ? nowKarachi.diff(loginTimeKarachi, 'hours', true) : 0;
 
-    // Log session info
+    // Log attendance info
     const emp = await Employee.findById(req.employee._id || req.employee.id).select("name").lean();
     console.log(
-      `[LOGOUT] [${emp?.name || 'Unknown'}] Status=${finalStatus}, LoginTime=${session.actualLoginTime}, LogoutTime=${formatTimeForStorage(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}, Shift=${session.shiftName}`
+      `[LOGOUT] [${emp?.name || 'Unknown'}] Status=${finalStatus}, CheckIn=${attendance.checkIn}, CheckOut=${formatTimeOnly(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}, Shift=${attendance.shiftName}`
     );
 
-    // Update the session with Karachi time
+    // Update attendance with check-out time
     const logoutTimeUTC = nowKarachi.utc().toDate();
-    const actualLogoutTime = formatTimeForStorage(nowKarachi);
+    const actualLogoutTime = formatTimeOnly(nowKarachi);
 
-    const updated = await EmployeeSession.findByIdAndUpdate(
-      session._id,
-      {
-        logoutTime: logoutTimeUTC,
-        active: false,
-        status: finalStatus,
-        actualLogoutTime: actualLogoutTime,
-        totalHours: parseFloat(totalHours.toFixed(2)),
-        isAutoLogout: req.body.isAutoLogout || false
-      },
-      { new: true }
-    );
+    let updated = null;
+    try {
+      updated = await Attendance.findByIdAndUpdate(
+        attendance._id,
+        {
+          logoutTime: logoutTimeUTC,
+          checkOut: actualLogoutTime, // ✅ Store formatted Karachi logout time (HH:mm)
+          active: false,
+          status: finalStatus,
+          totalHours: parseFloat(totalHours.toFixed(2)),
+          isAutoLogout: req.body.isAutoLogout || false
+        },
+        { new: true }
+      );
+      console.log("[LOGOUT] Attendance updated:", { id: attendance._id, checkOut: actualLogoutTime, updatedId: updated?._id });
+    } catch (uerr) {
+      console.error("[LOGOUT] Error updating attendance record:", uerr);
+      return res.status(500).json({ error: "Failed to update attendance on logout" });
+    }
 
     // ✅ PROCESS LATE DEDUCTIONS (if last day of payroll period)
     const employeeId = req.employee._id || req.employee.id;
@@ -695,12 +727,12 @@ router.post("/logout", requireAuth, async (req, res) => {
     let lateDeductionResult = null;
     try {
       lateDeductionResult = await processIfLastDayOfPeriod(
-        new Date(updated.date),
+        new Date(todayKarachi),
         ownerId,
         employeeId,
         userId
       );
-      if (lateDeductionResult.processed) {
+      if (lateDeductionResult && lateDeductionResult.processed) {
         console.log(`[LOGOUT] Late deduction processed:`, lateDeductionResult);
       }
     } catch (err) {
@@ -712,8 +744,8 @@ router.post("/logout", requireAuth, async (req, res) => {
       status: "success",
       message: "Logged out successfully",
       logoutTime: formatTimeForDisplay(nowKarachi),
-      sessionStatus: updated.status,
-      totalHours: updated.totalHours,
+      sessionStatus: updated ? updated.status : finalStatus,
+      totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
       lateDeductionResult: lateDeductionResult || null
     });
   } catch (err) {
@@ -765,26 +797,33 @@ router.get("/me", requireAuth, authCtrl.getMe);
 // ---------------------
 router.get("/sessions", requireAuth, async (req, res) => {
   try {
-    const sessions = await EmployeeSession.find({
-      employeeId: req.employee._id,
+    // ✅ FETCH FROM ATTENDANCE INSTEAD OF EMPLOYEE SESSION
+    const attendanceRecords = await Attendance.find({
+      employee: req.employee._id,
     })
-      .sort({ loginTime: -1 })
+      .sort({ date: -1 })
       .limit(30);
 
-    // Convert times to Karachi timezone for display
-    const formattedSessions = sessions.map(session => ({
-      ...session.toObject(),
-      loginTimeLocal: moment(session.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss"),
-      logoutTimeLocal: session.logoutTime ?
-        moment(session.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
-      actualLoginTime: session.actualLoginTime,
-      actualLogoutTime: session.actualLogoutTime,
+    // Convert times to expected format for frontend
+    const formattedSessions = attendanceRecords.map(record => ({
+      ...record.toObject(),
+      date: record.date, // YYYY-MM-DD
+      status: record.status, // on-time, late, half-day, absent, leave
+      actualLoginTime: record.checkIn, // HH:mm format
+      actualLogoutTime: record.checkOut, // HH:mm format
+      loginTime: record.loginTime, // UTC date
+      logoutTime: record.logoutTime, // UTC date
+      totalHours: record.totalHours || 0,
+      active: record.active || false,
+      loginTimeLocal: record.loginTime ? moment(record.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
+      logoutTimeLocal: record.logoutTime ?
+        moment(record.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
     }));
 
     res.json({ sessions: formattedSessions });
   } catch (err) {
-    console.error("Fetch sessions error:", err);
-    res.status(500).json({ error: "Unable to fetch sessions" });
+    console.error("Fetch attendance error:", err);
+    res.status(500).json({ error: "Unable to fetch attendance records" });
   }
 });
 

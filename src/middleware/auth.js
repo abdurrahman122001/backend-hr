@@ -50,6 +50,7 @@ module.exports = async function requireAuth(req, res, next) {
     req.user = {
       _id: user._id,
       role: normalizedRole,
+      userRole: user.role, // Preserve the original user role
       createdBy: user.createdBy,
       owner: finalOwnerId,
       // Add employee info if found
