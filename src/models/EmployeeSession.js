@@ -26,6 +26,7 @@ const EmployeeSessionSchema = new mongoose.Schema(
     },
     isAutoLogout: { type: Boolean, default: false },
     isLoginAfter6PM: { type: Boolean, default: false }, // New field to track login after 6 PM
+    timezone: { type: String, default: "Asia/Karachi" }, // Timezone where session occurred
   },
   { timestamps: true }
 );

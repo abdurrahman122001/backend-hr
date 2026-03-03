@@ -3,12 +3,14 @@ const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const Employee = require("../models/Employees");
+const Shift = require("../models/Shift");
 const EmployeeSession = require("../models/EmployeeSession");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
+const { processIfLastDayOfPeriod } = require("../utils/lateDeductions");
 
 const router = express.Router();
 
@@ -30,13 +32,62 @@ const {
 // Timezone Configuration
 // ---------------------
 const TIMEZONE = "Asia/Karachi";
-const OFFICE_START_HOUR = 15; // 3:00 PM in 24-hour format
-const OFFICE_START_MINUTE = 0;
 const GRACE_PERIOD_MINUTES = 15;
 const HALF_DAY_THRESHOLD_HOUR = 18; // 6:00 PM
 const LOGIN_RESTRICTION_END_HOUR = 8; // 8:00 AM
 const HALF_DAY_LOGOUT_THRESHOLD_HOUR = 21; // 9:00 PM
 const TOKEN_EXPIRY_SECONDS = 9 * 60 * 60; // 9 hours
+
+/**
+ * Convert time string HH:mm to total minutes since midnight
+ */
+function timeToMinutes(timeStr) {
+  if (!timeStr) return null;
+  const [h, m] = String(timeStr).trim().split(":").map(Number);
+  if (isNaN(h) || isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+/**
+ * Get reporting time from shift
+ * Returns minutes since midnight, or fallback value
+ */
+async function getReportingTimeFromShift(employeeId, defaultMinutes = 15 * 60 + 0) {
+  try {
+    const emp = await Employee.findById(employeeId).select("shifts").lean();
+    if (!emp || !emp.shifts || emp.shifts.length === 0) {
+      return defaultMinutes;
+    }
+
+    const shift = await Shift.findById(emp.shifts[0]).select("start").lean();
+    if (!shift || !shift.start) {
+      return defaultMinutes;
+    }
+
+    const reportingTime = timeToMinutes(shift.start);
+    return reportingTime !== null ? reportingTime : defaultMinutes;
+  } catch (err) {
+    console.error("[SHIFT-LOOKUP] Error getting reporting time:", err);
+    return defaultMinutes;
+  }
+}
+
+/**
+ * Get shift details for employee
+ */
+async function getEmployeeShift(employeeId) {
+  try {
+    const emp = await Employee.findById(employeeId).select("shifts").lean();
+    if (!emp || !emp.shifts || emp.shifts.length === 0) {
+      return null;
+    }
+
+    return await Shift.findById(emp.shifts[0]).lean();
+  } catch (err) {
+    console.error("[SHIFT-LOOKUP] Error getting employee shift:", err);
+    return null;
+  }
+}
 
 // Helper function to get current time in Karachi
 function getKarachiTime() {
@@ -209,7 +260,7 @@ router.post("/login", async (req, res) => {
     const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
     const emp = await Employee.findOne({ companyEmail }).select(
-      "_id companyEmail password role owner name trustedDevices department status"
+      "_id companyEmail password role owner name trustedDevices department status rt"
     );
 
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
@@ -278,15 +329,34 @@ router.post("/login", async (req, res) => {
     let sessionStatus = "on-time";
     let isLoginAfter6PM = false;
 
+    // GET EMPLOYEE'S SHIFT AND REPORTING TIME
+    const empShift = await getEmployeeShift(emp._id);
+    // ✅ PRIORITY: Use Employee.rt field first, then fall back to shift.start
+    const reportingTimeMinutes = emp.rt 
+      ? timeToMinutes(emp.rt)
+      : (empShift && empShift.start 
+        ? timeToMinutes(empShift.start) 
+        : (15 * 60 + 30)); // Default 3:30 PM
+    const shiftEndTimeMinutes = empShift && empShift.end 
+      ? timeToMinutes(empShift.end) 
+      : (0 * 60 + 0); // Default midnight
+
+    // Store shift info for logging
+    const shiftName = empShift?.name || "Default Shift";
+    // ✅ Display reporting time from Employee.rt for consistency
+    const reportingTimeStr = emp.rt || (empShift?.start || "15:30");
+    const shiftStartTimeStr = empShift?.start || "15:30";
+    const shiftEndTimeStr = empShift?.end || "00:00";
+
     // IF NO EXISTING SESSION → CREATE NEW ONE
     if (!existingSession) {
-      // CALCULATE STATUS BASED ON KARACHI LOGIN TIME
+      // CALCULATE STATUS BASED ON KARACHI LOGIN TIME AND REPORTING TIME
       const loginTotalMinutes = currentTime;
 
       // Time thresholds in minutes since midnight (Karachi time)
-      const officeStart = OFFICE_START_HOUR * 60 + OFFICE_START_MINUTE; // 3:00 PM
-      const gracePeriodEnd = officeStart + GRACE_PERIOD_MINUTES; // 3:15 PM
-      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60; // 6:00 PM
+      const officeStart = reportingTimeMinutes; // From shift reporting time
+      const gracePeriodEnd = officeStart + GRACE_PERIOD_MINUTES;
+      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60; // 6:00 PM (fixed)
 
       if (loginTotalMinutes < officeStart) {
         sessionStatus = "on-time";
@@ -303,6 +373,10 @@ router.post("/login", async (req, res) => {
       const actualLoginTime = formatTimeForStorage(nowKarachi);
       const loginTimeUTC = nowKarachi.utc().toDate(); // Store UTC for consistent querying
 
+      console.log(
+        `[LOGIN] [${emp.name}] Status=${sessionStatus}, LoginTime=${actualLoginTime}, ReportingTime=${reportingTimeStr}, ShiftName=${shiftName}`
+      );
+
       // ✅ CREATE NEW SESSION
       session = await EmployeeSession.create({
         employeeId: emp._id,
@@ -313,6 +387,10 @@ router.post("/login", async (req, res) => {
         status: sessionStatus,
         isLoginAfter6PM: isLoginAfter6PM,
         actualLoginTime: actualLoginTime, // Store formatted Karachi time
+        shiftId: empShift?._id || null,
+        shiftName: shiftName,
+        shiftStartTime: shiftStartTimeStr,
+        shiftEndTime: shiftEndTimeStr,
         timezone: TIMEZONE // Store timezone for reference
       });
     } else {
@@ -375,9 +453,6 @@ router.post("/login", async (req, res) => {
       expiresIn: "10m",
     });
 
-    // 🔥 Also trigger for non-trusted (or wait until confirmed?) 
-    // Usually better after confirmation, but the user said "when token generated"
-    // Sync supervision now so clients are up-to-date as soon as they see the app.
     await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (untrusted)", e));
 
     const loginIp =
@@ -494,6 +569,33 @@ router.post("/confirm-code", async (req, res) => {
     const todayKarachi = getDateOnly(nowKarachi);
     const actualLoginTime = formatTimeForStorage(nowKarachi);
 
+    // Get employee's shift for this session
+    const empShiftConfirm = await getEmployeeShift(emp._id);
+    const shiftNameConfirm = empShiftConfirm?.name || "Default Shift";
+    const shiftStartTimeStrConfirm = empShiftConfirm?.start || "15:00";
+    const shiftEndTimeStrConfirm = empShiftConfirm?.end || "00:00";
+
+    // Calculate status based on reporting time
+    const reportingTimeMinutesConfirm = empShiftConfirm && empShiftConfirm.start 
+      ? timeToMinutes(empShiftConfirm.start) 
+      : (15 * 60 + 0);
+    
+    const currentHour = nowKarachi.hours();
+    const currentMin = nowKarachi.minutes();
+    const loginTotalMinutesConfirm = currentHour * 60 + currentMin;
+    const gracePeriodEndConfirm = reportingTimeMinutesConfirm + GRACE_PERIOD_MINUTES;
+    const halfDayThresholdConfirm = HALF_DAY_THRESHOLD_HOUR * 60;
+    
+    let statusConfirm = "on-time";
+    let isLoginAfter6PMConfirm = false;
+
+    if (loginTotalMinutesConfirm >= reportingTimeMinutesConfirm && loginTotalMinutesConfirm > gracePeriodEndConfirm && loginTotalMinutesConfirm < halfDayThresholdConfirm) {
+      statusConfirm = "late";
+    } else if (loginTotalMinutesConfirm >= halfDayThresholdConfirm) {
+      statusConfirm = "half-day";
+      isLoginAfter6PMConfirm = true;
+    }
+
     await EmployeeSession.create({
       employeeId: emp._id,
       deviceFingerprint,
@@ -501,6 +603,12 @@ router.post("/confirm-code", async (req, res) => {
       date: todayKarachi,
       actualLoginTime: actualLoginTime,
       active: true,
+      status: statusConfirm,
+      isLoginAfter6PM: isLoginAfter6PMConfirm,
+      shiftId: empShiftConfirm?._id || null,
+      shiftName: shiftNameConfirm,
+      shiftStartTime: shiftStartTimeStrConfirm,
+      shiftEndTime: shiftEndTimeStrConfirm,
       timezone: TIMEZONE
     });
 
@@ -556,6 +664,12 @@ router.post("/logout", requireAuth, async (req, res) => {
     const loginTimeKarachi = moment(session.loginTime).tz(TIMEZONE);
     const totalHours = nowKarachi.diff(loginTimeKarachi, 'hours', true);
 
+    // Log session info
+    const emp = await Employee.findById(req.employee._id || req.employee.id).select("name").lean();
+    console.log(
+      `[LOGOUT] [${emp?.name || 'Unknown'}] Status=${finalStatus}, LoginTime=${session.actualLoginTime}, LogoutTime=${formatTimeForStorage(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}, Shift=${session.shiftName}`
+    );
+
     // Update the session with Karachi time
     const logoutTimeUTC = nowKarachi.utc().toDate();
     const actualLogoutTime = formatTimeForStorage(nowKarachi);
@@ -567,21 +681,80 @@ router.post("/logout", requireAuth, async (req, res) => {
         active: false,
         status: finalStatus,
         actualLogoutTime: actualLogoutTime,
-        totalHours: parseFloat(totalHours.toFixed(2))
+        totalHours: parseFloat(totalHours.toFixed(2)),
+        isAutoLogout: req.body.isAutoLogout || false
       },
       { new: true }
     );
+
+    // ✅ PROCESS LATE DEDUCTIONS (if last day of payroll period)
+    const employeeId = req.employee._id || req.employee.id;
+    const ownerId = req.employee.owner || req.employee.createdBy;
+    const userId = req.user?._id || req.employee._id;
+
+    let lateDeductionResult = null;
+    try {
+      lateDeductionResult = await processIfLastDayOfPeriod(
+        new Date(updated.date),
+        ownerId,
+        employeeId,
+        userId
+      );
+      if (lateDeductionResult.processed) {
+        console.log(`[LOGOUT] Late deduction processed:`, lateDeductionResult);
+      }
+    } catch (err) {
+      console.error("[LOGOUT] Error processing late deductions:", err);
+      // Continue with logout even if late deduction fails
+    }
 
     return res.json({
       status: "success",
       message: "Logged out successfully",
       logoutTime: formatTimeForDisplay(nowKarachi),
       sessionStatus: updated.status,
-      totalHours: updated.totalHours
+      totalHours: updated.totalHours,
+      lateDeductionResult: lateDeductionResult || null
     });
   } catch (err) {
     console.error("Logout error:", err);
     return res.status(500).json({ error: "Server error during logout" });
+  }
+});
+
+router.post("/reactivate-session", requireAuth, async (req, res) => {
+  try {
+    const employeeId = req.employee._id || req.employee.id;
+
+    // Find the most recent session for this employee that was just closed via auto-logout
+    const session = await EmployeeSession.findOne({
+      employeeId,
+      active: false,
+      isAutoLogout: true
+    }).sort({ updatedAt: -1 });
+
+    if (!session) {
+      return res.status(404).json({ error: "No recent auto-logout session to reactivate" });
+    }
+
+    // Only reactivate if it was closed very recently (e.g. the time it takes for a refresh)
+    const diff = Date.now() - new Date(session.updatedAt).getTime();
+    if (diff > 15000) { // 15 seconds should be plenty for any refresh
+      return res.status(400).json({ error: "Reactivation window expired" });
+    }
+
+    // Re-activate
+    session.active = true;
+    session.logoutTime = undefined;
+    session.actualLogoutTime = undefined;
+    session.totalHours = 0;
+    session.isAutoLogout = false;
+    await session.save();
+
+    return res.json({ status: "success", message: "Session reactivated" });
+  } catch (err) {
+    console.error("Reactivation error:", err);
+    return res.status(500).json({ error: "Server error" });
   }
 });
 
