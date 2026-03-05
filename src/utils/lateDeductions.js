@@ -431,10 +431,222 @@ async function processIfLastDayOfPeriod(currentDate, ownerId, employeeId, userId
   );
 }
 
+/**
+ * Apply real-time late deduction if count reaches multiple of 3
+ */
+async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanceDate) {
+  try {
+    const employee = await Employee.findById(employeeId).lean();
+    if (!employee) return;
+
+    // 1. Find payroll period dates for the attendanceDate
+    const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+    const shiftId = employee.shifts?.[0];
+    const payroll = allPayrolls.find(p =>
+      Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+    );
+    if (!payroll) return;
+
+    // Calculate period dates (logic from attendanceController)
+    const anchor = new Date(payroll.payrollPeriodStartDay);
+    let pStart, pEnd;
+    const d = new Date(attendanceDate);
+
+    if (payroll.payrollPeriodType === "monthly") {
+      const anchorDay = anchor.getDate();
+      const thisMonthStart = new Date(d.getFullYear(), d.getMonth(), anchorDay);
+      pStart = d >= thisMonthStart ? thisMonthStart : new Date(d.getFullYear(), d.getMonth() - 1, anchorDay);
+      pEnd = new Date(pStart.getFullYear(), pStart.getMonth() + 1, pStart.getDate());
+      pEnd.setDate(pEnd.getDate() - 1);
+    } else {
+      let length = payroll.payrollPeriodLength || 30; // fallback
+      if (payroll.payrollPeriodType === "weekly") length = 7;
+      const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
+      const cycles = Math.floor(diff / length);
+      pStart = new Date(anchor.getTime() + cycles * length * 80000000); // approximate
+      pStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + cycles * length);
+      pEnd = new Date(pStart);
+      pEnd.setDate(pEnd.getDate() + length - 1);
+    }
+
+    const startStr = pStart.toISOString().slice(0, 10);
+    const endStr = pEnd.toISOString().slice(0, 10);
+
+    // 2. Count Lates in this period (including the one just created)
+    const lateCount = await Attendance.countDocuments({
+      employee: employeeId,
+      status: "Late",
+      date: { $gte: startStr, $lte: endStr }
+    });
+
+    if (lateCount === 0 || lateCount % 3 !== 0) return; // Only process on multiples of 3
+
+    // 3. Find/Create Salary Slip for this period
+    const payrollMonth = pEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYear = String(pEnd.getFullYear());
+
+    let slip = await SalarySlip.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      month: payrollMonth,
+      year: payrollYear
+    });
+
+    if (!slip) {
+      // Minimal slip creation logic
+      slip = await SalarySlip.create({
+        owner: ownerId, employee: employeeId,
+        month: payrollMonth, year: payrollYear,
+        lateDeductionDaysCredited: 0,
+        createdBy: userId
+      });
+    }
+
+    const lateDeductionDays = Math.floor(lateCount / 3);
+    const previouslyCredited = slip.lateDeductionDaysCredited || 0;
+    const newDeductionDays = lateDeductionDays - previouslyCredited;
+
+    if (newDeductionDays <= 0) return;
+
+    // 4. Perform Deduction (Check Balance first)
+    const leaveYear = getLeaveYear(attendanceDate);
+    let balance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
+
+    if (balance) {
+      const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
+      const usedPaid = Number(balance.usedPaid || 0);
+      const entitlementLeft = totalEntitled - usedPaid;
+
+      if (entitlementLeft >= newDeductionDays) {
+        // Use paid leaves
+        balance.usedPaid += newDeductionDays;
+        await LeaveTransaction.create({
+          owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+          year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: newDeductionDays,
+          reason: `Late Deduction (${lateCount} lates)`
+        });
+        console.log(`[LATE-DEDUCT] ${employee.name}: Used ${newDeductionDays} paid leaves`);
+      } else {
+        // Deduct Salary
+        const Salaries = require("../models/Salaries");
+        const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+        if (salaryDoc) {
+          const gross = Number(await decrypt(salaryDoc.basic)) + Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) + Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
+          const perDay = gross / 22;
+          const amount = Math.round(perDay * newDeductionDays);
+
+          let prev = 0;
+          if (slip.lateDeductions) prev = Number(await decrypt(slip.lateDeductions)) || 0;
+          slip.lateDeductions = await encrypt(String(prev + amount));
+          console.log(`[LATE-DEDUCT] ${employee.name}: Deducted ${amount} from salary`);
+        }
+      }
+      slip.lateDeductionDaysCredited = lateDeductionDays;
+      await balance.save();
+      await slip.save();
+    }
+  } catch (err) {
+    console.error("[REALTIME-LATE-DEDUCTION] Error:", err);
+  }
+}
+
+/**
+ * Apply real-time half-day deduction (0.5 leave or salary)
+ */
+async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate) {
+  try {
+    const employee = await Employee.findById(employeeId).lean();
+    if (!employee) return;
+
+    // 1. Find payroll period (to get the right Salary Slip)
+    const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+    const shiftId = employee.shifts?.[0];
+    const payroll = allPayrolls.find(p =>
+      Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+    );
+    if (!payroll) return;
+
+    const anchor = new Date(payroll.payrollPeriodStartDay);
+    const d = new Date(attendanceDate);
+    let pEnd;
+
+    if (payroll.payrollPeriodType === "monthly") {
+      const anchorDay = anchor.getDate();
+      const thisMonthStart = new Date(d.getFullYear(), d.getMonth(), anchorDay);
+      pEnd = new Date(thisMonthStart.getFullYear(), thisMonthStart.getMonth() + 1, thisMonthStart.getDate());
+      if (d < thisMonthStart) pEnd = new Date(thisMonthStart);
+      pEnd.setDate(pEnd.getDate() - 1);
+    } else {
+      let length = payroll.payrollPeriodLength || 30;
+      if (payroll.payrollPeriodType === "weekly") length = 7;
+      const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
+      const cycles = Math.floor(diff / length);
+      pEnd = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + cycles * length + length - 1);
+    }
+
+    const payrollMonth = pEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYear = String(pEnd.getFullYear());
+
+    // 2. Check Leave Balance
+    const leaveYear = getLeaveYear(attendanceDate);
+    let balance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
+
+    if (!balance) return;
+
+    const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
+    const usedPaid = Number(balance.usedPaid || 0);
+    const entitlementLeft = totalEntitled - usedPaid;
+
+    let slip = await SalarySlip.findOne({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear });
+    if (!slip) {
+      slip = await SalarySlip.create({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear, createdBy: userId });
+    }
+
+    if (entitlementLeft >= 0.5) {
+      // Consume 0.5 paid leaves
+      balance.usedPaid += 0.5;
+      await LeaveTransaction.create({
+        owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+        year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: 0.5,
+        reason: "Half Day Login"
+      });
+      await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Paid" } });
+      console.log(`[HALF-DAY] ${employee.name}: Used 0.5 paid leaves`);
+    } else {
+      // Salary Deduction for 0.5 day
+      const Salaries = require("../models/Salaries");
+      const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+      if (salaryDoc) {
+        const gross = Number(await decrypt(salaryDoc.basic)) + (Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) || 0) + (Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0"))) || 0);
+        const perHalfDay = (gross / 22) * 0.5;
+
+        let prev = 0;
+        if (slip.leaveDeductions) prev = Number(await decrypt(slip.leaveDeductions)) || 0;
+        slip.leaveDeductions = await encrypt(String(prev + Math.round(perHalfDay)));
+
+        balance.usedUnpaid = (balance.usedUnpaid || 0) + 0.5;
+        await LeaveTransaction.create({
+          owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+          year: leaveYear, date: new Date(), type: "UNPAID_LEAVE_USED", value: 0.5,
+          reason: "Half Day Login (No leave balance)"
+        });
+      }
+      await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Unpaid" } });
+      console.log(`[HALF-DAY] ${employee.name}: Deducted 0.5 day salary`);
+    }
+    await balance.save();
+    await slip.save();
+  } catch (err) {
+    console.error("[REALTIME-HALF-DAY-DEDUCTION] Error:", err);
+  }
+}
+
 module.exports = {
   countLateSessionsInPeriod,
   isLateDeductionProcessed,
   processLateDeductionsForPeriod,
   processIfLastDayOfPeriod,
   getLeaveYear,
+  applyRealTimeLateDeduction,
+  applyRealTimeHalfDayDeduction,
 };

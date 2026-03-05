@@ -197,21 +197,27 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Salary slip not found." });
     }
 
-    let ownerAllowed = false;
-    const currentUserRole = req.user.role?.toLowerCase();
+    const currentUserRole = req.user.role?.toLowerCase().replace("_", "-");
+    const originalRole = req.user.userRole?.toLowerCase().replace("_", "-");
 
-    if (currentUserRole === "super-admin") {
+    console.log(`[SALARY-UPDATE-DEBUG] ID=${req.params.id}`);
+    console.log(`[SALARY-UPDATE-DEBUG] UserObject:`, JSON.stringify(req.user));
+    console.log(`[SALARY-UPDATE-DEBUG] Roles: req.user.role=${req.user.role}, req.user.userRole=${req.user.userRole}`);
+
+    let ownerAllowed = false;
+
+    // 🔒 RESTRICTION: Only super-admin can update salary slips
+    if (currentUserRole === "super-admin" || originalRole === "super-admin") {
       ownerAllowed = true;
-    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
-      ownerAllowed = String(slip.employee.owner) === String(req.user.owner);
     } else {
-      ownerAllowed = String(slip.employee._id) === String(req.user.employeeId);
+      ownerAllowed = false;
     }
 
     if (!ownerAllowed) {
+      console.log(`[AUTH-DENIED] Role=${currentUserRole}, UserRole=${originalRole}`);
       return res
         .status(403)
-        .json({ status: "error", message: "Not allowed to update this slip." });
+        .json({ status: "error", message: "Only Super-Admin is allowed to update salary slips." });
     }
 
     // Process updates

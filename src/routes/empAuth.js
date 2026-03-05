@@ -11,7 +11,8 @@ const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
-const { processIfLastDayOfPeriod } = require("../utils/lateDeductions");
+const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction } = require("../utils/lateDeductions");
+const { applyRealTimeLogoutBonus } = require("../utils/bonusService");
 
 const router = express.Router();
 
@@ -91,7 +92,12 @@ async function getEmployeeShift(employeeId) {
 }
 
 // Helper function to get current time in Karachi
-function getKarachiTime() {
+function getKarachiTime(dateStr = null) {
+  if (dateStr) {
+    // If a date string is provided (e.g. "2026-03-10"), use it as the base
+    // but keep it in the Karachi timezone.
+    return moment.tz(dateStr, TIMEZONE);
+  }
   return moment().tz(TIMEZONE);
 }
 
@@ -249,11 +255,11 @@ async function syncSupervision(employeeId, ownerId) {
 const codes = new Map();
 
 router.post("/login", async (req, res) => {
-  const { companyEmail, password, deviceFingerprint, deviceToken } = req.body;
+  const { companyEmail, password, deviceFingerprint, deviceToken, testDate } = req.body;
 
   try {
-    // Get current time in Karachi
-    const nowKarachi = getKarachiTime();
+    // Get current time in Karachi (allow override for testing)
+    const nowKarachi = getKarachiTime(testDate);
     const hours = nowKarachi.hours();
     const minutes = nowKarachi.minutes();
     const currentTime = hours * 60 + minutes;
@@ -398,6 +404,13 @@ router.post("/login", async (req, res) => {
         isLoginAfter6PM: isLoginAfter6PM,
         markedByHR: false // System auto-marked
       });
+
+      // ✅ ADDED: Apply Late Deduction logic immediately if Late
+      if (sessionStatus === "Late") {
+        await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+      } else if (sessionStatus === "Half Day") {
+        await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+      }
     } else {
       // ✅ ATTENDANCE ALREADY EXISTS
       attendance = existingAttendance;
@@ -625,6 +638,13 @@ router.post("/confirm-code", async (req, res) => {
         timezone: TIMEZONE,
         markedByHR: false
       });
+
+      // ✅ ADDED: Apply Late Deduction logic immediately if Late
+      if (statusConfirm === "Late") {
+        await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+      } else if (statusConfirm === "Half Day") {
+        await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+      }
     }
 
     return res.json({
@@ -649,8 +669,13 @@ router.post("/confirm-code", async (req, res) => {
 
 router.post("/logout", requireAuth, async (req, res) => {
   try {
-    // Get current time in Karachi
-    const nowKarachi = getKarachiTime();
+    const { testDate } = req.body;
+    const employeeId = req.employee._id || req.employee.id;
+    const ownerId = req.employee.owner || req.employee.createdBy;
+    const userId = req.user?._id || req.employee._id;
+
+    // Get current time in Karachi (allow override for testing)
+    const nowKarachi = getKarachiTime(testDate);
     const logoutHour = nowKarachi.hours();
     const logoutMinute = nowKarachi.minutes();
     const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
@@ -660,7 +685,7 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     // ✅ FIND ATTENDANCE RECORD FOR TODAY (try both active and non-active for robustness)
     let attendance = await Attendance.findOne({
-      employee: req.employee.id || req.employee._id,
+      employee: employeeId,
       date: todayKarachi,
       active: true
     });
@@ -668,7 +693,7 @@ router.post("/logout", requireAuth, async (req, res) => {
     if (!attendance) {
       // Try without active filter to help debugging and recover stale records
       attendance = await Attendance.findOne({
-        employee: req.employee.id || req.employee._id,
+        employee: employeeId,
         date: todayKarachi,
       });
       if (!attendance) {
@@ -690,7 +715,7 @@ router.post("/logout", requireAuth, async (req, res) => {
     const totalHours = loginTimeKarachi ? nowKarachi.diff(loginTimeKarachi, 'hours', true) : 0;
 
     // Log attendance info
-    const emp = await Employee.findById(req.employee._id || req.employee.id).select("name").lean();
+    const emp = await Employee.findById(employeeId).select("name").lean();
     console.log(
       `[LOGOUT] [${emp?.name || 'Unknown'}] Status=${finalStatus}, CheckIn=${attendance.checkIn}, CheckOut=${formatTimeOnly(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}, Shift=${attendance.shiftName}`
     );
@@ -714,16 +739,17 @@ router.post("/logout", requireAuth, async (req, res) => {
         { new: true }
       );
       console.log("[LOGOUT] Attendance updated:", { id: attendance._id, checkOut: actualLogoutTime, updatedId: updated?._id });
+
+      // ✅ ADDED: Apply Logout Bonuses (Early Bird / Non-Working Day)
+      if (updated) {
+        req.bonusResult = await applyRealTimeLogoutBonus(employeeId, ownerId, updated._id, todayKarachi);
+      }
     } catch (uerr) {
       console.error("[LOGOUT] Error updating attendance record:", uerr);
       return res.status(500).json({ error: "Failed to update attendance on logout" });
     }
 
     // ✅ PROCESS LATE DEDUCTIONS (if last day of payroll period)
-    const employeeId = req.employee._id || req.employee.id;
-    const ownerId = req.employee.owner || req.employee.createdBy;
-    const userId = req.user?._id || req.employee._id;
-
     let lateDeductionResult = null;
     try {
       lateDeductionResult = await processIfLastDayOfPeriod(
@@ -746,7 +772,8 @@ router.post("/logout", requireAuth, async (req, res) => {
       logoutTime: formatTimeForDisplay(nowKarachi),
       sessionStatus: updated ? updated.status : finalStatus,
       totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
-      lateDeductionResult: lateDeductionResult || null
+      lateDeductionResult: lateDeductionResult || null,
+      bonusResult: req.bonusResult || null
     });
   } catch (err) {
     console.error("Logout error:", err);
