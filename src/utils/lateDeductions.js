@@ -641,6 +641,255 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
   }
 }
 
+/**
+ * REVERSE half-day deductions when employee logs in again between shifts
+ * Restores leave balance or salary deduction that was applied
+ */
+async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDate) {
+  try {
+    const employee = await Employee.findById(employeeId).lean();
+    if (!employee) return;
+
+    // 1. Find payroll period
+    const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+    const shiftId = employee.shifts?.[0];
+    const payroll = allPayrolls.find(p =>
+      Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+    );
+    if (!payroll) return;
+
+    const anchor = new Date(payroll.payrollPeriodStartDay);
+    const d = new Date(attendanceDate);
+    let pEnd;
+
+    if (payroll.payrollPeriodType === "monthly") {
+      const anchorDay = anchor.getDate();
+      const thisMonthStart = new Date(d.getFullYear(), d.getMonth(), anchorDay);
+      pEnd = new Date(thisMonthStart.getFullYear(), thisMonthStart.getMonth() + 1, thisMonthStart.getDate());
+      if (d < thisMonthStart) pEnd = new Date(thisMonthStart);
+      pEnd.setDate(pEnd.getDate() - 1);
+    } else {
+      let length = payroll.payrollPeriodLength || 30;
+      if (payroll.payrollPeriodType === "weekly") length = 7;
+      const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
+      const cycles = Math.floor(diff / length);
+      pEnd = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + cycles * length + length - 1);
+    }
+
+    const payrollMonth = pEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYear = String(pEnd.getFullYear());
+
+    // 2. Check Leave Balance
+    const leaveYear = getLeaveYear(attendanceDate);
+    let balance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
+
+    if (!balance) return;
+
+    const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
+    const usedPaid = Number(balance.usedPaid || 0);
+    const entitlementLeft = totalEntitled - usedPaid;
+
+    let slip = await SalarySlip.findOne({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear });
+    if (!slip) return;
+
+    // Find the LeaveTransaction created for this half-day deduction
+    const leaveTransaction = await LeaveTransaction.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
+      reason: "Half Day Login"
+    });
+
+    if (leaveTransaction) {
+      const reversalValue = leaveTransaction.value; // Should be 0.5
+
+      if (leaveTransaction.type === "PAID_LEAVE_USED") {
+        // Restore the paid leave
+        balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
+        
+        // Create a reversal transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: new Date(),
+          type: "PAID_LEAVE_REVERSAL",
+          value: reversalValue,
+          reason: "Between-Shift Login - Half Day Reversal"
+        });
+
+        console.log(`[REVERSAL] ${employee.name}: Restored ${reversalValue} paid leaves (Between-shift login)`);
+      } else if (leaveTransaction.type === "UNPAID_LEAVE_USED") {
+        // Restore unpaid leave count
+        balance.usedUnpaid = Math.max(0, Number(balance.usedUnpaid || 0) - reversalValue);
+        
+        // Reverse the salary deduction from slip
+        if (slip.leaveDeductions) {
+          const Salaries = require("../models/Salaries");
+          const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+          if (salaryDoc) {
+            const gross = Number(await decrypt(salaryDoc.basic)) + (Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) || 0) + (Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0"))) || 0);
+            const perHalfDay = (gross / 22) * 0.5;
+
+            let currentDeduction = Number(await decrypt(slip.leaveDeductions)) || 0;
+            const reversedDeduction = Math.max(0, currentDeduction - Math.round(perHalfDay));
+            slip.leaveDeductions = await encrypt(String(reversedDeduction));
+          }
+        }
+
+        // Create a reversal transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: new Date(),
+          type: "UNPAID_LEAVE_REVERSAL",
+          value: reversalValue,
+          reason: "Between-Shift Login - Half Day Reversal"
+        });
+
+        console.log(`[REVERSAL] ${employee.name}: Reversed salary deduction (Between-shift login)`);
+      }
+
+      // Delete the original half-day deduction transaction
+      await LeaveTransaction.deleteOne({ _id: leaveTransaction._id });
+
+      // Clear the leaveType from attendance
+      await Attendance.updateOne(
+        { owner: ownerId, employee: employeeId, date: attendanceDate },
+        { $unset: { leaveType: 1 } }
+      );
+
+      await balance.save();
+      await slip.save();
+    }
+  } catch (err) {
+    console.error("[REVERSE-HALF-DAY-DEDUCTION] Error:", err);
+  }
+}
+
+/**
+ * REVERSE late deductions when employee logs in again between shifts
+ * Restores leave balance or salary deduction that was applied for being late
+ */
+async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDate) {
+  try {
+    const employee = await Employee.findById(employeeId).lean();
+    if (!employee) return;
+
+    // 1. Find payroll period
+    const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+    const shiftId = employee.shifts?.[0];
+    const payroll = allPayrolls.find(p =>
+      Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
+    );
+    if (!payroll) return;
+
+    const anchor = new Date(payroll.payrollPeriodStartDay);
+    const d = new Date(attendanceDate);
+    let pEnd;
+
+    if (payroll.payrollPeriodType === "monthly") {
+      const anchorDay = anchor.getDate();
+      const thisMonthStart = new Date(d.getFullYear(), d.getMonth(), anchorDay);
+      pEnd = new Date(thisMonthStart.getFullYear(), thisMonthStart.getMonth() + 1, thisMonthStart.getDate());
+      if (d < thisMonthStart) pEnd = new Date(thisMonthStart);
+      pEnd.setDate(pEnd.getDate() - 1);
+    } else {
+      let length = payroll.payrollPeriodLength || 30;
+      if (payroll.payrollPeriodType === "weekly") length = 7;
+      const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
+      const cycles = Math.floor(diff / length);
+      pEnd = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + cycles * length + length - 1);
+    }
+
+    const payrollMonth = pEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYear = String(pEnd.getFullYear());
+
+    // 2. Check Leave Balance
+    const leaveYear = getLeaveYear(attendanceDate);
+    let balance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
+
+    if (!balance) return;
+
+    let slip = await SalarySlip.findOne({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear });
+    if (!slip) return;
+
+    // Find the LeaveTransaction created for late deduction
+    const leaveTransaction = await LeaveTransaction.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
+      reason: new RegExp("Late Deduction")
+    });
+
+    if (leaveTransaction) {
+      const reversalValue = leaveTransaction.value;
+
+      if (leaveTransaction.type === "PAID_LEAVE_USED") {
+        // Restore the paid leave
+        balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
+        
+        // Create a reversal transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: new Date(),
+          type: "PAID_LEAVE_REVERSAL",
+          value: reversalValue,
+          reason: "Between-Shift Login - Late Deduction Reversal"
+        });
+
+        console.log(`[REVERSAL] ${employee.name}: Restored ${reversalValue} paid leaves (Late reversal)`);
+      } else if (leaveTransaction.type === "UNPAID_LEAVE_USED") {
+        // Restore unpaid leave count
+        balance.usedUnpaid = Math.max(0, Number(balance.usedUnpaid || 0) - reversalValue);
+        
+        // Reverse the salary deduction from slip
+        if (slip.lateDeductions) {
+          const Salaries = require("../models/Salaries");
+          const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+          if (salaryDoc) {
+            const gross = Number(await decrypt(salaryDoc.basic)) + (Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) || 0) + (Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0"))) || 0);
+            const perDay = gross / 22;
+            const deductionAmount = Math.round(perDay * reversalValue);
+
+            let currentDeduction = Number(await decrypt(slip.lateDeductions)) || 0;
+            const reversedDeduction = Math.max(0, currentDeduction - deductionAmount);
+            slip.lateDeductions = await encrypt(String(reversedDeduction));
+          }
+        }
+
+        // Create a reversal transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: new Date(),
+          type: "UNPAID_LEAVE_REVERSAL",
+          value: reversalValue,
+          reason: "Between-Shift Login - Late Deduction Reversal"
+        });
+
+        console.log(`[REVERSAL] ${employee.name}: Reversed salary deduction for late (Between-shift login)`);
+      }
+
+      // Delete the original late deduction transaction
+      await LeaveTransaction.deleteOne({ _id: leaveTransaction._id });
+
+      await balance.save();
+      await slip.save();
+    }
+  } catch (err) {
+    console.error("[REVERSE-LATE-DEDUCTION] Error:", err);
+  }
+}
+
 module.exports = {
   countLateSessionsInPeriod,
   isLateDeductionProcessed,
@@ -649,4 +898,6 @@ module.exports = {
   getLeaveYear,
   applyRealTimeLateDeduction,
   applyRealTimeHalfDayDeduction,
+  reverseHalfDayDeduction,
+  reverseLateDayDeduction,
 };

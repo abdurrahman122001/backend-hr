@@ -5,13 +5,14 @@ const crypto = require("crypto");
 const Employee = require("../models/Employees");
 const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
+const AttendanceLog = require("../models/AttendanceLog");
 const EmployeeSession = require("../models/EmployeeSession");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
-const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction } = require("../utils/lateDeductions");
+const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
 const { applyRealTimeLogoutBonus } = require("../utils/bonusService");
 
 const router = express.Router();
@@ -117,6 +118,23 @@ function getDateOnly(date) {
   return moment(date).tz(TIMEZONE).format("YYYY-MM-DD");
 }
 
+/**
+ * Calculate minutes between two time strings (HH:mm format)
+ * Handles wrap-around at midnight (e.g., 23:00 to 02:00)
+ */
+function calculateMinutesBetween(startTimeStr, endTimeStr) {
+  const startMinutes = timeToMinutes(startTimeStr);
+  const endMinutes = timeToMinutes(endTimeStr);
+
+  if (startMinutes === null || endMinutes === null) return 0;
+
+  if (endMinutes >= startMinutes) {
+    return endMinutes - startMinutes;
+  } else {
+    // Wrap around midnight (next day)
+    return (24 * 60) - startMinutes + endMinutes;
+  }
+}
 
 function secondsUntilMidnight() {
   const now = moment().tz(TIMEZONE);
@@ -335,6 +353,80 @@ router.post("/login", async (req, res) => {
       employee: emp._id,
       date: todayKarachi // Use Karachi date
     });
+
+    // ✅ CHECK FOR BETWEEN-SHIFT LOGIN
+    // If there's existing attendance WITH checkout, check if this is a between-shift login
+    if (existingAttendance && existingAttendance.checkOut) {
+      const empShift = await getEmployeeShift(emp._id);
+
+      if (empShift) {
+        const shiftEndMinutes = timeToMinutes(empShift.end);
+        const shiftStartMinutes = timeToMinutes(empShift.start);
+        const currentLoginMinutes = currentTime;
+
+        // Between-shift login: login happens after shift end and before next shift start (or within 12 hours)
+        // This allows for multiple shifts in a day or between-day shifts
+        const isAfterShiftEnd = currentLoginMinutes > shiftEndMinutes;
+
+        if (isAfterShiftEnd) {
+          // ✅ This is a between-shift login
+          console.log(`🔄 [BETWEEN-SHIFT LOGIN] ${emp.name} logged in again at ${formatTimeOnly(nowKarachi)} (after shift end at ${empShift.end})`);
+
+          // Log the between-shift activity
+          await AttendanceLog.create({
+            owner: emp.owner,
+            employee: emp._id,
+            date: todayKarachi,
+
+            // First shift info
+            firstShiftId: existingAttendance.shiftId,
+            firstShiftName: existingAttendance.shiftName,
+            firstShiftStart: existingAttendance.shiftStartTime,
+            firstShiftEnd: existingAttendance.shiftEndTime,
+            firstCheckIn: existingAttendance.checkIn,
+            firstCheckOut: existingAttendance.checkOut,
+            firstLogoutTime: existingAttendance.logoutTime,
+
+            // Second shift info
+            secondShiftId: empShift._id,
+            secondShiftName: empShift.name,
+            secondShiftStart: empShift.start,
+            secondCheckIn: formatTimeOnly(nowKarachi),
+            secondLoginTime: nowKarachi.utc().toDate(),
+
+            // Calculate duration
+            betweenShiftDuration: calculateMinutesBetween(existingAttendance.checkOut, formatTimeOnly(nowKarachi)),
+
+            status: 'logged'
+          });
+
+          // ✅ REMOVE CHECKOUT TIME from existing attendance
+          // Update status to "Present" since employee is continuing work
+          await Attendance.findByIdAndUpdate(
+            existingAttendance._id,
+            {
+              $unset: { checkOut: 1, logoutTime: 1 },
+              $set: { status: "Present" }, // Update to Present since they logged back in
+              totalHours: 0
+            }
+          );
+
+          // ✅ REVERSE any deductions (leaves/salary) that were applied for Half Day or Late
+          // When employee logs in again, we restore the deductions since they're continuing work
+          if (existingAttendance.status === "Half Day") {
+            await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+            console.log(`✅ [BETWEEN-SHIFT LOGIN] Half-day deductions reversed for ${emp.name}`);
+          } else if (existingAttendance.status === "Late") {
+            await reverseLateDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+            console.log(`✅ [BETWEEN-SHIFT LOGIN] Late deductions reversed for ${emp.name}`);
+          }
+
+          console.log(`✅ [BETWEEN-SHIFT LOGIN] Status updated to "Present" - ${emp.name} continuing work session`);
+
+          console.log(`✅ [BETWEEN-SHIFT LOGIN] Checkout time removed from attendance (Status preserved: ${existingAttendance.status}), continuing work session`);
+        }
+      }
+    }
 
     let attendance;
     let sessionStatus = "Present";
@@ -788,6 +880,17 @@ router.post("/logout", requireAuth, async (req, res) => {
         `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
       );
 
+      // ✅ Trigger Half-Day deduction if status changed to Half Day on logout
+      // (9:00 PM Karachi threshold check happened above)
+      if (finalStatus === "Half Day" && attendance.status !== "Half Day") {
+        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId}`);
+        try {
+          await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, todayKarachi);
+        } catch (derr) {
+          console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
+        }
+      }
+
       // ✅ Track activity in EmployeeSession
       // We always mark active: false on logout. 
       // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
@@ -823,6 +926,19 @@ router.post("/logout", requireAuth, async (req, res) => {
       console.error("[LOGOUT] Error processing late deductions:", err);
     }
 
+    // ✅ PROCESS BONUS (Early Bird or Non-Working Day)
+    let bonusResult = null;
+    try {
+      bonusResult = await applyRealTimeLogoutBonus(
+        employeeId,
+        ownerId,
+        updated._id,
+        todayKarachi
+      );
+    } catch (berr) {
+      console.error("[LOGOUT] Error processing bonuses:", berr);
+    }
+
     return res.json({
       status: "success",
       message: "Logged out successfully",
@@ -830,7 +946,7 @@ router.post("/logout", requireAuth, async (req, res) => {
       sessionStatus: updated ? updated.status : finalStatus,
       totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
       lateDeductionResult: lateDeductionResult || null,
-      bonusResult: req.bonusResult || null
+      bonusResult: bonusResult || null
     });
   } catch (err) {
     console.error("Logout error:", err);
@@ -896,30 +1012,14 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
     });
 
     if (attendance && attendance.checkOut) {
-      // Had a checkout, so restore the previous status
-      const empShift = await getEmployeeShift(employeeId);
-      const emp = await Employee.findById(employeeId).select("rt").lean();
-
-      const reportingTimeMinutes = emp?.rt
-        ? timeToMinutes(emp.rt)
-        : (empShift?.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
-
-      const loginMinutes = timeToMinutes(attendance.checkIn);
-      const gracePeriodEnd = reportingTimeMinutes + GRACE_PERIOD_MINUTES;
-      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
-
-      let originalStatus = "Present";
-      if (loginMinutes > gracePeriodEnd && loginMinutes < halfDayThreshold) {
-        originalStatus = "Late";
-      } else if (loginMinutes >= halfDayThreshold) {
-        originalStatus = "Half Day";
-      }
-
+      // Had a checkout, so restore by removing logout info
+      // ⚠️ PRESERVE THE ORIGINAL STATUS - don't recalculate it
       await Attendance.findByIdAndUpdate(attendance._id, {
         $unset: { logoutTime: 1, checkOut: 1 },
-        $set: { status: originalStatus, totalHours: 0 }
+        $set: { totalHours: 0 }
+        // ✅ Status remains unchanged (Half Day, Late, Present, etc.)
       });
-      console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status reverted to ${originalStatus}`);
+      console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Checkout removed, status preserved: ${attendance.status}`);
     }
 
     // Re-activate session tracker
