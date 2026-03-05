@@ -5,9 +5,14 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ")
+  let token = authHeader.startsWith("Bearer ")
     ? authHeader.split(" ")[1]
     : null;
+
+  // ✅ Also check query params (useful for sendBeacon/logout on browser close)
+  if (!token && req.query.token) {
+    token = req.query.token;
+  }
 
   if (!token) {
     console.warn("🔐 [Auth] No token provided");
@@ -30,6 +35,48 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
         .status(401)
         .json({ status: "error", message: "Unauthorized: employee not found" });
     }
+    // 🔹 Session Check: Ensure session is active for today
+    // Skip this check for reactivation or logout itself
+    const isExempted = req.path === "/reactivate-session" || req.path === "/logout";
+    if (!isExempted) {
+      const moment = require("moment-timezone");
+      const EmployeeSession = require("../models/EmployeeSession");
+      
+      // First, try to find an active session
+      let session = await EmployeeSession.findOne({
+        employeeId: emp._id,
+        active: true
+      }).sort({ loginTime: -1 });
+
+      // If no active session, check if there's a recent inactive auto-logout session (page refresh detection)
+      if (!session) {
+        const recentInactiveSession = await EmployeeSession.findOne({
+          employeeId: emp._id,
+          active: false,
+          isAutoLogout: true
+        }).sort({ updatedAt: -1 });
+
+        // Allow access if within reactivation window (30 seconds)
+        if (recentInactiveSession) {
+          const timeSinceInactive = Date.now() - new Date(recentInactiveSession.updatedAt).getTime();
+          if (timeSinceInactive < 30000) {
+            // Within reactivation window - allow access and log it
+            console.info(`🔄 [Auth] User in reactivation window (${timeSinceInactive}ms), allowing temporary access`);
+            session = recentInactiveSession;
+          }
+        }
+      }
+
+      if (!session) {
+        console.warn("🔐 [Auth] No active session for", emp.companyEmail);
+        return res.status(401).json({
+          status: "error",
+          message: "Session inactive. Please log in again.",
+          isSessionError: true
+        });
+      }
+    }
+
     // Attach employee data to request
     req.employee = {
       _id: emp._id,

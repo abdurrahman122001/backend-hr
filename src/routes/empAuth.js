@@ -440,6 +440,19 @@ router.post("/login", async (req, res) => {
       // 🔥 Auto-enable supervision on login (trusted device)
       await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (trusted)", e));
 
+      // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
+      await EmployeeSession.updateMany(
+        { employeeId: emp._id, active: true },
+        { active: false, isAutoLogout: true }
+      );
+
+      // ✅ Ensure an active EmployeeSession exists
+      await EmployeeSession.findOneAndUpdate(
+        { employeeId: emp._id, date: todayKarachi },
+        { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+        { upsert: true, new: true }
+      );
+
       return res.json({
         message: existingAttendance ?
           "Login successful (attendance already marked)." :
@@ -647,6 +660,19 @@ router.post("/confirm-code", async (req, res) => {
       }
     }
 
+    // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
+    await EmployeeSession.updateMany(
+      { employeeId: emp._id, active: true },
+      { active: false, isAutoLogout: true }
+    );
+
+    // ✅ Ensure an active EmployeeSession exists
+    await EmployeeSession.findOneAndUpdate(
+      { employeeId: emp._id, date: todayKarachi },
+      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+      { upsert: true, new: true }
+    );
+
     return res.json({
       message: "Device verified and trusted. Login successful.",
       token,
@@ -669,10 +695,13 @@ router.post("/confirm-code", async (req, res) => {
 
 router.post("/logout", requireAuth, async (req, res) => {
   try {
-    const { testDate } = req.body;
     const employeeId = req.employee._id || req.employee.id;
     const ownerId = req.employee.owner || req.employee.createdBy;
     const userId = req.user?._id || req.employee._id;
+
+    const { testDate, isAutoLogout: bodyAutoLogout } = req.body;
+    const { isAutoLogout: queryAutoLogout } = req.query;
+    const isAutoLogout = bodyAutoLogout || queryAutoLogout === 'true' || queryAutoLogout === true;
 
     // Get current time in Karachi (allow override for testing)
     const nowKarachi = getKarachiTime(testDate);
@@ -683,25 +712,35 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     const halfDayLogoutThreshold = HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60; // 9:00 PM Karachi time
 
-    // ✅ FIND ATTENDANCE RECORD FOR TODAY (try both active and non-active for robustness)
+    // ✅ FIND ATTENDANCE RECORD - Most recent if today not found (cross-midnight fix)
     let attendance = await Attendance.findOne({
       employee: employeeId,
-      date: todayKarachi,
-      active: true
+      date: todayKarachi
     });
 
     if (!attendance) {
-      // Try without active filter to help debugging and recover stale records
+      // Look for the most recent check-in that doesn't have a check-out yet
       attendance = await Attendance.findOne({
         employee: employeeId,
-        date: todayKarachi,
-      });
-      if (!attendance) {
-        return res.status(400).json({
-          error: "No attendance record found for today"
-        });
-      }
+        checkOut: { $exists: false }
+      }).sort({ createdAt: -1 });
     }
+
+    if (!attendance) {
+      // Fallback: Just get the last record even if it has a checkout (for manual re-logouts)
+      attendance = await Attendance.findOne({
+        employee: employeeId
+      }).sort({ createdAt: -1 });
+    }
+
+    if (!attendance) {
+      console.warn(`[LOGOUT] No attendance found for ${employeeId}`);
+      return res.status(400).json({
+        error: "No attendance record found to log out"
+      });
+    }
+
+    const attendanceDate = attendance.date; // The day they actually logged in (important)
 
     let finalStatus = attendance.status;
 
@@ -710,14 +749,15 @@ router.post("/logout", requireAuth, async (req, res) => {
       finalStatus = "Half Day";
     }
 
-    // Calculate total hours worked (convert loginTime from UTC to Karachi for calculation)
+    // Calculate total hours worked
     const loginTimeKarachi = attendance.loginTime ? moment(attendance.loginTime).tz(TIMEZONE) : null;
     const totalHours = loginTimeKarachi ? nowKarachi.diff(loginTimeKarachi, 'hours', true) : 0;
 
     // Log attendance info
     const emp = await Employee.findById(employeeId).select("name").lean();
+    const autoLogoutIndicator = isAutoLogout ? "🔴 [AUTO-LOGOUT] " : "[MANUAL-LOGOUT] ";
     console.log(
-      `[LOGOUT] [${emp?.name || 'Unknown'}] Status=${finalStatus}, CheckIn=${attendance.checkIn}, CheckOut=${formatTimeOnly(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}, Shift=${attendance.shiftName}`
+      `${autoLogoutIndicator}[${emp?.name || 'Unknown'}] Status=${finalStatus}, CheckIn=${attendance.checkIn}, CheckOut=${formatTimeOnly(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}`
     );
 
     // Update attendance with check-out time
@@ -730,26 +770,47 @@ router.post("/logout", requireAuth, async (req, res) => {
         attendance._id,
         {
           logoutTime: logoutTimeUTC,
-          checkOut: actualLogoutTime, // ✅ Store formatted Karachi logout time (HH:mm)
-          active: false,
+          checkOut: actualLogoutTime,
           status: finalStatus,
-          totalHours: parseFloat(totalHours.toFixed(2)),
-          isAutoLogout: req.body.isAutoLogout || false
+          totalHours: parseFloat(totalHours.toFixed(2))
         },
         { new: true }
       );
-      console.log("[LOGOUT] Attendance updated:", { id: attendance._id, checkOut: actualLogoutTime, updatedId: updated?._id });
 
-      // ✅ ADDED: Apply Logout Bonuses (Early Bird / Non-Working Day)
-      if (updated) {
-        req.bonusResult = await applyRealTimeLogoutBonus(employeeId, ownerId, updated._id, todayKarachi);
+      if (!updated) {
+        console.error(
+          `[ERROR-LOGOUT] Failed to update attendance record for ${employeeId}. Record not found after update.`
+        );
+        return res.status(500).json({ error: "Failed to save checkout time" });
       }
+
+      console.log(
+        `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
+      );
+
+      // ✅ Track activity in EmployeeSession
+      // We always mark active: false on logout. 
+      // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
+      const sessionUpdate = {
+        active: false,
+        logoutTime: logoutTimeUTC
+      };
+
+      if (isAutoLogout) {
+        sessionUpdate.isAutoLogout = true;
+      }
+
+      await EmployeeSession.findOneAndUpdate(
+        { employeeId, date: attendanceDate },
+        sessionUpdate,
+        { upsert: true, new: true }
+      );
     } catch (uerr) {
-      console.error("[LOGOUT] Error updating attendance record:", uerr);
+      console.error("[LOGOUT-ERROR] Error updating attendance record:", uerr);
       return res.status(500).json({ error: "Failed to update attendance on logout" });
     }
 
-    // ✅ PROCESS LATE DEDUCTIONS (if last day of payroll period)
+    // ✅ PROCESS LATE DEDUCTIONS
     let lateDeductionResult = null;
     try {
       lateDeductionResult = await processIfLastDayOfPeriod(
@@ -758,12 +819,8 @@ router.post("/logout", requireAuth, async (req, res) => {
         employeeId,
         userId
       );
-      if (lateDeductionResult && lateDeductionResult.processed) {
-        console.log(`[LOGOUT] Late deduction processed:`, lateDeductionResult);
-      }
     } catch (err) {
       console.error("[LOGOUT] Error processing late deductions:", err);
-      // Continue with logout even if late deduction fails
     }
 
     return res.json({
@@ -784,36 +841,97 @@ router.post("/logout", requireAuth, async (req, res) => {
 router.post("/reactivate-session", requireAuth, async (req, res) => {
   try {
     const employeeId = req.employee._id || req.employee.id;
+    const nowKarachi = getKarachiTime();
+    const todayKarachi = getDateOnly(nowKarachi);
 
-    // Find the most recent session for this employee that was just closed via auto-logout
-    const session = await EmployeeSession.findOne({
+    console.info(`🔄 [REACTIVATE-SESSION] Attempting to reactivate session for ${employeeId}`);
+
+    // Find the most recent auto-logout signal
+    let session = await EmployeeSession.findOne({
       employeeId,
       active: false,
       isAutoLogout: true
     }).sort({ updatedAt: -1 });
 
+    // ✅ If no recent auto-logout session found, check if there's ANY inactive session within window
     if (!session) {
-      return res.status(404).json({ error: "No recent auto-logout session to reactivate" });
+      session = await EmployeeSession.findOne({
+        employeeId,
+        active: false
+      }).sort({ updatedAt: -1 });
+
+      if (!session) {
+        // No session at all - user just logged in, allow it to continue
+        console.info(`🔄 [REACTIVATE-SESSION] No existing session found for ${employeeId}, assuming fresh login`);
+
+        // Create a new active session for today
+        const newSession = await EmployeeSession.findOneAndUpdate(
+          { employeeId, date: todayKarachi },
+          {
+            employeeId,
+            date: todayKarachi,
+            active: true,
+            isAutoLogout: false,
+            loginTime: nowKarachi.toDate()
+          },
+          { upsert: true, new: true }
+        );
+
+        return res.json({ status: "success", message: "Session created and reactivated" });
+      }
     }
 
-    // Only reactivate if it was closed very recently (e.g. the time it takes for a refresh)
     const diff = Date.now() - new Date(session.updatedAt).getTime();
-    if (diff > 15000) { // 15 seconds should be plenty for any refresh
+    if (diff > 30000) { // 30 second window for reactivation
+      console.warn(`⏰ [REACTIVATE-SESSION] Reactivation window expired for ${employeeId} (diff: ${diff}ms)`);
       return res.status(400).json({ error: "Reactivation window expired" });
     }
 
-    // Re-activate
+    console.info(`✅ [REACTIVATE-SESSION] Session found within window (${diff}ms), reactivating...`);
+
+    // ✅ RESTORE ATTENDANCE RECORD
+    const attendance = await Attendance.findOne({
+      employee: employeeId,
+      date: todayKarachi
+    });
+
+    if (attendance && attendance.checkOut) {
+      // Had a checkout, so restore the previous status
+      const empShift = await getEmployeeShift(employeeId);
+      const emp = await Employee.findById(employeeId).select("rt").lean();
+
+      const reportingTimeMinutes = emp?.rt
+        ? timeToMinutes(emp.rt)
+        : (empShift?.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
+
+      const loginMinutes = timeToMinutes(attendance.checkIn);
+      const gracePeriodEnd = reportingTimeMinutes + GRACE_PERIOD_MINUTES;
+      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+
+      let originalStatus = "Present";
+      if (loginMinutes > gracePeriodEnd && loginMinutes < halfDayThreshold) {
+        originalStatus = "Late";
+      } else if (loginMinutes >= halfDayThreshold) {
+        originalStatus = "Half Day";
+      }
+
+      await Attendance.findByIdAndUpdate(attendance._id, {
+        $unset: { logoutTime: 1, checkOut: 1 },
+        $set: { status: originalStatus, totalHours: 0 }
+      });
+      console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status reverted to ${originalStatus}`);
+    }
+
+    // Re-activate session tracker
     session.active = true;
-    session.logoutTime = undefined;
-    session.actualLogoutTime = undefined;
-    session.totalHours = 0;
     session.isAutoLogout = false;
     await session.save();
 
+    console.info(`✅ [REACTIVATE-SESSION] Session successfully reactivated for ${employeeId}`);
     return res.json({ status: "success", message: "Session reactivated" });
   } catch (err) {
-    console.error("Reactivation error:", err);
-    return res.status(500).json({ error: "Server error" });
+    console.error("❌ [REACTIVATE-SESSION] Error:", err);
+    return res.status(500).json({ error: "Server error during reactivation" });
   }
 });
 
