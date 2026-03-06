@@ -837,7 +837,9 @@ router.post("/logout", requireAuth, async (req, res) => {
     let finalStatus = attendance.status;
 
     // If logged out before 9:00 PM Karachi time, change status to Half Day
-    if (logoutTotalMinutes < halfDayLogoutThreshold) {
+    // ✅ CRITICAL: Skip status change for auto-logouts (browser refresh/close)
+    // to prevent "Half Day" status being stuck on page refresh.
+    if (logoutTotalMinutes < halfDayLogoutThreshold && !isAutoLogout) {
       finalStatus = "Half Day";
     }
 
@@ -882,7 +884,8 @@ router.post("/logout", requireAuth, async (req, res) => {
 
       // ✅ Trigger Half-Day deduction if status changed to Half Day on logout
       // (9:00 PM Karachi threshold check happened above)
-      if (finalStatus === "Half Day" && attendance.status !== "Half Day") {
+      // ✅ SKIP for auto-logouts to prevent errors during browser refresh
+      if (finalStatus === "Half Day" && attendance.status !== "Half Day" && !isAutoLogout) {
         console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId}`);
         try {
           await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, todayKarachi);
@@ -915,28 +918,34 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     // ✅ PROCESS LATE DEDUCTIONS
     let lateDeductionResult = null;
-    try {
-      lateDeductionResult = await processIfLastDayOfPeriod(
-        new Date(todayKarachi),
-        ownerId,
-        employeeId,
-        userId
-      );
-    } catch (err) {
-      console.error("[LOGOUT] Error processing late deductions:", err);
+    // ✅ SKIP for auto-logouts
+    if (!isAutoLogout) {
+      try {
+        lateDeductionResult = await processIfLastDayOfPeriod(
+          new Date(todayKarachi),
+          ownerId,
+          employeeId,
+          userId
+        );
+      } catch (err) {
+        console.error("[LOGOUT] Error processing late deductions:", err);
+      }
     }
 
     // ✅ PROCESS BONUS (Early Bird or Non-Working Day)
     let bonusResult = null;
-    try {
-      bonusResult = await applyRealTimeLogoutBonus(
-        employeeId,
-        ownerId,
-        updated._id,
-        todayKarachi
-      );
-    } catch (berr) {
-      console.error("[LOGOUT] Error processing bonuses:", berr);
+    // ✅ SKIP for auto-logouts
+    if (!isAutoLogout) {
+      try {
+        bonusResult = await applyRealTimeLogoutBonus(
+          employeeId,
+          ownerId,
+          updated._id,
+          todayKarachi
+        );
+      } catch (berr) {
+        console.error("[LOGOUT] Error processing bonuses:", berr);
+      }
     }
 
     return res.json({
