@@ -42,9 +42,9 @@ const LeaveTransactionSchema = new Schema(
         "UNPAID_LEAVE_USED",
         "BONUS_EARNED",
         "ADJUSTMENT",
-        "PAID_LEAVE_REVERSED",     
-        "UNPAID_LEAVE_REVERSED",   
-        "PAID_LEAVE_CREDITED",      
+        "PAID_LEAVE_REVERSED",
+        "UNPAID_LEAVE_REVERSED",
+        "PAID_LEAVE_CREDITED",
       ],
       required: true,
       index: true,
@@ -68,6 +68,10 @@ const LeaveTransactionSchema = new Schema(
     createdBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
+      default: null,
+    },
+    reason: {
+      type: String,
       default: null,
     },
   },

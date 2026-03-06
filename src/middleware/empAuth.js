@@ -1,7 +1,10 @@
 // middleware/requireEmployeeAuth.js - Updated to include permissions
 const jwt = require("jsonwebtoken");
+const moment = require("moment-timezone");
 const Employee = require("../models/Employees");
+const EmployeeSession = require("../models/EmployeeSession");
 const JWT_SECRET = process.env.JWT_SECRET;
+const TIMEZONE = "Asia/Karachi";
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
@@ -39,29 +42,30 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     // Skip this check for reactivation or logout itself
     const isExempted = req.path === "/reactivate-session" || req.path === "/logout";
     if (!isExempted) {
-      const moment = require("moment-timezone");
-      const EmployeeSession = require("../models/EmployeeSession");
-      
+
       // First, try to find an active session
       let session = await EmployeeSession.findOne({
         employeeId: emp._id,
         active: true
       }).sort({ loginTime: -1 });
 
-      // If no active session, check if there's a recent inactive auto-logout session (page refresh detection)
+      // If no active session, check if there's a recently inactive session (page refresh/navigation detection)
       if (!session) {
+        // Accept ANY recent inactive session within 60 seconds - covers:
+        // 1. isAutoLogout sessions (beacon fired on close)
+        // 2. Sessions inactive for any reason within the window
+        // This handles race conditions where the beacon may not have fired yet or
+        // the session was deactivated just before the new page loaded.
         const recentInactiveSession = await EmployeeSession.findOne({
           employeeId: emp._id,
-          active: false,
-          isAutoLogout: true
+          active: false
         }).sort({ updatedAt: -1 });
 
-        // Allow access if within reactivation window (30 seconds)
+        // Allow access if within a generous reactivation window (60 seconds)
         if (recentInactiveSession) {
           const timeSinceInactive = Date.now() - new Date(recentInactiveSession.updatedAt).getTime();
-          if (timeSinceInactive < 30000) {
-            // Within reactivation window - allow access and log it
-            console.info(`🔄 [Auth] User in reactivation window (${timeSinceInactive}ms), allowing temporary access`);
+          if (timeSinceInactive < 60000) {
+            // Within reactivation window - allow access silently
             session = recentInactiveSession;
           }
         }

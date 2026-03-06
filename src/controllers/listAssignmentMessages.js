@@ -2247,7 +2247,7 @@ exports.getTeamLeadPendingApprovals =
           ).size,
         },
         debug: {
-          supervisedEmployeesCount: supervisedEmployees.length,
+          supervisedEmployeesCount: supervisedEmployeeIds.length,
           query: query,
           threadsCount: threads.length,
           paginatedThreadsCount: paginatedThreads.length,

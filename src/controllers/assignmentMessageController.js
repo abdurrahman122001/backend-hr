@@ -91,7 +91,7 @@ async function getAllJuniorsRecursively(ownerId, seniorId) {
   try {
     const allJuniors = [];
     const visited = new Set();
-    
+
     async function collectJuniors(currentSeniorId) {
       const currentIdStr = String(currentSeniorId);
       if (visited.has(currentIdStr)) return;
@@ -849,12 +849,12 @@ exports.createMessage = async function createMessage(req, res) {
           isNewThread = threadMessages.length === 0;
 
           // Check if thread already has team lead as receiver
+          // Note: tls is fetched later; we do a quick DB check here instead
           threadHasTeamLead = threadMessages.some(msg => {
             if (Array.isArray(msg.receiver)) {
               return msg.receiver.some(receiverId => {
-                const receiverStr = String(receiverId);
-                // Check if this receiver ID is a team lead
-                return tls && tls.includes(receiverStr);
+                // We'll re-evaluate this once tls is available below
+                return false;
               });
             }
             return false;
@@ -886,12 +886,11 @@ exports.createMessage = async function createMessage(req, res) {
             isNewThread = false;
 
             // Check if thread already has team lead as receiver
+            // Note: tls is fetched later; this will be re-checked below once tls is available
             threadHasTeamLead = threadMessages.some(msg => {
               if (Array.isArray(msg.receiver)) {
                 return msg.receiver.some(receiverId => {
-                  const receiverStr = String(receiverId);
-                  // Check if this receiver ID is a team lead
-                  return tls && tls.includes(receiverStr);
+                  return false; // re-evaluated after tls is fetched below
                 });
               }
               return false;
@@ -1058,6 +1057,16 @@ exports.createMessage = async function createMessage(req, res) {
     }
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
+
+    // Re-evaluate threadHasTeamLead now that tls is available
+    if (threadMessages.length > 0) {
+      threadHasTeamLead = threadMessages.some(msg => {
+        if (Array.isArray(msg.receiver)) {
+          return msg.receiver.some(receiverId => tls.includes(String(receiverId)));
+        }
+        return false;
+      });
+    }
 
     // 🔥 HIERARCHY-BASED: Find the first active supervisor in the hierarchy for the sender
     const hierarchySupervisors = await findNextActiveSupervisor(owner, sender, client);
@@ -4301,9 +4310,9 @@ exports.getActivity = async function getActivity(req, res) {
     // Get unread count per employee (simplified query)
     for (const empId of employeeIdsToShow) {
       if (!isObjId(empId)) continue;
-      
+
       const empObjectId = oid(empId);
-      
+
       // Count unread messages for this employee
       // Check messages where employee is receiver and hasn't read them
       const unreadMessages = await AssignmentMessage.find({
@@ -4315,7 +4324,7 @@ exports.getActivity = async function getActivity(req, res) {
       })
         .select("_id readBy")
         .lean();
-      
+
       const unreadCount = unreadMessages.filter(msg => {
         if (!msg.readBy || msg.readBy.length === 0) return true;
         return !msg.readBy.some(read => String(read.employee) === String(empId));
@@ -4362,7 +4371,7 @@ exports.getActivity = async function getActivity(req, res) {
           allRecentMessages = []; // Set to empty array on error
         }
       }
-      
+
       const recentUnread = allRecentMessages
         .filter(msg => {
           if (!msg.readBy || msg.readBy.length === 0) return true;
@@ -4436,13 +4445,13 @@ exports.getActivity = async function getActivity(req, res) {
         const activity = activityMap.get(empIdStr);
         activity.unreadCount = unreadCount;
         activity.respondedCount = respondedCount;
-        
+
         // Process recent unread
         activity.unreadEmails = recentUnread.map(msg => {
           // Handle sender - could be ObjectId or populated object
           let senderName = "Unknown";
           let senderEmail = "";
-          
+
           if (msg.sender) {
             if (typeof msg.sender === 'object' && msg.sender.name) {
               senderName = msg.sender.name || msg.sender.companyEmail || "Unknown";
@@ -4452,7 +4461,7 @@ exports.getActivity = async function getActivity(req, res) {
               senderName = "Unknown";
             }
           }
-          
+
           return {
             id: String(msg._id),
             subject: msg.subject || "No Subject",
@@ -4467,7 +4476,7 @@ exports.getActivity = async function getActivity(req, res) {
         activity.respondedEmails = recentResponded.map(msg => {
           // Handle receiver - could be ObjectId, array of ObjectIds, or populated objects
           let receiverName = "Unknown";
-          
+
           if (msg.receiver) {
             if (Array.isArray(msg.receiver)) {
               receiverName = msg.receiver
@@ -4482,7 +4491,7 @@ exports.getActivity = async function getActivity(req, res) {
               receiverName = msg.receiver.name || msg.receiver.companyEmail || "Unknown";
             }
           }
-          
+
           return {
             id: String(msg._id),
             subject: msg.subject || "No Subject",

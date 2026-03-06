@@ -552,8 +552,9 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
 
 /**
  * Apply real-time half-day deduction (0.5 leave or salary)
+ * @param {ObjectId} attendanceId - The ID of the attendance record (optional)
  */
-async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate) {
+async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendanceId = null) {
   try {
     const employee = await Employee.findById(employeeId).lean();
     if (!employee) return;
@@ -602,13 +603,31 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
       slip = await SalarySlip.create({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear, createdBy: userId });
     }
 
+    // PREVENT DOUBLE DEDUCTION: Check if a transaction for this date and employee already exists
+    const dayStart = new Date(attendanceDate + 'T00:00:00');
+    const dayEnd = new Date(attendanceDate + 'T23:59:59');
+
+    const existingTx = await LeaveTransaction.findOne({
+      employee: employeeId,
+      date: { $gte: dayStart, $lte: dayEnd },
+      reason: { $regex: /^Half Day/i }
+    });
+
+    if (existingTx) {
+      console.log(`[HALF-DAY] Deduction already exists for ${employeeId} on ${attendanceDate}. skipping duplicate.`);
+      return;
+    }
+
     if (entitlementLeft >= 0.5) {
       // Consume 0.5 paid leaves
       balance.usedPaid += 0.5;
       await LeaveTransaction.create({
         owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
-        year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: 0.5,
-        reason: "Half Day Login"
+        year: leaveYear, date: new Date(attendanceDate), type: "PAID_LEAVE_USED", value: 0.5,
+        reason: "Half Day Login",
+        sourceModel: "Attendance",
+        sourceId: attendanceId,
+        createdBy: userId
       });
       await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Paid" } });
       console.log(`[HALF-DAY] ${employee.name}: Used 0.5 paid leaves`);
@@ -627,8 +646,11 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
         balance.usedUnpaid = (balance.usedUnpaid || 0) + 0.5;
         await LeaveTransaction.create({
           owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
-          year: leaveYear, date: new Date(), type: "UNPAID_LEAVE_USED", value: 0.5,
-          reason: "Half Day Login (No leave balance)"
+          year: leaveYear, date: new Date(attendanceDate), type: "UNPAID_LEAVE_USED", value: 0.5,
+          reason: "Half Day Login (No leave balance)",
+          sourceModel: "Attendance",
+          sourceId: attendanceId,
+          createdBy: userId
         });
       }
       await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Unpaid" } });
@@ -693,11 +715,12 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
     if (!slip) return;
 
     // Find the LeaveTransaction created for this half-day deduction
+    // Use regex to catch both "Half Day Login" and "Half Day Login (No leave balance)"
     const leaveTransaction = await LeaveTransaction.findOne({
       owner: ownerId,
       employee: employeeId,
       date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
-      reason: "Half Day Login"
+      reason: { $regex: /^Half Day/i }
     });
 
     if (leaveTransaction) {
@@ -706,7 +729,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
       if (leaveTransaction.type === "PAID_LEAVE_USED") {
         // Restore the paid leave
         balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
-        
+
         // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
@@ -723,7 +746,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
       } else if (leaveTransaction.type === "UNPAID_LEAVE_USED") {
         // Restore unpaid leave count
         balance.usedUnpaid = Math.max(0, Number(balance.usedUnpaid || 0) - reversalValue);
-        
+
         // Reverse the salary deduction from slip
         if (slip.leaveDeductions) {
           const Salaries = require("../models/Salaries");
@@ -831,7 +854,7 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
       if (leaveTransaction.type === "PAID_LEAVE_USED") {
         // Restore the paid leave
         balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
-        
+
         // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
@@ -848,7 +871,7 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
       } else if (leaveTransaction.type === "UNPAID_LEAVE_USED") {
         // Restore unpaid leave count
         balance.usedUnpaid = Math.max(0, Number(balance.usedUnpaid || 0) - reversalValue);
-        
+
         // Reverse the salary deduction from slip
         if (slip.lateDeductions) {
           const Salaries = require("../models/Salaries");
