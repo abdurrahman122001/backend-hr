@@ -1044,10 +1044,10 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
         $set: { status: statusToRestore, totalHours: 0 }
       });
 
-      // If the session had a Half Day deduction applied (status was Half Day)
-      // and the restored status is not Half Day, reverse the deduction.
-      // This covers the page REFRESH case: beacon applied deduction → reactivation reverses it.
-      if (previousStatus === "Half Day" && statusToRestore !== "Half Day") {
+      const previousStatusLower = (previousStatus || "").toLowerCase().replace(/\s+/g, '-');
+      const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
+
+      if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
         try {
           const emp = await Employee.findById(employeeId).select("owner").lean();
           if (emp) {

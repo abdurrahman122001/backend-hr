@@ -3545,30 +3545,63 @@ cron.schedule(
 );
 
 cron.schedule(
-  "0 0 * * *", // 12:00 AM Karachi
+  "0 0 * * *", // 12:00 AM
   async () => {
-    const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
+    try {
+      const { applyRealTimeHalfDayDeduction } = require("./utils/lateDeductions");
+      const { getDateOnly } = require("./utils/timeUtils");
 
-    const logoutTime = nowKarachi.toDate(); // Karachi time
-    const actualLogoutTime = nowKarachi.format("YYYY-MM-DD HH:mm");
+      const nowKarachi = moment().tz(ATTENDANCE_CRON_TZ);
+      const logoutTimeUTC = nowKarachi.utc().toDate();
+      const actualLogoutTime = nowKarachi.format("HH:mm");
+      const dateStr = nowKarachi.clone().subtract(1, 'day').format("YYYY-MM-DD");
 
-    const sessions = await EmployeeSession.find({ active: true });
+      // 1. Finalize EmployeeSessions
+      const sessions = await EmployeeSession.find({ active: true });
+      for (const session of sessions) {
+        const loginTimeKarachi = moment(session.loginTime).tz(ATTENDANCE_CRON_TZ);
+        const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
 
-    for (const session of sessions) {
-      const loginTimeKarachi = moment(session.loginTime).tz(ATTENDANCE_CRON_TZ);
-      const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
+        await EmployeeSession.findByIdAndUpdate(session._id, {
+          logoutTime: logoutTimeUTC,
+          actualLogoutTime: nowKarachi.format("YYYY-MM-DD HH:mm"),
+          totalHours: parseFloat(totalHours.toFixed(2)),
+          active: false,
+          status: totalHours < 6 ? "half-day" : session.status,
+          isAutoLogout: true,
+        });
+      }
 
-      await EmployeeSession.findByIdAndUpdate(session._id, {
-        logoutTime, // stored in Karachi timezone
-        actualLogoutTime,
-        totalHours: Number(totalHours.toFixed(2)),
-        active: false,
-        status: totalHours < 6 ? "half-day" : session.status,
-        isAutoLogout: true,
+      // 2. Finalize Attendance records for yesterday that have no checkout
+      const attendances = await Attendance.find({
+        date: dateStr,
+        checkOut: { $exists: false },
+        isHoliday: { $ne: true }
       });
-    }
 
-    console.log("✅ Auto logout completed at 12:07 AM (Asia/Karachi)");
+      for (const att of attendances) {
+        const loginTimeKarachi = moment(att.loginTime).tz(ATTENDANCE_CRON_TZ);
+        const totalHours = nowKarachi.diff(loginTimeKarachi, "hours", true);
+        const status = totalHours < 6 ? "Half Day" : att.status;
+
+        await Attendance.findByIdAndUpdate(att._id, {
+          logoutTime: logoutTimeUTC,
+          checkOut: actualLogoutTime,
+          totalHours: parseFloat(totalHours.toFixed(2)),
+          status: status,
+          isAutoLogout: true
+        });
+
+        // 3. Apply missing half-day deductions if needed
+        if (status === "Half Day") {
+          await applyRealTimeHalfDayDeduction(att.employee, att.owner, att.employee, att.date, att._id);
+        }
+      }
+
+      console.log(`[CRON-MIDNIGHT] Finalized ${sessions.length} sessions and ${attendances.length} attendance records for ${dateStr}`);
+    } catch (err) {
+      console.error("[CRON-MIDNIGHT] Error:", err);
+    }
   },
   { timezone: "Asia/Karachi" },
 );
