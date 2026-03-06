@@ -912,8 +912,6 @@ exports.rejectLeave = async (req, res) => {
       const leaveMonthName = monthNames[leaveDate.getMonth()];
       const yearStr = leaveDate.getFullYear().toString();
 
-      console.log(`[rejectLeave] Searching slip for Emp: ${leave.employee._id}, Month: ${leaveMonthName}/${leaveMonthNum}, Year: ${yearStr}`);
-
       const salarySlip = await SalarySlip.findOne({
         employee: leave.employee._id,
         $or: [
@@ -937,12 +935,10 @@ exports.rejectLeave = async (req, res) => {
         }
 
         const baseSalary = Number(decryptedAmt) || 0;
-        console.log(`[rejectLeave] Found slip. Base Salary decoded: ${baseSalary}`);
 
         if (baseSalary > 0) {
           const perDaySalary = baseSalary / 22;
           const deductionAmount = Math.round(perDaySalary * leave.totalDays);
-          console.log(`[rejectLeave] Deduction calculation (on 22 working days): ${baseSalary}/22 * ${leave.totalDays} = ${deductionAmount}`);
 
           // Read current leave deduction
           let currentDeduction = 0;
@@ -961,11 +957,9 @@ exports.rejectLeave = async (req, res) => {
           // Use the exported controller function to recalculate tax, total deductions, and net payable
           if (salaryController && salaryController.autoCalculateAndSaveTax) {
             await salaryController.autoCalculateAndSaveTax(salarySlip);
-            console.log(`✅ [rejectLeave] Salary deduction of ${deductionAmount} applied and slip recalculated.`);
           } else {
             // Fallback if controller method is not available (should not happen now)
             await salarySlip.save();
-            console.log(`✅ [rejectLeave] Salary deduction applied but full recalculation skipped.`);
           }
         } else {
           console.error(`[rejectLeave] Could not determine base salary for slip ${salarySlip._id}. Decrypted: ${decryptedAmt}`);
@@ -1603,7 +1597,6 @@ exports.checkLeavePolicy = async (req, res) => {
 // @access  Private
 exports.getLeavePolicyRules = async (req, res) => {
   try {
-    console.log("🔍 getLeavePolicyRules req.user:", JSON.stringify(req.user, null, 2));
 
     const employeeId = req.user.employeeId || req.user._id;
     let employee = null;
