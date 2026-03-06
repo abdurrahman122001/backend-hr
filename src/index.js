@@ -104,7 +104,8 @@ const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals"
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 const moment = require("moment-timezone");
-
+require("./schedulers/bonusLeaveCron");
+require("./schedulers/leaveSyncCron");
 // ---------- Static ----------
 app.use(
   "/uploads",
