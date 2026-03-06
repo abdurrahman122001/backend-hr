@@ -901,9 +901,16 @@ router.post("/logout", requireAuth, async (req, res) => {
       // This includes browser close (isAutoLogout=true). If it turns out the user
       // was just refreshing, the /reactivate-session endpoint will reverse it.
       if (finalStatus === "Half Day" && attendance.status !== "Half Day") {
-        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId}`);
+        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
         try {
-          await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, todayKarachi, attendance._id);
+          // ✅ Skip real-time deduction if it's an auto-logout (beacon).
+          // This avoids deducting on refresh/close. It will be handled by cron or reactivation.
+          if (!isAutoLogout) {
+            await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, todayKarachi, attendance._id);
+            console.log(`✅ [LOGOUT-DEDUCTION] Manual half-day deduction applied for ${employeeId}`);
+          } else {
+            console.log(`ℹ️ [LOGOUT-DEDUCTION] Skipping immediate deduction for auto-logout; will resolve on refresh/re-login or midnight.`);
+          }
         } catch (derr) {
           console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
         }
