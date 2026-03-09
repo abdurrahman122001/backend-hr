@@ -192,15 +192,21 @@ app.use("/api/emp-auth", empAuthRouter);
 
 // ---------- Protected routes ----------
 app.use("/api/employees", employeesRouter); // leave public if intentional
-app.use("/api/attendance", requireAuth, attendanceRouter);
+const attendanceAuth = require("./middleware/attendanceAuth");
+app.use("/api/attendance", attendanceAuth, attendanceRouter);
+
 app.use("/api/leaves", requireAuth, leavesRouter);
-app.use("/api/settings", requireAuth, settingsRouter);
-app.use("/api/payroll-periods", requireAuth, payrollPeriodsRouter);
+app.use("/api/settings", attendanceAuth, settingsRouter);
+app.use("/api/payroll-periods", attendanceAuth, payrollPeriodsRouter);
+
+
 app.use("/api/staff", requireAuth, staffRouter);
 app.use("/api/salary-slips", requireAuth, salarySlipsRouter);
-app.use("/api/shifts", requireAuth, shiftsRouter);
+app.use("/api/shifts", attendanceAuth, shiftsRouter);
+
 app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
-app.use("/api/attendance-config", requireAuth, attendanceConfigRouter);
+app.use("/api/attendance-config", attendanceAuth, attendanceConfigRouter);
+
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", requireAuth, companyProfile);

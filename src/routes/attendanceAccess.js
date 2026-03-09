@@ -5,8 +5,6 @@ const AttendanceAccess = require('../models/AttendanceAccess');
 const Employee = require('../models/Employees');
 const requireAuth = require('../middleware/auth');
 const requireEmpAuth = require('../middleware/empAuth');
-const attendanceAuth = require('../middleware/attendanceAuth');
-
 
 // ─────────────────────────────────────────────────────────────
 // ADMIN ROUTES (HR portal — uses admin auth middleware)
@@ -129,26 +127,12 @@ router.delete('/:id', requireAuth, async (req, res) => {
 
 /**
  * GET /api/attendance-access/my-access
-/**
- * GET /api/attendance-access/my-access
- * Called by attendance app to check if this user has attendance access.
- * Uses attendanceAuth so it works with both admin tokens AND employee tokens
- * without requiring an active EmployeeSession (works in new tabs).
+ * Called by employee dashboard to check if this employee has attendance access
  */
-router.get('/my-access', attendanceAuth, async (req, res) => {
+router.get('/my-access', requireEmpAuth, async (req, res) => {
     try {
-        // Admin users always have full access
-        if (req.user.isAdmin) {
-            return res.json({
-                hasAccess: true,
-                accessType: 'admin',
-                scope: [],
-            });
-        }
-
-        // Delegated employee — attendanceAuth already verified the grant
-        const employeeId = req.user.employeeId;
-        const ownerId = req.user.owner;
+        const employeeId = req.employee._id;
+        const ownerId = req.employee.owner;
 
         const grant = await AttendanceAccess.findOne({
             owner: ownerId,
@@ -165,7 +149,7 @@ router.get('/my-access', attendanceAuth, async (req, res) => {
         res.json({
             hasAccess: true,
             accessType: grant.accessType,
-            scope: grant.scope || [],
+            scope: grant.scope || [],     // [] means all employees
             notes: grant.notes,
         });
     } catch (err) {
@@ -173,6 +157,5 @@ router.get('/my-access', attendanceAuth, async (req, res) => {
         res.status(500).json({ error: 'Server error' });
     }
 });
-
 
 module.exports = router;
