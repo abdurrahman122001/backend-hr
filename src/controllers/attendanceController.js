@@ -32,11 +32,39 @@ function resolveOwnerId(user) {
   return user?.owner || user?.createdBy || user?._id;
 }
 
+/**
+ * getAttendanceBaseQuery
+ * Returns a database query object that filters by owner and, if applicable, 
+ * the delegated employee's allowed scope.
+ */
+function getAttendanceBaseQuery(req) {
+  const ownerId = resolveOwnerId(req.user);
+  const userId = req.user._id;
+
+  const query = {
+    owner: { $in: [oid(ownerId), oid(userId)] }
+  };
+
+  // If delegated employee has a restricted scope, apply it
+  if (req.user.isDelegated && Array.isArray(req.user.attendanceScope) && req.user.attendanceScope.length > 0) {
+    query.employee = { $in: req.user.attendanceScope.map(id => oid(id)) };
+  }
+
+  return query;
+}
+
 function oid(id) {
   return new mongoose.Types.ObjectId(id);
 }
 
-async function ensureEmployeeAccessible(employeeId, ownerId, userId) {
+async function ensureEmployeeAccessible(employeeId, ownerId, userId, attendanceScope = null) {
+  // 1. Mandatory scope check for delegated employees
+  if (attendanceScope && Array.isArray(attendanceScope) && attendanceScope.length > 0) {
+    const inScope = attendanceScope.some(id => String(id) === String(employeeId));
+    if (!inScope) return null;
+  }
+
+  // 2. Standard ownership check
   return Employee.findOne({
     _id: oid(employeeId),
     $or: [
@@ -611,8 +639,10 @@ exports.markAttendance = async (req, res) => {
     const employee = await ensureEmployeeAccessible(
       employeeId,
       ownerId,
-      userId
+      userId,
+      req.user.attendanceScope
     );
+
     if (!employee) {
       return res
         .status(404)
@@ -1858,15 +1888,17 @@ exports.getRecordsByDate = async (req, res) => {
   }
   try {
     const ownerId = resolveOwnerId(req.user);
-    const userId = req.user._id;
 
     // keep any auto-backfill tenant-scoped by passing effective owner if your backfill uses it
     await backfillForDate(date, ownerId);
 
-    const records = await Attendance.find({
-      owner: { $in: [oid(ownerId), oid(userId)] }, // support legacy/user-scoped data
+    const query = {
+      ...getAttendanceBaseQuery(req),
       date,
-    })
+    };
+
+    const records = await Attendance.find(query)
+
       // ⭐ MUST include status and _id so previous offboarded attendance shows
       .populate("employee", "name designation department email status _id")
       .lean();
@@ -1907,15 +1939,14 @@ exports.getRecordsByDateRange = async (req, res) => {
 exports.getStats = async (req, res) => {
   try {
     const { date } = req.query;
-    const ownerId = resolveOwnerId(req.user);
-    const userId = req.user._id;
+    const query = {
+      ...getAttendanceBaseQuery(req),
+      date
+    };
 
     const stats = await Attendance.aggregate([
       {
-        $match: {
-          owner: { $in: [oid(ownerId), oid(userId)] },
-          date,
-        },
+        $match: query,
       },
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]);
@@ -1946,17 +1977,20 @@ exports.getRecordsByEmployee = async (req, res) => {
     const userId = req.user._id;
 
     // guard: ensure employee belongs to tenant (new/legacy)
-    const emp = await ensureEmployeeAccessible(id, ownerId, userId);
+    const emp = await ensureEmployeeAccessible(id, ownerId, userId, req.user.attendanceScope);
     if (!emp) {
       return res
         .status(404)
-        .json({ error: "Employee not found or unauthorized" });
+        .json({ error: "Employee not found or unauthorized (check delegation scope)" });
     }
 
-    const records = await Attendance.find({
-      owner: { $in: [oid(ownerId), oid(userId)] },
+    const query = {
+      ...getAttendanceBaseQuery(req),
       employee: oid(id),
-    })
+    };
+
+    const records = await Attendance.find(query)
+
       .sort({ date: 1 })
       // ⭐ MUST include status + _id so UI can show old offboarded attendance
       .populate("employee", "name position department email status _id")

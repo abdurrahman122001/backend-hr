@@ -100,10 +100,9 @@ async function ensureIndexes() {
 
     console.log("Connecting to MongoDB…");
     console.log(
-      `→ Using URI host: ${
-        MONGODB_URI.includes("@")
-          ? MONGODB_URI.split("@")[1].split("/")[0]
-          : MONGODB_URI
+      `→ Using URI host: ${MONGODB_URI.includes("@")
+        ? MONGODB_URI.split("@")[1].split("/")[0]
+        : MONGODB_URI
       }`
     );
     await mongoose.connect(MONGODB_URI);

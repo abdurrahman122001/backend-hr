@@ -1,12 +1,12 @@
 const express = require("express");
 const router = express.Router();
-const requireAuth = require("../middleware/auth");
 const Employee = require("../models/Employees");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const { getLeaveYear } = require("../utils/leaveEntitlement");
 const leaveYearBalanceController = require("../controllers/leaveYearBalanceController");
 const empAuth = require("../middleware/empAuth");
+const attendanceAuth = require("../middleware/attendanceAuth");
 
 // Get month range for your fiscal calendar (26th to 25th)
 function getMonthRange(year, monthName) {
@@ -192,7 +192,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
 }
 
 // GET /leave-summary/:employeeId?month=&year=
-router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
+router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { month, year } = req.query;
@@ -254,7 +254,7 @@ router.get("/leave-summary/:employeeId", requireAuth, async (req, res) => {
 });
 
 // GET /leave-summary-history/:employeeId?year=
-router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) => {
+router.get("/leave-summary-history/:employeeId", attendanceAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year } = req.query;
@@ -320,7 +320,7 @@ router.get("/leave-summary-history/:employeeId", requireAuth, async (req, res) =
 });
 
 // GET /leave-transactions/:employeeId?year=&month=
-router.get("/leave-transactions/:employeeId", async (req, res) => {
+router.get("/leave-transactions/:employeeId", attendanceAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year, month } = req.query;
@@ -363,7 +363,7 @@ router.get("/leave-transactions/:employeeId", async (req, res) => {
 });
 
 // GET /leave-balance/:employeeId?date=
-router.get("/leave-balance/:employeeId", async (req, res) => {
+router.get("/leave-balance/:employeeId", attendanceAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { date } = req.query;
@@ -401,7 +401,7 @@ router.get("/leave-balance/:employeeId", async (req, res) => {
     }
 });
 
-router.get("/available-years", requireAuth, async (req, res) => {
+router.get("/available-years", attendanceAuth, async (req, res) => {
     try {
         const rawOwnerId = req.user.owner;
         const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
@@ -414,7 +414,7 @@ router.get("/available-years", requireAuth, async (req, res) => {
     }
 });
 
-router.get("/employee/:employeeId/current", requireAuth, leaveYearBalanceController.getCurrentYearLeaveBalance);
-router.put("/update-balance/:employeeId", requireAuth, leaveYearBalanceController.upsertLeaveBalance);
+router.get("/employee/:employeeId/current", attendanceAuth, leaveYearBalanceController.getCurrentYearLeaveBalance);
+router.put("/update-balance/:employeeId", attendanceAuth, leaveYearBalanceController.upsertLeaveBalance);
 
 module.exports = router;

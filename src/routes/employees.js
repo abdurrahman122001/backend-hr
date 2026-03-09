@@ -15,6 +15,8 @@ const {
 } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
+const attendanceAuth = require("../middleware/attendanceAuth");
+
 
 function getEffectiveOwnerId(user) {
   if (!user) return null;
@@ -127,7 +129,8 @@ router.get("/", unifiedAuth, async (req, res) => {
   }
 });
 
-router.get("/attendance", requireAuth, async (req, res) => {
+router.get("/attendance", attendanceAuth, async (req, res) => {
+
   try {
     const { trashed } = req.query;
     const includeTrashed = trashed === "true";
