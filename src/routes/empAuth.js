@@ -847,12 +847,57 @@ router.post("/logout", requireAuth, async (req, res) => {
     // This is used by /reactivate-session to restore the correct status on refresh.
     const originalStatusBeforeLogout = attendance.status;
 
-    // If logged out before 9:00 PM Karachi time, change status to Half Day
-    // ✅ This applies to BOTH manual and auto-logout (browser close).
-    // If the user was just refreshing, the /reactivate-session endpoint will
-    // restore the original status. So it's safe to always apply the rule here.
-    if (logoutTotalMinutes < halfDayLogoutThreshold) {
+    // ─────────────────────────────────────────────────────────────────────────
+    // HALF-DAY RULE:
+    // Only mark as Half Day if the employee left early (before shift end) AND
+    // the logout is on the SAME calendar date as the attendance date.
+    //
+    // Cases where we KEEP the original status (no Half Day):
+    //   1. Logout date ≠ attendance date  → employee worked past midnight (night shift)
+    //   2. Logout time ≥ shift end time   → employee completed their shift
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Get shift end time for this employee (to determine if shift is complete)
+    let shiftEndMinutes = null;
+    try {
+      const empForShift = await Employee.findById(employeeId).select("shifts").lean();
+      if (empForShift && empForShift.shifts && empForShift.shifts.length > 0) {
+        const shiftDoc = await Shift.findById(empForShift.shifts[0]).select("end").lean();
+        if (shiftDoc && shiftDoc.end) {
+          shiftEndMinutes = timeToMinutes(shiftDoc.end);
+        }
+      }
+    } catch (shiftErr) {
+      console.error("[LOGOUT] Error fetching shift end time:", shiftErr);
+    }
+
+    // Case 1: Cross-midnight logout — logout date is different from check-in date
+    const isCrossMidnightLogout = todayKarachi !== attendanceDate;
+
+    // Case 2: Logout at/after shift end time (shift completed)
+    // If shiftEndMinutes is 0 or null (midnight/unset), treat midnight logout as shift complete
+    let isShiftComplete = false;
+    if (shiftEndMinutes === null) {
+      // No shift configured — use the HALF_DAY_LOGOUT_THRESHOLD_HOUR as the check
+      isShiftComplete = logoutTotalMinutes >= halfDayLogoutThreshold;
+    } else if (shiftEndMinutes === 0) {
+      // Shift ends at midnight (00:00) — any logout past midnight or cross-midnight is complete
+      isShiftComplete = isCrossMidnightLogout || logoutTotalMinutes === 0;
+    } else {
+      // Normal shift end: logout >= shift end time means shift was completed
+      isShiftComplete = logoutTotalMinutes >= shiftEndMinutes;
+    }
+
+    if (isCrossMidnightLogout) {
+      // Employee worked past midnight into the next day — keep original status
+      console.log(`[LOGOUT] Cross-midnight logout detected (attendance: ${attendanceDate}, logout date: ${todayKarachi}). Keeping original status: ${finalStatus}`);
+    } else if (isShiftComplete) {
+      // Logout is at or after shift end time — shift was completed
+      console.log(`[LOGOUT] Shift completed (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes}min). Keeping status: ${finalStatus}`);
+    } else {
+      // Employee left early on the same day — apply Half Day rule
       finalStatus = "Half Day";
+      console.log(`[LOGOUT] Early logout (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Status → Half Day`);
     }
 
     // Calculate total hours worked
@@ -906,8 +951,9 @@ router.post("/logout", requireAuth, async (req, res) => {
           // ✅ Skip real-time deduction if it's an auto-logout (beacon).
           // This avoids deducting on refresh/close. It will be handled by cron or reactivation.
           if (!isAutoLogout) {
-            await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, todayKarachi, attendance._id);
-            console.log(`✅ [LOGOUT-DEDUCTION] Manual half-day deduction applied for ${employeeId}`);
+            // Use attendanceDate (login date) — not todayKarachi — for cross-midnight correctness
+            await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
+            console.log(`✅ [LOGOUT-DEDUCTION] Manual half-day deduction applied for ${employeeId} on ${attendanceDate}`);
           } else {
             console.log(`ℹ️ [LOGOUT-DEDUCTION] Skipping immediate deduction for auto-logout; will resolve on refresh/re-login or midnight.`);
           }
@@ -916,8 +962,6 @@ router.post("/logout", requireAuth, async (req, res) => {
         }
       }
 
-      // ✅ Track activity in EmployeeSession
-      // We always mark active: false on logout. 
       // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
       const sessionUpdate = {
         active: false,
@@ -943,8 +987,9 @@ router.post("/logout", requireAuth, async (req, res) => {
     // ✅ SKIP for auto-logouts
     if (!isAutoLogout) {
       try {
+        // Use attendanceDate so cross-midnight logouts process deductions for the login date
         lateDeductionResult = await processIfLastDayOfPeriod(
-          new Date(todayKarachi),
+          new Date(attendanceDate),
           ownerId,
           employeeId,
           userId
@@ -959,11 +1004,12 @@ router.post("/logout", requireAuth, async (req, res) => {
     // ✅ SKIP for auto-logouts
     if (!isAutoLogout) {
       try {
+        // Use attendanceDate so cross-midnight logouts credit bonus against the login date
         bonusResult = await applyRealTimeLogoutBonus(
           employeeId,
           ownerId,
           updated._id,
-          todayKarachi
+          attendanceDate
         );
       } catch (berr) {
         console.error("[LOGOUT] Error processing bonuses:", berr);
