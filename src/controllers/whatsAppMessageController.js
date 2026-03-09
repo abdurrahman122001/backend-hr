@@ -2490,26 +2490,50 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     await msg.save();
 
     const populated = await msg.populate([
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "client", select: "_id clientName assignedTo" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "scheduledBy", select: "_id name companyEmail" },
+      { path: "repliedTo", select: "_id note message sender attachments" },
+      { path: "replyContent.originalSender", select: "_id name companyEmail" },
     ]);
 
     // FIXED: Emit new_message event ONLY to relevant users
     if (req.app.get("io")) {
       const io = req.app.get("io");
 
+      const senderId = populated.sender?._id || populated.sender;
+
+      // Construct a response object similar to createMessage for consistency
+      const responseEvent = {
+        ...populated.toObject(),
+        parentClientId: populated.client?._id || populated.client,
+        requiresApproval: populated.approvalStatus === "pending",
+        isClientEmployeeChat: populated.isClientEmployeeMessage,
+      };
+
       // Notify ONLY the sender about attachment upload
-      io.to(`employee_${msg.sender}`).emit("new_message", {
-        message: populated,
-        type: "attachments_uploaded",
-      });
+      if (senderId) {
+        io.to(`employee_${senderId}`).emit("new_message", {
+          message: responseEvent,
+          type: "attachments_uploaded",
+        });
+      }
 
       // Notify ONLY the actual receivers about new attachments
-      msg.receiver.forEach((receiverId) => {
-        io.to(`employee_${receiverId}`).emit("new_message", {
-          message: populated,
-          type: "attachments_added",
+      if (Array.isArray(populated.receiver)) {
+        populated.receiver.forEach((r) => {
+          const receiverId = r?._id || r;
+          if (receiverId) {
+            io.to(`employee_${receiverId}`).emit("new_message", {
+              message: responseEvent,
+              type: "attachments_added",
+            });
+          }
         });
-      });
+      }
     }
 
     res.status(201).json(populated.attachments);
