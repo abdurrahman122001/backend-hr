@@ -783,145 +783,6 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
-    // Mark Attendance and Sessions for each approved date
-    try {
-      const TIMEZONE = "Asia/Karachi";
-      const ownerId = leave.employee.owner || (user.isEmployee ? user.owner : user._id);
-
-      for (const dateEntry of leave.dates) {
-        const dateStr = moment(dateEntry.date).tz(TIMEZONE).format("YYYY-MM-DD");
-
-        // Determine status based on dateEntry.type
-        // Leave model has enum: ["full", "half", "late", "early_leave"]
-        // Attendance model status enum: ['Present', 'Late', 'Absent', 'Half Day', 'Leave']
-        // EmployeeSession status enum: ["on-time", "late", "half-day", "absent", "leave"]
-
-        let attendanceStatus = "Leave";
-        let sessionStatus = "leave";
-
-        if (dateEntry.type === "half") {
-          attendanceStatus = "Half Day";
-          sessionStatus = "half-day";
-        } else if (dateEntry.type === "late" || dateEntry.type === "early_leave") {
-          // For late arrival/early departure, they are still present but we mark it
-          attendanceStatus = "Late";
-          sessionStatus = "late";
-        }
-
-        // Upsert Attendance
-        await Attendance.findOneAndUpdate(
-          { owner: ownerId, employee: leave.employee._id, date: dateStr },
-          {
-            $set: {
-              owner: ownerId,
-              employee: leave.employee._id,
-              date: dateStr,
-              status: attendanceStatus,
-              leaveType: finalIsPaid ? "Paid" : "Unpaid",
-              markedByHR: true,
-              notes: (notes || "Leave approved") + (dateEntry.type !== "full" ? ` (${dateEntry.type})` : ""),
-              createdBy: approverId,
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-
-        // Upsert EmployeeSession
-        await EmployeeSession.findOneAndUpdate(
-          { employeeId: leave.employee._id, date: dateStr },
-          {
-            $set: {
-              employeeId: leave.employee._id,
-              date: dateStr,
-              status: sessionStatus,
-              active: false,
-              totalHours: dateEntry.type === "half" ? 4 : (dateEntry.type === "full" ? 0 : 8),
-              notes: notes || "Leave approved",
-              actualLoginTime: null,
-              actualLogoutTime: null,
-              // Set login/logout to start/end of day in UTC for consistency
-              loginTime: moment(dateEntry.date).tz(TIMEZONE).startOf("day").toDate(),
-              logoutTime: moment(dateEntry.date).tz(TIMEZONE).endOf("day").toDate(),
-            }
-          },
-          { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
-      }
-      console.log(`✅ [approveLeave] Automatically marked attendance/sessions for ${leave.dates.length} days for employee ${leave.employee._id}`);
-    } catch (markingError) {
-      console.error("⚠️ [approveLeave] Failed to mark attendance/sessions:", markingError);
-      // We don't block the approval even if attendance marking fails
-    }
-
-    // Update employee's leave balance in both Employee and LeaveYearBalance models
-    const leaveYear = getLeaveYear(leave.startDate);
-    const ownerId = leave.employee.owner || (user.isEmployee ? user.owner : user._id);
-
-    try {
-      if (finalIsPaid) {
-        // Increment usedPaid in Employee model
-        await Employee.findByIdAndUpdate(leave.employee._id, {
-          $inc: { "leaveEntitlement.usedPaid": actualApprovedDays },
-        });
-
-        // Update LeaveYearBalance
-        const balance = await LeaveYearBalance.findOneAndUpdate(
-          { employee: leave.employee._id, year: leaveYear },
-          {
-            $inc: { usedPaid: actualApprovedDays },
-            $set: { owner: ownerId } // Ensure owner is set
-          },
-          { upsert: true, new: true }
-        );
-
-        // Create Transaction for audit trail
-        await LeaveTransaction.create({
-          owner: ownerId,
-          employee: leave.employee._id,
-          leaveYearBalance: balance._id,
-          year: leaveYear,
-          date: leave.startDate,
-          type: "PAID_LEAVE_USED",
-          value: actualApprovedDays,
-          sourceModel: "ApplyLeave",
-          sourceId: leave._id,
-          createdBy: approverId
-        });
-      } else {
-        // Increment usedUnpaid in Employee model
-        await Employee.findByIdAndUpdate(leave.employee._id, {
-          $inc: { "leaveEntitlement.usedUnpaid": actualApprovedDays },
-        });
-
-        // Update LeaveYearBalance
-        const balance = await LeaveYearBalance.findOneAndUpdate(
-          { employee: leave.employee._id, year: leaveYear },
-          {
-            $inc: { usedUnpaid: actualApprovedDays },
-            $set: { owner: ownerId } // Ensure owner is set
-          },
-          { upsert: true, new: true }
-        );
-
-        // Create Transaction for audit trail
-        await LeaveTransaction.create({
-          owner: ownerId,
-          employee: leave.employee._id,
-          leaveYearBalance: balance._id,
-          year: leaveYear,
-          date: leave.startDate,
-          type: "UNPAID_LEAVE_USED",
-          value: actualApprovedDays,
-          sourceModel: "ApplyLeave",
-          sourceId: leave._id,
-          createdBy: approverId
-        });
-      }
-    } catch (balanceError) {
-      console.error("⚠️ [approveLeave] Failed to update leave balance:", balanceError);
-      // We don't block the whole approval if balance update fails, but we log it
-    }
-
     // Get updated leave with populated fields
     const updatedLeave = await Leave.findById(leave._id)
       .populate("employee", "name email department photographUrl")
@@ -1051,8 +912,6 @@ exports.rejectLeave = async (req, res) => {
       const leaveMonthName = monthNames[leaveDate.getMonth()];
       const yearStr = leaveDate.getFullYear().toString();
 
-      console.log(`[rejectLeave] Searching slip for Emp: ${leave.employee._id}, Month: ${leaveMonthName}/${leaveMonthNum}, Year: ${yearStr}`);
-
       const salarySlip = await SalarySlip.findOne({
         employee: leave.employee._id,
         $or: [
@@ -1076,12 +935,10 @@ exports.rejectLeave = async (req, res) => {
         }
 
         const baseSalary = Number(decryptedAmt) || 0;
-        console.log(`[rejectLeave] Found slip. Base Salary decoded: ${baseSalary}`);
 
         if (baseSalary > 0) {
           const perDaySalary = baseSalary / 22;
           const deductionAmount = Math.round(perDaySalary * leave.totalDays);
-          console.log(`[rejectLeave] Deduction calculation (on 22 working days): ${baseSalary}/22 * ${leave.totalDays} = ${deductionAmount}`);
 
           // Read current leave deduction
           let currentDeduction = 0;
@@ -1100,11 +957,9 @@ exports.rejectLeave = async (req, res) => {
           // Use the exported controller function to recalculate tax, total deductions, and net payable
           if (salaryController && salaryController.autoCalculateAndSaveTax) {
             await salaryController.autoCalculateAndSaveTax(salarySlip);
-            console.log(`✅ [rejectLeave] Salary deduction of ${deductionAmount} applied and slip recalculated.`);
           } else {
             // Fallback if controller method is not available (should not happen now)
             await salarySlip.save();
-            console.log(`✅ [rejectLeave] Salary deduction applied but full recalculation skipped.`);
           }
         } else {
           console.error(`[rejectLeave] Could not determine base salary for slip ${salarySlip._id}. Decrypted: ${decryptedAmt}`);
@@ -1742,7 +1597,6 @@ exports.checkLeavePolicy = async (req, res) => {
 // @access  Private
 exports.getLeavePolicyRules = async (req, res) => {
   try {
-    console.log("🔍 getLeavePolicyRules req.user:", JSON.stringify(req.user, null, 2));
 
     const employeeId = req.user.employeeId || req.user._id;
     let employee = null;

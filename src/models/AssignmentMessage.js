@@ -133,6 +133,9 @@ const AssignmentMessageSchema = new Schema(
     spamReportedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     spamReportCount: { type: Number, default: 0 },
     spamReporters: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
+    intendedRecipients: [
+      { type: Schema.Types.ObjectId, ref: "Employee" }
+    ],
     approvedAt: { type: Date },
     approvedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     disapprovalNote: { type: String },
@@ -210,13 +213,11 @@ AssignmentMessageSchema.pre("save", function (next) {
         .substring(0, 50);
 
       if (this.clientEmployeeEmail) {
-        threadId = `external_${
-          this.clientEmployeeEmail
-        }_${normalizedSubject}_${Date.now()}`;
+        threadId = `external_${this.clientEmployeeEmail
+          }_${normalizedSubject}_${Date.now()}`;
       } else if (this.clientName) {
-        threadId = `external_${
-          this.clientName
-        }_${normalizedSubject}_${Date.now()}`;
+        threadId = `external_${this.clientName
+          }_${normalizedSubject}_${Date.now()}`;
       } else {
         threadId = `external_${normalizedSubject}_${Date.now()}`;
       }

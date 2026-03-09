@@ -58,20 +58,14 @@ exports.getRoster = async (req, res) => {
       _id: { $ne: me._id } // Exclude self from contact list
     };
 
-    // Regular employees can only see team leads, managers, their supervisor, and their juniors
-    if (isEmployee && !isTeamLead && !isManager) {
-      employeeQuery.$or = [
-        { _id: me.supervisor }, // Their supervisor
-        { role: { $in: ["Manager", "Team Lead"] } }, // All managers and team leads
-        { _id: { $in: juniorIds } }, // People they supervise (juniors)
-      ];
-    } else {
-      // Team leads and managers can see all operations employees
-      employeeQuery.$or = [
-        { department: "Operations" },
-        { role: { $in: ["Employee", "Manager", "Team Lead"] } },
-      ];
-    }
+    // Regular employees can now see all active employees in their organization to facilitate communication
+    // (Previously restricted to supervisor, managers, and team leads)
+
+    // Default visibility for all: see everyone in Operations or with specific roles
+    employeeQuery.$or = [
+      { department: "Operations" },
+      { role: { $in: ["Employee", "Manager", "Team Lead"] } },
+    ];
 
     const employees = await Employee.find(employeeQuery)
       .select(

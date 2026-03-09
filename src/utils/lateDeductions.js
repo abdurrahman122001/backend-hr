@@ -609,7 +609,7 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
 
     const existingTx = await LeaveTransaction.findOne({
       employee: employeeId,
-      date: { $gte: dayStart, $lte: dayEnd },
+      date: new Date(attendanceDate),
       reason: { $regex: /^Half Day/i }
     });
 
@@ -719,7 +719,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
     const leaveTransaction = await LeaveTransaction.findOne({
       owner: ownerId,
       employee: employeeId,
-      date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
+      date: new Date(attendanceDate),
       reason: { $regex: /^Half Day/i }
     });
 
@@ -736,10 +736,10 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           employee: employeeId,
           leaveYearBalance: balance._id,
           year: leaveYear,
-          date: new Date(),
+          date: new Date(attendanceDate),
           type: "PAID_LEAVE_REVERSAL",
           value: reversalValue,
-          reason: "Between-Shift Login - Half Day Reversal"
+          reason: "Half Day Reversal (Session Reactivated)"
         });
 
         console.log(`[REVERSAL] ${employee.name}: Restored ${reversalValue} paid leaves (Between-shift login)`);
@@ -767,10 +767,10 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           employee: employeeId,
           leaveYearBalance: balance._id,
           year: leaveYear,
-          date: new Date(),
+          date: new Date(attendanceDate),
           type: "UNPAID_LEAVE_REVERSAL",
           value: reversalValue,
-          reason: "Between-Shift Login - Half Day Reversal"
+          reason: "Half Day Reversal (Session Reactivated)"
         });
 
         console.log(`[REVERSAL] ${employee.name}: Reversed salary deduction (Between-shift login)`);

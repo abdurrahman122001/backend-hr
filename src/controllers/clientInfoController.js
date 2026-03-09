@@ -696,19 +696,9 @@ exports.searchTeamMembers = async (req, res) => {
 
     /* ---------------- ROLE RULES ---------------- */
 
-    // ✅ Manager/Team Lead or Hierarchy Senior → see all employees
-    if (role === "manager" || role === "team lead" || role === "team_lead" || isSenior) {
-      // no extra restriction
-    }
-
-    // 🔒 Others → only their Team Lead (if any)
-    else {
-      if (!emp.teamLead) {
-        employeesQuery._id = { $eq: null };
-      } else {
-        employeesQuery._id = emp.teamLead;
-      }
-    }
+    // ✅ Anyone can search all employees in their organization (Active only)
+    employeesQuery.status = "active";
+    // no extra restriction based on role here to allow messaging colleagues
 
     const employees = await Employee.find(employeesQuery)
       .select("_id name email companyEmail role designation")

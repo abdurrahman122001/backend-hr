@@ -301,20 +301,12 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
-    return { ...q, owner: ownerId };
-  }
-
-  // Define base participant filter for this user
-  const participantFilter = {
+  // 🛡️ CORE PRIVACY RULE: Pending messages are ONLY visible to participants (Sender & Receiver)
+  const isParticipant = {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // 🔥 HIERARCHY-BASED: Get all juniors where this user is the senior
+  // Hierarchy lookup for junior-based visibility
   const juniorLinks = await EmployeeHierarchy.find({
     owner: ownerId,
     senior: me,
@@ -323,90 +315,29 @@ async function applyVisibility(q, req) {
     .lean();
   const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
-  // 🧑‍🤝‍🧑 TEAM LEAD: Can see their own plus messages from their juniors if pending
-  if (currentUserRole === "team_lead") {
-    const visibilityConditions = {
-      $or: [
-        { sender: me },
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        // 🔥 HIERARCHY-BASED: Supervisors can see pending messages from their juniors
-        ...(juniorIds.length > 0
-          ? [
-            {
-              sender: { $in: juniorIds },
-              approvalStatus: "pending",
-              owner: ownerId,
-            },
-          ]
-          : []),
-        // Team leads can see all pending messages that need approval in their organization
-        {
-          approvalStatus: "pending",
-          owner: ownerId,
-        },
-      ],
-    };
+  // 👁️ ROLE/HIERARCHY VISIBILITY (Non-Pending only)
+  const roleHierarchyFilter = {
+    approvalStatus: { $ne: "pending" }, // Blocks hierarchy/role access for pending
+    $or: [
+      // Managers/Owners see all "approved/sent" messages for their organization
+      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      // Team leads see all "approved/sent" messages for their organization
+      ...(currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
+      // Seniors see "approved/sent" messages from their juniors
+      ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
+    ]
+  };
 
-    return { $and: [q, visibilityConditions] };
-  }
+  // Base inbox visibility: either you're a participant, or you have role-based non-pending access
+  const inboxVisibility = {
+    $or: [
+      isParticipant,
+      roleHierarchyFilter
+    ]
+  };
 
-  // 🔥 HIERARCHY-BASED: Any supervisor (even if not Team Lead) can see their juniors' pending messages
-  if (juniorIds.length > 0) {
-    const visOr = [
-      { sender: me },
-      { receiver: me },
-      { receiver: { $in: [me] } },
-      {
-        sender: { $in: juniorIds },
-        approvalStatus: "pending",
-        owner: ownerId,
-      },
-    ];
-
-    if (q.isScheduled === true && q.status === "scheduled") {
-      return { $and: [q, { $or: visOr }] };
-    }
-
-    const now = new Date();
-    const scheduledVisibility = {
-      $or: [
-        {
-          $and: [
-            {
-              $or: [
-                { isScheduled: { $ne: true } },
-                { isScheduled: true, status: "sent" },
-                {
-                  isScheduled: true,
-                  status: "scheduled",
-                  scheduledFor: { $lte: now },
-                },
-              ],
-            },
-            { $or: visOr },
-          ],
-        },
-        {
-          isScheduled: true,
-          status: "scheduled",
-          scheduledFor: { $gt: now },
-          sender: me,
-        },
-      ],
-    };
-
-    return { $and: [q, scheduledVisibility] };
-  }
-
-  // 👷 NORMAL EMPLOYEE
+  // 🕒 SCHEDULED MESSAGE VISIBILITY
   const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
-
-  if (q.isScheduled === true && q.status === "scheduled") {
-    return { $and: [q, { $or: visOr }] };
-  }
-
   const scheduledVisibility = {
     $or: [
       {
@@ -422,9 +353,10 @@ async function applyVisibility(q, req) {
               },
             ],
           },
-          { $or: visOr },
+          inboxVisibility,
         ],
       },
+      // Always see your own future scheduled messages (Drafts/Future)
       {
         isScheduled: true,
         status: "scheduled",
@@ -433,6 +365,11 @@ async function applyVisibility(q, req) {
       },
     ],
   };
+
+  // Handle specific scheduled fetch (e.g., from a scheduled list view)
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { $and: [q, inboxVisibility] };
+  }
 
   return { $and: [q, scheduledVisibility] };
 }
@@ -997,22 +934,40 @@ exports.createMessage = async function createMessage(req, res) {
 
     receivers = receivers.filter((id) => id !== String(sender));
 
-    let approvalStatus;
+    let approvalStatus = "approved";
     let clientSupervisionMode = "direct";
+    let clientDoc = null;
+    let isSenderAssigned = false;
+    let assignedToIds = [];
 
     if (client && isObjId(client)) {
-      const clientDoc = await ClientInfo.findById(client)
-        .select("supervision")
+      clientDoc = await ClientInfo.findById(client)
+        .populate("assignedTo", "_id role")
+        .select("supervision assignedTo supervisedBy")
         .lean();
 
-      clientSupervisionMode = clientDoc?.supervision || "direct";
+      if (clientDoc) {
+        clientSupervisionMode = clientDoc.supervision || "direct";
+        // Support both array and single-object assignedTo
+        assignedToIds = (Array.isArray(clientDoc.assignedTo) ? clientDoc.assignedTo : [clientDoc.assignedTo])
+          .filter(Boolean)
+          .map(emp => String(emp._id || emp));
+
+        isSenderAssigned = assignedToIds.includes(String(sender));
+
+        // Automatically add all assigned team members as receivers if they aren't the sender
+        assignedToIds.forEach(id => {
+          if (!receivers.includes(id) && id !== String(sender)) {
+            receivers.push(id);
+          }
+        });
+      }
 
       if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
         approvalStatus = "approved";
-      } else if (clientSupervisionMode === "needs_approval") {
+      } else if (clientSupervisionMode === "needs_approval" && isSenderAssigned) {
+        // 🔥 CRITICAL: Only set to pending if sender is actually assigned to this client
         approvalStatus = "pending";
-      } else if (clientSupervisionMode === "direct") {
-        approvalStatus = "approved";
       } else {
         approvalStatus = "approved";
       }
@@ -1039,22 +994,8 @@ exports.createMessage = async function createMessage(req, res) {
       );
     }
 
-    let assignedTeamMemberId = null;
-    if (client && isObjId(client)) {
-      const clientDoc = await ClientInfo.findById(client)
-        .populate("assignedTo", "_id role")
-        .lean();
-
-      if (clientDoc && clientDoc.assignedTo && clientDoc.assignedTo._id) {
-        assignedTeamMemberId = String(clientDoc.assignedTo._id);
-        if (
-          !receivers.includes(assignedTeamMemberId) &&
-          assignedTeamMemberId !== String(sender)
-        ) {
-          receivers.push(assignedTeamMemberId);
-        }
-      }
-    }
+    // Simplified assignedTo handling - already handled above in the consolidated clientDoc fetch
+    let assignedTeamMemberId = assignedToIds[0] || null;
 
     const { tls, managers } = await findTLsAndManagersByOwner(owner);
 
@@ -1068,18 +1009,15 @@ exports.createMessage = async function createMessage(req, res) {
       });
     }
 
+    const originalIntendedReceivers = [...receivers]; // 💾 Capture final intended list before supervision replaces it
+
     // 🔥 HIERARCHY-BASED: Find the first active supervisor in the hierarchy for the sender
-    const hierarchySupervisors = await findNextActiveSupervisor(owner, sender, client);
-    const hasHierarchy = hierarchySupervisors.length > 0;
-    if (client && isObjId(client)) {
+    // NOTE: only applies if sender is assigned to client and client needs approval
+    if (client && isObjId(client) && isSenderAssigned && approvalStatus === "pending") {
       if (senderRole === "employee" || senderRole === "team_lead" || senderRole === "manager") {
-
-        // Get the client doc to check specific supervision settings
-        const clientDoc = await ClientInfo.findById(client).select("supervision supervisedBy").lean();
+        // Use clientDoc from the consolidated fetch above
         const activeSupervisors = (clientDoc?.supervisedBy || []).map(id => String(id));
-
-        const hierarchySupervisors = await findSupervisorsFromHierarchy(owner, sender);
-        const managementChain = await getManagementChainFromHierarchy(owner, sender); // Function defined below/locally
+        const managementChain = await getManagementChainFromHierarchy(owner, sender);
 
         let targetSupervisor = null;
 
@@ -1128,7 +1066,7 @@ exports.createMessage = async function createMessage(req, res) {
           const isExplicitReceiver =
             normalizeIds(receiverBody).includes(receiverId) ||
             normalizeIds(receiversBody).includes(receiverId);
-          const isAssignedTeamMember = receiverId === assignedTeamMemberId;
+          const isAssignedTeamMember = assignedToIds.includes(receiverId);
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
 
@@ -1143,7 +1081,7 @@ exports.createMessage = async function createMessage(req, res) {
           const isExplicitReceiver =
             normalizeIds(receiverBody).includes(receiverId) ||
             normalizeIds(receiversBody).includes(receiverId);
-          const isAssignedTeamMember = receiverId === assignedTeamMemberId;
+          const isAssignedTeamMember = assignedToIds.includes(receiverId);
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
 
@@ -1160,45 +1098,38 @@ exports.createMessage = async function createMessage(req, res) {
       if (approvalStatus !== "pending") approvalStatus = null;
     }
 
-    if (replyTo && originalMessage) {
-      if (client && isObjId(client)) {
-        const replyClientDoc = await ClientInfo.findById(client)
-          .select("supervision")
-          .lean();
-        // Similar logic for Reply
-        const clientDoc = await ClientInfo.findById(client).select("supervision supervisedBy").lean();
-        const activeSupervisors = (clientDoc?.supervisedBy || []).map(id => String(id));
+    if (replyTo && originalMessage && client && isObjId(client) && isSenderAssigned && approvalStatus === "pending") {
+      // Logic for supervisions on replies - already initialized above, but ensuring consistency
+      const activeSupervisors = (clientDoc?.supervisedBy || []).map(id => String(id));
+      const managementChain = await getManagementChainFromHierarchy(owner, sender);
 
-        const managementChain = await getManagementChainFromHierarchy(owner, sender);
-
-        let targetSupervisor = null;
-        for (const supervisorId of managementChain) {
-          if (activeSupervisors.includes(String(supervisorId))) {
-            targetSupervisor = supervisorId;
-            break;
-          }
+      let targetSupervisor = null;
+      for (const supervisorId of managementChain) {
+        if (activeSupervisors.includes(String(supervisorId))) {
+          targetSupervisor = supervisorId;
+          break;
         }
+      }
 
-        if (targetSupervisor) {
-          receivers = [String(targetSupervisor)]; // Only the specific supervisor
-          approvalStatus = "pending";
-          // Update thread history
-          if (threadMessages.length > 0 && !threadHasTeamLead) {
-            try {
-              const threadMessageIds = threadMessages.map(msg => msg._id);
-              await AssignmentMessage.updateMany(
-                { _id: { $in: threadMessageIds }, receiver: { $ne: targetSupervisor } },
-                { $addToSet: { receiver: targetSupervisor } }
-              );
-            } catch (e) { console.error(e) }
-          }
-        } else {
-          // Supervision is OFF for everyone
-          if (managers.length > 0 && !receivers.some((r) => managers.includes(r))) {
-            receivers = [...receivers, ...managers.map((id) => String(id))];
-          }
-          approvalStatus = "approved";
+      if (targetSupervisor) {
+        receivers = [String(targetSupervisor)]; // Only the specific supervisor
+        approvalStatus = "pending";
+        // Update thread history
+        if (threadMessages.length > 0 && !threadHasTeamLead) {
+          try {
+            const threadMessageIds = threadMessages.map(msg => msg._id);
+            await AssignmentMessage.updateMany(
+              { _id: { $in: threadMessageIds }, receiver: { $ne: targetSupervisor } },
+              { $addToSet: { receiver: targetSupervisor } }
+            );
+          } catch (e) { console.error(e) }
         }
+      } else {
+        // No active supervisor in chain for this sender
+        if (managers.length > 0 && !receivers.some((r) => managers.includes(r))) {
+          receivers = [...receivers, ...managers.map((id) => String(id))];
+        }
+        approvalStatus = "approved";
       }
     }
 
@@ -1439,6 +1370,7 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt: !isScheduled ? new Date() : undefined,
       threadId,
       replyTo: replyTo || undefined,
+      intendedRecipients: (approvalStatus === "pending") ? originalIntendedReceivers : [],
       isFromClient: inheritedIsFromClient,
       isFromCompanyEmployee: inheritedIsFromCompanyEmployee,
       clientEmployeeName: inheritedClientEmployeeName,
@@ -1468,15 +1400,16 @@ exports.createMessage = async function createMessage(req, res) {
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
 
-      // 🔥 EMIT THREAD UPDATE EVENT FOR TEAM LEADS
-      if (senderRole === "employee" && clientSupervisionMode === "needs_approval" && tls.length > 0) {
-        // Notify team leads about thread update
-        tls.forEach(teamLeadId => {
-          io.to(`employee_${teamLeadId}`).emit("thread_updated_for_supervision", {
+      // 🔥 HIERARCHY-BASED: Notify THE specific supervisor(s) about the thread update
+      if (senderRole === "employee" && clientSupervisionMode === "needs_approval" && isSenderAssigned) {
+        const supervisorsToNotify = targetSupervisor ? [String(targetSupervisor)] : [];
+
+        supervisorsToNotify.forEach(supervisorId => {
+          io.to(`employee_${supervisorId}`).emit("thread_updated_for_supervision", {
             threadId: threadId,
             clientId: client,
             updatedAt: new Date(),
-            message: "Thread now requires supervision",
+            message: "Thread requires your supervision",
           });
         });
       }
@@ -1847,12 +1780,17 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Get managers for the owner
       const { managers } = await findTLsAndManagersByOwner(ownerId);
 
-      // Update receiver: Add managers, keep existing receivers (optional, but keep for now)
+      // RESTORE INTENDED RECIPIENTS
+      const intendedRecipients = Array.isArray(msg.intendedRecipients)
+        ? msg.intendedRecipients.map((r) => String(r._id || r))
+        : [];
+
       const currentReceivers = Array.isArray(msg.receiver)
         ? msg.receiver.map((r) => String(r._id || r))
         : [];
+
       const finalReceivers = Array.from(
-        new Set([...currentReceivers, ...managers])
+        new Set([...currentReceivers, ...managers, ...intendedRecipients])
       ).filter((rid) => rid !== String(msg.sender?._id || msg.sender));
 
       msg.receiver = finalReceivers;

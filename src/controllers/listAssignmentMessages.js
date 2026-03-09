@@ -94,20 +94,12 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
-  if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
-    ownerId
-  ) {
-    return { ...q, owner: ownerId };
-  }
-
-  // Define base participant filter for this user
-  const participantFilter = {
+  // 🛡️ CORE PRIVACY RULE: Pending messages are ONLY visible to participants (Sender & Receiver)
+  const isParticipant = {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // 🔥 HIERARCHY-BASED: Get all juniors where this user is the senior
+  // Hierarchy lookup for junior-based visibility
   const juniorLinks = await EmployeeHierarchy.find({
     owner: ownerId,
     senior: me,
@@ -116,90 +108,29 @@ async function applyVisibility(q, req) {
     .lean();
   const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
-  // 🧑‍🤝‍🧑 TEAM LEAD: Can see their own plus messages from their juniors if pending
-  if (currentUserRole === "team_lead") {
-    const visibilityConditions = {
-      $or: [
-        { sender: me },
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        // 🔥 HIERARCHY-BASED: Supervisors can see pending messages from their juniors
-        ...(juniorIds.length > 0
-          ? [
-            {
-              sender: { $in: juniorIds },
-              approvalStatus: "pending",
-              owner: ownerId,
-            },
-          ]
-          : []),
-        // Team leads can see all pending messages that need approval in their organization
-        {
-          approvalStatus: "pending",
-          owner: ownerId,
-        },
-      ],
-    };
+  // 👁️ ROLE/HIERARCHY VISIBILITY (Non-Pending only)
+  const roleHierarchyFilter = {
+    approvalStatus: { $ne: "pending" }, // Blocks hierarchy/role access for pending
+    $or: [
+      // Managers/Owners see all "approved/sent" messages for their organization
+      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      // Team leads see all "approved/sent" messages for their organization
+      ...(currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
+      // Seniors see "approved/sent" messages from their juniors
+      ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
+    ]
+  };
 
-    return { $and: [q, visibilityConditions] };
-  }
+  // Base inbox visibility
+  const inboxVisibility = {
+    $or: [
+      isParticipant,
+      roleHierarchyFilter
+    ]
+  };
 
-  // 🔥 HIERARCHY-BASED: Any supervisor (even if not Team Lead) can see their juniors' pending messages
-  if (juniorIds.length > 0) {
-    const visOr = [
-      { sender: me },
-      { receiver: me },
-      { receiver: { $in: [me] } },
-      {
-        sender: { $in: juniorIds },
-        approvalStatus: "pending",
-        owner: ownerId,
-      },
-    ];
-
-    if (q.isScheduled === true && q.status === "scheduled") {
-      return { $and: [q, { $or: visOr }] };
-    }
-
-    const now = new Date();
-    const scheduledVisibility = {
-      $or: [
-        {
-          $and: [
-            {
-              $or: [
-                { isScheduled: { $ne: true } },
-                { isScheduled: true, status: "sent" },
-                {
-                  isScheduled: true,
-                  status: "scheduled",
-                  scheduledFor: { $lte: now },
-                },
-              ],
-            },
-            { $or: visOr },
-          ],
-        },
-        {
-          isScheduled: true,
-          status: "scheduled",
-          scheduledFor: { $gt: now },
-          sender: me,
-        },
-      ],
-    };
-
-    return { $and: [q, scheduledVisibility] };
-  }
-
-  // 👷 NORMAL EMPLOYEE
+  // 🕒 SCHEDULED MESSAGE VISIBILITY
   const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
-
-  if (q.isScheduled === true && q.status === "scheduled") {
-    return { $and: [q, { $or: visOr }] };
-  }
-
   const scheduledVisibility = {
     $or: [
       {
@@ -215,9 +146,10 @@ async function applyVisibility(q, req) {
               },
             ],
           },
-          { $or: visOr },
+          inboxVisibility,
         ],
       },
+      // Always see your own future scheduled messages (Drafts/Future)
       {
         isScheduled: true,
         status: "scheduled",
@@ -226,6 +158,11 @@ async function applyVisibility(q, req) {
       },
     ],
   };
+
+  // Handle specific scheduled fetch
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { $and: [q, inboxVisibility] };
+  }
 
   return { $and: [q, scheduledVisibility] };
 }

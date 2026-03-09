@@ -102,236 +102,85 @@ function normalizeRole(role) {
 }
 
 async function applyVisibility(q, req) {
-  // 🚨 CRITICAL: Return impossible query if no authenticated user
-  if (!req.employee?._id) {
-    return { _id: null };
-  }
+  if (!req.employee?._id) return { _id: null };
 
   const me = oid(String(req.employee._id));
-  if (!me) {
-    return { _id: null };
-  }
+  if (!me) return { _id: null };
 
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🚨 CRITICAL: Base visibility - user must ALWAYS be participant
-  const participantFilter = {
+  // 🛡️ CORE PRIVACY RULE: Pending messages are ONLY visible to participants (Sender & Receiver)
+  const isParticipant = {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // 🧑‍💼 MANAGER: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
-  if (currentUserRole === "manager" && ownerId) {
-    const managerQuery = {
-      $and: [
-        { owner: ownerId }, // Within their organization
-        participantFilter, // AND they are participant
-      ],
-    };
+  // Hierarchy lookup for junior-based visibility
+  const juniorLinks = await EmployeeHierarchy.find({
+    owner: ownerId,
+    senior: me,
+  })
+    .select("junior")
+    .lean();
+  const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
-    // For thread-based queries, maintain thread context but ensure participation
-    if (q.threadId) {
-      managerQuery.$and.push({ threadId: q.threadId });
+  // 👁️ ROLE/HIERARCHY VISIBILITY (Non-Pending only)
+  const roleHierarchyFilter = {
+    approvalStatus: { $ne: "pending" }, // Blocks hierarchy/role access for pending
+    $or: [
+      // Managers/Owners see all "approved/sent" messages for their organization
+      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      // Team leads see all "approved/sent" messages for their organization
+      ...(currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
+      // Seniors see "approved/sent" messages from their juniors
+      ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
+    ]
+  };
 
-      // Verify manager has access to this thread
-      const threadAccess = await AssignmentMessage.findOne({
-        threadId: q.threadId,
-        $and: [{ owner: ownerId }, participantFilter],
-      });
+  // Base inbox visibility
+  const inboxVisibility = {
+    $or: [
+      isParticipant,
+      roleHierarchyFilter
+    ]
+  };
 
-      if (!threadAccess) {
-        return { _id: null }; // No access to this thread
-      }
-    }
-
-    // Handle scheduled messages for managers
-    if (q.isScheduled === true && q.status === "scheduled") {
-      const now = new Date();
-      return {
-        ...managerQuery,
-        isScheduled: true,
-        status: "scheduled",
-        $or: [
-          { scheduledFor: { $lte: now } }, // Past scheduled messages they can see
-          { sender: me }, // Or their own future scheduled messages
-        ],
-      };
-    }
-
-    // Apply trash/spam filters if present
-    if (q.isTrashed !== undefined) {
-      managerQuery.$and.push({ isTrashed: q.isTrashed });
-    }
-    if (q.isSpam !== undefined) {
-      managerQuery.$and.push({ isSpam: q.isSpam });
-    }
-
-    return managerQuery;
-  }
-
-  // 🎯 TEAM LEAD: Can see messages within their organization WHERE THEY ARE PARTICIPANTS
-  if (currentUserRole === "team_lead" && ownerId) {
-    const teamLeadQuery = {
-      $and: [
-        { owner: ownerId }, // Within their organization
-        participantFilter, // AND they are participant
-      ],
-    };
-
-    // For thread-based queries
-    if (q.threadId) {
-      teamLeadQuery.$and.push({ threadId: q.threadId });
-
-      // Verify team lead has access to this thread
-      const threadAccess = await AssignmentMessage.findOne({
-        threadId: q.threadId,
-        $and: [{ owner: ownerId }, participantFilter],
-      });
-
-      if (!threadAccess) {
-        return { _id: null };
-      }
-    }
-
-    // Special case: Team leads can see pending approval messages from their organization
-    // but ONLY if they are participants OR if they need to review them
-    if (q.approvalStatus === "pending" || q.filter === "review") {
-      // For review filter, team leads can see pending messages from their org
-      // that require their approval (direct supervision mode)
-      const reviewQuery = {
+  // 🕒 SCHEDULED MESSAGE VISIBILITY
+  const now = new Date();
+  const scheduledVisibility = {
+    $or: [
+      {
         $and: [
-          { owner: ownerId },
-          { approvalStatus: "pending" },
           {
             $or: [
-              participantFilter, // They are participant
-              // OR it's a message from employees under their supervision
+              { isScheduled: { $ne: true } },
+              { isScheduled: true, status: "sent" },
               {
-                sender: {
-                  $in: await getEmployeesUnderSupervision(ownerId, "team_lead"),
-                },
+                isScheduled: true,
+                status: "scheduled",
+                scheduledFor: { $lte: now },
               },
             ],
           },
+          inboxVisibility,
         ],
-      };
-
-      // Apply additional filters
-      if (q.threadId) reviewQuery.$and.push({ threadId: q.threadId });
-      if (q.isTrashed !== undefined)
-        reviewQuery.$and.push({ isTrashed: q.isTrashed });
-      if (q.isSpam !== undefined) reviewQuery.$and.push({ isSpam: q.isSpam });
-
-      return reviewQuery;
-    }
-
-    // Handle scheduled messages for team leads
-    if (q.isScheduled === true && q.status === "scheduled") {
-      const now = new Date();
-      return {
-        ...teamLeadQuery,
-        isScheduled: true,
-        status: "scheduled",
-        $or: [{ scheduledFor: { $lte: now } }, { sender: me }],
-      };
-    }
-
-    // Apply filters
-    if (q.isTrashed !== undefined) {
-      teamLeadQuery.$and.push({ isTrashed: q.isTrashed });
-    }
-    if (q.isSpam !== undefined) {
-      teamLeadQuery.$and.push({ isSpam: q.isSpam });
-    }
-
-    return teamLeadQuery;
-  }
-
-  // 👷 NORMAL EMPLOYEE: STRICT participant-based visibility ONLY
-  const employeeQuery = {
-    $and: [participantFilter],
-  };
-
-  // For thread-based queries, verify access to the thread
-  if (q.threadId) {
-    employeeQuery.$and.push({ threadId: q.threadId });
-
-    const threadAccess = await AssignmentMessage.findOne({
-      threadId: q.threadId,
-      $or: participantFilter.$or,
-    });
-
-    if (!threadAccess) {
-      return { _id: null }; // No access to this thread
-    }
-  }
-
-  // Handle scheduled messages specifically for employees
-  const now = new Date();
-  if (q.isScheduled === true && q.status === "scheduled") {
-    return {
-      $and: [
-        participantFilter,
-        { isScheduled: true },
-        { status: "scheduled" },
-        {
-          $or: [
-            { scheduledFor: { $lte: now } }, // Past scheduled messages
-            { sender: me }, // Or their own future scheduled messages
-          ],
-        },
-      ],
-    };
-  }
-
-  // Handle normal messages with scheduled logic
-  const baseConditions = {
-    $or: [
-      { isScheduled: { $ne: true } }, // Not scheduled
-      { isScheduled: true, status: "sent" }, // Scheduled but sent
+      },
+      // Always see your own future scheduled messages (Drafts/Future)
       {
         isScheduled: true,
         status: "scheduled",
-        scheduledFor: { $lte: now }, // Scheduled but time has passed
+        scheduledFor: { $gt: now },
+        sender: me,
       },
     ],
   };
 
-  employeeQuery.$and.push(baseConditions);
-
-  // Apply additional filters
-  if (q.owner && isObjId(q.owner)) {
-    employeeQuery.$and.push({ owner: q.owner });
-  }
-  if (q.client && isObjId(q.client)) {
-    employeeQuery.$and.push({ client: q.client });
-  }
-  if (q.sender && isObjId(q.sender)) {
-    employeeQuery.$and.push({ sender: q.sender });
-  }
-  if (
-    q.status &&
-    ["draft", "scheduled", "sent", "cancelled"].includes(q.status)
-  ) {
-    employeeQuery.$and.push({ status: q.status });
-  }
-  if (
-    q.approvalStatus &&
-    ["pending", "approved", "disapproved"].includes(q.approvalStatus)
-  ) {
-    employeeQuery.$and.push({ approvalStatus: q.approvalStatus });
-  }
-  if (q.isTrashed !== undefined) {
-    employeeQuery.$and.push({ isTrashed: q.isTrashed });
-  }
-  if (q.isSpam !== undefined) {
-    employeeQuery.$and.push({ isSpam: q.isSpam });
-  }
-  if (q.isScheduled !== undefined) {
-    employeeQuery.$and.push({ isScheduled: q.isScheduled });
+  // Handle specific scheduled fetch
+  if (q.isScheduled === true && q.status === "scheduled") {
+    return { $and: [q, inboxVisibility] };
   }
 
-  return employeeQuery;
+  return { $and: [q, scheduledVisibility] };
 }
 
 // Helper function to get employees under supervision
@@ -963,10 +812,10 @@ exports.createMessage = async function createMessage(req, res) {
         .populate("client")
         .select("subject threadId emailMetadata client")
         .lean();
-      
+
       if (originalMessage) {
         threadId = originalMessage.threadId;
-        
+
         // Get email thread info for replies
         if (originalMessage.client) {
           emailThreadInfo = await getEmailThreadInfo(replyTo, originalMessage.client._id);
@@ -1470,13 +1319,13 @@ exports.createMessage = async function createMessage(req, res) {
           let inReplyTo = null;
           let references = null;
           let emailSubject = populated.subject || "Message from your service provider";
-          
+
           if (populated.replyTo && populated.replyTo.emailMetadata) {
             // This is a reply to an existing email
             inReplyTo = populated.replyTo.emailMetadata.messageId;
-            references = populated.replyTo.emailMetadata.references || 
-                        populated.replyTo.emailMetadata.messageId;
-            
+            references = populated.replyTo.emailMetadata.references ||
+              populated.replyTo.emailMetadata.messageId;
+
             // Add Re: prefix for replies
             if (!emailSubject.toLowerCase().startsWith('re:')) {
               emailSubject = `Re: ${emailSubject}`;
@@ -1498,18 +1347,18 @@ exports.createMessage = async function createMessage(req, res) {
                 <div style="background-color: #f5f5f5; padding: 20px; border-radius: 5px; margin: 20px 0;">
                   <p style="white-space: pre-wrap; color: #333;">${populated.note || ""}</p>
                 </div>
-                ${populated.attachments && populated.attachments.length > 0 ? 
-                  `<div style="margin-top: 20px;">
+                ${populated.attachments && populated.attachments.length > 0 ?
+                `<div style="margin-top: 20px;">
                     <p><strong>Attachments:</strong></p>
                     <ul style="list-style: none; padding: 0;">
-                      ${populated.attachments.map(att => 
-                        `<li style="margin: 5px 0;">
+                      ${populated.attachments.map(att =>
+                  `<li style="margin: 5px 0;">
                           <span style="color: #666;">📎</span> ${att.originalName || att.filename}
                         </li>`
-                      ).join('')}
+                ).join('')}
                     </ul>
                   </div>` : ''
-                }
+              }
                 <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; color: #666; font-size: 12px;">
                   <p>This message was sent by ${populated.sender?.name || "Team Member"}.</p>
                   <p>If you need to reply, please respond to this email.</p>
@@ -1519,7 +1368,7 @@ exports.createMessage = async function createMessage(req, res) {
             threadId: populated.threadId,
             inReplyTo: inReplyTo,
             references: references,
-            attachments: populated.attachments && populated.attachments.length > 0 ? 
+            attachments: populated.attachments && populated.attachments.length > 0 ?
               populated.attachments.map(att => ({
                 filename: att.filename,
                 originalName: att.originalName || att.filename,
@@ -1532,7 +1381,7 @@ exports.createMessage = async function createMessage(req, res) {
           // Send email to client with thread headers
           emailInfo = await sendEmailToClient(emailContent);
           emailSentToClient = true;
-          
+
           // Update message with email metadata including thread info
           msg.emailMetadata = {
             sentToClient: true,
@@ -1558,7 +1407,7 @@ exports.createMessage = async function createMessage(req, res) {
     const io = getIO(req);
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
-      
+
       // Also emit if email was sent to client
       if (emailSentToClient) {
         io.to(`employee_${sender}`).emit("message_sent_to_client", {
@@ -1775,9 +1624,8 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
     }
 
     res.json({
-      message: `Message ${
-        action === "send" ? "sent immediately" : "converted to draft"
-      }`,
+      message: `Message ${action === "send" ? "sent immediately" : "converted to draft"
+        }`,
       data: populated,
     });
   } catch (e) {
@@ -1965,16 +1813,16 @@ async function getEmailThreadInfo(messageId, clientId) {
       client: clientId,
       "emailMetadata.messageId": { $exists: true }
     })
-    .sort({ createdAt: 1 })
-    .select("emailMetadata threadId")
-    .lean();
+      .sort({ createdAt: 1 })
+      .select("emailMetadata threadId")
+      .lean();
 
     if (originalMessage && originalMessage.emailMetadata) {
       return {
         messageId: originalMessage.emailMetadata.messageId,
         threadId: originalMessage.threadId,
-        references: originalMessage.emailMetadata.references || 
-                   originalMessage.emailMetadata.messageId
+        references: originalMessage.emailMetadata.references ||
+          originalMessage.emailMetadata.messageId
       };
     }
 
@@ -1997,14 +1845,14 @@ async function getEmailThreadInfo(messageId, clientId) {
 /** ---------- UPDATED HELPER FUNCTION TO SEND EMAIL TO CLIENT ---------- **/
 async function sendEmailToClient(emailDetails) {
   try {
-    const { 
-      to, 
-      subject, 
-      text, 
-      html, 
-      cc, 
-      attachments, 
-      replyToMessageId, 
+    const {
+      to,
+      subject,
+      text,
+      html,
+      cc,
+      attachments,
+      replyToMessageId,
       threadId,
       inReplyTo,
       references
@@ -2012,17 +1860,17 @@ async function sendEmailToClient(emailDetails) {
 
     // Generate proper email headers for thread continuity
     let emailHeaders = {};
-    
+
     if (inReplyTo) {
       emailHeaders['In-Reply-To'] = inReplyTo;
     }
-    
+
     if (references) {
       emailHeaders['References'] = references;
     } else if (inReplyTo) {
       emailHeaders['References'] = inReplyTo;
     }
-    
+
     if (threadId) {
       const threadIndex = Buffer.from(threadId).toString('base64');
       emailHeaders['Thread-Index'] = threadIndex;
@@ -2062,7 +1910,7 @@ async function sendEmailToClient(emailDetails) {
             contentType: att.mimetype || 'application/octet-stream'
           };
         }
-        
+
         // Default fallback
         return {
           filename: att.originalName || att.filename,
@@ -2074,7 +1922,7 @@ async function sendEmailToClient(emailDetails) {
 
     const info = await transporter.sendMail(mailOptions);
     console.log(`✅ Email sent to client: ${info.messageId}`);
-    
+
     // Return email metadata for tracking
     return {
       ...info,
@@ -2186,12 +2034,12 @@ exports.approveMessage = async function approveMessage(req, res) {
             attachments:
               populated.attachments && populated.attachments.length > 0
                 ? populated.attachments.map((att) => ({
-                    filename: att.filename,
-                    originalName: att.originalName || att.filename,
-                    mimetype: att.mimetype,
-                    size: att.size,
-                    url: att.url,
-                  }))
+                  filename: att.filename,
+                  originalName: att.originalName || att.filename,
+                  mimetype: att.mimetype,
+                  size: att.size,
+                  url: att.url,
+                }))
                 : [],
           };
 
@@ -2326,7 +2174,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       message: emailSent
         ? "Message approved and sent to client successfully"
         : "Message approved successfully" +
-          (emailError ? ` (but email failed: ${emailError})` : ""),
+        (emailError ? ` (but email failed: ${emailError})` : ""),
       data: populated,
       emailInfo: {
         sent: emailSent,
