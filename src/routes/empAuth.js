@@ -874,30 +874,35 @@ router.post("/logout", requireAuth, async (req, res) => {
     // Case 1: Cross-midnight logout — logout date is different from check-in date
     const isCrossMidnightLogout = todayKarachi !== attendanceDate;
 
-    // Case 2: Logout at/after shift end time (shift completed)
+    // Case 2: Logout at/after shift end time (shift completed) OR after 9:00 PM Karachi time
     // If shiftEndMinutes is 0 or null (midnight/unset), treat midnight logout as shift complete
     let isShiftComplete = false;
+
+    // 🔥 Universal Rule: If employee stays until 9:00 PM, they are NOT marked as Half Day
+    const stayedUntil9PM = logoutTotalMinutes >= halfDayLogoutThreshold;
+
     if (shiftEndMinutes === null) {
-      // No shift configured — use the HALF_DAY_LOGOUT_THRESHOLD_HOUR as the check
-      isShiftComplete = logoutTotalMinutes >= halfDayLogoutThreshold;
+      // No shift configured — use the 9:00 PM threshold
+      isShiftComplete = stayedUntil9PM;
     } else if (shiftEndMinutes === 0) {
-      // Shift ends at midnight (00:00) — any logout past midnight or cross-midnight is complete
-      isShiftComplete = isCrossMidnightLogout || logoutTotalMinutes === 0;
+      // Shift ends at midnight (00:00)
+      // Safe if: Cross-midnight OR exactly midnight OR stayed until 9 PM
+      isShiftComplete = isCrossMidnightLogout || logoutTotalMinutes === 0 || stayedUntil9PM;
     } else {
-      // Normal shift end: logout >= shift end time means shift was completed
-      isShiftComplete = logoutTotalMinutes >= shiftEndMinutes;
+      // Normal shift end: logout >= shift end time OR stayed until 9 PM
+      isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
     }
 
     if (isCrossMidnightLogout) {
       // Employee worked past midnight into the next day — keep original status
       console.log(`[LOGOUT] Cross-midnight logout detected (attendance: ${attendanceDate}, logout date: ${todayKarachi}). Keeping original status: ${finalStatus}`);
     } else if (isShiftComplete) {
-      // Logout is at or after shift end time — shift was completed
-      console.log(`[LOGOUT] Shift completed (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes}min). Keeping status: ${finalStatus}`);
+      // Logout is at or after shift end time (or after 9 PM threshold) — shift was completed
+      console.log(`[LOGOUT] Shift completed or stayed until 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Keeping status: ${finalStatus}`);
     } else {
-      // Employee left early on the same day — apply Half Day rule
+      // Employee left early on the same day AND before 9 PM — apply Half Day rule
       finalStatus = "Half Day";
-      console.log(`[LOGOUT] Early logout (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Status → Half Day`);
+      console.log(`[LOGOUT] Early logout before 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Status → Half Day`);
     }
 
     // Calculate total hours worked
