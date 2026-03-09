@@ -1,5 +1,6 @@
 const express = require("express");
 const { Conversation, Message, Space } = require("../models/Chat");
+const ChatThread = require("../models/ChatThread");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
 const multer = require("multer");
@@ -711,18 +712,44 @@ exports.getMessages = async (req, res) => {
     }
 
     // Query messages by conversation ID
-    const messages = await Message.find({
+    const messagesRaw = await Message.find({
       conversation: conversationId,
     })
       .populate("sender", "name companyEmail avatar")
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
-      .populate("replyTo") // ✅ ADD: Populate replyTo reference
-
+      .populate("replyTo")
       .sort({ createdAt: -1 })
       .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .skip((page - 1) * limit)
+      .lean();
+
+    // Aggregate thread reply counts for these messages
+    const messageIds = messagesRaw.map(m => m._id);
+    const threadStats = await ChatThread.aggregate([
+      { $match: { parentMessageId: { $in: messageIds }, isDeleted: false } },
+      {
+        $group: {
+          _id: "$parentMessageId",
+          threadReplyCount: { $sum: 1 },
+          lastThreadReplyAt: { $max: "$createdAt" }
+        }
+      }
+    ]);
+
+    // Create a map for quick lookup
+    const statsMap = threadStats.reduce((acc, stat) => {
+      acc[stat._id.toString()] = stat;
+      return acc;
+    }, {});
+
+    // Attach stats to messages
+    const messages = messagesRaw.map(m => ({
+      ...m,
+      threadReplyCount: statsMap[m._id.toString()]?.threadReplyCount || 0,
+      lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null
+    }));
 
     console.log(`📨 Found ${messages.length} messages`);
 
@@ -3119,7 +3146,7 @@ exports.getSpaceMessages = async (req, res) => {
       });
     }
 
-    const messages = await Message.find({
+    const messagesRaw = await Message.find({
       conversation: conversation._id,
     })
       .populate("sender", "name companyEmail avatar")
@@ -3129,13 +3156,40 @@ exports.getSpaceMessages = async (req, res) => {
       .populate("replyTo") // ✅ ADD: Populate replyTo reference
       .sort({ createdAt: -1 })
       .limit(limit * 1)
-      .skip((page - 1) * limit);
+      .skip((page - 1) * limit)
+      .lean();
+
+    // Aggregate thread reply counts for these messages
+    const messageIds = messagesRaw.map(m => m._id);
+    const threadStats = await ChatThread.aggregate([
+      { $match: { parentMessageId: { $in: messageIds }, isDeleted: false } },
+      {
+        $group: {
+          _id: "$parentMessageId",
+          threadReplyCount: { $sum: 1 },
+          lastThreadReplyAt: { $max: "$createdAt" }
+        }
+      }
+    ]);
+
+    // Create a map for quick lookup
+    const statsMap = threadStats.reduce((acc, stat) => {
+      acc[stat._id.toString()] = stat;
+      return acc;
+    }, {});
+
+    // Attach stats to messages
+    const messages = messagesRaw.map(m => ({
+      ...m,
+      threadReplyCount: statsMap[m._id.toString()]?.threadReplyCount || 0,
+      lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null
+    }));
 
     // Mark messages as read for current user
     const unreadMessages = messages.filter(
       (msg) =>
         !msg.readBy.some(
-          (read) => read.employee._id.toString() === req.employee._id.toString()
+          (read) => (read.employee?._id || read.employee).toString() === req.employee._id.toString()
         )
     );
 

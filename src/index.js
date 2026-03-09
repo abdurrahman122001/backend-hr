@@ -105,6 +105,8 @@ const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
 const promotionRoutes = require("./routes/promotion");
 const salaryStructureRoutes = require("./routes/salaryStructure");
 const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
+const chatThreadRoutes = require("./routes/chatThreadRoutes");
+
 const app = express();
 
 // ---------- Schedulers / Cron Jobs ----------
@@ -282,6 +284,7 @@ app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRo
 const attendanceAccessRouter = require("./routes/attendanceAccess");
 app.use("/api/attendance-access", attendanceAccessRouter);
 
+app.use("/api/chat-threads", chatThreadRoutes);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
