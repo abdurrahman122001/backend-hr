@@ -144,7 +144,6 @@ const ALLOWED_ORIGINS = [
   "https://apis.innand.com",
   "http://employee.virsme.com",
   "https://employee.virsme.com",
-  "https://attendance.virsme.com",
   "http://hr.virsme.com",
   "https://hr.virsme.com",
   "http://innand.com",
@@ -152,9 +151,13 @@ const ALLOWED_ORIGINS = [
   "http://www.innand.com",
   "https://complete-profile.virsme.com",
   "https://www.innand.com",
+  "https://attendance.virsme.com",
+  "http://attendance.virsme.com",
   "http://localhost:8080",
+
   "http://localhost:8081",
   "http://localhost:8082",
+  "http://localhost:8083",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
