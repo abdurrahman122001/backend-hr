@@ -100,6 +100,7 @@ const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
 const promotionRoutes = require("./routes/promotion");
 const salaryStructureRoutes = require("./routes/salaryStructure");
 const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
+const chatThreadRoutes = require("./routes/chatThreadRoutes");
 
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
@@ -260,6 +261,7 @@ app.use("/api/apply-leave", applyLeaveRoutes);
 app.use("/api/promotion", requireAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
 app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
+app.use("/api/chat-threads", chatThreadRoutes);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
