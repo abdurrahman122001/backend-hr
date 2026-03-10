@@ -13,8 +13,8 @@ const toNum = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 const monthOrder = [
-  "January","February","March","April","May","June",
-  "July","August","September","October","November","December"
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December"
 ];
 
 // Generate full fiscal months starting from the given month/year
@@ -148,8 +148,7 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
       const tax = Math.round(s.fixed + over * s.rate);
       if (DEBUG_TAX) {
         console.log(
-          `[tax] slab match: A=${A.toLocaleString()} | from=${s.from.toLocaleString()} to=${
-            s.to === Infinity ? "∞" : s.to.toLocaleString()
+          `[tax] slab match: A=${A.toLocaleString()} | from=${s.from.toLocaleString()} to=${s.to === Infinity ? "∞" : s.to.toLocaleString()
           } | fixed=${s.fixed.toLocaleString()} | rate=${(s.rate * 100).toFixed(
             2
           )}% | over=${over.toLocaleString()} | annualTax=${tax.toLocaleString()}`
@@ -385,9 +384,9 @@ exports.getAutoTaxStatus = async (req, res) => {
 
     console.log(`[tax] TaxConfig found - autoApplyEnabled: ${taxCfg.autoApplyEnabled}`);
     console.log(`[tax] autoEnabledOwners:`, taxCfg.autoEnabledOwners);
-    
-    const isAutoEnabled = taxCfg?.autoApplyEnabled && 
-                         taxCfg.autoEnabledOwners?.includes(req.user._id.toString());
+
+    const isAutoEnabled = taxCfg?.autoApplyEnabled &&
+      taxCfg.autoEnabledOwners?.includes(req.user._id.toString());
 
     console.log(`[tax] Final autoTaxEnabled: ${isAutoEnabled}`);
 
@@ -399,6 +398,8 @@ exports.getAutoTaxStatus = async (req, res) => {
         autoApplyFromMonth: taxCfg.autoApplyFromMonth,
         autoApplyEnabledAt: taxCfg.autoApplyEnabledAt,
         processedAutoTaxMonths: taxCfg.processedAutoTaxMonths,
+        slabs: taxCfg.slabs,
+        enableMedicalExemption: taxCfg.enableMedicalExemption,
       } : null
     });
 
@@ -461,7 +462,7 @@ async function applyAutoTaxToFutureSlips(ownerId, fiscalMonths, taxCfg) {
 exports.autoApplyTaxIfEnabled = async function (slip) {
   try {
     console.log(`[TAX-AUTO] Checking auto-tax for slip: ${slip._id}, Owner: ${slip.owner}, Month: ${slip.month} ${slip.year}`);
-    
+
     // Check if tax is already applied
     const currentTax = slip.taxDeduction ? (Number(await decrypt(slip.taxDeduction)) || 0) : 0;
     if (currentTax > 0) {
@@ -481,7 +482,7 @@ exports.autoApplyTaxIfEnabled = async function (slip) {
     }
 
     console.log(`[TAX-AUTO] Auto-tax enabled for this owner. Checking date conditions...`);
-    
+
     // Check if this slip is from the auto-apply month or later
     const monthOrder = [
       "January", "February", "March", "April", "May", "June",
@@ -499,7 +500,7 @@ exports.autoApplyTaxIfEnabled = async function (slip) {
       const autoFromYear = parseInt(taxCfg.autoApplyFromMonth.year);
 
       const shouldApplyTax = slipYear > autoFromYear ||
-                            (slipYear === autoFromYear && slipMonthIndex >= autoFromMonthIndex);
+        (slipYear === autoFromYear && slipMonthIndex >= autoFromMonthIndex);
 
       if (!shouldApplyTax) {
         console.log(`[TAX-AUTO] Slip ${slip.month} ${slip.year} is before auto-apply date ${taxCfg.autoApplyFromMonth.month} ${taxCfg.autoApplyFromMonth.year}`);

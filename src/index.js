@@ -219,7 +219,7 @@ app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api/attendance", requireAuth, attendanceLeaveSummaryRouter);
+app.use("/api", attendanceLeaveSummaryRouter);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);

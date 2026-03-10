@@ -869,3 +869,81 @@ exports.getSalaryHistory = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * Get all template/master salaries for the company (owner)
+ * This is used for payroll estimates to see current salary configurations
+ */
+exports.getAllMasterSalaries = async (req, res) => {
+  try {
+    const ownerId = req.user.owner || req.user._id;
+
+    // Fetch all salary templates for this company
+    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).lean();
+
+    // Decrypt all fields for frontend consumption
+    const decryptedSalaries = await Promise.all(
+      salaryTemplates.map(async (sal) => {
+        const decrypted = { ...sal };
+
+        // Define all fields to decrypt
+        const fieldsToDecrypt = [
+          ...COMP_FIELDS,
+          "leaveDeductions", "lateDeductions", "eobiDeduction",
+          "sessiDeduction", "providentFundDeduction", "gratuityFundDeduction",
+          "advanceSalaryDeductions", "medicalInsurance", "lifeInsurance",
+          "penalties", "othersDeductions", "taxDeduction"
+        ];
+
+        for (const field of fieldsToDecrypt) {
+          if (sal[field]) {
+            try {
+              const dv = await decrypt(sal[field]);
+              decrypted[field] = safeNumber(dv, 0);
+            } catch {
+              decrypted[field] = 0;
+            }
+          } else {
+            decrypted[field] = 0;
+          }
+        }
+
+        // Handle nested loanDeductions
+        if (sal.loanDeductions) {
+          // Flatten for frontend matching PayrollEstimate keys
+          try {
+            if (sal.loanDeductions.vehicleLoan) {
+              const v = await decrypt(sal.loanDeductions.vehicleLoan);
+              decrypted.vehicleLoanDeduction = safeNumber(v, 0);
+            } else {
+              decrypted.vehicleLoanDeduction = 0;
+            }
+
+            if (sal.loanDeductions.otherLoans) {
+              const v = await decrypt(sal.loanDeductions.otherLoans);
+              decrypted.otherLoanDeductions = safeNumber(v, 0);
+            } else {
+              decrypted.otherLoanDeductions = 0;
+            }
+          } catch {
+            decrypted.vehicleLoanDeduction = 0;
+            decrypted.otherLoanDeductions = 0;
+          }
+        } else {
+          decrypted.vehicleLoanDeduction = 0;
+          decrypted.otherLoanDeductions = 0;
+        }
+
+        return decrypted;
+      })
+    );
+
+    res.json({
+      status: "success",
+      data: decryptedSalaries
+    });
+  } catch (err) {
+    console.error("Error in getAllMasterSalaries:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
