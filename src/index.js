@@ -128,7 +128,13 @@ app.use(
     },
   }),
 );
-app.use("/upload", express.static(path.join(__dirname, "../uploads")));
+app.use("/upload", express.static(path.join(__dirname, "../uploads"), {
+  setHeaders: (res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  },
+}));
 
 app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
 
