@@ -206,18 +206,21 @@ router.patch("/:id", requireAuth, async (req, res) => {
 
     let ownerAllowed = false;
 
-    // 🔒 RESTRICTION: Only super-admin can update salary slips
+    // 🔒 RESTRICTION: Only super-admin or company-admin/hr can update salary slips
     if (currentUserRole === "super-admin" || originalRole === "super-admin") {
       ownerAllowed = true;
-    } else {
-      ownerAllowed = false;
+    } else if (
+      (currentUserRole === "admin" || currentUserRole === "hr" || originalRole === "admin" || originalRole === "hr") &&
+      String(slip.owner) === String(req.user.owner)
+    ) {
+      ownerAllowed = true;
     }
 
     if (!ownerAllowed) {
-      console.log(`[AUTH-DENIED] Role=${currentUserRole}, UserRole=${originalRole}`);
+      console.log(`[AUTH-DENIED] Role=${currentUserRole}, UserRole=${originalRole}, SlipOwner=${slip.owner}, UserOwner=${req.user.owner}`);
       return res
         .status(403)
-        .json({ status: "error", message: "Only Super-Admin is allowed to update salary slips." });
+        .json({ status: "error", message: "Not authorized to update this salary slip." });
     }
 
     // Process updates

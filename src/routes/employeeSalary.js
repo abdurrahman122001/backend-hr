@@ -2,7 +2,9 @@ const express = require('express');
 const router = express.Router();
 const controller = require('../controllers/employeeSalaryController');
 const { uploadPhotos } = require("../middleware/upload");
+const requireAuth = require("../middleware/auth");
 
+router.get('/', requireAuth, controller.getAllMasterSalaries);
 router.get('/:id', controller.getEmployeeAndSalarySlip);
 router.get('/:id/history', controller.getSalaryHistory);
 router.put('/:id', controller.updateEmployeeAndSalarySlip);

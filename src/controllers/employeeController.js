@@ -36,6 +36,9 @@ function normalizeToCurrentYear(dateStr) {
 // Get Owner ID based on your existing logic
 // ---------------------------------------------
 function getEffectiveOwnerId(user) {
+  if (!user) return null;
+  // Prioritize .owner if it exists (set by our middleware)
+  if (user.owner) return user.owner;
   if (user.role === "admin" && user.createdBy) {
     return user.createdBy;
   }
@@ -441,6 +444,39 @@ exports.bulkActivate = async (req, res) => {
     });
   } catch (err) {
     console.error("Bulk activate error:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+};
+
+/**
+ * Auto-offboard employees whose notice period has ended
+ */
+exports.autoOffboardEmployees = async (req, res) => {
+  try {
+    const ownerId = getEffectiveOwnerId(req.user);
+    const today = dayjs().format("YYYY-MM-DD");
+
+    const result = await Employee.updateMany(
+      {
+        owner: { $in: [ownerId] },
+        status: "resigned",
+        noticePeriodEndDate: { $lte: today },
+        isTrashed: false,
+      },
+      {
+        $set: {
+          status: "offboarded",
+        },
+      }
+    );
+
+    res.json({
+      status: "success",
+      message: `Auto-offboarded ${result.modifiedCount} employees`,
+      data: { modifiedCount: result.modifiedCount },
+    });
+  } catch (err) {
+    console.error("Auto-offboard error:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 };

@@ -35,7 +35,7 @@ const {
 // Timezone Configuration
 // ---------------------
 const TIMEZONE = "Asia/Karachi";
-const GRACE_PERIOD_MINUTES = 15;
+const GRACE_PERIOD_MINUTES = 0;
 const HALF_DAY_THRESHOLD_HOUR = 18; // 6:00 PM
 const LOGIN_RESTRICTION_END_HOUR = 8; // 8:00 AM
 const HALF_DAY_LOGOUT_THRESHOLD_HOUR = 21; // 9:00 PM
@@ -55,7 +55,7 @@ function timeToMinutes(timeStr) {
  * Get reporting time from shift
  * Returns minutes since midnight, or fallback value
  */
-async function getReportingTimeFromShift(employeeId, defaultMinutes = 15 * 60 + 0) {
+async function getReportingTimeFromShift(employeeId, defaultMinutes = 15 * 60 + 30) {
   try {
     const emp = await Employee.findById(employeeId).select("shifts").lean();
     if (!emp || !emp.shifts || emp.shifts.length === 0) {
@@ -661,7 +661,7 @@ router.post("/confirm-code", async (req, res) => {
     codes.delete(decoded.id);
 
     const emp = await Employee.findById(decoded.id).select(
-      "_id companyEmail role owner name trustedDevices"
+      "_id companyEmail role owner name trustedDevices rt shifts"
     );
 
     const userAgent = req.headers["user-agent"] || "unknown";
@@ -707,9 +707,11 @@ router.post("/confirm-code", async (req, res) => {
     const shiftEndTimeStrConfirm = empShiftConfirm?.end || "00:00";
 
     // Calculate status based on reporting time
-    const reportingTimeMinutesConfirm = empShiftConfirm && empShiftConfirm.start
-      ? timeToMinutes(empShiftConfirm.start)
-      : (15 * 60 + 0);
+    const reportingTimeMinutesConfirm = emp.rt
+      ? timeToMinutes(emp.rt)
+      : (empShiftConfirm && empShiftConfirm.start
+        ? timeToMinutes(empShiftConfirm.start)
+        : (15 * 60 + 30)); // Default 3:30 PM
 
     const currentHour = nowKarachi.hours();
     const currentMin = nowKarachi.minutes();

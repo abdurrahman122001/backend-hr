@@ -67,7 +67,14 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
 
     if (!leaveBalance) {
         const employee = await Employee.findById(employeeId).lean();
-        const totalEntitled = employee?.leaveEntitlement?.total || 0;
+        const profileYear = employee?.leaveEntitlement?.bonusYear;
+
+        // Only use profile total if it matches the requested year
+        let totalEntitled = 0;
+        if (profileYear === leaveYear) {
+            totalEntitled = employee?.leaveEntitlement?.total || 0;
+        }
+
         return {
             initialBalance: totalEntitled,
             monthlyBalances: {},
