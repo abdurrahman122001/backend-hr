@@ -54,13 +54,14 @@ module.exports = async function unifiedAuth(req, res, next) {
       // This is CRITICAL FIX:
       // When employee logs in, req.user._id should be the COMPANY OWNER ID
       // not the employee's personal ID
+      const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
       req.user = {
-        _id: employee.owner, // COMPANY ID - for database queries
+        _id: finalOwner, // COMPANY ID - for database queries
         employeeId: employee._id, // Employee's personal ID
         role: employee.role,
         name: employee.name,
         email: employee.companyEmail,
-        owner: Array.isArray(employee.owner) ? employee.owner[0] : employee.owner,
+        owner: finalOwner,
         department: employee.department,
         permissions: employee.permissions || {},
         isEmployee: true,
@@ -79,13 +80,17 @@ module.exports = async function unifiedAuth(req, res, next) {
         userAccount: user._id,
       }).select("role permissions name department");
 
+      // CRITICAL: For HR users, owner is user.owner or user.createdBy
+      const effectiveOwner = user.owner || user.createdBy || user._id;
+      const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;
+
       req.user = {
-        _id: user._id, // Admin's ID is the company ID
+        _id: user._id, // User's actual ID
         role: user.role,
         name: user.name,
         email: user.email,
         createdBy: user.createdBy,
-        owner: user._id, // Same as _id for admin
+        owner: finalOwnerId, // This is the tenant/company ID
         isEmployee: false,
         isAdmin: true,
         permissions: linkedEmployee?.permissions || {},

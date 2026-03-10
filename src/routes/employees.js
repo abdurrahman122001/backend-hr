@@ -12,6 +12,7 @@ const {
   updateEmployeePermissions,
   bulkResign,
   bulkActivate,
+  autoOffboardEmployees,
 } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
@@ -62,6 +63,9 @@ router.post("/bulk/resign", requireAuth, bulkResign);
 
 // Bulk Activate
 router.post("/bulk/activate", requireAuth, bulkActivate);
+
+// Auto-offboard
+router.get("/auto-offboard", requireAuth, autoOffboardEmployees);
 
 /**
  * GET /api/employees

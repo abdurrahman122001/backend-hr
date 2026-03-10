@@ -588,10 +588,10 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
       // REQUIRED FIELDS FIX
       const ownerId =
+        req.user?.owner ||
         req.user?._id ||
-        req._id ||
-        employeeData.owner ||
-        existingEmployee.owner;
+        employeeData?.owner ||
+        existingEmployee?.owner;
 
       slipSet.owner = ownerId;
       slipSet.month =
