@@ -8,6 +8,7 @@ const SalarySlipSchema = new Schema(
 
     employee: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     encryptedWithKeyVersion: { type: Number, default: 1 }, // Track which key version was used
+    isLocked: { type: Boolean, default: false },
     manuallyEditedFields: {
       type: Map,
       of: Boolean,

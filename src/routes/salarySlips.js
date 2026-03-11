@@ -253,6 +253,10 @@ router.patch("/:id", requireAuth, async (req, res) => {
       }
     }
 
+    if (req.body.hasOwnProperty("isLocked")) {
+      updates.isLocked = Boolean(req.body.isLocked);
+    }
+
     // Handle nested deduction objects
     if (
       req.body.loanDeductions &&
