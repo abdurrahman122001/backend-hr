@@ -279,7 +279,7 @@ app.use("/api/promotion", requireAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
 app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
 app.use("/api/attendance-access", attendanceAccessRouter);
-
+app.use("/api/chat-threads", chatThreadRoutes);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
