@@ -223,6 +223,13 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .json({ status: "error", message: "Not authorized to update this salary slip." });
     }
 
+    if (slip.isLocked && req.body.isLocked !== false && req.body.isLocked !== 'false') {
+      return res.status(403).json({
+        status: "error",
+        message: "This salary slip is locked and cannot be edited.",
+      });
+    }
+
     // Process updates
     const updates = {};
     const editedFields = {};

@@ -186,7 +186,6 @@ app.use((err, _req, res, next) => {
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 
-// ---------- Public routes ----------
 app.use("/api/auth", authRouter);
 app.use("/api/emp-auth", empAuthRouter);
 
@@ -219,7 +218,10 @@ app.use("/api/salary-fields", requireAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
-app.use("/api", attendanceLeaveSummaryRouter);
+// Mount at /api so /api/leave-summary-history works
+// Mount leave-related summary routes under /api/attendance
+app.use("/api/attendance", attendanceLeaveSummaryRouter);
+app.use("/api/attendance", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);
@@ -263,7 +265,10 @@ app.use("/api/hierarchy", requireAuth, hierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);
+app.use("/api/email", emailReceiverRoutes);
+// Already handled above with attendanceAuth
 app.use("/api", employeeLeaveSummary);
+
 app.use("/api/admin", adminWorkSpaceManagementRoute);
 app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
@@ -273,7 +278,7 @@ app.use("/api/promotion", requireAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
 app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
 app.use("/api/attendance-access", attendanceAccessRouter);
-app.use("/api/chat-threads", chatThreadRoutes);
+
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
