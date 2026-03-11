@@ -242,6 +242,8 @@ router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
         const usedUnpaidMonth = typeof monthBalance.unpaidUsed === 'number' ? monthBalance.unpaidUsed : 0;
         const balance = monthBalance.balance;
 
+        const remainingPaid = leaveBalance?.remainingPaid || 0;
+
         res.json({
             Annual: {
                 total,
@@ -251,7 +253,8 @@ router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
                 usedUnpaidYTD,
                 usedPaidMonth,
                 usedUnpaidMonth,
-                balance
+                balance,
+                remainingPaid
             }
         });
     } catch (e) {
