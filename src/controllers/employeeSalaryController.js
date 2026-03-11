@@ -879,11 +879,14 @@ exports.getAllMasterSalaries = async (req, res) => {
     const ownerId = req.user.owner || req.user._id;
 
     // Fetch all salary templates for this company
-    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).lean();
+    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).populate("employee").lean();
+
+    // Filter out any templates where the employee has been deleted (employee is null)
+    const validTemplates = salaryTemplates.filter(sal => sal.employee != null);
 
     // Decrypt all fields for frontend consumption
     const decryptedSalaries = await Promise.all(
-      salaryTemplates.map(async (sal) => {
+      validTemplates.map(async (sal) => {
         const decrypted = { ...sal };
 
         // Define all fields to decrypt

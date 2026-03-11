@@ -1,7 +1,7 @@
 const PFSetting = require("../models/PFSetting");
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/SalarySlip");
-
+const { encrypt } = require("../utils/encryption");
 
 async function getPFRateAndYears(employeeId) {
   const employee = await Employee.findById(employeeId);
@@ -17,24 +17,61 @@ async function getPFRateAndYears(employeeId) {
   return { pfRate, years };
 }
 
-async function createSalarySlip(employeeId, slipData) {
+async function createSalarySlip(employeeId, slipData, encryptionKey) {
   const { pfRate } = await getPFRateAndYears(employeeId);
-  // Use slipData.basic as string or number
-  const basicSalary = Number(slipData.basic);
+  const basicSalary = Number(slipData.basic || 0);
   const empPFMonthly = Math.round(basicSalary * (pfRate / 100));
 
-  // Add PF deduction to deductions, but you may want to handle all totals here
+  if (slipData.providentFundDeduction === undefined || slipData.providentFundDeduction === "") {
+      slipData.providentFundDeduction = empPFMonthly.toString();
+  }
+
+  if (encryptionKey) {
+    const allowances = [
+      "basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance", "medicalAllowance",
+      "utilityAllowance", "overtimeCompensation", "dislocationAllowance", "leaveEncashment",
+      "bonus", "arrears", "autoAllowance", "incentive", "fuelAllowance", "othersAllowances", "loanBenefits"
+    ];
+    // Notice loanBenefits is added above, check if it's needed! But I will copy all.
+    const deductions = [
+      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction", "providentFundDeduction",
+      "gratuityFundDeduction", "vehicleLoanDeduction", "otherLoanDeductions", "advanceSalaryDeductions",
+      "medicalInsurance", "lifeInsurance", "penalties", "othersDeductions", "taxDeduction"
+    ];
+
+    const allowedFields = [...allowances, ...deductions];
+
+    for (let key of allowedFields) {
+      if (slipData[key] !== undefined && slipData[key] !== null) {
+        let val = slipData[key];
+        if (typeof val === "string" && val.includes(":")) {
+          // already encrypted
+        } else {
+          slipData[key] = await encrypt(val, encryptionKey);
+        }
+      }
+    }
+    
+    // Check if loanDeductions nested exists
+    if (slipData.loanDeductions && typeof slipData.loanDeductions === "object") {
+        for (const subKey of ["vehicleLoan", "otherLoans"]) {
+             if (slipData.loanDeductions[subKey] !== undefined) {
+                 let val = slipData.loanDeductions[subKey];
+                 if (typeof val === "string" && val.includes(":")) continue;
+                 slipData.loanDeductions[subKey] = await encrypt(val, encryptionKey);
+             }
+        }
+    }
+  }
+
   const slip = await SalarySlip.create({
     ...slipData,
     employee: employeeId,
-    providentFundDeduction: empPFMonthly.toString(), // Only employee's share is deducted
-    // ... other fields as needed
   });
 
   return slip;
 }
 
-// Export for use in your routes
 module.exports = {
   getPFRateAndYears,
   createSalarySlip

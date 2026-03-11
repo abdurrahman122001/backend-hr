@@ -161,7 +161,9 @@ router.post("/", requireAuth, async (req, res) => {
       slipData.owner = allowed.owner;
     }
 
-    const slip = await createSalarySlip(employeeId, slipData);
+    const encKey = req.body.encryptionKey || process.env.ENCRYPTION_KEY;
+
+    const slip = await createSalarySlip(employeeId, slipData, encKey);
     res.json({ status: "success", slip });
   } catch (err) {
     console.error("Error creating salary slip:", err);
@@ -475,6 +477,62 @@ router.get("/:id/download", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Error generating PDF:", err);
     res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ---------- DELETE salary slip ----------
+router.delete("/:id", requireAuth, async (req, res) => {
+  try {
+    const slipId = req.params.id;
+
+    // Fetch the salary slip to check ownership/permissions
+    const slip = await SalarySlip.findById(slipId).populate("employee");
+    if (!slip) {
+      return res.status(404).json({
+        status: "error",
+        message: "Salary slip not found",
+      });
+    }
+
+    const currentUserRole = req.user.role?.toLowerCase().replace("_", "-");
+    const originalRole = req.user.userRole?.toLowerCase().replace("_", "-");
+    
+    // Check permission to delete
+    let allowed = false;
+    if (currentUserRole === "super-admin" || originalRole === "super-admin") {
+      allowed = true;
+    } else if (
+      currentUserRole === "admin" || 
+      currentUserRole === "hr" || 
+      originalRole === "admin" || 
+      originalRole === "hr"
+    ) {
+      // Must belong to the same company owner
+      if (String(slip.owner) === String(req.user.owner) || String(req.user.owner || req.user._id) === String(slip.owner)) {
+        allowed = true;
+      }
+    }
+
+    if (!allowed) {
+      return res.status(403).json({
+        status: "error",
+        message: "Not authorized to delete this salary slip",
+      });
+    }
+
+    await SalarySlip.findByIdAndDelete(slipId);
+
+    res.json({
+      status: "success",
+      message: "Salary slip deleted successfully",
+    });
+  } catch (err) {
+    console.error("Error deleting salary slip:", err);
+    res.status(500).json({
+      status: "error",
+      message: "Failed to delete salary slip",
+      details: err.message,
+    });
   }
 });
 
