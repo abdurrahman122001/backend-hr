@@ -102,6 +102,7 @@ const salaryStructureRoutes = require("./routes/salaryStructure");
 const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
 const chatThreadRoutes = require("./routes/chatThreadRoutes");
 const attendanceAccessRouter = require("./routes/attendanceAccess");
+const emailReceiverRoutes = require("./routes/emailReceiverRoutes");
 
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
