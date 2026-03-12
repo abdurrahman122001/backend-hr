@@ -109,11 +109,18 @@ exports.getRecentActiveThreads = async (req, res) => {
   try {
     const employeeId = req.employee?._id;
     const owner = req.employee?.owner;
+    const { conversationId, spaceId } = req.query;
 
     // 1. Find all threads where the user is a participant or has access via owner
     // For simplicity, we'll find all unique parentMessageIds in ChatThread for this owner
-    const activeThreads = await ChatThread.aggregate([
-      { $match: { owner: new mongoose.Types.ObjectId(owner), isDeleted: false } },
+    
+    let matchQuery = { 
+      owner: new mongoose.Types.ObjectId(owner), 
+      isDeleted: false 
+    };
+
+    const activeThreadsAggregation = [
+      { $match: matchQuery },
       {
         $group: {
           _id: "$parentMessageId",
@@ -121,15 +128,40 @@ exports.getRecentActiveThreads = async (req, res) => {
           lastReplyAt: { $max: "$createdAt" },
         },
       },
+      {
+        $lookup: {
+          from: "messages",
+          localField: "_id",
+          foreignField: "_id",
+          as: "parentMessage"
+        }
+      },
+      { $unwind: "$parentMessage" }
+    ];
+
+    // Filter by conversation or space if provided
+    if (conversationId && isObjId(conversationId)) {
+      activeThreadsAggregation.push({
+        $match: { "parentMessage.conversation": new mongoose.Types.ObjectId(conversationId) }
+      });
+    } else if (spaceId && isObjId(spaceId)) {
+      activeThreadsAggregation.push({
+        $match: { "parentMessage.space": new mongoose.Types.ObjectId(spaceId) }
+      });
+    }
+
+    activeThreadsAggregation.push(
       { $sort: { lastReplyAt: -1 } },
-      { $limit: 20 },
-    ]);
+      { $limit: 20 }
+    );
+
+    const activeThreads = await ChatThread.aggregate(activeThreadsAggregation);
 
     if (activeThreads.length === 0) {
       return res.json({ success: true, data: [] });
     }
 
-    // 2. Populate parent message details
+    // 2. Populate parent message sender details (since aggregate lookup doesn't populate nested fields easily)
     const populatedThreads = await Promise.all(
       activeThreads.map(async (thread) => {
         const parentMessage = await Message.findById(thread._id)
