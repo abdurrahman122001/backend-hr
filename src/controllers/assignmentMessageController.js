@@ -1402,6 +1402,7 @@ exports.createMessage = async function createMessage(req, res) {
 
       // 🔥 HIERARCHY-BASED: Notify THE specific supervisor(s) about the thread update
       if (senderRole === "employee" && clientSupervisionMode === "needs_approval" && isSenderAssigned) {
+        const targetSupervisor = null;
         const supervisorsToNotify = targetSupervisor ? [String(targetSupervisor)] : [];
 
         supervisorsToNotify.forEach(supervisorId => {
