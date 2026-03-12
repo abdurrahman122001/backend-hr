@@ -215,6 +215,7 @@ app.use("/api/settings", attendanceAuth, settingsRouter);
 app.use("/api/admin/settings", requireAuth, settingsRouter);
 
 app.use("/api/payroll-periods", attendanceAuth, payrollPeriodsRouter);
+app.use("/api/admin/payroll-periods", requireAuth, payrollPeriodsRouter);
 
 
 app.use("/api/staff", requireAuth, staffRouter);
@@ -224,6 +225,7 @@ app.use("/api/admin/shifts", requireAuth, shiftsRouter);
 
 app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", attendanceAuth, attendanceConfigRouter);
+app.use("/api/admin/attendance-config", requireAuth, attendanceConfigRouter);
 
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
