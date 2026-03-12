@@ -12,19 +12,18 @@ const {
 const AttendanceLog = require('../models/AttendanceLog');
 const requireAuth = require('../middleware/auth');
 const leaveYearBalanceController = require('../controllers/leaveYearBalanceController');
-const attendanceAuth = require('../middleware/attendanceAuth');
 
 // existing endpoints
 router.post('/', markAttendance);      // upsert by {employee, date}
 router.get('/', getRecordsByDate);    // GET /api/attendance?date=YYYY-MM-DD
 router.get('/stats', getStats);            // GET /api/attendance/stats?date=YYYY-MM-DD
 
-// ✅ NEW: GET between-shift login logs (MUST come before /employee/:id)
+// GET between-shift login logs
 router.get('/logs/between-shift', requireAuth, async (req, res) => {
   try {
     let { ownerId, startDate, endDate, employeeId } = req.query;
 
-    // ✅ If ownerId not provided in query, use the authenticated user's owner from middleware
+    // If ownerId not provided in query, use the authenticated user's owner from middleware
     if (!ownerId && req.user) {
       ownerId = req.user.owner;
     }
@@ -61,7 +60,7 @@ router.get('/logs/between-shift', requireAuth, async (req, res) => {
   }
 });
 
-// ✅ UPDATE LOG STATUS (for admin review)
+// UPDATE LOG STATUS (for admin review)
 router.patch('/logs/between-shift/:id', requireAuth, async (req, res) => {
   try {
     const { status, notes } = req.body;
@@ -95,7 +94,7 @@ router.get('/employee/:id', getRecordsByEmployee);
 
 // GET current year balance for one employee
 //  → /api/attendance/employee/:employeeId/current
-router.get('/employee/:employeeId/current', attendanceAuth, leaveYearBalanceController.getCurrentYearLeaveBalance);
+router.get('/employee/:employeeId/current', leaveYearBalanceController.getCurrentYearLeaveBalance);
 
 // GET aggregated totals for one employee
 router.get('/employee/:id/stats', getStatsByEmployee);

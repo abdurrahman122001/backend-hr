@@ -264,7 +264,7 @@ router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
 });
 
 // GET /leave-summary-history/:employeeId?year=
-router.get("/leave-summary-history/:employeeId", attendanceAuth, async (req, res) => {
+router.get("/:employeeId", attendanceAuth, async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year } = req.query;

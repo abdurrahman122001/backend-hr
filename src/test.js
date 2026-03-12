@@ -193,16 +193,25 @@ app.use("/api/emp-auth", empAuthRouter);
 // ---------- Protected routes ----------
 app.use("/api/employees", employeesRouter); // leave public if intentional
 const attendanceAuth = require("./middleware/attendanceAuth");
+
 app.use("/api/attendance", attendanceAuth, attendanceRouter);
+app.use("/api/attendances", requireAuth, attendanceRouter); // For super-admin access
+
+// Separate routes for different access levels
+app.use("/api/admin/employees", requireAuth, employeesRouter); // Super-admin only
+app.use("/api/admin/attendances", requireAuth, attendanceRouter); // Super-admin attendance
 
 app.use("/api/leaves", requireAuth, leavesRouter);
 app.use("/api/settings", attendanceAuth, settingsRouter);
+app.use("/api/admin/settings", requireAuth, settingsRouter);
+
 app.use("/api/payroll-periods", attendanceAuth, payrollPeriodsRouter);
 
 
 app.use("/api/staff", requireAuth, staffRouter);
 app.use("/api/salary-slips", requireAuth, salarySlipsRouter);
 app.use("/api/shifts", attendanceAuth, shiftsRouter);
+app.use("/api/admin/shifts", requireAuth, shiftsRouter);
 
 app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", attendanceAuth, attendanceConfigRouter);
@@ -221,8 +230,8 @@ app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
 // Mount at /api so /api/leave-summary-history works
 // Mount leave-related summary routes under /api/attendance
-app.use("/api", attendanceLeaveSummaryRouter);
-app.use("/api/attendance", employeeLeaveSummary);
+app.use("/api/leave-summary-history", attendanceLeaveSummaryRouter);
+app.use("/api", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
 app.use("/api/loans", loansRoutes);

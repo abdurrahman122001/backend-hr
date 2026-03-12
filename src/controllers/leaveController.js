@@ -336,6 +336,22 @@ exports.applyLeave = async (req, res) => {
         .json({ message: "Please select at least one date" });
     }
 
+    // Validate that no date is in the past
+    const today = new Date();
+    today.setHours(0, 0, 0, 0); // Set to start of day for accurate comparison
+    
+    for (const dateObj of dates) {
+      const leaveDate = new Date(dateObj.date);
+      leaveDate.setHours(0, 0, 0, 0);
+      
+      if (leaveDate < today) {
+        return res.status(400).json({
+          message: "Cannot apply leave for past dates",
+          invalidDate: dateObj.date,
+        });
+      }
+    }
+
     // Validate reason length
     if (!reason || reason.trim().length < 10) {
       return res.status(400).json({

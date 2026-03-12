@@ -8,9 +8,8 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 /**
  * attendanceAuth
- * Allows either:
- * 1. Admin/HR users (standard requireAuth logic)
- * 2. Employees with delegated AttendanceAccess
+ * Allows ONLY employees with delegated AttendanceAccess
+ * Admin/HR users are blocked and shown "oops we didn't find anything"
  */
 module.exports = async function attendanceAuth(req, res, next) {
     const authHeader = req.headers.authorization || "";
@@ -19,7 +18,7 @@ module.exports = async function attendanceAuth(req, res, next) {
         : null;
 
     if (!token) {
-        return res.status(401).json({ message: "No token provided" });
+        return res.status(404).json({ message: "oops we didn't find anything" });
     }
 
     try {
@@ -27,7 +26,7 @@ module.exports = async function attendanceAuth(req, res, next) {
         const userId = payload.id || payload._id;
 
         if (!userId) {
-            return res.status(401).json({ message: "Invalid token: No user ID" });
+            return res.status(404).json({ message: "oops we didn't find anything" });
         }
 
         // ─── 1. CHECK ADMIN/HR USER ──────────────────────────────────────────
@@ -36,21 +35,8 @@ module.exports = async function attendanceAuth(req, res, next) {
         );
 
         if (user) {
-            if ((user.tokenVersion || 0) !== (payload.tv || 0)) {
-                return res.status(401).json({ message: "Token invalidated" });
-            }
-
-            const effectiveOwner = user.owner || user.createdBy || user._id;
-            const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;
-
-            req.user = {
-                _id: user._id,
-                role: user.role,
-                owner: finalOwnerId,
-                isAdmin: true,
-                isDelegated: false,
-            };
-            return next();
+            // Admin/HR users are blocked - only employees with access can view
+            return res.status(404).json({ message: "oops we didn't find anything" });
         }
 
         // ─── 2. CHECK EMPLOYEE WITH DELEGATION ───────────────────────────────
@@ -66,9 +52,7 @@ module.exports = async function attendanceAuth(req, res, next) {
             });
 
             if (!grant) {
-                return res.status(403).json({
-                    error: "Access denied. No attendance delegation found for this employee.",
-                });
+                return res.status(404).json({ message: "oops we didn't find anything" });
             }
 
             // Check if method requires 'edit' access
@@ -76,9 +60,7 @@ module.exports = async function attendanceAuth(req, res, next) {
                 ["POST", "PATCH", "PUT", "DELETE"].includes(req.method) &&
                 grant.accessType === "view"
             ) {
-                return res.status(403).json({
-                    error: "Permission denied. You have view-only access to attendance.",
-                });
+                return res.status(404).json({ message: "oops we didn't find anything" });
             }
 
             // Allow access
@@ -95,7 +77,7 @@ module.exports = async function attendanceAuth(req, res, next) {
             return next();
         }
 
-        return res.status(401).json({ message: "User/Employee not found." });
+        return res.status(404).json({ message: "oops we didn't find anything" });
     } catch (err) {
         console.error("🔐 [AttendanceAuth] Error:", err.message);
         if (err.name === "TokenExpiredError") {
