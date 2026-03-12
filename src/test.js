@@ -21,6 +21,7 @@ const EmployeeSession = require("./models/EmployeeSession");
 const { getLeaveYear } = require("./utils/leaveEntitlement");
 const LeaveTransaction = require("./models/LeaveTransaction");
 const LeaveYearBalance = require("./models/LeaveYearBalance");
+const ProbationLeaveApproval = require("./models/ProbationLeaveApproval");
 // ---------- Routers ----------
 const authRouter = require("./routes/auth");
 const empAuthRouter = require("./routes/empAuth");
