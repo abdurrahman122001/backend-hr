@@ -221,7 +221,7 @@ app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
 // Mount at /api so /api/leave-summary-history works
 // Mount leave-related summary routes under /api/attendance
-app.use("/api/attendance", attendanceLeaveSummaryRouter);
+app.use("/api", attendanceLeaveSummaryRouter);
 app.use("/api/attendance", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
