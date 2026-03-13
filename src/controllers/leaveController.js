@@ -336,21 +336,8 @@ exports.applyLeave = async (req, res) => {
         .json({ message: "Please select at least one date" });
     }
 
-    // Validate that no date is in the past
-    const today = new Date();
-    today.setHours(0, 0, 0, 0); // Set to start of day for accurate comparison
-    
-    for (const dateObj of dates) {
-      const leaveDate = new Date(dateObj.date);
-      leaveDate.setHours(0, 0, 0, 0);
-      
-      if (leaveDate < today) {
-        return res.status(400).json({
-          message: "Cannot apply leave for past dates",
-          invalidDate: dateObj.date,
-        });
-      }
-    }
+    // NOTE: Past date validation removed - users can now apply for past dates
+    // This allows back-dating leave requests for record-keeping purposes
 
     // Validate reason length
     if (!reason || reason.trim().length < 10) {
@@ -799,6 +786,55 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
+    // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
+    // When leave is approved, mark all leave dates as "Leave" in attendance
+    try {
+      const Attendance = require("../models/Attendance");
+      
+      for (const dateObj of leave.dates) {
+        const dateStr = dateObj.date; // Format: YYYY-MM-DD
+        const leaveDate = new Date(dateStr);
+        
+        // Check if attendance record exists for this date
+        let attendance = await Attendance.findOne({
+          employee: leave.employee,
+          date: dateStr,
+          owner: leave.employee.owner,
+        });
+        
+        if (attendance) {
+          // Update existing attendance - preserve original status if needed
+          if (!attendance.originalStatus) {
+            attendance.originalStatus = attendance.status;
+          }
+          attendance.status = "Leave";
+          attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
+          attendance.markedByHR = true;
+          attendance.notes = attendance.notes 
+            ? `${attendance.notes}; Updated to Leave via approved leave request`
+            : "Marked as Leave via approved leave request";
+          await attendance.save();
+        } else {
+          // Create new attendance record as Leave
+          attendance = new Attendance({
+            owner: leave.employee.owner,
+            employee: leave.employee,
+            date: dateStr,
+            status: "Leave",
+            leaveType: finalIsPaid ? "Paid" : "Unpaid",
+            markedByHR: true,
+            notes: "Auto-created from approved leave request",
+          });
+          await attendance.save();
+        }
+        
+        console.log(`✅ Attendance updated for ${dateStr}: Leave (${finalIsPaid ? "Paid" : "Unpaid"})`);
+      }
+    } catch (attendanceError) {
+      console.error("⚠️ Error updating attendance for leave:", attendanceError);
+      // Don't fail the approval if attendance update fails
+    }
+
     // Get updated leave with populated fields
     const updatedLeave = await Leave.findById(leave._id)
       .populate("employee", "name email department photographUrl")
@@ -917,6 +953,61 @@ exports.rejectLeave = async (req, res) => {
     });
 
     await leave.save();
+
+    // UPDATE ATTENDANCE RECORDS WHEN LEAVE IS REJECTED
+    // Mark leave dates as "Absent" and "Unpaid" unless already Absent and Unpaid
+    try {
+      const Attendance = require("../models/Attendance");
+      
+      for (const dateObj of leave.dates) {
+        const dateStr = dateObj.date; // Format: YYYY-MM-DD
+        
+        // Check if attendance record exists for this date
+        let attendance = await Attendance.findOne({
+          employee: leave.employee._id,
+          date: dateStr,
+          owner: leave.employee.owner,
+        });
+        
+        if (attendance) {
+          // Only update if NOT already Absent and Unpaid
+          const isAlreadyAbsentUnpaid = attendance.status === "Absent" && attendance.leaveType === "Unpaid";
+          
+          if (!isAlreadyAbsentUnpaid) {
+            // Update existing attendance to Absent/Unpaid
+            if (!attendance.originalStatus) {
+              attendance.originalStatus = attendance.status;
+            }
+            attendance.status = "Absent";
+            attendance.leaveType = "Unpaid";
+            attendance.markedByHR = true;
+            attendance.notes = attendance.notes 
+              ? `${attendance.notes}; Marked as Absent due to rejected leave`
+              : "Marked as Absent - leave request was rejected";
+            await attendance.save();
+            console.log(`⚠️ Attendance updated for ${dateStr}: Absent (Unpaid) - leave rejected`);
+          } else {
+            console.log(`ℹ️ Attendance for ${dateStr} already Absent/Unpaid - no change needed`);
+          }
+        } else {
+          // Create new attendance record as Absent/Unpaid
+          attendance = new Attendance({
+            owner: leave.employee.owner,
+            employee: leave.employee._id,
+            date: dateStr,
+            status: "Absent",
+            leaveType: "Unpaid",
+            markedByHR: true,
+            notes: "Auto-created from rejected leave request",
+          });
+          await attendance.save();
+          console.log(`⚠️ Attendance created for ${dateStr}: Absent (Unpaid) - leave rejected`);
+        }
+      }
+    } catch (attendanceError) {
+      console.error("⚠️ Error updating attendance for rejected leave:", attendanceError);
+      // Don't fail the rejection if attendance update fails
+    }
 
     // IMPLEMENT SALARY DEDUCTION FOR REJECTED LEAVE
     try {
@@ -1107,13 +1198,11 @@ exports.getLeaves = async (req, res) => {
       .limit(parseInt(limit))
       .populate(
         "employee",
-        "name email department designation position employeeId photographUrl status",
+        "name email department position employeeId photographUrl status"
       )
-      .populate("approvedBy", "name email")
-      .populate("rejectedBy", "name email")
-      .populate("appliedBy", "name email")
       .lean();
 
+    // Process employee data
     const processedLeaves = leaves.map((leave) => ({
       ...leave,
       employee: processEmployeeWithPhoto(leave.employee, req),
@@ -1150,7 +1239,7 @@ exports.getLeaves = async (req, res) => {
 exports.getPendingLeaves = async (req, res) => {
   try {
     const user = req.user;
-    const employee = await Employee.findById(user.employeeId || user.id);
+    
 
     const query = { status: "pending" };
 
@@ -1159,11 +1248,6 @@ exports.getPendingLeaves = async (req, res) => {
     const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
     const ownedEmployeeIds = ownedEmployees.map(e => e._id);
     query.employee = { $in: ownedEmployeeIds };
-
-    // Supervisors see leaves where they are the current assigned supervisor
-    if (employee.role !== "admin" && employee.role !== "hr") {
-      query.supervisor = employee._id;
-    }
 
     const pendingLeaves = await Leave.find(query)
       .populate("employee", "name email department designation photographUrl status")

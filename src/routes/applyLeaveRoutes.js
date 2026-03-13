@@ -3,14 +3,15 @@ const router = express.Router();
 const leaveController = require("../controllers/leaveController");
 const UnifiedAuth = require("../middleware/unifiedAuth");
 
-// Apply for leave
+const requireAuth = require("../middleware/auth"); // Make sure this is correct
+
 router.post("/", UnifiedAuth, leaveController.applyLeave);
 
 // Get all leaves (with filters)
 router.get("/", UnifiedAuth, leaveController.getLeaves);
 
 // Get leaves pending approval
-router.get("/pending", UnifiedAuth, leaveController.getPendingLeaves);
+router.get("/pending", requireAuth, leaveController.getPendingLeaves);
 router.get("/my-leaves", UnifiedAuth, leaveController.getMyLeaves); // Add this line
 
 // Get leave statistics

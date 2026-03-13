@@ -7,7 +7,7 @@ const { getLeaveYear } = require("../utils/leaveEntitlement");
 const leaveYearBalanceController = require("../controllers/leaveYearBalanceController");
 const empAuth = require("../middleware/empAuth");
 const attendanceAuth = require("../middleware/attendanceAuth");
-
+const requireAuth = require("../middleware/auth");
 // Get month range for your fiscal calendar (26th to 25th)
 function getMonthRange(year, monthName) {
     const months = [
@@ -426,5 +426,6 @@ router.get("/available-years", attendanceAuth, async (req, res) => {
 
 router.get("/employee/:employeeId/current", attendanceAuth, leaveYearBalanceController.getCurrentYearLeaveBalance);
 router.put("/update-balance/:employeeId", attendanceAuth, leaveYearBalanceController.upsertLeaveBalance);
+router.put("/admin/update-balance/:employeeId", requireAuth, leaveYearBalanceController.upsertLeaveBalance);
 
 module.exports = router;
