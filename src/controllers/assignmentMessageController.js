@@ -220,8 +220,9 @@ function normalizeIds(val) {
 }
 // 🔥 FIXED: Thread ID generation based on subject only
 function generateThreadId(clientId, subject) {
-  if (!clientId) {
-    throw new Error("clientId is required to generate threadId");
+  // Only require clientId if subject is completely missing
+  if (!clientId && (!subject || subject.trim() === "")) {
+    throw new Error("clientId or subject is required to generate threadId");
   }
 
   if (!subject || subject.trim() === "") {

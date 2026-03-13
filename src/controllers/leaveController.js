@@ -1334,9 +1334,40 @@ exports.cancelLeave = async (req, res) => {
     }
 
     // Check if user can cancel this leave
-    const employee = await Employee.findById(user.employeeId || user.id);
+    let employee;
+    
+    if (user.isEmployee && user.employeeId) {
+      // Employee user - use employeeId
+      employee = await Employee.findById(user.employeeId);
+    } else if (!user.isEmployee && (user.role === 'admin' || user.role === 'hr' || user.role === 'super-admin')) {
+      // Admin user - find linked employee record or use admin privileges
+      
+      // Try to find linked employee first
+      if (user.employeeInfo && user.employeeInfo.employeeId) {
+        employee = await Employee.findById(user.employeeInfo.employeeId);
+      }
+      
+      // If no linked employee found, create a minimal employee object for authorization
+      if (!employee) {
+        employee = {
+          _id: user._id, // Use admin user ID for authorization
+          role: user.role,
+          name: user.name,
+          isSuperAdmin: true
+        };
+      }
+    } else {
+      // Fallback
+      const employeeId = user.employeeId || user.id || user._id;
+      employee = await Employee.findById(employeeId);
+    }
+    
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+    
     const isLeaveOwner = leave.employee.toString() === employee._id.toString();
-    const isSuperAdmin = employee.role === "admin" || employee.role === "hr";
+    const isSuperAdmin = employee.role === "admin" || employee.role === "hr" || employee.role === "super-admin" || employee.isSuperAdmin;
 
     if (!isLeaveOwner && !isSuperAdmin) {
       return res
@@ -1374,6 +1405,7 @@ exports.getLeaveStats = async (req, res) => {
     if (!req.user) {
       return res.status(401).json({
         error: "Authentication required - User not found in request",
+        message: "Please log in again",
       });
     }
 

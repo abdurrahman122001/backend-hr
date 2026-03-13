@@ -1115,3 +1115,35 @@ exports.getThreadStats = async function (req, res) {
     res.status(500).json({ error: "Failed to get thread statistics" });
   }
 };
+
+// NEW: Get unread count for a thread
+exports.getUnreadCount = async function (req, res) {
+  try {
+    const { threadId } = req.params;
+    const currentUser = req.employee._id;
+
+    if (!threadId) {
+      return res.status(400).json({ error: "Thread ID is required" });
+    }
+
+    const unreadCount = await ThreadChatMessage.countDocuments({
+      threadId,
+      isDeleted: false,
+      'readBy.employee': { $ne: currentUser },
+      $or: [
+        { sender: currentUser },
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } }
+      ]
+    });
+
+    res.json({
+      success: true,
+      unreadCount
+    });
+
+  } catch (e) {
+    console.error("❌ Error in getUnreadCount:", e);
+    res.status(500).json({ error: "Failed to fetch unread count" });
+  }
+};
