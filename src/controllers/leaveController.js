@@ -260,6 +260,7 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       analysis.recommendation = "APPROVE";
       analysis.reason = "Complies with all HR policy rules";
       analysis.severity = "LOW";
+      analysis.isPaid = true;
     } else {
       // Count violations by severity
       const highViolations = analysis.violations.filter(
@@ -272,12 +273,15 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       if (highViolations.length > 0) {
         analysis.recommendation = "REJECT_OR_UNPAID";
         analysis.reason = `${highViolations.length} high-severity policy violations detected`;
+        analysis.isPaid = false; // Mark as unpaid if high severity violations exist
       } else if (mediumViolations.length > 0) {
         analysis.recommendation = "MANUAL_REVIEW";
         analysis.reason = `${mediumViolations.length} policy violations require manual review`;
+        // Keep analysis.isPaid as false if already set by specific checks (like notice)
       } else {
         analysis.recommendation = "APPROVE_WITH_NOTES";
         analysis.reason = "Minor policy considerations noted";
+        analysis.isPaid = true;
       }
     }
 
@@ -321,6 +325,90 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
     };
   }
 }
+
+/**
+ * Helper function to handle salary deduction for unpaid or rejected leave
+ * @param {string} employeeId 
+ * @param {number} totalDays 
+ * @param {Date} startDate 
+ * @returns {Promise<boolean>}
+ */
+async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
+  try {
+    const leaveDate = new Date(startDate);
+    const now = new Date();
+
+    const leaveMonthNum = (leaveDate.getMonth() + 1).toString();
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const leaveMonthName = monthNames[leaveDate.getMonth()];
+    const yearStr = leaveDate.getFullYear().toString();
+
+    // Find salary slip for the month of leave OR the current month
+    const salarySlip = await SalarySlip.findOne({
+      employee: employeeId,
+      $or: [
+        { month: leaveMonthNum, year: yearStr },
+        { month: leaveMonthName, year: yearStr },
+        { month: (now.getMonth() + 1).toString(), year: now.getFullYear().toString() },
+        { month: monthNames[now.getMonth()], year: now.getFullYear().toString() }
+      ]
+    }).sort({ updatedAt: -1 });
+
+    if (!salarySlip) {
+      console.warn(`⚠️ No salary slip found for employee ${employeeId} to apply deduction.`);
+      return false;
+    }
+
+    // Try to get Gross, fallback to Basic
+    let decryptedAmt = "";
+    if (salarySlip.grossSalary && salarySlip.grossSalary !== "") {
+      decryptedAmt = await decrypt(salarySlip.grossSalary);
+    }
+
+    // If gross decryption failed or was empty, try basic
+    if ((!decryptedAmt || decryptedAmt === "[Decryption Error]") && salarySlip.basic) {
+      decryptedAmt = await decrypt(salarySlip.basic);
+    }
+
+    const baseSalary = Number(decryptedAmt) || 0;
+
+    if (baseSalary > 0) {
+      const perDaySalary = baseSalary / 22; // Using 22 working days as standard
+      const deductionAmount = Math.round(perDaySalary * totalDays);
+
+      // Read current leave deduction
+      let currentDeduction = 0;
+      if (salarySlip.leaveDeductions) {
+        try {
+          const decDed = await decrypt(salarySlip.leaveDeductions);
+          currentDeduction = Number(decDed) || 0;
+        } catch (e) {
+          currentDeduction = 0;
+        }
+      }
+
+      const totalDeduction = currentDeduction + deductionAmount;
+      salarySlip.leaveDeductions = await encrypt(totalDeduction.toString());
+
+      // Use the exported controller function to recalculate tax, total deductions, and net payable
+      if (salaryController && salaryController.autoCalculateAndSaveTax) {
+        await salaryController.autoCalculateAndSaveTax(salarySlip);
+      } else {
+        await salarySlip.save();
+      }
+      
+      console.log(`✅ Salary deduction applied for ${employeeId}: ${deductionAmount} for ${totalDays} days.`);
+      return true;
+    } else {
+      console.error(`❌ Could not determine base salary for slip ${salarySlip._id}.`);
+      return false;
+    }
+  } catch (error) {
+    console.error("❌ [deductLeaveFromSalary] Error:", error);
+    return false;
+  }
+}
+
 // @desc    Apply for leave with AI analysis (NO AUTO-DECISION)
 // @route   POST /api/leaves
 // @access  Private
@@ -786,6 +874,12 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
+    // APPLY SALARY DEDUCTION IF UNPAID
+    if (!finalIsPaid) {
+      console.log(`ℹ️ Leave approved as UNPAID. Applying salary deduction for ${actualApprovedDays} days.`);
+      await deductLeaveFromSalary(leave.employee._id, actualApprovedDays, leave.startDate);
+    }
+
     // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
     // When leave is approved, mark all leave dates as "Leave" in attendance
     try {
@@ -1010,73 +1104,9 @@ exports.rejectLeave = async (req, res) => {
     }
 
     // IMPLEMENT SALARY DEDUCTION FOR REJECTED LEAVE
-    try {
-      const leaveDate = new Date(leave.startDate);
-      const now = new Date();
+    // Rejected leave is treated as absence, thus always unpaid/deductible
+    await deductLeaveFromSalary(leave.employee._id, leave.totalDays, leave.startDate);
 
-      const leaveMonthNum = (leaveDate.getMonth() + 1).toString();
-      const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-      const leaveMonthName = monthNames[leaveDate.getMonth()];
-      const yearStr = leaveDate.getFullYear().toString();
-
-      const salarySlip = await SalarySlip.findOne({
-        employee: leave.employee._id,
-        $or: [
-          { month: leaveMonthNum, year: yearStr },
-          { month: leaveMonthName, year: yearStr },
-          { month: (now.getMonth() + 1).toString(), year: now.getFullYear().toString() },
-          { month: monthNames[now.getMonth()], year: now.getFullYear().toString() }
-        ]
-      }).sort({ updatedAt: -1 });
-
-      if (salarySlip) {
-        // Try to get Gross, fallback to Basic
-        let decryptedAmt = "";
-        if (salarySlip.grossSalary && salarySlip.grossSalary !== "") {
-          decryptedAmt = await decrypt(salarySlip.grossSalary);
-        }
-
-        // If gross decryption failed or was empty, try basic
-        if ((!decryptedAmt || decryptedAmt === "[Decryption Error]") && salarySlip.basic) {
-          decryptedAmt = await decrypt(salarySlip.basic);
-        }
-
-        const baseSalary = Number(decryptedAmt) || 0;
-
-        if (baseSalary > 0) {
-          const perDaySalary = baseSalary / 22;
-          const deductionAmount = Math.round(perDaySalary * leave.totalDays);
-
-          // Read current leave deduction
-          let currentDeduction = 0;
-          if (salarySlip.leaveDeductions) {
-            try {
-              const decDed = await decrypt(salarySlip.leaveDeductions);
-              currentDeduction = Number(decDed) || 0;
-            } catch (e) {
-              currentDeduction = 0;
-            }
-          }
-
-          const totalDeduction = currentDeduction + deductionAmount;
-          salarySlip.leaveDeductions = await encrypt(totalDeduction.toString());
-
-          // Use the exported controller function to recalculate tax, total deductions, and net payable
-          if (salaryController && salaryController.autoCalculateAndSaveTax) {
-            await salaryController.autoCalculateAndSaveTax(salarySlip);
-          } else {
-            // Fallback if controller method is not available (should not happen now)
-            await salarySlip.save();
-          }
-        } else {
-          console.error(`[rejectLeave] Could not determine base salary for slip ${salarySlip._id}. Decrypted: ${decryptedAmt}`);
-        }
-      } else {
-        console.warn(`⚠️ [rejectLeave] No salary slip found for employee ${leave.employee._id} for month ${leaveMonthName}.`);
-      }
-    } catch (deductionError) {
-      console.error("⚠️ [rejectLeave] Salary deduction failed:", deductionError);
-    }
 
     const processedLeave = {
       ...leave.toObject(),
