@@ -43,7 +43,7 @@ const ChatThreadSchema = new Schema(
     // Message type
     messageType: {
       type: String,
-      enum: ["text", "file", "image", "gif"],
+      enum: ["text", "file", "image", "gif", "audio"],
       default: "text",
     },
     
@@ -62,6 +62,18 @@ const ChatThreadSchema = new Schema(
     
     // Attachments
     attachments: [ChatThreadAttachmentSchema],
+
+    // Mentions
+    mentions: [
+      {
+        employee: { type: Schema.Types.ObjectId, ref: "Employee" },
+        mentionedAt: { type: Date, default: Date.now },
+        mentionText: String,
+      },
+    ],
+
+    // GIF URL if applicable
+    gifUrl: String,
     
     // Deletion status
     isDeleted: {
@@ -108,17 +120,27 @@ ChatThreadSchema.methods.markAsRead = async function(employeeId) {
 
 // Method to add reaction
 ChatThreadSchema.methods.addReaction = async function(employeeId, emoji) {
-  // Remove existing reaction from same user (to toggle or change)
-  this.reactions = this.reactions.filter(
-    reaction => reaction.employee.toString() !== employeeId.toString()
+  // Check if this exact reaction already exists for this user
+  const existingIndex = this.reactions.findIndex(
+    r => r.employee.toString() === employeeId.toString() && r.emoji === emoji
   );
-  
-  // Add new reaction
-  this.reactions.push({
-    employee: employeeId,
-    emoji: emoji,
-    reactedAt: new Date()
-  });
+
+  if (existingIndex > -1) {
+    // If it exists, remove it (toggle off)
+    this.reactions.splice(existingIndex, 1);
+  } else {
+    // If it doesn't exist, remove any OTHER emoji this user might have (one emoji per user)
+    this.reactions = this.reactions.filter(
+      r => r.employee.toString() !== employeeId.toString()
+    );
+    
+    // Add new reaction
+    this.reactions.push({
+      employee: employeeId,
+      emoji: emoji,
+      reactedAt: new Date()
+    });
+  }
   
   await this.save();
   return this;
