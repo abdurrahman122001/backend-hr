@@ -17,6 +17,9 @@ router.get("/threads/:threadId/messages", empAuth, threadChatController.getThrea
 // Get thread info
 router.get("/threads/:threadId/info", empAuth, threadChatController.getThreadInfo);
 
+// Get unread count
+router.get("/threads/:threadId/unread-count", empAuth, threadChatController.getUnreadCount);
+
 // Edit a message
 router.patch("/messages/:id/edit", empAuth, threadChatController.editMessage);
 

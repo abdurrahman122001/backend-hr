@@ -123,7 +123,7 @@ exports.approveLeaveCredit = async (req, res) => {
         // ✅ Credit the leave to LeaveYearBalance
         const balance = await LeaveYearBalance.findOneAndUpdate(
             {
-                owner: approval.owner,
+                owner: req.user._id,
                 employee: approval.employee._id || approval.employee,
                 year: leaveYear,
             },
@@ -140,7 +140,7 @@ exports.approveLeaveCredit = async (req, res) => {
 
         // 🧾 Create transaction record
         await LeaveTransaction.create({
-            owner: approval.owner,
+            owner: req.user._id,
             employee: approval.employee._id || approval.employee,
             leaveYearBalance: balance._id,
             year: leaveYear,
