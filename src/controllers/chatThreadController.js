@@ -1,7 +1,8 @@
 const ChatThread = require("../models/ChatThread");
-const { Message } = require("../models/Chat");
+const { Message, Conversation } = require("../models/Chat");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
+const chatController = require("./chatController");
 
 // Utility
 const isObjId = (v) => mongoose.isValidObjectId(v);
@@ -12,16 +13,66 @@ function getIO(req) {
 }
 
 /**
+ * Utility to group flat reactions into the structure expected by the frontend
+ */
+function groupReactions(flatReactions) {
+  if (!flatReactions || !Array.isArray(flatReactions)) return [];
+  
+  const groups = {};
+  flatReactions.forEach(r => {
+    if (!groups[r.emoji]) {
+      groups[r.emoji] = {
+        emoji: r.emoji,
+        users: [],
+        count: 0
+      };
+    }
+    // Handle both populated and unpopulated employee field
+    const user = r.employee && typeof r.employee === 'object' ? r.employee : { _id: r.employee };
+    groups[r.emoji].users.push(user);
+    groups[r.emoji].count++;
+  });
+  
+  return Object.values(groups);
+}
+
+/**
  * Create a new thread reply
  */
 exports.createThreadReply = async (req, res) => {
   try {
-    const { parentMessageId, content, messageType = "text" } = req.body;
+    const { parentMessageId, content, messageType = "text", mentions: mentionsRaw, gifUrl } = req.body;
     const sender = req.employee?._id;
     const owner = req.employee?.owner;
 
-    if (!parentMessageId || !content) {
-      return res.status(400).json({ error: "Parent message ID and content are required" });
+    console.log("📨 Send thread reply request:", {
+      parentMessageId,
+      content,
+      messageType,
+      files: req.files ? req.files.length : 0,
+    });
+
+    // Process uploaded files
+    const uploadedAttachments = [];
+    if (req.files && req.files.length > 0) {
+      uploadedAttachments.push(
+        ...req.files.map((file) => ({
+          filename: file.filename,
+          originalName: file.originalname,
+          mimetype: file.mimetype,
+          size: file.size,
+          url: `${req.protocol}://${req.get("host")}/uploads/chat-attachments/${file.filename}`,
+          uploadedBy: sender
+        }))
+      );
+    }
+
+    if (!parentMessageId) {
+      return res.status(400).json({ error: "Parent message ID is required" });
+    }
+
+    if (!content && uploadedAttachments.length === 0 && messageType !== "audio") {
+      return res.status(400).json({ error: "Content or attachments are required" });
     }
 
     if (!isObjId(parentMessageId)) {
@@ -34,12 +85,39 @@ exports.createThreadReply = async (req, res) => {
       return res.status(404).json({ error: "Parent message not found" });
     }
 
+    // Process Mentions
+    let finalMentions = [];
+    if (mentionsRaw) {
+      try {
+        const parsedMentions = typeof mentionsRaw === 'string' ? JSON.parse(mentionsRaw) : mentionsRaw;
+        finalMentions = parsedMentions.map(m => ({
+          employee: m.employee || m._id || m.userId,
+          mentionText: m.mentionText || m.name,
+          mentionedAt: new Date()
+        })).filter(m => isObjId(m.employee));
+      } catch (e) {
+        console.error("Error parsing mentions:", e);
+      }
+    } else {
+      finalMentions = await chatController.processMentions(content, sender);
+    }
+
+    // Determine final message type
+    let finalMessageType = messageType;
+    if (uploadedAttachments.length > 0 && (finalMessageType === "text" || finalMessageType === "file")) {
+       const hasImage = uploadedAttachments.some(a => a.mimetype?.startsWith("image/"));
+       finalMessageType = hasImage ? "image" : "file";
+    }
+
     const reply = await ChatThread.create({
       parentMessageId,
       owner,
       sender,
-      content,
-      messageType,
+      content: content || (finalMessageType === "audio" ? "🎤 Audio message" : "Attachment"),
+      messageType: finalMessageType,
+      attachments: uploadedAttachments,
+      mentions: finalMentions,
+      gifUrl
     });
 
     // Mark as read by sender
@@ -47,7 +125,9 @@ exports.createThreadReply = async (req, res) => {
 
     const populatedReply = await ChatThread.findById(reply._id)
       .populate("sender", "name photographUrl avatar companyEmail role")
-      .populate("reactions.employee", "name photographUrl avatar");
+      .populate("reactions.employee", "name photographUrl avatar")
+      .populate("attachments.uploadedBy", "name")
+      .lean();
 
     // Emit via socket
     const io = getIO(req);
@@ -56,16 +136,26 @@ exports.createThreadReply = async (req, res) => {
       io.to(`thread_${parentMessageId}`).emit("new_chat_thread_reply", populatedReply);
       
       // Also notify participants of the parent conversation
-      // This is optional depending on how we want the UI to update the reply count
       io.to(`conversation_${parentMsg.conversation}`).emit("chat_thread_updated", {
         parentMessageId,
         lastReply: populatedReply,
       });
+
+      // Send mention notifications
+      if (finalMentions.length > 0) {
+        const conversation = await Conversation.findById(parentMsg.conversation);
+        if (conversation) {
+           chatController.sendMentionNotifications(finalMentions, populatedReply, conversation, req);
+        }
+      }
     }
 
     res.status(201).json({
       success: true,
-      data: populatedReply,
+      data: {
+        ...populatedReply,
+        reactions: groupReactions(populatedReply.reactions)
+      },
     });
   } catch (error) {
     console.error("Error creating thread reply:", error);
@@ -91,9 +181,14 @@ exports.getThreadReplies = async (req, res) => {
       .populate("attachments.uploadedBy", "name")
       .lean();
 
+    const formattedReplies = replies.map(r => ({
+      ...r,
+      reactions: groupReactions(r.reactions)
+    }));
+
     res.json({
       success: true,
-      data: replies,
+      data: formattedReplies,
     });
   } catch (error) {
     console.error("Error fetching thread replies:", error);
@@ -166,6 +261,7 @@ exports.getRecentActiveThreads = async (req, res) => {
       activeThreads.map(async (thread) => {
         const parentMessage = await Message.findById(thread._id)
           .populate("sender", "name photographUrl avatar")
+          .populate("reactions.users", "name photographUrl avatar")
           .lean();
         
         if (!parentMessage) return null;
@@ -296,18 +392,53 @@ exports.addReactionToReply = async (req, res) => {
     const updatedReply = await ChatThread.findById(id)
       .populate("reactions.employee", "name photographUrl avatar");
 
+    const groupedReactions = groupReactions(updatedReply.reactions);
+
     // Emit event
     const io = getIO(req);
     if (io) {
-      io.to(`thread_${reply.parentMessageId}`).emit("chat_thread_reply_updated", updatedReply);
+      io.to(`thread_${reply.parentMessageId}`).emit("chat_thread_reply_updated", {
+        ...updatedReply.toObject(),
+        reactions: groupedReactions
+      });
     }
 
     res.json({
       success: true,
-      data: updatedReply.reactions,
+      message: "Reaction updated successfully",
+      reactions: groupedReactions,
     });
   } catch (error) {
     console.error("Error adding reaction:", error);
-    res.status(500).json({ error: "Failed to add reaction" });
+    res.status(500).json({ success: false, error: "Failed to add reaction" });
+  }
+};
+
+/**
+ * Get reactions for a thread reply
+ */
+exports.getThreadReplyReactions = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!isObjId(id)) {
+      return res.status(400).json({ success: false, error: "Invalid reply ID" });
+    }
+
+    const reply = await ChatThread.findById(id)
+      .populate("reactions.employee", "name companyEmail avatar photographUrl")
+      .select("reactions");
+
+    if (!reply) {
+      return res.status(404).json({ success: false, error: "Reply not found" });
+    }
+
+    res.json({
+      success: true,
+      reactions: groupReactions(reply.reactions) || [],
+    });
+  } catch (error) {
+    console.error("Error fetching reactions:", error);
+    res.status(500).json({ success: false, error: "Failed to fetch reactions" });
   }
 };

@@ -7041,3 +7041,6 @@ exports.getEmployeeForMention = async (req, res) => {
     });
   }
 };
+
+exports.processMentions = processMentions;
+exports.sendMentionNotifications = sendMentionNotifications;

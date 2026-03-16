@@ -1,7 +1,11 @@
 const express = require("express");
 const router = express.Router();
 const chatThreadController = require("../controllers/chatThreadController");
+const chatController = require("../controllers/chatController");
 const empAuth = require("../middleware/empAuth");
+
+// Multer for attachments
+const upload = chatController.upload;
 
 // All routes require employee authentication
 router.use(empAuth);
@@ -10,7 +14,7 @@ router.use(empAuth);
  * @route   POST /api/chat-threads
  * @desc    Create a new thread reply
  */
-router.post("/", chatThreadController.createThreadReply);
+router.post("/", upload.array("attachments", 10), chatThreadController.createThreadReply);
 
 /**
  * @route   GET /api/chat-threads/recent/active
@@ -41,5 +45,11 @@ router.delete("/:id", chatThreadController.deleteThreadReply);
  * @desc    Add reaction to a reply
  */
 router.post("/:id/reactions", chatThreadController.addReactionToReply);
+
+/**
+ * @route   GET /api/chat-threads/:id/reactions
+ * @desc    Get reactions for a reply
+ */
+router.get("/:id/reactions", chatThreadController.getThreadReplyReactions);
 
 module.exports = router;
