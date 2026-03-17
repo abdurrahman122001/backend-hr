@@ -673,20 +673,21 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
-    const deviceId = crypto.randomBytes(32).toString("hex");
-
     const deviceIndex = emp.trustedDevices.findIndex(
       (d) => d.deviceFingerprint === deviceFingerprint
     );
 
+    let deviceId;
     if (deviceIndex > -1) {
-      // Update existing device info
-      emp.trustedDevices[deviceIndex].deviceId = deviceId;
+      // ✅ Device fingerprint already known — KEEP the existing deviceId so the
+      // browser cookie stays valid. Only refresh metadata (IP, userAgent).
+      deviceId = emp.trustedDevices[deviceIndex].deviceId;
       emp.trustedDevices[deviceIndex].userAgent = userAgent;
       emp.trustedDevices[deviceIndex].ip = ip;
       emp.trustedDevices[deviceIndex].addedAt = new Date();
     } else {
-      // Add new device
+      // 🆕 Brand new device — generate a fresh permanent token
+      deviceId = crypto.randomBytes(32).toString("hex");
       emp.trustedDevices.push({
         deviceId,
         deviceFingerprint,
