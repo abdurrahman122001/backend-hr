@@ -520,7 +520,10 @@ router.post("/login", async (req, res) => {
     // CHECK IF DEVICE IS TRUSTED
     const isTrusted = emp.trustedDevices?.some(
       (d) =>
-        d.deviceFingerprint === deviceFingerprint || d.deviceId === deviceToken
+        deviceFingerprint &&
+        deviceToken &&
+        d.deviceFingerprint === deviceFingerprint &&
+        d.deviceId === deviceToken
     );
 
     if (isTrusted) {
@@ -593,7 +596,7 @@ router.post("/login", async (req, res) => {
     const when = formatTimeForDisplay(nowKarachi);
 
     await sendMail({
-      to: "abdullahahmedqureshint@gmail.com",
+      to: "nashfintechnologies@gmail.com",
       subject: "Employee login verification requested",
       text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
       html: `<p><b>New device login verification requested</b></p>
@@ -672,9 +675,18 @@ router.post("/confirm-code", async (req, res) => {
 
     const deviceId = crypto.randomBytes(32).toString("hex");
 
-    if (
-      !emp.trustedDevices.some((d) => d.deviceFingerprint === deviceFingerprint)
-    ) {
+    const deviceIndex = emp.trustedDevices.findIndex(
+      (d) => d.deviceFingerprint === deviceFingerprint
+    );
+
+    if (deviceIndex > -1) {
+      // Update existing device info
+      emp.trustedDevices[deviceIndex].deviceId = deviceId;
+      emp.trustedDevices[deviceIndex].userAgent = userAgent;
+      emp.trustedDevices[deviceIndex].ip = ip;
+      emp.trustedDevices[deviceIndex].addedAt = new Date();
+    } else {
+      // Add new device
       emp.trustedDevices.push({
         deviceId,
         deviceFingerprint,
