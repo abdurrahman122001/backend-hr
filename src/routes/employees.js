@@ -115,6 +115,7 @@ router.get("/", unifiedAuth, async (req, res) => {
     // Execute query
     const list = await Employee.find(query)
       .select("-password -__v") // Exclude sensitive fields
+      .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
 
@@ -285,7 +286,9 @@ router.get("/:id", requireAuth, async (req, res) => {
     }
 
     const scope = buildEmployeeScope(req.user);
-    const emp = await Employee.findOne({ _id: id, ...scope }).lean();
+    const emp = await Employee.findOne({ _id: id, ...scope })
+      .populate("shifts", "name")
+      .lean();
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
     res.json({ status: "success", employee: emp });
