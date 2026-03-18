@@ -1945,17 +1945,43 @@ exports.editMessage = async function editMessage(req, res) {
     // 🔥 CRITICAL FIX: ENHANCED APPROVAL WORKFLOW LOGIC WITH CLIENT SUPERVISION
     // THIS IS THE SINGLE PLACE WHERE APPROVAL STATUS SHOULD BE SET
     if (hasContentChanges) {
-      // CASE 1: Team Lead editing someone else's message
-      // 🔥 FIX: Editing ≠ Approving. Keep status as "pending" so TL must
-      //   still explicitly click the Approve button after editing.
+      // CASE 1 & 4 Consolidated: Team Lead or Manager editing someone else's message
       if ((isTeamLead || isManager) && !isSender && clientRequiresApproval) {
-        // Keep the existing pending/disapproved status — do NOT auto-approve
-        // The Team Lead must use the Approve button separately.
-        if (msg.approvalStatus !== "pending" && msg.approvalStatus !== "disapproved") {
-          // If it was in some other state (e.g. already approved), keep it approved
-          // No change needed
+        // Manager or TL editing an employee's message - handle status
+        if (isOriginalSenderEmployee) {
+          // If editing ≠ approving, we should decide if it goes to pending.
+          // Currently we keep existing status or move to pending if it was null.
+          if (!msg.approvalStatus || msg.approvalStatus === "disapproved") {
+            msg.approvalStatus = "pending";
+          }
+          // If it was already approved, keep it approved (they are fixing an approved content).
+          // If it was pending, keep it pending.
+
+          // Re-calculate receivers to ensure correct seniors can see it
+          const senderId = msg.sender?._id || msg.sender;
+          const nextActiveForEdit = await findNextActiveSupervisors(
+            msg.owner,
+            String(senderId),
+            client?.supervisedBy || []
+          );
+          if (nextActiveForEdit.length > 0) {
+            msg.receiver = nextActiveForEdit;
+          } else {
+            const anySeniors = await findSupervisorsFromHierarchy(msg.owner, String(senderId));
+            if (anySeniors.length === 0) {
+              const { tls } = await findTLsAndManagersByOwner(msg.owner);
+              if (tls.length > 0) msg.receiver = tls;
+              else msg.approvalStatus = "approved";
+            } else {
+              // 🔥 FIX: Assign found hierarchy seniors and KEEP IT PENDING
+              msg.receiver = anySeniors;
+              if (!msg.approvalStatus) msg.approvalStatus = "pending";
+            }
+          }
+        } else {
+          // Senior editing another senior's message - no approval needed
+          msg.approvalStatus = null;
         }
-        // approvalStatus stays as-is (pending stays pending)
       }
       // CASE 2: Original sender editing their own message
       else if (isSender) {
@@ -1992,7 +2018,6 @@ exports.editMessage = async function editMessage(req, res) {
             if (nextActive.length > 0) {
               msg.receiver = nextActive;
             } else {
-              // No active supervisors found
               const anySeniors = await findSupervisorsFromHierarchy(msg.owner, currentUserId);
               if (anySeniors.length === 0) {
                 const { tls } = await findTLsAndManagersByOwner(msg.owner);
@@ -2004,55 +2029,16 @@ exports.editMessage = async function editMessage(req, res) {
               }
             }
           }
-
         }
       }
-      // CASE 3: Team Lead editing their own message
-      else if (isTeamLead && isSender) {
-        // Team Lead editing their own message - no approval needed
+      // CASE 3: Team Lead or Manager editing their own message (redundant but for clarity)
+      else if ((isTeamLead || isManager) && isSender) {
         msg.approvalStatus = null;
       }
-      // CASE 4: Manager editing (not original sender)
-      else if (isManager && !isSender && clientRequiresApproval) {
-        // Manager editing someone else's message
-        if (isOriginalSenderEmployee) {
-          // Manager editing an employee's message - needs approval if client requires it
-          msg.approvalStatus = "pending";
 
-          // 🔥 NEW: Find next active supervisor for the message
-          const nextActiveForEdit = await findNextActiveSupervisors(
-            msg.owner,
-            String(msg.sender._id),
-            client?.supervisedBy || []
-          );
-          if (nextActiveForEdit.length > 0) {
-            msg.receiver = nextActiveForEdit;
-          } else {
-            // Fallback for no active supervisors
-            const anySeniors = await findSupervisorsFromHierarchy(msg.owner, String(msg.sender._id));
-            if (anySeniors.length === 0) {
-              const { tls } = await findTLsAndManagersByOwner(msg.owner);
-              if (tls.length > 0) msg.receiver = tls;
-              else msg.approvalStatus = "approved";
-            } else {
-              msg.approvalStatus = "approved";
-            }
-          }
-        } else {
-
-          // Manager editing another manager or team lead's message - no approval needed
-          msg.approvalStatus = null;
-        }
-      }
-
-      // 🔥 ADDITIONAL FIX: Ensure original Managers and Team Lead senders never get "pending" status
-      // NOTE: Only check the ORIGINAL SENDER's role here, NOT the editor's role.
-      // A Team Lead editing an employee's pending message should NOT nullify the pending status.
+      // 🔥 ADDITIONAL GUARD: Ensure original Managers and Team Lead senders never get "pending" status
       if (msg.approvalStatus === "pending") {
-        const isSenderManagerOrLead =
-          isOriginalSenderManager || isOriginalSenderTeamLead;
-
-        if (isSenderManagerOrLead) {
+        if (isOriginalSenderManager || isOriginalSenderTeamLead) {
           msg.approvalStatus = null;
         }
       }
@@ -2084,6 +2070,10 @@ exports.editMessage = async function editMessage(req, res) {
     // Prepare response data with edit information
     const responseData = {
       ...populated.toObject(),
+      note: msg.note, // Explicitly include note to avoid disappearing issues
+      message: msg.note, // FE expects message as well
+      subject: msg.subject,
+      approvalStatus: msg.approvalStatus,
       isEdited: msg.isEdited,
       editedAt: msg.editedAt,
       editedBy: populated.editedBy,
@@ -2327,6 +2317,9 @@ exports.editMessage = async function editMessage(req, res) {
     const finalResponse = {
       message: responseMessage,
       data: responseData,
+      // Root level fields for maximum compatibility
+      note: msg.note,
+      messageContent: msg.note,
       approvalStatus: msg.approvalStatus,
       editedBy: currentUserRole,
       clientSupervision: clientSupervision,
