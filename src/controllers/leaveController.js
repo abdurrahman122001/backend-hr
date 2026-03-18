@@ -737,28 +737,9 @@ exports.approveLeave = async (req, res) => {
       approverId = user._id;
     }
 
-    // Handle policy violations warning
+    // Policy violations no longer block approval
     let policyOverrideNotes = "";
     if (leave.policyAnalysis && leave.policyAnalysis.violations.length > 0) {
-      const highSeverityViolations = leave.policyAnalysis.violations.filter(
-        (v) => v.severity === "HIGH",
-      );
-
-      if (highSeverityViolations.length > 0 && !overridePolicy) {
-        return res.status(200).json({
-          success: false,
-          requiresConfirmation: true,
-          message: "This leave has high-severity policy violations",
-          violations: highSeverityViolations,
-          analysis: {
-            recommendation: leave.policyAnalysis.recommendation,
-            severity: leave.policyAnalysis.severity,
-          },
-          suggestion:
-            "Add 'overridePolicy: true' in request body to approve despite violations",
-        });
-      }
-
       if (overridePolicy) {
         policyOverrideNotes = " (Policy override)";
       }
@@ -774,15 +755,10 @@ exports.approveLeave = async (req, res) => {
       paymentNotes = markAsPaid
         ? "Manually marked as paid"
         : "Manually marked as unpaid";
-    } else if (
-      overridePolicy &&
-      leave.policyAnalysis &&
-      !leave.policyAnalysis.isPaid
-    ) {
-      // If overriding policy and system suggested unpaid, make it paid
-      finalIsPaid = true;
-      paymentNotes = "Marked as paid despite policy violation";
     }
+    // Removed automatic payment upgrade on policy override to respect user request:
+    // "if the employee violates policy than if is approved than only leave deduction will apply"
+
 
     // Handle partial approval
     let partialApprovalNotes = "";
