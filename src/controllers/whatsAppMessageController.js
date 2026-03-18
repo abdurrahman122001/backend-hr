@@ -1946,9 +1946,16 @@ exports.editMessage = async function editMessage(req, res) {
     // THIS IS THE SINGLE PLACE WHERE APPROVAL STATUS SHOULD BE SET
     if (hasContentChanges) {
       // CASE 1: Team Lead editing someone else's message
-      if (isTeamLead && !isSender && clientRequiresApproval) {
-        // Team Lead editing someone else's message for client that requires approval - AUTO APPROVE
-        msg.approvalStatus = "approved";
+      // 🔥 FIX: Editing ≠ Approving. Keep status as "pending" so TL must
+      //   still explicitly click the Approve button after editing.
+      if ((isTeamLead || isManager) && !isSender && clientRequiresApproval) {
+        // Keep the existing pending/disapproved status — do NOT auto-approve
+        // The Team Lead must use the Approve button separately.
+        if (msg.approvalStatus !== "pending" && msg.approvalStatus !== "disapproved") {
+          // If it was in some other state (e.g. already approved), keep it approved
+          // No change needed
+        }
+        // approvalStatus stays as-is (pending stays pending)
       }
       // CASE 2: Original sender editing their own message
       else if (isSender) {
@@ -1963,8 +1970,12 @@ exports.editMessage = async function editMessage(req, res) {
             msg.approvalStatus = clientRequiresApproval
               ? "pending"
               : "approved";
+          } else if (msg.approvalStatus === "approved" && clientRequiresApproval) {
+            // 🔥 FIX: If an employee edits an already approved message,
+            //   it must be re-approved if the client requires approval.
+            msg.approvalStatus = "pending";
           } else if (msg.approvalStatus === "approved") {
-            // Already approved - keep it approved
+            // Already approved - keep it approved (direct supervision)
             msg.approvalStatus = "approved";
           } else if (!msg.approvalStatus && clientRequiresApproval) {
             // No approval status yet and client requires approval
@@ -1986,9 +1997,10 @@ exports.editMessage = async function editMessage(req, res) {
               if (anySeniors.length === 0) {
                 const { tls } = await findTLsAndManagersByOwner(msg.owner);
                 if (tls.length > 0) msg.receiver = tls;
-                else msg.approvalStatus = "approved";
+                else msg.approvalStatus = "approved"; // Fallback to approved if NO seniors exist
               } else {
-                msg.approvalStatus = "approved";
+                // 🔥 FIX: Set the found seniors as receivers and KEEP IT PENDING
+                msg.receiver = anySeniors;
               }
             }
           }
@@ -2033,13 +2045,14 @@ exports.editMessage = async function editMessage(req, res) {
         }
       }
 
-      // 🔥 ADDITIONAL FIX: Ensure Managers and Team Leads never get "pending" status
+      // 🔥 ADDITIONAL FIX: Ensure original Managers and Team Lead senders never get "pending" status
+      // NOTE: Only check the ORIGINAL SENDER's role here, NOT the editor's role.
+      // A Team Lead editing an employee's pending message should NOT nullify the pending status.
       if (msg.approvalStatus === "pending") {
         const isSenderManagerOrLead =
           isOriginalSenderManager || isOriginalSenderTeamLead;
-        const isEditorManagerOrLead = isManager || isTeamLead;
 
-        if (isSenderManagerOrLead || isEditorManagerOrLead) {
+        if (isSenderManagerOrLead) {
           msg.approvalStatus = null;
         }
       }

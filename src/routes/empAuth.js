@@ -142,6 +142,134 @@ function secondsUntilMidnight() {
   return Math.max(midnight.diff(now, "seconds"), 60);
 }
 
+/**
+ * Helper to handle attendance creation or session restoration.
+ * Used in both /login (for trusted devices) and /confirm-code.
+ */
+async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
+  const todayKarachi = getDateOnly(nowKarachi);
+  const currentTime = nowKarachi.hours() * 60 + nowKarachi.minutes();
+
+  let existingAttendance = await Attendance.findOne({
+    employee: emp._id,
+    date: todayKarachi
+  });
+
+  // RESTORE SESSION (RE-LOGIN)
+  if (existingAttendance && existingAttendance.checkOut) {
+    console.log(`🔄 [RESTORE] ${emp.name} has existing checkout, restoring session...`);
+
+    let statusToRestore = existingAttendance.originalStatus;
+    if (!statusToRestore) {
+      const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
+      const reportingTime = emp.rt ? timeToMinutes(emp.rt) : (await getReportingTimeFromShift(emp._id));
+      const graceEnd = reportingTime + GRACE_PERIOD_MINUTES;
+      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+
+      if (checkInMinutes <= graceEnd) statusToRestore = "Present";
+      else if (checkInMinutes < halfDayThreshold) statusToRestore = "Late";
+      else statusToRestore = "Half Day";
+    }
+
+    await Attendance.findByIdAndUpdate(existingAttendance._id, {
+      $unset: { checkOut: 1, logoutTime: 1, originalStatus: 1 },
+      $set: { status: statusToRestore, totalHours: 0 }
+    });
+
+    if (existingAttendance.status === "Half Day" && statusToRestore !== "Half Day") {
+      try {
+        await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+      } catch (err) {
+        console.error(`[RESTORE] Error reversing half-day deduction:`, err);
+      }
+    }
+
+    try {
+      const empShiftForLog = await getEmployeeShift(emp._id);
+      if (empShiftForLog) {
+        await AttendanceLog.create({
+          owner: emp.owner,
+          employee: emp._id,
+          date: todayKarachi,
+          firstShiftId: existingAttendance.shiftId,
+          firstShiftName: existingAttendance.shiftName,
+          firstShiftStart: existingAttendance.shiftStartTime,
+          firstShiftEnd: existingAttendance.shiftEndTime,
+          firstCheckIn: existingAttendance.checkIn,
+          firstCheckOut: existingAttendance.checkOut,
+          firstLogoutTime: existingAttendance.logoutTime,
+          secondShiftId: empShiftForLog._id,
+          secondShiftName: empShiftForLog.name,
+          secondShiftStart: empShiftForLog.start,
+          secondCheckIn: formatTimeOnly(nowKarachi),
+          secondLoginTime: nowKarachi.utc().toDate(),
+          betweenShiftDuration: calculateMinutesBetween(existingAttendance.checkOut, formatTimeOnly(nowKarachi)),
+          status: 'logged'
+        });
+      }
+    } catch (logErr) {
+      console.error(`[RESTORE] Error creating between-shift log:`, logErr);
+    }
+
+    const freshAttendance = await Attendance.findById(existingAttendance._id).lean();
+    return { attendance: freshAttendance, sessionStatus: freshAttendance.status, attendanceExists: true };
+  }
+
+  // CREATE NEW ATTENDANCE
+  if (!existingAttendance) {
+    const empShift = await getEmployeeShift(emp._id);
+    const reportingTimeMinutes = emp.rt
+      ? timeToMinutes(emp.rt)
+      : (empShift && empShift.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
+
+    const gracePeriodEnd = reportingTimeMinutes + GRACE_PERIOD_MINUTES;
+    const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+
+    let sessionStatus = "Present";
+    let isLoginAfter6PM = false;
+
+    if (currentTime <= gracePeriodEnd) {
+      sessionStatus = "Present";
+    } else if (currentTime < halfDayThreshold) {
+      sessionStatus = "Late";
+    } else {
+      sessionStatus = "Half Day";
+      isLoginAfter6PM = true;
+    }
+
+    const actualLoginTime = formatTimeOnly(nowKarachi);
+    const loginTimeUTC = nowKarachi.utc().toDate();
+
+    const attendance = await Attendance.create({
+      employee: emp._id,
+      owner: emp.owner,
+      date: todayKarachi,
+      status: sessionStatus,
+      checkIn: actualLoginTime,
+      loginTime: loginTimeUTC,
+      deviceFingerprint,
+      active: true,
+      shiftId: empShift?._id || null,
+      shiftName: empShift?.name || "Default Shift",
+      shiftStartTime: empShift?.start || "15:30",
+      shiftEndTime: empShift?.end || "00:00",
+      timezone: TIMEZONE,
+      isLoginAfter6PM,
+      markedByHR: false
+    });
+
+    if (sessionStatus === "Late") {
+      await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+    } else if (sessionStatus === "Half Day") {
+      await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi, attendance._id);
+    }
+
+    return { attendance, sessionStatus, attendanceExists: false };
+  }
+
+  return { attendance: existingAttendance, sessionStatus: existingAttendance.status, attendanceExists: true };
+}
+
 
 // ---------------------
 // Email Transport Setup
@@ -348,173 +476,42 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // CHECK FOR EXISTING ATTENDANCE TODAY (using Karachi date)
+    // ---------------------------------------------------------
+    // 1. Identify current/potential status (READ ONLY)
+    // ---------------------------------------------------------
+    // We check this here to provide accurate info in the verification email
+    // but we DO NOT commit any changes to the database yet if the device is untrusted.
     let existingAttendance = await Attendance.findOne({
       employee: emp._id,
-      date: todayKarachi // Use Karachi date
+      date: todayKarachi
     });
 
-    // ✅ RE-LOGIN HANDLER: Employee logged back in on the SAME DAY with an existing checkOut
-    // This covers: browser-close + re-login, or genuine between-shift logins
-    if (existingAttendance && existingAttendance.checkOut) {
-      console.log(`🔄 [RE-LOGIN] ${emp.name} has existing checkout (${existingAttendance.checkOut}), restoring session...`);
-
-      // ── STEP 1: Calculate the correct status to restore ──────────────────────
-      // Priority: use saved originalStatus (set by logout beacon)
-      // Fallback: recalculate from original checkIn time (handles old records without originalStatus)
-      let statusToRestore = existingAttendance.originalStatus;
-
-      if (!statusToRestore) {
-        // Recalculate from original checkIn time
-        const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
-        const reportingTime = emp.rt
-          ? timeToMinutes(emp.rt)
-          : (await getReportingTimeFromShift(emp._id));
-        const graceEnd = reportingTime + GRACE_PERIOD_MINUTES;
-        const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
-
-        if (checkInMinutes <= graceEnd) {
-          statusToRestore = "Present";
-        } else if (checkInMinutes < halfDayThreshold) {
-          statusToRestore = "Late";
-        } else {
-          statusToRestore = "Half Day";
-        }
-      }
-
-      // ── STEP 2: Restore attendance — remove checkOut, fix status ─────────────
-      await Attendance.findByIdAndUpdate(
-        existingAttendance._id,
-        {
-          $unset: { checkOut: 1, logoutTime: 1, originalStatus: 1 },
-          $set: { status: statusToRestore, totalHours: 0 }
-        }
-      );
-
-      // ── STEP 3: Reverse Half-Day deductions if status was Half Day ────────────
-      // The deduction was applied when the user checked out; now they're active again.
-      if (existingAttendance.status === "Half Day" && statusToRestore !== "Half Day") {
-        try {
-          await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-          console.log(`✅ [RE-LOGIN] Half-day deduction reversed for ${emp.name}`);
-        } catch (err) {
-          console.error(`[RE-LOGIN] Error reversing half-day deduction:`, err);
-        }
-      }
-
-      console.log(`✅ [RE-LOGIN] ${emp.name} session restored. Status: ${existingAttendance.status} → ${statusToRestore}`);
-
-      // ── STEP 4 (Optional): Log between-shift activity if shift is configured ──
-      try {
-        const empShiftForLog = await getEmployeeShift(emp._id);
-        if (empShiftForLog) {
-          await AttendanceLog.create({
-            owner: emp.owner,
-            employee: emp._id,
-            date: todayKarachi,
-            firstShiftId: existingAttendance.shiftId,
-            firstShiftName: existingAttendance.shiftName,
-            firstShiftStart: existingAttendance.shiftStartTime,
-            firstShiftEnd: existingAttendance.shiftEndTime,
-            firstCheckIn: existingAttendance.checkIn,
-            firstCheckOut: existingAttendance.checkOut,
-            firstLogoutTime: existingAttendance.logoutTime,
-            secondShiftId: empShiftForLog._id,
-            secondShiftName: empShiftForLog.name,
-            secondShiftStart: empShiftForLog.start,
-            secondCheckIn: formatTimeOnly(nowKarachi),
-            secondLoginTime: nowKarachi.utc().toDate(),
-            betweenShiftDuration: calculateMinutesBetween(existingAttendance.checkOut, formatTimeOnly(nowKarachi)),
-            status: 'logged'
-          });
-        }
-      } catch (logErr) {
-        // Non-fatal: between-shift log failure should not block login
-        console.error(`[RE-LOGIN] Error creating between-shift log:`, logErr);
-      }
-    }
-
-    let attendance;
     let sessionStatus = "Present";
-    let isLoginAfter6PM = false;
-
-    // GET EMPLOYEE'S SHIFT AND REPORTING TIME
-    const empShift = await getEmployeeShift(emp._id);
-    // ✅ PRIORITY: Use Employee.rt field first, then fall back to shift.start
-    const reportingTimeMinutes = emp.rt
-      ? timeToMinutes(emp.rt)
-      : (empShift && empShift.start
-        ? timeToMinutes(empShift.start)
-        : (15 * 60 + 30)); // Default 3:30 PM
-    const shiftEndTimeMinutes = empShift && empShift.end
-      ? timeToMinutes(empShift.end)
-      : (0 * 60 + 0); // Default midnight
-
-    // Store shift info for logging
-    const shiftName = empShift?.name || "Default Shift";
-    // ✅ Display reporting time from Employee.rt for consistency
-    const reportingTimeStr = emp.rt || (empShift?.start || "15:30");
-    const shiftStartTimeStr = empShift?.start || "15:30";
-    const shiftEndTimeStr = empShift?.end || "00:00";
-
-    // IF NO EXISTING ATTENDANCE → CREATE NEW ONE
-    if (!existingAttendance) {
-      // CALCULATE STATUS BASED ON KARACHI LOGIN TIME AND REPORTING TIME
-      const loginTotalMinutes = currentTime;
-
-      // Time thresholds in minutes since midnight (Karachi time)
-      const officeStart = reportingTimeMinutes; // From employee's reporting time
-      const gracePeriodEnd = officeStart + GRACE_PERIOD_MINUTES;
-      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60; // 6:00 PM (fixed)
-
-      if (loginTotalMinutes <= gracePeriodEnd) {
-        sessionStatus = "Present";
-      } else if (loginTotalMinutes < halfDayThreshold) {
-        sessionStatus = "Late";
+    if (existingAttendance) {
+      if (existingAttendance.checkOut) {
+        // Predicted restore status
+        sessionStatus = existingAttendance.originalStatus;
+        if (!sessionStatus) {
+          const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
+          const reportingTime = emp.rt ? timeToMinutes(emp.rt) : (await getReportingTimeFromShift(emp._id));
+          const graceEnd = reportingTime + GRACE_PERIOD_MINUTES;
+          const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+          if (checkInMinutes <= graceEnd) sessionStatus = "Present";
+          else if (checkInMinutes < halfDayThreshold) sessionStatus = "Late";
+          else sessionStatus = "Half Day";
+        }
       } else {
-        sessionStatus = "Half Day";
-        isLoginAfter6PM = true;
-      }
-
-      // Store times in Karachi timezone
-      const actualLoginTime = formatTimeOnly(nowKarachi);
-      const loginTimeUTC = nowKarachi.utc().toDate(); // Store UTC for consistent querying
-
-      console.log(
-        `[LOGIN] [${emp.name}] Status=${sessionStatus}, LoginTime=${actualLoginTime}, ReportingTime=${reportingTimeStr}, ShiftName=${shiftName}`
-      );
-
-      // ✅ CREATE NEW ATTENDANCE WITH CHECK-IN TIME
-      attendance = await Attendance.create({
-        employee: emp._id,
-        owner: emp.owner,
-        date: todayKarachi, // Store Karachi date YYYY-MM-DD
-        status: sessionStatus, // Present, Late, Half Day
-        checkIn: actualLoginTime, // Store formatted Karachi login time HH:mm
-        loginTime: loginTimeUTC, // Store UTC for consistent querying
-        deviceFingerprint,
-        active: true,
-        shiftId: empShift?._id || null,
-        shiftName: shiftName,
-        shiftStartTime: shiftStartTimeStr,
-        shiftEndTime: shiftEndTimeStr,
-        timezone: TIMEZONE, // Store timezone for reference
-        isLoginAfter6PM: isLoginAfter6PM,
-        markedByHR: false // System auto-marked
-      });
-
-      // ✅ ADDED: Apply Late Deduction logic immediately if Late
-      if (sessionStatus === "Late") {
-        await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-      } else if (sessionStatus === "Half Day") {
-        await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi, attendance._id);
+        sessionStatus = existingAttendance.status;
       }
     } else {
-      // ✅ ATTENDANCE ALREADY EXISTS
-      // Re-fetch from DB to get the updated status after any re-login restoration above
-      const freshAttendance = await Attendance.findById(existingAttendance._id).lean();
-      attendance = freshAttendance || existingAttendance;
-      sessionStatus = attendance.status; // now reflects restored status (e.g. Late, not Half Day)
+      // Calculate potential status for new attendance
+      const empShift = await getEmployeeShift(emp._id);
+      const rtMinutes = emp.rt ? timeToMinutes(emp.rt) : (empShift?.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
+      const graceEnd = rtMinutes + GRACE_PERIOD_MINUTES;
+      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+      if (currentTime <= graceEnd) sessionStatus = "Present";
+      else if (currentTime < halfDayThreshold) sessionStatus = "Late";
+      else sessionStatus = "Half Day";
     }
 
     // CHECK IF DEVICE IS TRUSTED
@@ -527,6 +524,11 @@ router.post("/login", async (req, res) => {
     );
 
     if (isTrusted) {
+      // PERFORM ATTENDANCE LOGIC (Create or Restore)
+      const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
+      const attendance = attendanceResult.attendance;
+      sessionStatus = attendanceResult.sessionStatus;
+
       const token = jwt.sign(
         {
           id: emp._id,
@@ -557,7 +559,7 @@ router.post("/login", async (req, res) => {
       );
 
       return res.json({
-        message: existingAttendance ?
+        message: attendanceResult.attendanceExists ?
           "Login successful (attendance already marked)." :
           "Login successful (trusted device).",
         token,
@@ -569,12 +571,12 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           department: emp.department,
         },
-        attendanceId: attendance._id,
+        attendanceId: attendance?._id,
         sessionStatus: sessionStatus,
-        attendanceExists: !!existingAttendance,
+        attendanceExists: attendanceResult.attendanceExists,
         trusted: true,
         expiresIn: 9 * 60 * 60,
-        localLoginTime: formatTimeForDisplay(nowKarachi), // Return local time for display
+        localLoginTime: formatTimeForDisplay(nowKarachi),
       });
     }
 
@@ -596,7 +598,7 @@ router.post("/login", async (req, res) => {
     const when = formatTimeForDisplay(nowKarachi);
 
     await sendMail({
-      to: "nashfintechnologies@gmail.com",
+      to: "qaziabdurrahman12@gmail.com",
       subject: "Employee login verification requested",
       text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
       html: `<p><b>New device login verification requested</b></p>
@@ -612,7 +614,7 @@ router.post("/login", async (req, res) => {
     return res.json({
       message: "Verification code sent to admin email.",
       tempToken,
-      attendanceId: attendance?._id,
+      attendanceId: null, // No attendance record yet for unrecognized devices
       sessionStatus: sessionStatus,
       attendanceExists: !!existingAttendance,
       user: {
@@ -708,71 +710,11 @@ router.post("/confirm-code", async (req, res) => {
 
     // Get Karachi time for session logging
     const nowKarachi = getKarachiTime();
-    const loginTimeUTC = nowKarachi.utc().toDate();
     const todayKarachi = getDateOnly(nowKarachi);
-    const actualLoginTime = formatTimeOnly(nowKarachi);
 
-    // Get employee's shift for this session
-    const empShiftConfirm = await getEmployeeShift(emp._id);
-    const shiftNameConfirm = empShiftConfirm?.name || "Default Shift";
-    const shiftStartTimeStrConfirm = empShiftConfirm?.start || "15:00";
-    const shiftEndTimeStrConfirm = empShiftConfirm?.end || "00:00";
-
-    // Calculate status based on reporting time
-    const reportingTimeMinutesConfirm = emp.rt
-      ? timeToMinutes(emp.rt)
-      : (empShiftConfirm && empShiftConfirm.start
-        ? timeToMinutes(empShiftConfirm.start)
-        : (15 * 60 + 30)); // Default 3:30 PM
-
-    const currentHour = nowKarachi.hours();
-    const currentMin = nowKarachi.minutes();
-    const loginTotalMinutesConfirm = currentHour * 60 + currentMin;
-    const gracePeriodEndConfirm = reportingTimeMinutesConfirm + GRACE_PERIOD_MINUTES;
-    const halfDayThresholdConfirm = HALF_DAY_THRESHOLD_HOUR * 60;
-
-    let statusConfirm = "Present";
-    let isLoginAfter6PMConfirm = false;
-
-    if (loginTotalMinutesConfirm > gracePeriodEndConfirm && loginTotalMinutesConfirm < halfDayThresholdConfirm) {
-      statusConfirm = "Late";
-    } else if (loginTotalMinutesConfirm >= halfDayThresholdConfirm) {
-      statusConfirm = "Half Day";
-      isLoginAfter6PMConfirm = true;
-    }
-
-    // Check for existing attendance to avoid duplicate key error
-    let existingAttendanceConfirm = await Attendance.findOne({
-      employee: emp._id,
-      date: todayKarachi
-    });
-
-    if (!existingAttendanceConfirm) {
-      await Attendance.create({
-        employee: emp._id,
-        owner: emp.owner,
-        date: todayKarachi,
-        status: statusConfirm,
-        checkIn: actualLoginTime,
-        loginTime: loginTimeUTC,
-        deviceFingerprint,
-        active: true,
-        isLoginAfter6PM: isLoginAfter6PMConfirm,
-        shiftId: empShiftConfirm?._id || null,
-        shiftName: shiftNameConfirm,
-        shiftStartTime: shiftStartTimeStrConfirm,
-        shiftEndTime: shiftEndTimeStrConfirm,
-        timezone: TIMEZONE,
-        markedByHR: false
-      });
-
-      // ✅ ADDED: Apply Late Deduction logic immediately if Late
-      if (statusConfirm === "Late") {
-        await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-      } else if (statusConfirm === "Half Day") {
-        await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi, existingAttendanceConfirm ? existingAttendanceConfirm._id : null);
-      }
-    }
+    // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation
+    const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
+    const attendance = attendanceResult.attendance;
 
     // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
     await EmployeeSession.updateMany(
@@ -798,6 +740,8 @@ router.post("/confirm-code", async (req, res) => {
         owner: emp.owner,
         name: emp.name || "",
       },
+      attendanceId: attendance?._id,
+      sessionStatus: attendance?.status,
       expiresIn: 9 * 60 * 60,
       localLoginTime: formatTimeForDisplay(nowKarachi),
     });
