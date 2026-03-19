@@ -384,22 +384,34 @@ exports.getConversations = async (req, res) => {
     // Combine pinned (first) and unpinned (after)
     const allConversations = [...pinnedConversations, ...unpinnedConversations];
 
+    // Build a lookup map from groupConversations to efficiently get unreadCount for spaces
+    const spaceConversationsMap = groupConversations.reduce((map, conv) => {
+      if (conv.space) {
+        map[conv.space._id ? conv.space._id.toString() : conv.space.toString()] = conv;
+      }
+      return map;
+    }, {});
+
     res.json({
       success: true,
       conversations: allConversations,
-      spaces: spaces.map((space) => ({
-        _id: space._id,
-        name: space.name,
-        description: space.description,
-        avatar: space.avatar,
-        createdBy: space.createdBy,
-        admins: space.admins,
-        members: space.members,
-        isPrivate: space.isPrivate,
-        memberCount: space.members.length,
-        unreadCount: 0,
-        type: "space",
-      })),
+      spaces: spaces.map((space) => {
+        const conv = spaceConversationsMap[space._id.toString()];
+        const unreadCount = conv ? (conv.unreadCount?.get(req.employee._id.toString()) || 0) : 0;
+        return {
+          _id: space._id,
+          name: space.name,
+          description: space.description,
+          avatar: space.avatar,
+          createdBy: space.createdBy,
+          admins: space.admins,
+          members: space.members,
+          isPrivate: space.isPrivate,
+          memberCount: space.members.length,
+          unreadCount: unreadCount,
+          type: "space",
+        };
+      }),
       pinnedCount: pinnedConversations.length,
     });
   } catch (error) {
