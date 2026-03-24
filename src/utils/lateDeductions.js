@@ -737,7 +737,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           leaveYearBalance: balance._id,
           year: leaveYear,
           date: new Date(attendanceDate),
-          type: "PAID_LEAVE_REVERSAL",
+          type: "PAID_LEAVE_REVERSED",
           value: reversalValue,
           reason: "Half Day Reversal (Session Reactivated)"
         });
@@ -768,7 +768,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           leaveYearBalance: balance._id,
           year: leaveYear,
           date: new Date(attendanceDate),
-          type: "UNPAID_LEAVE_REVERSAL",
+          type: "UNPAID_LEAVE_REVERSED",
           value: reversalValue,
           reason: "Half Day Reversal (Session Reactivated)"
         });
@@ -861,8 +861,8 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
           employee: employeeId,
           leaveYearBalance: balance._id,
           year: leaveYear,
-          date: new Date(),
-          type: "PAID_LEAVE_REVERSAL",
+          date: new Date(attendanceDate),
+          type: "PAID_LEAVE_REVERSED",
           value: reversalValue,
           reason: "Between-Shift Login - Late Deduction Reversal"
         });
@@ -893,8 +893,8 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
           employee: employeeId,
           leaveYearBalance: balance._id,
           year: leaveYear,
-          date: new Date(),
-          type: "UNPAID_LEAVE_REVERSAL",
+          date: new Date(attendanceDate),
+          type: "UNPAID_LEAVE_REVERSED",
           value: reversalValue,
           reason: "Between-Shift Login - Late Deduction Reversal"
         });

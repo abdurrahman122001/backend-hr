@@ -176,7 +176,10 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       $set: { status: statusToRestore, totalHours: 0 }
     });
 
-    if (existingAttendance.status === "Half Day" && statusToRestore !== "Half Day") {
+    const previousStatusLower = (existingAttendance.status || "").toLowerCase().replace(/\s+/g, '-');
+    const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
+
+    if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
       try {
         await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
       } catch (err) {
@@ -598,7 +601,7 @@ router.post("/login", async (req, res) => {
     const when = formatTimeForDisplay(nowKarachi);
 
     await sendMail({
-      to: "abdullahahmedqureshint@gmail.com",
+      to: "nashfintechnologies@gmail.com",
       subject: "Employee login verification requested",
       text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
       html: `<p><b>New device login verification requested</b></p>
@@ -802,21 +805,7 @@ router.post("/logout", requireAuth, async (req, res) => {
     const attendanceDate = attendance.date; // The day they actually logged in (important)
 
     let finalStatus = attendance.status;
-    // Save a snapshot of the current status before we potentially change it.
-    // This is used by /reactivate-session to restore the correct status on refresh.
     const originalStatusBeforeLogout = attendance.status;
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // HALF-DAY RULE:
-    // Only mark as Half Day if the employee left early (before shift end) AND
-    // the logout is on the SAME calendar date as the attendance date.
-    //
-    // Cases where we KEEP the original status (no Half Day):
-    //   1. Logout date ≠ attendance date  → employee worked past midnight (night shift)
-    //   2. Logout time ≥ shift end time   → employee completed their shift
-    // ─────────────────────────────────────────────────────────────────────────
-
-    // Get shift end time for this employee (to determine if shift is complete)
     let shiftEndMinutes = null;
     try {
       const empForShift = await Employee.findById(employeeId).select("shifts").lean();
@@ -832,9 +821,6 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     // Case 1: Cross-midnight logout — logout date is different from check-in date
     const isCrossMidnightLogout = todayKarachi !== attendanceDate;
-
-    // Case 2: Logout at/after shift end time (shift completed) OR after 9:00 PM Karachi time
-    // If shiftEndMinutes is 0 or null (midnight/unset), treat midnight logout as shift complete
     let isShiftComplete = false;
 
     // 🔥 Universal Rule: If employee stays until 9:00 PM, they are NOT marked as Half Day
@@ -844,22 +830,16 @@ router.post("/logout", requireAuth, async (req, res) => {
       // No shift configured — use the 9:00 PM threshold
       isShiftComplete = stayedUntil9PM;
     } else if (shiftEndMinutes === 0) {
-      // Shift ends at midnight (00:00)
-      // Safe if: Cross-midnight OR exactly midnight OR stayed until 9 PM
       isShiftComplete = isCrossMidnightLogout || logoutTotalMinutes === 0 || stayedUntil9PM;
     } else {
-      // Normal shift end: logout >= shift end time OR stayed until 9 PM
       isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
     }
 
     if (isCrossMidnightLogout) {
-      // Employee worked past midnight into the next day — keep original status
       console.log(`[LOGOUT] Cross-midnight logout detected (attendance: ${attendanceDate}, logout date: ${todayKarachi}). Keeping original status: ${finalStatus}`);
     } else if (isShiftComplete) {
-      // Logout is at or after shift end time (or after 9 PM threshold) — shift was completed
       console.log(`[LOGOUT] Shift completed or stayed until 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Keeping status: ${finalStatus}`);
     } else {
-      // Employee left early on the same day AND before 9 PM — apply Half Day rule
       finalStatus = "Half Day";
       console.log(`[LOGOUT] Early logout before 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Status → Half Day`);
     }
@@ -888,8 +868,6 @@ router.post("/logout", requireAuth, async (req, res) => {
           checkOut: actualLogoutTime,
           status: finalStatus,
           totalHours: parseFloat(totalHours.toFixed(2)),
-          // ✅ Store the status that was set BEFORE the logout status calculation.
-          // Reactivation uses this to restore the correct status on page refresh.
           originalStatus: originalStatusBeforeLogout
         },
         { new: true }
@@ -906,16 +884,10 @@ router.post("/logout", requireAuth, async (req, res) => {
         `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
       );
 
-      // Apply Half-Day deduction whenever status changes to Half Day on logout.
-      // This includes browser close (isAutoLogout=true). If it turns out the user
-      // was just refreshing, the /reactivate-session endpoint will reverse it.
       if (finalStatus === "Half Day" && attendance.status !== "Half Day") {
         console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
         try {
-          // ✅ Skip real-time deduction if it's an auto-logout (beacon).
-          // This avoids deducting on refresh/close. It will be handled by cron or reactivation.
           if (!isAutoLogout) {
-            // Use attendanceDate (login date) — not todayKarachi — for cross-midnight correctness
             await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
             console.log(`✅ [LOGOUT-DEDUCTION] Manual half-day deduction applied for ${employeeId} on ${attendanceDate}`);
           } else {

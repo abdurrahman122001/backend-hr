@@ -214,13 +214,37 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   // 5) Taxable monthly
   const taxableMonthly = Math.max(0, netBeforeTax - medExemptMonthly);
 
-  // 6) Annualize + compute band-only tax
-  const annualTaxable = taxableMonthly * 12;
+  // 6.1) Calculate pro-rated months remaining in fiscal year (July to June)
+  const fiscalStartMonth = 7; // July
+  const fiscalEndMonth = 6;   // June
+
+  let joiningDate = null;
+  if (slip.employee?.joiningDate) {
+    joiningDate = new Date(slip.employee.joiningDate);
+  }
+
+  // Use the slip's month/year to determine the fiscal year start
+  const slipMonthIndex = monthOrder.indexOf(slip.month);
+  const slipYearNum = parseInt(slip.year);
+  
+  const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
+  if (slipMonthIndex + 1 <= fiscalEndMonth) {
+    fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
+  }
+
+  const effectiveStart = (joiningDate && joiningDate > fiscalStart) ? joiningDate : fiscalStart;
+  const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
+  
+  let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
+  if (monthsRemaining < 1) monthsRemaining = 1;
+
+  // 6.2) Annualize + compute band-only tax using remaining months
+  const annualTaxable = taxableMonthly * monthsRemaining;
   const annualTax = computeAnnualTaxBandOnly(
     annualTaxable,
     taxCfg?.slabs || []
   );
-  const monthlyTax = Math.round(annualTax / 12);
+  const monthlyTax = Math.round(annualTax / monthsRemaining);
 
   // 7) Final totals
   const totalDeductions = baseDeductionsMonthly + monthlyTax;

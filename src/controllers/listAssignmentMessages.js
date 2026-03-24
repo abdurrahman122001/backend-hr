@@ -1134,6 +1134,7 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
       isTrashed: false,
       isSpam: false,
       status: "sent",
+      approvalStatus: { $ne: "pending" }, // 🔥 FIX: Don't count pending messages as unread emails
     });
 
     res.json({

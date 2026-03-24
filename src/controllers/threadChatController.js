@@ -286,7 +286,7 @@ exports.createThreadChatMessage = async function (req, res) {
       owner,
       sender,
       receiver: receivers,
-      content: content.trim(),
+      content: content,
       messageType,
       isFormatted: content.includes('<') && content.includes('>'),
       replyTo: replyTo || undefined,
@@ -666,7 +666,7 @@ exports.editMessage = async function (req, res) {
     }
 
     // Edit message
-    await message.edit(content.trim(), currentUser);
+    await message.edit(content, currentUser);
 
     // Populate updated message
     const populated = await ThreadChatMessage.findById(message._id)

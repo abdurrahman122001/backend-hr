@@ -41,7 +41,6 @@ const messageSchema = new mongoose.Schema(
     content: {
       type: String,
       required: false,
-      trim: true,
     },
     messageType: {
       type: String,
