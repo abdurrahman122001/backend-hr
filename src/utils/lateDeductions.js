@@ -554,7 +554,7 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
  * Apply real-time half-day deduction (0.5 leave or salary)
  * @param {ObjectId} attendanceId - The ID of the attendance record (optional)
  */
-async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendanceId = null) {
+async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendanceId = null, forceUnpaid = false) {
   try {
     const employee = await Employee.findById(employeeId).lean();
     if (!employee) return;
@@ -604,9 +604,6 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
     }
 
     // PREVENT DOUBLE DEDUCTION: Check if a transaction for this date and employee already exists
-    const dayStart = new Date(attendanceDate + 'T00:00:00');
-    const dayEnd = new Date(attendanceDate + 'T23:59:59');
-
     const existingTx = await LeaveTransaction.findOne({
       employee: employeeId,
       date: new Date(attendanceDate),
@@ -618,7 +615,8 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
       return;
     }
 
-    if (entitlementLeft >= 0.5) {
+    // Logic: Use paid leave only if NOT forced unpaid AND balance exists
+    if (!forceUnpaid && entitlementLeft >= 0.5) {
       // Consume 0.5 paid leaves
       balance.usedPaid += 0.5;
       await LeaveTransaction.create({
@@ -647,14 +645,14 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
         await LeaveTransaction.create({
           owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
           year: leaveYear, date: new Date(attendanceDate), type: "UNPAID_LEAVE_USED", value: 0.5,
-          reason: "Half Day Login (No leave balance)",
+          reason: forceUnpaid ? "Unpaid Half Day (Forced)" : "Half Day Login (No leave balance)",
           sourceModel: "Attendance",
           sourceId: attendanceId,
           createdBy: userId
         });
       }
       await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Unpaid" } });
-      console.log(`[HALF-DAY] ${employee.name}: Deducted 0.5 day salary`);
+      console.log(`[HALF-DAY] ${employee.name}: Deducted 0.5 day salary${forceUnpaid ? ' (FORCED UNPAID)' : ''}`);
     }
     await balance.save();
     await slip.save();
