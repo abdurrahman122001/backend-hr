@@ -170,22 +170,21 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const fiscalEndMonth = 6; // June
 
     let joiningDate = null;
-
-    // salarySlip should have employee reference populated elsewhere
     if (salarySlip?.employee?.joiningDate) {
       joiningDate = new Date(salarySlip.employee.joiningDate);
-    } else {
-      // manually fetch employee if not populated
-      const emp = await Employee.findById(salarySlip.employee).lean();
-      if (emp?.joiningDate) joiningDate = new Date(emp.joiningDate);
     }
 
-    const today = new Date();
+    const slipMonth = salarySlip.month;
+    const slipYearNum = parseInt(salarySlip.year || new Date().getFullYear());
+    
+    // Month name to index lookup
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const slipMonthIndex = monthNames.indexOf(slipMonth);
 
-    const fiscalStart = new Date(today.getFullYear(), fiscalStartMonth - 1, 1);
-
-    // If current month is Jan–Jun, fiscal year actually started last year
-    if (today.getMonth() + 1 <= fiscalEndMonth) {
+    const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
+    
+    // If slip month is Jan–Jun, fiscal year started last calendar year
+    if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) {
       fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
     }
 
