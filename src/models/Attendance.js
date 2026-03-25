@@ -5,9 +5,9 @@ const AttendanceSchema = new Schema({
   owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   employee: { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   date: { type: String, required: true },
-  status: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day', 'Unpaid Half Day', 'Leave'], required: true },
+  status: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day', 'Leave'], required: true },
   // Snapshot of status before logout recalculation — used by reactivation to restore original status on refresh
-  originalStatus: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day', 'Unpaid Half Day', 'Leave'], default: null },
+  originalStatus: { type: String, enum: ['Present', 'Late', 'Absent', 'Half Day', 'Leave'], default: null },
   checkIn: { type: String },
   checkOut: { type: String },
   notes: { type: String },
