@@ -1457,7 +1457,7 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           {
             $set: {
-              status: "Leave",
+              status: "Absent",
               leaveType: "Paid",
               effectivePaidDays: result.paid || 0,
               proportionate: true,
@@ -1481,7 +1481,7 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           {
             $set: {
-              status: "Leave",
+              status: "Absent",
               leaveType: "Paid",
               effectivePaidDays: effectiveDays,
               proportionate: false,
@@ -1514,7 +1514,7 @@ exports.markAttendance = async (req, res) => {
         );
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Leave", leaveType: "Paid" } }
+          { $set: { status: "Absent", leaveType: "Paid" } }
         );
         console.log(
           `[LEAVE][${employee.name}] Forced paid leave -> Days=${effectiveDays}, NO deduction`
@@ -1542,7 +1542,7 @@ exports.markAttendance = async (req, res) => {
 
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Leave", leaveType: "Unpaid" } }
+          { $set: { status: "Absent", leaveType: "Unpaid" } }
         );
         return res.json(rec);
       }
@@ -1758,8 +1758,8 @@ exports.markAttendance = async (req, res) => {
     }
 
 
-    if (!beforeJoin && status === "Half Day") {
-      const isExplicitUnpaid = (leaveType === "Unpaid");
+    if (!beforeJoin && (status === "Half Day" || status === "Unpaid Half Day")) {
+      const isExplicitUnpaid = (status === "Unpaid Half Day" || leaveType === "Unpaid");
 
       if (!isExplicitUnpaid) {
         // PAID case: deduct from balance (debt allowed as per current full-day leave logic)

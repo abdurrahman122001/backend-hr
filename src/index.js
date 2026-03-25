@@ -112,7 +112,7 @@ const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 const app = express();
 
 // ---------- Schedulers / Cron Jobs ----------
-require("./schedulers/bonusLeaveCron");
+// require("./schedulers/bonusLeaveCron");
 require("./schedulers/leaveSyncCron");
 
 // ---------- Static ----------
