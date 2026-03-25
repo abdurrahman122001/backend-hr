@@ -662,7 +662,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (EXTERNAL + INBOX ONLY)
+     * BASE QUERY (EXTERNAL - BOTH SENT AND RECEIVED)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: true, $ne: null },
@@ -670,11 +670,14 @@ exports.getExternalCommunications = async function getExternalCommunications(
       // ❌ no drafts
       status: { $ne: "draft" },
 
-      // ❌ exclude my sent messages
-      sender: { $ne: currentUser },
-
-      // ✅ received by me only
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+      // 🔥 FIXED: Include messages where user is SENDER or RECEIVER
+      $or: [
+        // Received emails (from clients or anyone with client context)
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+        // Sent emails (to clients)
+        { sender: currentUser }
+      ],
     };
 
     if (isObjId(client)) q.client = client;
@@ -911,7 +914,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
     }
 
     /* --------------------------------------------------
-     * BASE QUERY (INTERNAL + INBOX ONLY)
+     * BASE QUERY (INTERNAL - BOTH SENT AND RECEIVED)
      * -------------------------------------------------- */
     const q = {
       client: { $exists: false },
@@ -919,11 +922,14 @@ exports.getInternalCommunications = async function getInternalCommunications(
       // ❌ no drafts
       status: { $ne: "draft" },
 
-      // ❌ exclude my sent messages
-      sender: { $ne: currentUser },
-
-      // ✅ received by me only
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+      // 🔥 FIXED: Include messages where user is SENDER or RECEIVER
+      $or: [
+        // Received emails
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+        // Sent emails  
+        { sender: currentUser }
+      ],
     };
 
     /* -------------------------------------------------- */
