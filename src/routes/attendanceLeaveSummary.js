@@ -134,17 +134,14 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
             case "UNPAID_LEAVE_USED": monthlyData[monthName].unpaidUsed += tx.value || 0; break;
             case "BONUS_EARNED": monthlyData[monthName].bonusAdded += tx.value || 0; break;
             case "ADJUSTMENT": monthlyData[monthName].bonusAdded += tx.value || 0; break;
-            case "PAID_LEAVE_CREDITED":
-                monthlyData[monthName].credited += tx.value || 0;
-                yearCredits += tx.value || 0;
-                break;
+           
             case "PAID_LEAVE_REVERSED": monthlyData[monthName].paidUsed -= tx.value || 0; break;
             case "UNPAID_LEAVE_REVERSED": monthlyData[monthName].unpaidUsed -= tx.value || 0; break;
         }
     }
 
     // 6. Calculate initial balance (start of year) and running balance month by month
-    const calculatedInitialBalance = (leaveBalance.total || 0) - yearCredits;
+    const calculatedInitialBalance = (leaveBalance.total || 0) ;
     let runningBalance = calculatedInitialBalance;
     const monthlyBalances = {};
     let totalUsedPaid = 0;

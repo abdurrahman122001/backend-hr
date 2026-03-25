@@ -247,13 +247,13 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
   }
 
   // 2. Reverse Leave Balance usage (Paid/Unpaid)
-  if (status === "Leave" || status === "Absent" || status === "Half Day") {
+  if (status === "Leave" || status === "Absent" || status === "Half Day" || status === "Unpaid Half Day") {
     let daysToReverse = 0;
     if (typeof record.effectivePaidDays === "number") {
       daysToReverse = record.effectivePaidDays;
     } else if (record.proportionate && typeof record.proportionateValue === "number") {
       daysToReverse = record.proportionateValue;
-    } else if (status === "Half Day") {
+    } else if (status === "Half Day" || status === "Unpaid Half Day") {
       daysToReverse = 0.5;
     } else {
       daysToReverse = 1;
@@ -675,8 +675,8 @@ exports.markAttendance = async (req, res) => {
         markedByHR: true,
       },
     };
-    if (status === "Absent" || status === "Half Day") {
-      updateDoc.$set.leaveType = leaveType || "Unpaid";
+    if (status === "Absent" || status === "Half Day" || status === "Unpaid Half Day") {
+      updateDoc.$set.leaveType = (status === "Unpaid Half Day" ? "Unpaid" : (leaveType || "Unpaid"));
     } else {
       updateDoc.$unset = { leaveType: "" };
     }
@@ -1758,54 +1758,48 @@ exports.markAttendance = async (req, res) => {
     }
 
 
-    if (!beforeJoin && status === "Half Day") {
-      const balanceSnapshot = await getLeaveBalanceSnapshot(ownerId, employeeId, date);
-      const totalBal = (balanceSnapshot.total || 0) + (balanceSnapshot.bonus || 0);
-      const usedPaid = balanceSnapshot.usedPaid || 0;
-      const balance = totalBal - usedPaid;
+    if (!beforeJoin && (status === "Half Day" || status === "Unpaid Half Day")) {
+      const isExplicitUnpaid = (status === "Unpaid Half Day" || leaveType === "Unpaid");
 
-      let unpaid = 0;
-
-      if (balance >= 0.5) {
+      if (!isExplicitUnpaid) {
+        // PAID case: deduct from balance (debt allowed as per current full-day leave logic)
         await updateLeaveEntitlementForEmployee(
           ownerId,
           employeeId,
           date,
           0.5,
-          "leave",
+          "leave", // "leave" type forces addPaid = deductionCount in utils
           false
         );
         await Attendance.updateOne(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { leaveType: "Paid" } }
+          { $set: { leaveType: "Paid", status: "Half Day" } }
         );
-        console.log(`[HALF] Paid half - day -> NO deduction`);
+        console.log(`[HALF] Paid half-day -> Balance used (0.5)`);
       } else {
-        unpaid = 0.5;
+        // UNPAID case: salary deduction
         await updateLeaveEntitlementForEmployee(
           ownerId,
           employeeId,
           date,
           0.5,
           "absent",
-          true
+          true // forceUnpaid = true forces addUnpaid = deductionCount in utils
         );
-        let prev = slip.leaveDeductions
-          ? Number(await decrypt(slip.leaveDeductions))
-          : 0;
+        
+        // Apply salary deduction to slip
+        if (!slip.leaveDeductions) slip.leaveDeductions = await encrypt("0");
+        const prev = Number(await decrypt(slip.leaveDeductions)) || 0;
         const add = perDay * 0.5;
         slip.leaveDeductions = await encrypt(String(prev + add));
         await slip.save();
+
         await Attendance.updateOne(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { leaveType: "Unpaid" } }
+          { $set: { leaveType: "Unpaid", status: "Half Day" } }
         );
-        console.log(
-          `[HALF] Unpaid half - day -> Deduction=${add}, New leaveDeductions = ${prev + add
-          } `
-        );
+        console.log(`[HALF] Unpaid half-day -> Salary Deduction=${add}`);
       }
-
       return res.json(rec);
     }
 
