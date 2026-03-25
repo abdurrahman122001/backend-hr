@@ -108,18 +108,32 @@ async function applyVisibility(q, req) {
     .lean();
   const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
-  // 👁️ ROLE/HIERARCHY VISIBILITY (Non-Pending only)
-  const roleHierarchyFilter = {
-    approvalStatus: { $ne: "pending" }, // Blocks hierarchy/role access for pending
-    $or: [
-      // Managers/Owners see all "approved/sent" messages for their organization
-      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
-      // Team leads see all "approved/sent" messages for their organization
-      ...(currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
-      // Seniors see "approved/sent" messages from their juniors
-      ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
-    ]
-  };
+  // 👁️ ROLE/HIERARCHY VISIBILITY
+  const isManagerOwner = ["manager", "owner"].includes(currentUserRole);
+
+  const hierarchySegments = [];
+  if (currentUserRole === "team_lead") {
+    hierarchySegments.push({ owner: ownerId });
+  }
+  if (juniorIds.length > 0) {
+    hierarchySegments.push({ sender: { $in: juniorIds } });
+    hierarchySegments.push({ receiver: { $in: juniorIds } });
+  }
+
+  const roleSegments = [];
+  if (isManagerOwner) {
+    roleSegments.push({ owner: ownerId });
+  }
+
+  if (hierarchySegments.length > 0) {
+    roleSegments.push({
+      approvalStatus: { $ne: "pending" },
+      $or: hierarchySegments
+    });
+  }
+
+  // If no role/hierarchy access applies, use a filter that matches nothing
+  const roleHierarchyFilter = roleSegments.length > 0 ? { $or: roleSegments } : { _id: null };
 
   // Base inbox visibility
   const inboxVisibility = {
@@ -452,34 +466,137 @@ exports.listMessages = async function listMessages(req, res) {
       }
     }
 
-    // Apply visibility rules
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
+
+    const isSentView = req.query.status === "sent";
+    const isInboxView = !isSentView && req.query.isTrashed !== "true" && req.query.isSpam !== "true";
+
+    // Force incoming-only for unified inbox unless explicitly in Sent
+    if (isInboxView) {
+      q.$or = [
+        { isFromClient: true },
+        { receiver: me },
+        { receiver: { $in: [me] } }
+      ];
+    }
+
     const qFinal = await applyVisibility(q, req);
 
-    // Validation
-    const hasExplicitFilter =
-      q.owner ||
-      q.client !== undefined ||
-      q.sender ||
-      q.receiver ||
-      q.$or ||
-      q.status ||
-      q.isScheduled !== undefined ||
-      q.approvalStatus !== undefined ||
-      q.isTrashed !== undefined ||
-      q.isSpam !== undefined ||
-      q.isHrPolicy !== undefined;
+    const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
 
-    if (!hasExplicitFilter) {
-      return res.status(400).json({
-        error:
-          "Provide at least one scope: owner, client, sender, receiver, participant, status, approvalStatus, isTrashed, isSpam, isScheduled, or excludeHrPolicy",
+    if (isThreaded) {
+      const distinctThreads = await AssignmentMessage.aggregate([
+        { $match: qFinal },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: "$threadId",
+            latestId: { $first: "$_id" },
+            latestMessageAt: { $max: "$createdAt" },
+            receivedSomething: {
+              $max: {
+                $cond: [
+                  {
+                    $or: [
+                      { $eq: ["$isFromClient", true] },
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
+                      { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
+                    ]
+                  },
+                  true,
+                  false
+                ]
+              }
+            },
+            threadMessageCount: { $sum: 1 },
+            threadUnreadCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$isRead", true] },
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                    ]
+                  },
+                  1,
+                  0
+                ]
+              }
+            }
+          }
+        },
+        { $match: { receivedSomething: true } },
+        { $sort: { latestMessageAt: -1 } },
+        { $skip: (pageNum - 1) * lim },
+        { $limit: lim }
+      ]);
+
+      const latestMessageIds = distinctThreads.map(t => t.latestId);
+      if (latestMessageIds.length === 0) {
+        return res.json({ items: [], total: 0, page: pageNum, pages: 0, limit: lim });
+      }
+
+      const [messages, totalThreadsResult] = await Promise.all([
+        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "client", select: "_id clientName" },
+          ])
+          .lean(),
+        AssignmentMessage.aggregate([
+          { $match: qFinal },
+          {
+            $group: {
+              _id: "$threadId",
+              receivedSomething: {
+                $max: {
+                  $cond: [
+                    {
+                      $or: [
+                        { $eq: ["$isFromClient", true] },
+                        { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
+                        { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
+                      ]
+                    },
+                    true,
+                    false
+                  ]
+                }
+              }
+            }
+          },
+          { $match: { receivedSomething: true } },
+          { $count: "total" }
+        ])
+      ]);
+
+      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
+      const finalItems = messages.map(m => {
+        const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
+        return {
+          ...m,
+          receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
+          isDirectMessage: !m.client,
+          threadMessageCount: stats ? stats.threadMessageCount : 1,
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0
+        };
+      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      return res.json({
+        items: finalItems,
+        total: totalCount,
+        page: pageNum,
+        pages: Math.ceil(totalCount / lim),
+        limit: lim,
+        userRole: currentUserRole,
+        isTeamLead: isTeamLead,
       });
     }
 
-    // Pagination & fetch
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
-
+    // Default: Regular non-grouped fetch
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
@@ -512,13 +629,6 @@ exports.listMessages = async function listMessages(req, res) {
       );
     }
 
-    // HR Policy logic (keep your existing HR policy code)
-    let hrPolicyMessage = null;
-    if (pageNum === 1 && !shouldExcludeHrPolicy && !isTrashed && !isSpam) {
-      // ... your existing HR policy code
-    }
-
-    // Ensure receiver is always treated as array for consistency
     const normalizedItems = finalItems.map((item) => ({
       ...item,
       receiver: Array.isArray(item.receiver)
@@ -535,15 +645,6 @@ exports.listMessages = async function listMessages(req, res) {
       limit: lim,
       userRole: currentUserRole,
       isTeamLead: isTeamLead,
-      messageTypes: {
-        clientBased: normalizedItems.filter(
-          (item) => item.client && !item.isVirtual
-        ).length,
-        directMessages: normalizedItems.filter(
-          (item) => !item.client && !item.isVirtual
-        ).length,
-        totalMessages: normalizedItems.length,
-      },
     });
   } catch (e) {
     console.error("❌ Error in listMessages:", e);
@@ -660,21 +761,12 @@ exports.getExternalCommunications = async function getExternalCommunications(
     if (!isObjId(currentUser)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
-
-    /* --------------------------------------------------
-     * BASE QUERY (EXTERNAL + INBOX ONLY)
-     * -------------------------------------------------- */
+    const me = oid(String(currentUser));
     const q = {
       client: { $exists: true, $ne: null },
 
       // ❌ no drafts
       status: { $ne: "draft" },
-
-      // ❌ exclude my sent messages
-      sender: { $ne: currentUser },
-
-      // ✅ received by me only
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
     if (isObjId(client)) q.client = client;
@@ -733,60 +825,78 @@ exports.getExternalCommunications = async function getExternalCommunications(
       ];
     }
 
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
+
+    const isSentView = status === "sent";
+    const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true";
+
+    // 🔥 CRM/Manager Fix: External Inbox ONLY shows incoming client mail or mail to self.
+    // Solo sent messages to clients are handled in the 'Sent' tab.
+    if (isInboxView) {
+      q.$or = [
+        { isFromClient: true },
+        { receiver: me },
+        { receiver: { $in: [me] } }
+      ];
+    }
+
     const qFinal = await applyVisibility(q, req);
 
-    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    // Robust threadMode check
+    const isThreaded = threadMode === "true" || threadMode === true;
 
-    // If threadMode is enabled and we have client messages
-    if (threadMode === "true") {
-      // First, get distinct threadIds that match the query
+    if (isThreaded) {
       const distinctThreads = await AssignmentMessage.aggregate([
         { $match: qFinal },
+        { $sort: { createdAt: -1 } },
         {
           $group: {
             _id: "$threadId",
-            latestMessage: { $max: "$createdAt" },
-            client: { $first: "$client" },
-            // Only group threads that have a client
-            hasClient: { $first: { $ne: ["$client", null] } }
+            latestId: { $first: "$_id" },
+            latestMessageAt: { $max: "$createdAt" },
+            // CRM (manager) and all users: External Inbox strictly shows threads with CLIENT replies.
+            // Solitary sent messages remain in "Sent".
+            hasClientInteraction: {
+              $max: {
+                $cond: [{ $eq: ["$isFromClient", true] }, true, false]
+              }
+            },
+            hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } },
+            threadMessageCount: { $sum: 1 },
+            threadUnreadCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$isRead", true] },
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                    ]
+                  },
+                  1,
+                  0
+                ]
+              }
+            }
           }
         },
-        // Filter to only include threads with clients
-        { $match: { hasClient: true } },
-        { $sort: { latestMessage: -1 } },
+        // Filter: Must have client ID AND must have an incoming message from a client
+        { $match: { hasClient: true, hasClientInteraction: true } },
+        { $sort: { latestMessageAt: -1 } },
         { $skip: (pageNum - 1) * lim },
-        { $limit: lim },
-        { $project: { threadId: "$_id", _id: 0 } }
+        { $limit: lim }
       ]);
 
-      const threadIds = distinctThreads.map(t => t.threadId);
-
-      // If no threads with clients found, return empty result
-      if (threadIds.length === 0) {
-        return res.json({
-          communicationType: "external",
-          items: [],
-          total: 0,
-          page: pageNum,
-          pages: 0,
-          limit: lim,
-        });
+      const latestMessageIds = distinctThreads.map(t => t.latestId);
+      if (latestMessageIds.length === 0) {
+        return res.json({ communicationType: "external", items: [], total: 0, page: pageNum, pages: 0, limit: lim });
       }
 
-      // Get all messages for these threads
-      const [threadMessages, totalThreads] = await Promise.all([
-        AssignmentMessage.find({
-          ...qFinal,
-          threadId: { $in: threadIds }
-        })
-          .sort({ threadId: 1, createdAt: -1 }) // Group by thread, newest first in each thread
+      const [messages, totalThreadsResult] = await Promise.all([
+        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            {
-              path: "sender",
-              select: "_id name companyEmail role supervisionMode",
-            },
+            { path: "sender", select: "_id name companyEmail role supervisionMode" },
             { path: "receiver", select: "_id name companyEmail role" },
             { path: "client", select: "_id clientName" },
           ])
@@ -796,54 +906,38 @@ exports.getExternalCommunications = async function getExternalCommunications(
           {
             $group: {
               _id: "$threadId",
-              hasClient: { $first: { $ne: ["$client", null] } }
+              hasClientInteraction: {
+                $max: {
+                  $cond: [{ $eq: ["$isFromClient", true] }, true, false]
+                }
+              },
+              hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } }
             }
           },
-          { $match: { hasClient: true } },
+          { $match: { hasClient: true, hasClientInteraction: true } },
           { $count: "total" }
         ])
       ]);
 
-      // Group messages by threadId
-      const groupedThreads = {};
-      threadMessages.forEach(message => {
-        if (!groupedThreads[message.threadId]) {
-          groupedThreads[message.threadId] = [];
-        }
-        groupedThreads[message.threadId].push(message);
-      });
-
-      // Convert to array format with thread metadata
-      const threadsArray = Object.keys(groupedThreads).map(threadId => {
-        const messages = groupedThreads[threadId];
-        const latestMessage = messages[0]; // Already sorted by createdAt: -1
-
+      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
+      const finalItems = messages.map(m => {
+        const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
         return {
-          threadId,
-          client: latestMessage.client,
-          subject: latestMessage.subject,
-          latestMessageAt: latestMessage.createdAt,
-          messageCount: messages.length,
-          messages: messages, // All messages in the thread
-          isFromClient: latestMessage.isFromClient,
-          isFromCompanyEmployee: latestMessage.isFromCompanyEmployee,
-          // Add any other thread-level metadata you need
+          ...m,
+          receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
+          isDirectMessage: !m.client,
+          threadMessageCount: stats ? stats.threadMessageCount : 1,
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0
         };
-      });
-
-      // Sort threads by latest message time
-      threadsArray.sort((a, b) => new Date(b.latestMessageAt) - new Date(a.latestMessageAt));
-
-      const totalCount = totalThreads.length > 0 ? totalThreads[0].total : 0;
+      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
 
       return res.json({
         communicationType: "external",
-        items: threadsArray,
+        items: finalItems,
         total: totalCount,
         page: pageNum,
         pages: Math.ceil(totalCount / lim),
         limit: lim,
-        threadMode: true
       });
     }
 
@@ -880,6 +974,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     res.status(500).json({ error: "Failed to fetch external communications" });
   }
 };
+
 exports.getInternalCommunications = async function getInternalCommunications(
   req,
   res
@@ -913,17 +1008,17 @@ exports.getInternalCommunications = async function getInternalCommunications(
     /* --------------------------------------------------
      * BASE QUERY (INTERNAL + INBOX ONLY)
      * -------------------------------------------------- */
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const me = oid(String(req.employee._id));
+
     const q = {
-      client: { $exists: false },
+      $or: [
+        { client: { $exists: false } },
+        { client: null }
+      ],
 
       // ❌ no drafts
       status: { $ne: "draft" },
-
-      // ❌ exclude my sent messages
-      sender: { $ne: currentUser },
-
-      // ✅ received by me only
-      $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
     };
 
     /* -------------------------------------------------- */
@@ -983,8 +1078,133 @@ exports.getInternalCommunications = async function getInternalCommunications(
     const qFinal = await applyVisibility(q, req);
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
+    const isSentView = status === "sent";
+    const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true";
+
+    if (isInboxView) {
+      q.$or = [
+        { receiver: me },
+        { receiver: { $in: [me] } }
+      ];
+    }
+    
+    // Robust threadMode check
+    const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
+
+    if (isThreaded) {
+      const distinctThreads = await AssignmentMessage.aggregate([
+        { $match: qFinal },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: "$threadId",
+            latestId: { $first: "$_id" },
+            latestMessageAt: { $max: "$createdAt" },
+            // Internal Inbox logic: show if received from someone else
+            receivedFromOthers: {
+              $max: {
+                $cond: [
+                  {
+                    $or: [
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
+                      { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
+                    ]
+                  },
+                  true,
+                  false
+                ]
+              }
+            },
+            hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } },
+            threadMessageCount: { $sum: 1 },
+            threadUnreadCount: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $ne: ["$isRead", true] },
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                    ]
+                  },
+                  1,
+                  0
+                ]
+              }
+            }
+          }
+        },
+        // Filter to only include threads without clients AND that have incoming interaction
+        { $match: { hasClient: false, receivedFromOthers: true } },
+        { $sort: { latestMessageAt: -1 } },
+        { $skip: (pageNum - 1) * lim },
+        { $limit: lim }
+      ]);
+
+      const latestMessageIds = distinctThreads.map(t => t.latestId);
+      if (latestMessageIds.length === 0) {
+        return res.json({ communicationType: "internal", items: [], total: 0, page: pageNum, pages: 0, limit: lim });
+      }
+
+      const [messages, totalThreadsResult] = await Promise.all([
+        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role" },
+          ])
+          .lean(),
+        AssignmentMessage.aggregate([
+          { $match: qFinal },
+          {
+            $group: {
+              _id: "$threadId",
+              receivedFromOthers: {
+                $max: {
+                  $cond: [
+                    {
+                      $or: [
+                        { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
+                        { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
+                      ]
+                    },
+                    true,
+                    false
+                  ]
+                }
+              },
+              hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } }
+            }
+          },
+          { $match: { hasClient: false, receivedFromOthers: true } }, // Internal only
+          { $count: "total" }
+        ])
+      ]);
+
+      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
+      const finalItems = messages.map(m => {
+        const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
+        return {
+          ...m,
+          receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
+          isDirectMessage: !m.client,
+          threadMessageCount: stats ? stats.threadMessageCount : 1,
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0
+        };
+      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      return res.json({
+        communicationType: "internal",
+        items: finalItems,
+        total: totalCount,
+        page: pageNum,
+        pages: Math.ceil(totalCount / lim),
+        limit: lim,
+      });
+    }
+
+    // Default: flat list
     const [items, total] = await Promise.all([
       AssignmentMessage.find(qFinal)
         .sort({ createdAt: -1 })
@@ -1071,9 +1291,17 @@ exports.starMessage = async function starMessage(req, res) {
     }
 
     // Check if user has permission to see this message
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const ownerId = req.employee?.owner;
+
     const canView = await AssignmentMessage.findOne({
       _id: id,
-      $or: [{ sender: currentUser }, { receiver: currentUser }],
+      $or: [
+        { sender: currentUser },
+        { receiver: currentUser },
+        { receiver: { $in: [currentUser] } },
+        ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : [])
+      ],
     });
 
     if (!canView) {
@@ -1162,7 +1390,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
     }
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     // Apply visibility rules
     const qFinal = await applyVisibility({ client: clientId }, req);
@@ -1170,6 +1398,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
     // Aggregate threads and return both paginated data and total count using $facet
     const pipeline = [
       { $match: qFinal },
+      { $sort: { createdAt: -1 } }, // Sort before grouping to ensure $first gets latest
       // Group messages into threads, keeping the latest message
       {
         $group: {
@@ -1533,7 +1762,7 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
       q.client = client;
     }
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
       { path: "receiver", select: "_id name companyEmail role" },
@@ -1602,7 +1831,7 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
     // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     // Execute query with proper error handling
     let items, total;
@@ -1807,7 +2036,7 @@ exports.searchMessages = async function searchMessages(req, res) {
 
     // ✅ Pagination
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     // ✅ Determine sort order
     let sortCriteria = {};
@@ -1904,7 +2133,7 @@ exports.listDrafts = async function listDrafts(req, res) {
     else if (req.employee?.owner) q.owner = req.employee.owner;
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     const [items, total] = await Promise.all([
       AssignmentMessage.find(q)

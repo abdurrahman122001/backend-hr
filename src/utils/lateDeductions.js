@@ -7,6 +7,7 @@ const LeaveTransaction = require("../models/LeaveTransaction");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
 const { decrypt, encrypt } = require("./encryption");
+const { logAttendanceChange } = require("./attendanceLogger");
 
 const TIMEZONE = "Asia/Karachi";
 
@@ -544,6 +545,25 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
       slip.lateDeductionDaysCredited = lateDeductionDays;
       await balance.save();
       await slip.save();
+      
+      // LOG THE LATE RULE APPLICATION
+      try {
+        await logAttendanceChange({
+          ownerId: ownerId,
+          performerId: employeeId,
+          performerType: 'System',
+          performerName: "Late Rule Processor",
+          employeeId: employeeId,
+          attendanceDate: attendanceDate,
+          oldStatus: "Late (accumulated)",
+          newStatus: "Late Deduction Applied",
+          oldLeaveType: "None",
+          newLeaveType: "Late Deduction",
+          outcome: `3-Day Late Rule Applied: ${newDeductionDays} day(s) deducted`,
+          adjustedDays: newDeductionDays,
+          details: `3-Day Late Rule Application (Total Lates: ${lateCount})`
+        });
+      } catch (logErr) { console.error("Late rule log error:", logErr); }
     }
   } catch (err) {
     console.error("[REALTIME-LATE-DEDUCTION] Error:", err);
