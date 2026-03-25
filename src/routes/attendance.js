@@ -7,7 +7,8 @@ const {
   getStatsByEmployee,
   getRecordsByDateRange,
   deleteRecord,
-  creditBonusLeavesForPayrollPeriod
+  creditBonusLeavesForPayrollPeriod,
+  getChangeLogs
 } = require('../controllers/attendanceController');
 const AttendanceLog = require('../models/AttendanceLog');
 const requireAuth = require('../middleware/auth');
@@ -21,6 +22,7 @@ const { getLeaveYear } = require("../utils/leaveEntitlement");
 router.post('/', markAttendance);      // upsert by {employee, date}
 router.get('/', getRecordsByDate);    // GET /api/attendance?date=YYYY-MM-DD
 router.get('/stats', getStats);            // GET /api/attendance/stats?date=YYYY-MM-DD
+router.get('/change-logs', requireAuth, getChangeLogs); // GET /api/attendance/change-logs
 
 // Fiscal month logic (26th to 25th)
 function getFiscalMonth(date) {

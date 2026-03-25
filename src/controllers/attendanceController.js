@@ -17,6 +17,7 @@ const Salaries = require("../models/Salaries");
 const LoanDetail = require("../models/LoanDetail");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
+const AttendanceChangeLog = require("../models/AttendanceChangeLog");
 
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
@@ -225,6 +226,48 @@ async function reverseOldBonus(oldRec) {
   console.log(
     `[BONUS-REVERSAL] Employee=${employeeId} Bonus=${newBonus}, Accumulated=${newAccumulated}`
   );
+}
+
+async function logAttendanceChange(reqUser, employeeId, date, oldStatus, newStatus, oldLeaveType, newLeaveType, overrideOutcome = null) {
+  if (oldStatus === newStatus && oldLeaveType === newLeaveType) return;
+  
+  let outcome = "None";
+  if (overrideOutcome) {
+    outcome = overrideOutcome;
+  } else if (newStatus === "Absent" || newStatus === "Half Day") {
+     outcome = newLeaveType === "Unpaid" ? "Salary Deduction" : "Leave Consumption";
+  } else if (newStatus === "Leave") {
+     outcome = newLeaveType === "Paid" ? "Leave Consumption" : "Salary Deduction";
+  } else if (newStatus === "Late") {
+     outcome = "Potential Late Deduction";
+  }
+
+  let actualPerformerName = reqUser.name;
+  if (reqUser.isDelegated && reqUser.employeeId) {
+    const delegatedPerformer = await Employee.findById(reqUser.employeeId).select('name designation');
+    if (delegatedPerformer) {
+      actualPerformerName = `${delegatedPerformer.name} (${delegatedPerformer.designation || 'Delegated Employee'})`;
+    }
+  }
+
+  const employee = await Employee.findById(employeeId).select('name designation');
+  const employeeDisplay = employee ? `${employee.name} (${employee.designation || 'Employee'})` : "Unknown";
+
+  await AttendanceChangeLog.create({
+    owner: reqUser.owner || reqUser._id,
+    performedBy: reqUser.employeeId || reqUser._id,
+    performerType: reqUser.isDelegated ? 'Employee' : 'User',
+    performerName: actualPerformerName || "Admin",
+    employee: employeeId,
+    employeeName: employeeDisplay,
+    attendanceDate: date,
+    oldStatus: oldStatus || "None",
+    newStatus: newStatus || "None",
+    oldLeaveType: oldLeaveType || "None",
+    newLeaveType: newLeaveType || "None",
+    outcome: outcome,
+    details: reqUser.isDelegated ? "Changed via delegation" : "Changed by Admin"
+  });
 }
 
 /**
@@ -690,6 +733,13 @@ exports.markAttendance = async (req, res) => {
       `[ATTENDANCE][${employee.name}]Upserted -> Status=${rec.status
       }, LeaveType = ${rec.leaveType || "-"} on ${date} `
     );
+
+    // LOG THE CHANGE
+    try {
+      await logAttendanceChange(req.user, employeeId, date, oldRec?.status, rec.status, oldRec?.leaveType, rec.leaveType);
+    } catch (logErr) {
+      console.error("Failed to write to AttendanceChangeLog", logErr);
+    }
 
     // ========= Payroll period =========
     const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
@@ -2068,9 +2118,42 @@ exports.deleteRecord = async (req, res) => {
     // Step 2: Delete the record
     await Attendance.deleteOne({ _id: id });
 
+    try {
+      await logAttendanceChange(req.user, record.employee, record.date, record.status, "Deleted", record.leaveType, "None", "Reversal (Deleted)");
+    } catch (logErr) {
+      console.error("Failed to write to AttendanceChangeLog", logErr);
+    }
+
     res.json({ success: true, message: "Attendance record deleted and affects reversed." });
   } catch (err) {
     console.error("Error in deleteRecord:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// GET /api/attendance/change-logs
+exports.getChangeLogs = async (req, res) => {
+  try {
+    const ownerId = resolveOwnerId(req.user);
+    const { startDate, endDate, employeeId } = req.query;
+
+    const query = { owner: ownerId };
+    if (employeeId) query.employee = employeeId;
+    if (startDate && endDate) {
+      query.createdAt = {
+        $gte: new Date(startDate),
+        $lte: new Date(endDate + 'T23:59:59.999Z')
+      };
+    }
+
+    const logs = await AttendanceChangeLog.find(query)
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+
+    res.json(logs);
+  } catch (err) {
+    console.error("Error fetching change logs:", err);
     res.status(500).json({ error: err.message });
   }
 };
