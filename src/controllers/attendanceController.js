@@ -287,7 +287,11 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
   if (!record) return;
 
   const ownerId = resolveOwnerId(record);
-  const employeeId = record.employee._id || record.employee;
+  const employeeId = record.employee ? (record.employee._id || record.employee) : null;
+  if (!employeeId) {
+     // If no employee is attached (e.g., a Holiday record), there are no leave/bonus effects to reverse on a per-person basis.
+     return;
+  }
   const date = record.date;
   const status = record.status;
   const leaveType = record.leaveType;
@@ -652,11 +656,24 @@ exports.markAttendance = async (req, res) => {
     if (isHoliday) {
       console.log(`[HOLIDAY] Marking Holiday -> ${date}`);
 
-      await Attendance.deleteMany({
+      // Find existing employee records on this date to reverse their effects (leaves/absence)
+      const existingRecords = await Attendance.find({
         owner: ownerId,
         employee: { $exists: true },
         date,
       });
+
+      if (existingRecords.length > 0) {
+        console.log(`[HOLIDAY] Reversing effects for ${existingRecords.length} records...`);
+        // Reverse balances/bonuses before deletion
+        await Promise.all(existingRecords.map(r => reverseAttendanceEffects(r)));
+        
+        await Attendance.deleteMany({
+          owner: ownerId,
+          employee: { $exists: true },
+          date,
+        });
+      }
 
       const rec = await Attendance.findOneAndUpdate(
         { owner: ownerId, date, isHoliday: true },
