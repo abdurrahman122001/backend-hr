@@ -22,6 +22,7 @@ const AttendanceChangeLogSchema = new Schema({
   newLeaveType: { type: String },
   
   outcome: { type: String }, // 'Salary Deduction', 'Leave Deduction', 'None'
+  adjustedDays: { type: Number, default: 0 }, // e.g. 0.5 for Half Day, 1 for Absent
   details: { type: String }, // Optional: "By Admin", "Via Delegation", etc.
   
 }, { timestamps: true });

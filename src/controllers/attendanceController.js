@@ -232,6 +232,14 @@ async function logAttendanceChange(reqUser, employeeId, date, oldStatus, newStat
   if (oldStatus === newStatus && oldLeaveType === newLeaveType) return;
   
   let outcome = "None";
+  let adjustedDays = 0;
+  
+  if (newStatus === "Half Day") {
+    adjustedDays = 0.5;
+  } else if (newStatus === "Absent" || newStatus === "Leave") {
+    adjustedDays = 1;
+  }
+
   if (overrideOutcome) {
     outcome = overrideOutcome;
   } else if (newStatus === "Absent" || newStatus === "Half Day") {
@@ -266,6 +274,7 @@ async function logAttendanceChange(reqUser, employeeId, date, oldStatus, newStat
     oldLeaveType: oldLeaveType || "None",
     newLeaveType: newLeaveType || "None",
     outcome: outcome,
+    adjustedDays: adjustedDays,
     details: reqUser.isDelegated ? "Changed via delegation" : "Changed by Admin"
   });
 }
