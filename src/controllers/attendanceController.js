@@ -1,6 +1,5 @@
 // backend/src/controllers/attendanceController.js
 const mongoose = require("mongoose");
-const { backfillForDate } = require("../backfillAttendance");
 const Employee = require("../models/Employees");
 const PayrollPeriod = require("../models/PayrollPeriod");
 const Shift = require("../models/Shift");
@@ -1943,10 +1942,6 @@ exports.getRecordsByDate = async (req, res) => {
   }
   try {
     const ownerId = resolveOwnerId(req.user);
-
-    // keep any auto-backfill tenant-scoped by passing effective owner if your backfill uses it
-    await backfillForDate(date, ownerId);
-
     const query = {
       ...getAttendanceBaseQuery(req),
       date,
