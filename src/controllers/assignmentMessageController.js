@@ -3989,6 +3989,28 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     );
 
     await message.save();
+    
+    // 🔥 FIX: Emit socket event for real-time update
+    const io = getIO(req);
+    if (io) {
+      const allParticipants = new Set();
+      const senderId = String(message.sender);
+      allParticipants.add(senderId);
+      if (message.receiver && Array.isArray(message.receiver)) {
+        message.receiver.forEach(r => allParticipants.add(String(r)));
+      }
+      allParticipants.add(String(userId));
+      
+      allParticipants.forEach(participantId => {
+        io.to(`employee_${participantId}`).emit("message_read", {
+          messageId: message._id,
+          threadId: message.threadId,
+          read: false,
+          readBy: userId,
+          timestamp: new Date()
+        });
+      });
+    }
 
     res.json({
       success: true,

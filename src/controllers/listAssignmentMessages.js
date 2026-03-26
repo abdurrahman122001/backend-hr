@@ -515,7 +515,7 @@ exports.listMessages = async function listMessages(req, res) {
                 $cond: [
                   {
                     $and: [
-                      { $ne: ["$isRead", true] },
+                      { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
                       { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
                     ]
                   },
@@ -869,7 +869,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
                 $cond: [
                   {
                     $and: [
-                      { $ne: ["$isRead", true] },
+                      { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
                       { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
                     ]
                   },
@@ -1124,7 +1124,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
                 $cond: [
                   {
                     $and: [
-                      { $ne: ["$isRead", true] },
+                      { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
                       { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
                     ]
                   },
@@ -1406,7 +1406,16 @@ exports.getClientThreads = async function getClientThreads(req, res) {
           latestMessage: { $first: "$$ROOT" },
           messageCount: { $sum: 1 },
           unreadCount: {
-            $sum: { $cond: [{ $eq: ["$isRead", false] }, 1, 0] },
+            $sum: { 
+              $cond: [
+                { $and: [
+                  { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
+                  { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                ]}, 
+                1, 
+                0
+              ] 
+            },
           },
           lastActivity: { $max: "$createdAt" },
         },
