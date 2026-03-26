@@ -135,19 +135,20 @@ router.get("/", unifiedAuth, async (req, res) => {
 });
 
 router.get("/attendance", attendanceAuth, async (req, res) => {
-
   try {
-    const { trashed } = req.query;
+    const { trashed, includeOffboarded } = req.query;
     const includeTrashed = trashed === "true";
+    const showOffboarded = includeOffboarded === "true";
 
     const scope = buildEmployeeScope(req.user, includeTrashed);
-
-    // ❌ Remove all "offboarded" filtering logic
     const query = { ...scope };
 
-    // ✔ Fetch all employees (active + offboarded)
-    const list = await Employee.find(query).sort({ name: 1 }).lean();
+    // If not including offboarded, filter by status
+    if (!showOffboarded) {
+      query.status = { $nin: ["offboarded", "resigned", "terminated"] };
+    }
 
+    const list = await Employee.find(query).sort({ name: 1 }).lean();
     res.json({ status: "success", data: list });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message });
