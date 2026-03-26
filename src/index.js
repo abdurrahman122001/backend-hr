@@ -3520,56 +3520,56 @@ cron.schedule(
 );
 // auto absent 
 
-cron.schedule(
-  "59 23 * * *", // 11:59 PM
-  async () => {
-    try {
-      const nowKarachi = moment().tz("Asia/Karachi");
-      const dateStr = nowKarachi.format("YYYY-MM-DD");
+// cron.schedule(
+//   "59 23 * * *", // 11:59 PM
+//   async () => {
+//     try {
+//       const nowKarachi = moment().tz("Asia/Karachi");
+//       const dateStr = nowKarachi.format("YYYY-MM-DD");
 
-      const owners = await Employee.distinct("owner", { isTrashed: false });
+//       const owners = await Employee.distinct("owner", { isTrashed: false });
 
-      let totalInserted = 0;
+//       let totalInserted = 0;
 
-      for (const ownerId of owners) {
-        try {
-          // ✅ Check config for this owner
-          const config = await AttendanceConfig.findOne({ owner: ownerId }).lean();
+//       for (const ownerId of owners) {
+//         try {
+//           // ✅ Check config for this owner
+//           const config = await AttendanceConfig.findOne({ owner: ownerId }).lean();
 
-          // 👉 If config exists AND manual marking is enabled → skip
-          if (config && config.markAbsentManually === true) {
-            console.log(
-              `[CRON-ABSENT] ⏭ Skipped owner ${ownerId} (manual mode enabled)`
-            );
-            continue;
-          }
+//           // 👉 If config exists AND manual marking is enabled → skip
+//           if (config && config.markAbsentManually === true) {
+//             console.log(
+//               `[CRON-ABSENT] ⏭ Skipped owner ${ownerId} (manual mode enabled)`
+//             );
+//             continue;
+//           }
 
-          // ✅ Otherwise run auto absent
-          const count = await backfillForDate(dateStr, ownerId);
-          totalInserted += count;
+//           // ✅ Otherwise run auto absent
+//           const count = await backfillForDate(dateStr, ownerId);
+//           totalInserted += count;
 
-          console.log(
-            `[CRON-ABSENT] Owner ${ownerId} → ${count} absents marked for ${dateStr}`
-          );
+//           console.log(
+//             `[CRON-ABSENT] Owner ${ownerId} → ${count} absents marked for ${dateStr}`
+//           );
 
-        } catch (err) {
-          console.error(
-            `[CRON-ABSENT] ❌ Failed for owner ${ownerId}:`,
-            err.message
-          );
-        }
-      }
+//         } catch (err) {
+//           console.error(
+//             `[CRON-ABSENT] ❌ Failed for owner ${ownerId}:`,
+//             err.message
+//           );
+//         }
+//       }
 
-      console.log(
-        `[CRON-ABSENT] ✅ Completed. Total absents marked: ${totalInserted} for ${dateStr}`
-      );
+//       console.log(
+//         `[CRON-ABSENT] ✅ Completed. Total absents marked: ${totalInserted} for ${dateStr}`
+//       );
 
-    } catch (err) {
-      console.error("[CRON-ABSENT] ❌ Fatal Error:", err);
-    }
-  },
-  { timezone: "Asia/Karachi" }
-);
+//     } catch (err) {
+//       console.error("[CRON-ABSENT] ❌ Fatal Error:", err);
+//     }
+//   },
+//   { timezone: "Asia/Karachi" }
+// );
 
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {

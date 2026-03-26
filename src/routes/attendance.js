@@ -18,11 +18,14 @@ const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const { getLeaveYear } = require("../utils/leaveEntitlement");
 
+const attendanceAuth = require('../middleware/attendanceAuth');
+
 // existing endpoints
 router.post('/', markAttendance);      // upsert by {employee, date}
 router.get('/', getRecordsByDate);    // GET /api/attendance?date=YYYY-MM-DD
 router.get('/stats', getStats);            // GET /api/attendance/stats?date=YYYY-MM-DD
-router.get('/change-logs', requireAuth, getChangeLogs); // GET /api/attendance/change-logs
+router.get('/change-logs', requireAuth, getChangeLogs); // GET /api/attendance/change-logs (admin)
+router.get('/audit-logs', attendanceAuth, getChangeLogs); // GET /api/attendance/audit-logs (attendance app)
 
 // Fiscal month logic (26th to 25th)
 function getFiscalMonth(date) {

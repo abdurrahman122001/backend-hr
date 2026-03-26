@@ -847,6 +847,7 @@ exports.markAttendance = async (req, res) => {
     }
 
     // ========= Payroll period dates =========
+    const attendanceDate = new Date(date);
     const anchor = new Date(payroll.payrollPeriodStartDay);
     let periodStart, periodEnd;
     if (payroll.payrollPeriodType === "monthly") {
@@ -1822,9 +1823,7 @@ exports.getRecordsByDate = async (req, res) => {
     };
 
     const records = await Attendance.find(query)
-
-      // ⭐ MUST include status and _id so previous offboarded attendance shows
-      .populate("employee", "name designation department email status _id")
+      .populate("employee", "name designation department email status _id photographUrl imageUrl")
       .lean();
 
     res.json(records);
@@ -1848,8 +1847,7 @@ exports.getRecordsByDateRange = async (req, res) => {
       owner: { $in: [oid(ownerId), oid(userId)] },
       date: { $gte: from, $lte: to },
     })
-      // ⭐ MUST include status + _id, otherwise old offboarded attendance doesn't show in UI
-      .populate("employee", "name position department email status _id")
+      .populate("employee", "name position department email status _id photographUrl imageUrl")
       .lean();
 
     res.json(records);
@@ -1914,10 +1912,8 @@ exports.getRecordsByEmployee = async (req, res) => {
     };
 
     const records = await Attendance.find(query)
-
       .sort({ date: 1 })
-      // ⭐ MUST include status + _id so UI can show old offboarded attendance
-      .populate("employee", "name position department email status _id")
+      .populate("employee", "name position department email status _id photographUrl imageUrl")
       .lean();
 
     res.json(records);
@@ -2011,27 +2007,47 @@ exports.deleteRecord = async (req, res) => {
   }
 };
 
-// GET /api/attendance/change-logs
+// GET /api/attendance/change-logs (or /audit-logs)
 exports.getChangeLogs = async (req, res) => {
   try {
     const ownerId = resolveOwnerId(req.user);
-    const { startDate, endDate, employeeId } = req.query;
+    const { startDate, endDate, employeeId, page = 1, limit = 50 } = req.query;
 
     const query = { owner: ownerId };
     if (employeeId) query.employee = employeeId;
+    
     if (startDate && endDate) {
+      // Create date objects for start and end of range in the log's createdAt timestamp
+      const start = new Date(startDate);
+      start.setHours(0, 0, 0, 0);
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      
       query.createdAt = {
-        $gte: new Date(startDate),
-        $lte: new Date(endDate + 'T23:59:59.999Z')
+        $gte: start,
+        $lte: end
       };
     }
 
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const totalCount = await AttendanceChangeLog.countDocuments(query);
+    const totalPages = Math.ceil(totalCount / parseInt(limit));
+
     const logs = await AttendanceChangeLog.find(query)
       .sort({ createdAt: -1 })
-      .limit(500)
+      .skip(skip)
+      .limit(parseInt(limit))
       .lean();
 
-    res.json(logs);
+    res.json({
+      logs,
+      pagination: {
+        total: totalCount,
+        pages: totalPages,
+        currentPage: parseInt(page),
+        limit: parseInt(limit)
+      }
+    });
   } catch (err) {
     console.error("Error fetching change logs:", err);
     res.status(500).json({ error: err.message });

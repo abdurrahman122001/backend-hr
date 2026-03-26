@@ -1127,7 +1127,7 @@ router.get("/sessions", requireAuth, async (req, res) => {
 router.get("/all-sessions", async (req, res) => {
   try {
     const sessions = await EmployeeSession.find()
-      .populate("employeeId", "name companyEmail role")
+      .populate("employeeId", "name companyEmail role photographUrl")
       .sort({ loginTime: -1 });
 
     const formatted = sessions.map((s) => {
@@ -1140,6 +1140,7 @@ router.get("/all-sessions", async (req, res) => {
         employeeName: s.employeeId?.name || "Unknown",
         employeeEmail: s.employeeId?.companyEmail || "N/A",
         role: s.employeeId?.role || "N/A",
+        photographUrl: s.employeeId?.photographUrl,
         loginTime: loginTimeLocal,
         logoutTime: logoutTimeLocal,
         actualLoginTime: s.actualLoginTime,
