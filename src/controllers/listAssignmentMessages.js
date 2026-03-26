@@ -99,6 +99,13 @@ async function applyVisibility(q, req) {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
+  // Get clients I'm assigned to for shared visibility
+  const assignedClients = await ClientInfo.find({
+    owner: ownerId,
+    assignedTo: me
+  }).select("_id").lean();
+  const assignedClientIds = assignedClients.map(c => oid(c._id));
+
   // Hierarchy lookup for junior-based visibility
   const juniorLinks = await EmployeeHierarchy.find({
     owner: ownerId,
@@ -135,11 +142,12 @@ async function applyVisibility(q, req) {
   // If no role/hierarchy access applies, use a filter that matches nothing
   const roleHierarchyFilter = roleSegments.length > 0 ? { $or: roleSegments } : { _id: null };
 
-  // Base inbox visibility
+  // Base visibility (Participant OR Hierarchy OR Client-assigned)
   const inboxVisibility = {
     $or: [
       isParticipant,
-      roleHierarchyFilter
+      roleHierarchyFilter,
+      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
     ]
   };
 
@@ -303,6 +311,9 @@ exports.getMessage = async function getMessage(req, res) {
 
     // Check if user has permission to view this message
     const userId = req.employee._id.toString();
+    const me = oid(userId);
+    const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
+    const currentUserRole = normalizeRole(req.employee?.role || "");
     const senderId =
       typeof msg.sender === "string" ? msg.sender : msg.sender?._id?.toString();
 
@@ -319,7 +330,31 @@ exports.getMessage = async function getMessage(req, res) {
       ];
     }
 
-    const hasAccess = userId === senderId || receiverIds.includes(userId);
+    // Check basic participant access
+    let hasAccess = userId === senderId || receiverIds.includes(userId);
+
+    // Check Manager/Owner/Team Lead access
+    if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
+      if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
+        hasAccess = true;
+      }
+    }
+
+    // Check client assignment access (team visibility)
+    if (!hasAccess && msg.client) {
+      const clientId = msg.client?._id || msg.client;
+      const client = await ClientInfo.findOne({
+        _id: clientId,
+        assignedTo: me
+      }).select("_id").lean();
+      if (client) hasAccess = true;
+    }
+
+    // Check hierarchy access (senior viewing junior)
+    if (!hasAccess && senderId) {
+      const seniorsOfSender = await getManagementChainFromHierarchy(ownerId, senderId);
+      if (seniorsOfSender.includes(userId)) hasAccess = true;
+    }
 
     if (!hasAccess) {
       return res

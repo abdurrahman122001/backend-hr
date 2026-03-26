@@ -307,6 +307,13 @@ async function applyVisibility(q, req) {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
+  // Get clients I'm assigned to for shared visibility
+  const assignedClients = await ClientInfo.find({
+    owner: ownerId,
+    assignedTo: me
+  }).select("_id").lean();
+  const assignedClientIds = assignedClients.map(c => oid(c._id));
+
   // Hierarchy lookup for junior-based visibility
   const juniorLinks = await EmployeeHierarchy.find({
     owner: ownerId,
@@ -329,11 +336,12 @@ async function applyVisibility(q, req) {
     ]
   };
 
-  // Base inbox visibility: either you're a participant, or you have role-based non-pending access
+  // Base visibility (Participant OR Hierarchy OR Client-assigned)
   const inboxVisibility = {
     $or: [
       isParticipant,
-      roleHierarchyFilter
+      roleHierarchyFilter,
+      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
     ]
   };
 
@@ -2222,13 +2230,16 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
     }
 
     const q = {
-      sender: me,
       client: client,
+      status: "sent"
     };
     if (isObjId(owner)) q.owner = owner;
 
+    // Apply visibility rules (including client-assigned visibility)
+    const qFinal = await applyVisibility(q, req);
+
     const [items, total] = await Promise.all([
-      AssignmentMessage.find(q)
+      AssignmentMessage.find(qFinal)
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
         .limit(limit)
