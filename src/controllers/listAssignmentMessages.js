@@ -523,9 +523,14 @@ exports.listMessages = async function listMessages(req, res) {
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     const isSentView = req.query.status === "sent";
-    const isInboxView = !isSentView && req.query.isTrashed !== "true" && req.query.isSpam !== "true";
-
-    // Force incoming-only for unified inbox unless explicitly in Sent
+    const isTrashedVal = isTrashed === "true" || isTrashed === true;
+    const isSpamVal = isSpam === "true" || isSpam === true;
+    const isParticipantView = !!req.query.participant;
+    
+    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Trash, Spam, or asking for ALL mail (participant view)
+    const isInboxView = !isSentView && !isTrashedVal && !isSpamVal && !isParticipantView;
+    
+    // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
       q.$or = [
         { isFromClient: true },
