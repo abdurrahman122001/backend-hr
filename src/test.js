@@ -13,6 +13,7 @@ const cron = require("node-cron");
 const AttendanceConfig = require("./models/AttendanceConfig");
 const Employee = require("./models/Employees");
 const Attendance = require("./models/Attendance");
+const { backfillForDate } = require("./backfillAttendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
 const empAuth = require("./middleware/empAuth");
 const puppeteer = require("puppeteer");
@@ -387,125 +388,6 @@ app.get("/api/employees/count", async (_req, res) => {
   }
 });
 
-// ---------- Cron: auto-fill YESTERDAY’s attendance ----------
-// Runs at 00:00 in configured timezone (default Asia/Karachi)
-const ATTENDANCE_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
-// cron.schedule(
-//   "0 0 * * *",
-//   async () => {
-//     try {
-//       // Compute "yesterday" in the server's local time (the node-cron lib triggers in the TZ we pass)
-//       const yesterday = new Date();
-//       yesterday.setDate(yesterday.getDate() - 1);
-
-//       const y = yesterday.getFullYear();
-//       const m = String(yesterday.getMonth() + 1).padStart(2, "0");
-//       const d = String(yesterday.getDate()).padStart(2, "0");
-//       const date = `${y}-${m}-${d}`;
-
-//       const config = await AttendanceConfig.findOne({}).lean();
-//       if (config && config.markAbsentManually === true) {
-//         return;
-//       }
-
-//       // Skip holidays
-//       const holiday = await Attendance.findOne({
-//         date,
-//         isHoliday: true,
-//       }).lean();
-//       if (holiday) {
-//         return;
-//       }
-//       const done = await Attendance.find({ date }).select("employee").lean();
-//       const doneIds = new Set(done.map((r) => String(r.employee)));
-
-//       // All employees
-//       const allEmps = await Employee.find({}).select("_id owner shifts").lean();
-
-//       // Payroll periods
-//       const allPayrolls = await PayrollPeriod.find({}).lean();
-
-//       // Day name for yesterday (lowercase long weekday)
-//       const dayName = yesterday
-//         .toLocaleDateString("en-US", { weekday: "long" })
-//         .toLowerCase();
-
-//       const ops = [];
-
-//       for (const e of allEmps) {
-//         if (doneIds.has(String(e._id))) continue;
-
-//         const payroll = allPayrolls.find(
-//           (p) =>
-//             Array.isArray(p.shifts) &&
-//             Array.isArray(e.shifts) &&
-//             e.shifts.some((s) => p.shifts.map(String).includes(String(s)))
-//         );
-
-//         // If no payroll period or no nonWorkingDays config → mark absent
-//         if (!payroll || !Array.isArray(payroll.nonWorkingDays)) {
-//           ops.push({
-//             updateOne: {
-//               filter: { employee: e._id, date },
-//               update: {
-//                 $setOnInsert: {
-//                   employee: e._id,
-//                   date,
-//                   owner: e.owner || null,
-//                   status: "Absent",
-//                   checkIn: null,
-//                   checkOut: null,
-//                   notes: null,
-//                   markedByHR: false,
-//                 },
-//               },
-//               upsert: true,
-//             },
-//           });
-//           continue;
-//         }
-
-//         // Respect non-working days
-//         const nonWorking = payroll.nonWorkingDays.map((n) =>
-//           String(n).toLowerCase().trim()
-//         );
-//         if (nonWorking.includes(dayName)) {
-//           // It's a non-working day for this employee; skip
-//           continue;
-//         }
-
-//         // Otherwise, mark absent
-//         ops.push({
-//           updateOne: {
-//             filter: { employee: e._id, date },
-//             update: {
-//               $setOnInsert: {
-//                 employee: e._id,
-//                 date,
-//                 owner: e.owner || null,
-//                 status: "Absent",
-//                 checkIn: null,
-//                 checkOut: null,
-//                 notes: null,
-//                 markedByHR: false,
-//               },
-//             },
-//             upsert: true,
-//           },
-//         });
-//       }
-
-//       if (ops.length) {
-//         const result = await Attendance.bulkWrite(ops);
-//         const upserted = result?.upsertedCount || 0;
-//       } else {
-//       }
-//     } catch (err) {
-//       console.error("[cron] Error auto-filling attendance:", err);
-//     }
-//   },
-//   { timezone: ATTENDANCE_CRON_TZ }
-// );
 
 // ---------- TLS (Let’s Encrypt) & Server Startup ----------
 const ENABLE_HTTPS =
@@ -3635,6 +3517,58 @@ cron.schedule(
     }
   },
   { timezone: "Asia/Karachi" },
+);
+// auto absent 
+
+cron.schedule(
+  "59 23 * * *", // 11:59 PM
+  async () => {
+    try {
+      const nowKarachi = moment().tz("Asia/Karachi");
+      const dateStr = nowKarachi.format("YYYY-MM-DD");
+
+      const owners = await Employee.distinct("owner", { isTrashed: false });
+
+      let totalInserted = 0;
+
+      for (const ownerId of owners) {
+        try {
+          // ✅ Check config for this owner
+          const config = await AttendanceConfig.findOne({ owner: ownerId }).lean();
+
+          // 👉 If config exists AND manual marking is enabled → skip
+          if (config && config.markAbsentManually === true) {
+            console.log(
+              `[CRON-ABSENT] ⏭ Skipped owner ${ownerId} (manual mode enabled)`
+            );
+            continue;
+          }
+
+          // ✅ Otherwise run auto absent
+          const count = await backfillForDate(dateStr, ownerId);
+          totalInserted += count;
+
+          console.log(
+            `[CRON-ABSENT] Owner ${ownerId} → ${count} absents marked for ${dateStr}`
+          );
+
+        } catch (err) {
+          console.error(
+            `[CRON-ABSENT] ❌ Failed for owner ${ownerId}:`,
+            err.message
+          );
+        }
+      }
+
+      console.log(
+        `[CRON-ABSENT] ✅ Completed. Total absents marked: ${totalInserted} for ${dateStr}`
+      );
+
+    } catch (err) {
+      console.error("[CRON-ABSENT] ❌ Fatal Error:", err);
+    }
+  },
+  { timezone: "Asia/Karachi" }
 );
 
 // ---------- Optional root route ----------

@@ -48,6 +48,7 @@ const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
 const loansRoutes = require("./routes/loans");
 const onboardingRouter = require("./routes/onBoarding");
+const specificNonWorkingDayRouter = require("./routes/specificNonWorkingDay");
 const requireAuth = require("./middleware/auth");
 const requireEmployeeAuth = require("./middleware/empAuth");
 const empAttendanceRouter = require("./routes/empAttendance");
@@ -228,6 +229,8 @@ app.use("/api/admin/shifts", requireAuth, shiftsRouter);
 app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
 app.use("/api/attendance-config", attendanceAuth, attendanceConfigRouter);
 app.use("/api/admin/attendance-config", requireAuth, attendanceConfigRouter);
+app.use("/api/specific-non-working-days", attendanceAuth, specificNonWorkingDayRouter);
+app.use("/api/admin/specific-non-working-days", requireAuth, specificNonWorkingDayRouter);
 
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);

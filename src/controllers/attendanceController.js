@@ -18,6 +18,7 @@ const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const AttendanceChangeLog = require("../models/AttendanceChangeLog");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
+const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
@@ -56,6 +57,48 @@ function getAttendanceBaseQuery(req) {
 
 function oid(id) {
   return new mongoose.Types.ObjectId(id);
+}
+
+/**
+ * Check if a date is a non-working day by checking:
+ * 1. Recurring non-working days from PayrollPeriod
+ * 2. Specific non-working days from SpecificNonWorkingDay collection
+ */
+async function isNonWorkingDayHelper(ownerId, date, payroll) {
+  const ymd = (d) => d.toISOString().slice(0, 10);
+  const attendanceDate = new Date(date);
+  const dow = attendanceDate.getDay();
+  
+  // Check recurring non-working days from payroll
+  const dateSet = new Set();
+  const weekdaySet = new Set();
+  const nameToDay = {
+    sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2,
+    wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5, sat: 6, saturday: 6,
+  };
+  
+  (payroll.nonWorkingDays || []).forEach((raw) => {
+    if (!raw) return;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateSet.add(s);
+    if (/^[0-6]$/.test(s)) return weekdaySet.add(Number(s));
+    const key = s.toLowerCase();
+    if (key in nameToDay) return weekdaySet.add(nameToDay[key]);
+    const nd = new Date(s);
+    if (!isNaN(nd)) dateSet.add(ymd(nd));
+  });
+  
+  const isRecurringNonWorkingDay =
+    dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+  
+  // Check specific non-working days
+  const specificNwd = await SpecificNonWorkingDay.findOne({
+    owner: oid(ownerId),
+    date: ymd(attendanceDate),
+  }).lean();
+  
+  return isRecurringNonWorkingDay || !!specificNwd;
 }
 
 async function ensureEmployeeAccessible(employeeId, ownerId, userId, attendanceScope = null) {
@@ -603,57 +646,11 @@ exports.markAttendance = async (req, res) => {
       return total;
     };
 
-    // ========= Holiday (tenant-scoped, no employee) =========
-    if (isHoliday) {
-      console.log(`[HOLIDAY] Marking Holiday -> ${date}`);
+    // ========= Helper function for date formatting =========
+    const ymd = (d) => d.toISOString().slice(0, 10);
 
-      // Find existing employee records on this date to reverse their effects (leaves/absence)
-      const existingRecords = await Attendance.find({
-        owner: ownerId,
-        employee: { $exists: true },
-        date,
-      });
-
-      if (existingRecords.length > 0) {
-        console.log(`[HOLIDAY] Reversing effects for ${existingRecords.length} records...`);
-        // Reverse balances/bonuses before deletion
-        await Promise.all(existingRecords.map(r => reverseAttendanceEffects(r)));
-        
-        await Attendance.deleteMany({
-          owner: ownerId,
-          employee: { $exists: true },
-          date,
-        });
-      }
-
-      const rec = await Attendance.findOneAndUpdate(
-        { owner: ownerId, date, isHoliday: true },
-        {
-          $set: {
-            owner: ownerId,
-            date,
-            isHoliday: true,
-            markedByHR: true,
-            createdBy: userId,
-          },
-          $unset: {
-            employee: "",
-            status: "",
-            checkIn: "",
-            checkOut: "",
-            notes: "",
-            leaveType: "",
-          },
-        },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
-
-      console.log(`[HOLIDAY] Overriding all employee attendance for ${date}`);
-      return res.json({
-        message: "Holiday applied and all previous attendance removed.",
-        holiday: rec,
-      });
-    }
+    // ========= Specific Non-Working Day is managed via separate API =========
+    // The isHoliday parameter is no longer supported. Use /api/specific-non-working-days instead.
 
     // ========= Employee (needed for logs) =========
     const employee = await ensureEmployeeAccessible(
@@ -770,43 +767,8 @@ exports.markAttendance = async (req, res) => {
     }
 
     // ========= Non-working day guard =========
-    const attendanceDate = new Date(date);
-    const ymd = (d) => d.toISOString().slice(0, 10);
-    const dow = attendanceDate.getDay();
-    const dateSet = new Set();
-    const weekdaySet = new Set();
-    const nameToDay = {
-      sun: 0,
-      sunday: 0,
-      mon: 1,
-      monday: 1,
-      tue: 2,
-      tues: 2,
-      tuesday: 2,
-      wed: 3,
-      weds: 3,
-      wednesday: 3,
-      thu: 4,
-      thur: 4,
-      thurs: 4,
-      thursday: 4,
-      fri: 5,
-      friday: 5,
-      sat: 6,
-      saturday: 6,
-    };
-    (payroll.nonWorkingDays || []).forEach((raw) => {
-      if (!raw) return;
-      const s = String(raw).trim();
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateSet.add(s);
-      if (/^[0-6]$/.test(s)) return weekdaySet.add(Number(s));
-      const key = s.toLowerCase();
-      if (key in nameToDay) return weekdaySet.add(nameToDay[key]);
-      const nd = new Date(s);
-      if (!isNaN(nd)) dateSet.add(ymd(nd));
-    });
-    const isNonWorkingDay =
-      dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+    // Checks both recurring (payroll) and specific (user-marked) non-working days
+    const isNonWorkingDay = await isNonWorkingDayHelper(ownerId, date, payroll);
 
     if (isNonWorkingDay) {
       if (status !== "Present") {
@@ -1035,52 +997,15 @@ exports.markAttendance = async (req, res) => {
       const dayMs = 24 * 60 * 60 * 1000;
       let daysToCharge = 0;
 
-      const buildNonWorkingSets = () => {
-        const ds = new Set();
-        const ws = new Set();
-        (payroll.nonWorkingDays || []).forEach((raw) => {
-          if (!raw) return;
-          const s = String(raw).trim();
-          if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds.add(s);
-          if (/^[0-6]$/.test(s)) return ws.add(Number(s));
-          const key = s.toLowerCase();
-          const nameToDay2 = {
-            sun: 0,
-            sunday: 0,
-            mon: 1,
-            monday: 1,
-            tue: 2,
-            tues: 2,
-            tuesday: 2,
-            wed: 3,
-            weds: 3,
-            wednesday: 3,
-            thu: 4,
-            thur: 4,
-            thurs: 4,
-            thursday: 4,
-            fri: 5,
-            friday: 5,
-            sat: 6,
-            saturday: 6,
-          };
-          if (key in nameToDay2) return ws.add(nameToDay2[key]);
-          const nd = new Date(s);
-          if (!isNaN(nd)) ds.add(ymd(nd));
-        });
-        return { ds, ws };
-      };
-
-      const { ds, ws } = buildNonWorkingSets();
-
       for (
         let d = new Date(periodStart);
         d < joinDate;
         d = new Date(d.getTime() + dayMs)
       ) {
         const iso = ymd(d);
-        const weekday = d.getDay();
-        if (ds.has(iso) || ws.has(weekday)) continue;
+        // Check both recurring and specific non-working days
+        const isNwd = await isNonWorkingDayHelper(ownerId, iso, payroll);
+        if (isNwd) continue;
 
         const existing = await Attendance.findOne({
           owner: ownerId,
@@ -1144,19 +1069,6 @@ exports.markAttendance = async (req, res) => {
       !(status === "Absent" && (leaveType === "Unpaid" || !leaveType))
     ) {
       const dayMs = 24 * 60 * 60 * 1000;
-      const dsR = new Set();
-      const wsR = new Set();
-      (payroll.nonWorkingDays || []).forEach((raw) => {
-        if (!raw) return;
-        const s = String(raw).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dsR.add(s);
-        if (/^[0-6]$/.test(s)) return wsR.add(Number(s));
-        const key = s.toLowerCase();
-        if (key in nameToDay) return wsR.add(nameToDay[key]);
-        const nd = new Date(s);
-        if (!isNaN(nd)) dsR.add(ymd(nd));
-      });
-
       let nextNonWorkingCountRev = 0;
       for (
         let d = new Date(new Date(date).getTime() + dayMs);
@@ -1164,13 +1076,9 @@ exports.markAttendance = async (req, res) => {
         d = new Date(d.getTime() + dayMs)
       ) {
         const iso = ymd(d);
-        const weekday = d.getDay();
-        if (dsR.has(iso) || wsR.has(weekday)) {
-          nextNonWorkingCountRev += 1;
-          continue;
-        }
-        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
-        if (holidayRec) {
+        // Check both recurring and specific non-working days
+        const isNwd = await isNonWorkingDayHelper(ownerId, iso, payroll);
+        if (isNwd) {
           nextNonWorkingCountRev += 1;
           continue;
         }
@@ -1250,33 +1158,16 @@ exports.markAttendance = async (req, res) => {
     // ========= ABSENT =========
     if (status === "Absent") {
       const dayMs = 24 * 60 * 60 * 1000;
-      const ds2 = new Set();
-      const ws2 = new Set();
-      (payroll.nonWorkingDays || []).forEach((raw) => {
-        if (!raw) return;
-        const s = String(raw).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds2.add(s);
-        if (/^[0-6]$/.test(s)) return ws2.add(Number(s));
-        const key = s.toLowerCase();
-        if (key in nameToDay) return ws2.add(nameToDay[key]);
-        const nd = new Date(s);
-        if (!isNaN(nd)) return ds2.add(ymd(nd));
-      });
-
       let nextNonWorkingCount = 0;
       for (
-        let d = new Date(attendanceDate.getTime() + dayMs);
+        let d = new Date(new Date(date).getTime() + dayMs);
         ;
         d = new Date(d.getTime() + dayMs)
       ) {
         const iso = ymd(d);
-        const weekday = d.getDay();
-        if (ds2.has(iso) || ws2.has(weekday)) {
-          nextNonWorkingCount += 1;
-          continue;
-        }
-        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
-        if (holidayRec) {
+        // Check both recurring and specific non-working days
+        const isNwd = await isNonWorkingDayHelper(ownerId, iso, payroll);
+        if (isNwd) {
           nextNonWorkingCount += 1;
           continue;
         }
@@ -1444,33 +1335,16 @@ exports.markAttendance = async (req, res) => {
     // ========= LEAVE =========
     if (status === "Leave") {
       const dayMs = 24 * 60 * 60 * 1000;
-      const ds3 = new Set();
-      const ws3 = new Set();
-      (payroll.nonWorkingDays || []).forEach((raw) => {
-        if (!raw) return;
-        const s = String(raw).trim();
-        if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return ds3.add(s);
-        if (/^[0-6]$/.test(s)) return ws3.add(Number(s));
-        const key = s.toLowerCase();
-        if (key in nameToDay) return ws3.add(nameToDay[key]);
-        const nd = new Date(s);
-        if (!isNaN(nd)) return ds3.add(ymd(nd));
-      });
-
       let nextNonWorkingCountForLeave = 0;
       for (
-        let d = new Date(attendanceDate.getTime() + dayMs);
+        let d = new Date(new Date(date).getTime() + dayMs);
         ;
         d = new Date(d.getTime() + dayMs)
       ) {
         const iso = ymd(d);
-        const weekday = d.getDay();
-        if (ds3.has(iso) || ws3.has(weekday)) {
-          nextNonWorkingCountForLeave += 1;
-          continue;
-        }
-        const holidayRec = await Attendance.findOne({ owner: ownerId, date: iso, isHoliday: true }).lean();
-        if (holidayRec) {
+        // Check both recurring and specific non-working days
+        const isNwd = await isNonWorkingDayHelper(ownerId, iso, payroll);
+        if (isNwd) {
           nextNonWorkingCountForLeave += 1;
           continue;
         }
