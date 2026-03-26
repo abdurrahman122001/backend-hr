@@ -39,7 +39,7 @@ const GRACE_PERIOD_MINUTES = 0;
 const HALF_DAY_THRESHOLD_HOUR = 18; // 6:00 PM
 const LOGIN_RESTRICTION_END_HOUR = 8; // 8:00 AM
 const HALF_DAY_LOGOUT_THRESHOLD_HOUR = 21; // 9:00 PM
-const TOKEN_EXPIRY_SECONDS = 9 * 60 * 60; // 9 hours
+const TOKEN_EXPIRY_SECONDS = 16 * 60 * 60; // 16 hours
 
 /**
  * Convert time string HH:mm to total minutes since midnight
@@ -155,11 +155,13 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     date: todayKarachi
   });
 
-  // RESTORE SESSION (RE-LOGIN)
-  if (existingAttendance && existingAttendance.checkOut) {
-    console.log(`🔄 [RESTORE] ${emp.name} has existing checkout, restoring session...`);
+  // RESTORE SESSION (RE-LOGIN / RECONNECT)
+  // If user has an existing checkout OR a logoutTime for today, they are re-entering an active session
+  if (existingAttendance && (existingAttendance.checkOut || existingAttendance.logoutTime)) {
+    console.log(`🔄 [RESTORE] ${emp.name} re-connecting, restoring session...`);
 
     let statusToRestore = existingAttendance.originalStatus;
+    // If no originalStatus was saved during logout, calculate it from check-in time
     if (!statusToRestore) {
       const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
       const reportingTime = emp.rt ? timeToMinutes(emp.rt) : (await getReportingTimeFromShift(emp._id));
@@ -175,6 +177,8 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       $unset: { checkOut: 1, logoutTime: 1, originalStatus: 1 },
       $set: { status: statusToRestore, totalHours: 0 }
     });
+
+    console.log(`✅ [RESTORE-SUCCESS] ${emp.name} status restored to ${statusToRestore}. Logout time removed.`);
 
     const previousStatusLower = (existingAttendance.status || "").toLowerCase().replace(/\s+/g, '-');
     const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
@@ -425,6 +429,7 @@ router.post("/login", async (req, res) => {
 
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
+    // 1. Core Status Checks
     if (emp.status && (emp.status.toLowerCase() === "offboarded" || emp.status.toLowerCase() === "review")) {
       return res.status(403).json({
         error: "Account Disabled",
@@ -444,46 +449,7 @@ router.post("/login", async (req, res) => {
     const ok = await emp.comparePassword(password);
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
-    if (isRestrictedTime) {
-      console.log(`[RESTRICTED TIME LOGIN] ${emp.companyEmail} logged in during 12 AM - 8 AM Karachi time. No session created.`);
-
-      const token = jwt.sign(
-        {
-          id: emp._id,
-          role: emp.role,
-          owner: emp.owner,
-          name: emp.name,
-          companyEmail: emp.companyEmail,
-          department: emp.department,
-        },
-        JWT_SECRET,
-        { expiresIn: TOKEN_EXPIRY_SECONDS }
-      );
-
-      // even during restricted hours we still want supervision metadata up-to-date
-      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (restricted)", e));
-
-      return res.json({
-        message: "Login successful (Restricted hours: 12 AM - 8 AM Karachi time. No attendance recorded)",
-        token,
-        user: {
-          id: emp._id,
-          name: emp.name,
-          companyEmail: emp.companyEmail,
-          role: emp.role,
-          owner: emp.owner,
-          department: emp.department,
-        },
-        restrictedHours: true,
-        expiresIn: 9 * 60 * 60,
-      });
-    }
-
-    // ---------------------------------------------------------
-    // 1. Identify current/potential status (READ ONLY)
-    // ---------------------------------------------------------
-    // We check this here to provide accurate info in the verification email
-    // but we DO NOT commit any changes to the database yet if the device is untrusted.
+    // 2. Identify current/potential status (READ ONLY for email/verification context)
     let existingAttendance = await Attendance.findOne({
       employee: emp._id,
       date: todayKarachi
@@ -492,7 +458,6 @@ router.post("/login", async (req, res) => {
     let sessionStatus = "Present";
     if (existingAttendance) {
       if (existingAttendance.checkOut) {
-        // Predicted restore status
         sessionStatus = existingAttendance.originalStatus;
         if (!sessionStatus) {
           const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
@@ -507,7 +472,6 @@ router.post("/login", async (req, res) => {
         sessionStatus = existingAttendance.status;
       }
     } else {
-      // Calculate potential status for new attendance
       const empShift = await getEmployeeShift(emp._id);
       const rtMinutes = emp.rt ? timeToMinutes(emp.rt) : (empShift?.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
       const graceEnd = rtMinutes + GRACE_PERIOD_MINUTES;
@@ -517,7 +481,7 @@ router.post("/login", async (req, res) => {
       else sessionStatus = "Half Day";
     }
 
-    // CHECK IF DEVICE IS TRUSTED
+    // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
     const isTrusted = emp.trustedDevices?.some(
       (d) =>
         deviceFingerprint &&
@@ -526,46 +490,38 @@ router.post("/login", async (req, res) => {
         d.deviceId === deviceToken
     );
 
-    if (isTrusted) {
-      // PERFORM ATTENDANCE LOGIC (Create or Restore)
-      const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
-      const attendance = attendanceResult.attendance;
-      sessionStatus = attendanceResult.sessionStatus;
+    // UNRECOGNIZED DEVICE (2FA flow)
+    if (!isTrusted) {
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      const expires = Date.now() + 10 * 60 * 1000;
+      codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
 
-      const token = jwt.sign(
-        {
-          id: emp._id,
-          role: emp.role,
-          owner: emp.owner,
-          name: emp.name,
-          companyEmail: emp.companyEmail,
-          department: emp.department,
-        },
-        JWT_SECRET,
-        { expiresIn: TOKEN_EXPIRY_SECONDS }
-      );
+      const tempToken = jwt.sign({ id: emp._id }, JWT_SECRET, { expiresIn: "10m" });
+      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (untrusted)", e));
 
-      // 🔥 Auto-enable supervision on login (trusted device)
-      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (trusted)", e));
+      const loginIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
+      const when = formatTimeForDisplay(nowKarachi);
 
-      // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
-      await EmployeeSession.updateMany(
-        { employeeId: emp._id, active: true },
-        { active: false, isAutoLogout: true }
-      );
-
-      // ✅ Ensure an active EmployeeSession exists
-      await EmployeeSession.findOneAndUpdate(
-        { employeeId: emp._id, date: todayKarachi },
-        { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
-        { upsert: true, new: true }
-      );
+      await sendMail({
+        to: "nashfintechnologies@gmail.com",
+        subject: "Employee login verification requested",
+        text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
+        html: `<p><b>New device login verification requested</b></p>
+               <ul>
+                 <li><b>Employee:</b> ${emp.companyEmail}</li>
+                 <li><b>Time (Karachi):</b> ${when}</li>
+                 <li><b>IP:</b> ${loginIp}</li>
+                 <li><b>Login Status:</b> ${sessionStatus}</li>
+                 <li><b>Verification Code:</b> <code>${code}</code></li>
+               </ul>`,
+      });
 
       return res.json({
-        message: attendanceResult.attendanceExists ?
-          "Login successful (attendance already marked)." :
-          "Login successful (trusted device).",
-        token,
+        message: "Verification code sent to admin email.",
+        tempToken,
+        attendanceId: null,
+        sessionStatus: sessionStatus,
+        attendanceExists: !!existingAttendance,
         user: {
           id: emp._id,
           name: emp.name,
@@ -574,72 +530,74 @@ router.post("/login", async (req, res) => {
           owner: emp.owner,
           department: emp.department,
         },
-        attendanceId: attendance?._id,
-        sessionStatus: sessionStatus,
-        attendanceExists: attendanceResult.attendanceExists,
-        trusted: true,
-        expiresIn: 9 * 60 * 60,
         localLoginTime: formatTimeForDisplay(nowKarachi),
       });
     }
 
-    // 2FA (UNRECOGNIZED DEVICE)
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expires = Date.now() + 10 * 60 * 1000;
-    codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
+    // 4. AUTHORIZED: HANDLING RESTRICTED HOURS (Trusted Device Path)
+    if (isRestrictedTime) {
+      console.log(`[RESTRICTED TIME LOGIN] ${emp.companyEmail} logged in during 12 AM - 8 AM Karachi time.`);
 
-    const tempToken = jwt.sign({ id: emp._id }, JWT_SECRET, {
-      expiresIn: "10m",
-    });
+      const token = jwt.sign(
+        { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
+        JWT_SECRET,
+        { expiresIn: TOKEN_EXPIRY_SECONDS }
+      );
 
-    await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (untrusted)", e));
+      await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (restricted)", e));
 
-    const loginIp =
-      req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
-      req.ip ||
-      "unknown";
-    const when = formatTimeForDisplay(nowKarachi);
+      return res.json({
+        message: "Login successful (Restricted hours: 12 AM - 8 AM Karachi time. No attendance recorded)",
+        token,
+        user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
+        restrictedHours: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+      });
+    }
 
-    await sendMail({
-      to: "nashfintechnologies@gmail.com",
-      subject: "Employee login verification requested",
-      text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
-      html: `<p><b>New device login verification requested</b></p>
-             <ul>
-               <li><b>Employee:</b> ${emp.companyEmail}</li>
-               <li><b>Time (Karachi):</b> ${when}</li>
-               <li><b>IP:</b> ${loginIp}</li>
-               <li><b>Login Status:</b> ${sessionStatus}</li>
-               <li><b>Verification Code:</b> <code>${code}</code></li>
-             </ul>`,
-    });
+    // 5. AUTHORIZED: NORMAL LOGIN (Create or Restore Attendance)
+    const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
+    const attendance = attendanceResult.attendance;
+    sessionStatus = attendanceResult.sessionStatus;
+
+    const token = jwt.sign(
+      { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
+      JWT_SECRET,
+      { expiresIn: TOKEN_EXPIRY_SECONDS }
+    );
+
+    // 🔥 Auto-enable supervision on login (trusted device)
+    await syncSupervision(emp._id, emp.owner).catch(e => console.error("syncSupervision error (trusted)", e));
+
+    // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
+    await EmployeeSession.updateMany(
+      { employeeId: emp._id, active: true },
+      { active: false, isAutoLogout: true }
+    );
+
+    // ✅ Ensure an active EmployeeSession exists
+    await EmployeeSession.findOneAndUpdate(
+      { employeeId: emp._id, date: todayKarachi },
+      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+      { upsert: true, new: true }
+    );
 
     return res.json({
-      message: "Verification code sent to admin email.",
-      tempToken,
-      attendanceId: null, // No attendance record yet for unrecognized devices
+      message: attendanceResult.attendanceExists ? "Login successful (attendance already marked)." : "Login successful (trusted device).",
+      token,
+      user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
+      attendanceId: attendance?._id,
       sessionStatus: sessionStatus,
-      attendanceExists: !!existingAttendance,
-      user: {
-        id: emp._id,
-        name: emp.name,
-        companyEmail: emp.companyEmail,
-        role: emp.role,
-        owner: emp.owner,
-        department: emp.department,
-      },
+      attendanceExists: attendanceResult.attendanceExists,
+      trusted: true,
+      expiresIn: TOKEN_EXPIRY_SECONDS,
       localLoginTime: formatTimeForDisplay(nowKarachi),
     });
   } catch (err) {
     console.error("Login error:", err);
-
     if (err.code === 11000) {
-      return res.status(400).json({
-        error: "Session Conflict",
-        message: "A session already exists for today."
-      });
+      return res.status(400).json({ error: "Session Conflict", message: "A session already exists for today." });
     }
-
     return res.status(500).json({ error: "Server error" });
   }
 });
@@ -702,7 +660,6 @@ router.post("/confirm-code", async (req, res) => {
       });
     }
     await emp.save();
-
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
@@ -715,8 +672,27 @@ router.post("/confirm-code", async (req, res) => {
     // Get Karachi time for session logging
     const nowKarachi = getKarachiTime();
     const todayKarachi = getDateOnly(nowKarachi);
+    const currentTime = nowKarachi.hours() * 60 + nowKarachi.minutes();
+    const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
-    // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation
+    // If it's restricted time, we verify use but do NOT call performAttendanceLogic
+    if (isRestrictedTime) {
+      console.log(`[RESTRICTED TIME CODE-CONFIRM] ${emp.companyEmail} verified but skipping attendance (12AM-8AM).`);
+      
+      return res.json({
+        message: "Device verified and trusted. Login successful (Restricted hours: No attendance recorded).",
+        token,
+        deviceToken: deviceId,
+        user: { id: emp._id, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, name: emp.name || "" },
+        attendanceId: null,
+        sessionStatus: "Restricted",
+        restrictedHours: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+        localLoginTime: formatTimeForDisplay(nowKarachi),
+      });
+    }
+
+    // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation (Not restricted)
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
     const attendance = attendanceResult.attendance;
 
@@ -746,7 +722,7 @@ router.post("/confirm-code", async (req, res) => {
       },
       attendanceId: attendance?._id,
       sessionStatus: attendance?.status,
-      expiresIn: 9 * 60 * 60,
+      expiresIn: TOKEN_EXPIRY_SECONDS,
       localLoginTime: formatTimeForDisplay(nowKarachi),
     });
   } catch (err) {
