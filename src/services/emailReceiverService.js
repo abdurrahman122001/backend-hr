@@ -708,12 +708,7 @@ class EmailReceiverService {
         replyTo: replyToMessageId || null,
         isHrPolicy: false,
         isSystemMessage: false,
-        readBy: [
-          {
-            employee: assignedEmployee._id,
-            readAt: new Date(),
-          },
-        ],
+        readBy: [],
         attachments: [],
 
         // Client information
