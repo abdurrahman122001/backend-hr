@@ -142,11 +142,22 @@ async function applyVisibility(q, req) {
   // If no role/hierarchy access applies, use a filter that matches nothing
   const roleHierarchyFilter = roleSegments.length > 0 ? { $or: roleSegments } : { _id: null };
 
-  // Base visibility (Participant OR Hierarchy OR Client-assigned)
+  // Base visibility rules:
+  // 1. You are a participant (sender/receiver)
+  // 2. You have role-based visibility (Manager/Lead/Senior)
+  // 3. You are assigned to the client (Team visibility)
+  // 4. Organization-wide: Anyone in the organization can see "Sent" or "Scheduled" messages (once they aren't pending)
+  const organizationSentVisibility = {
+    owner: ownerId,
+    status: { $in: ["sent", "scheduled"] },
+    approvalStatus: { $ne: "pending" }
+  };
+
   const inboxVisibility = {
     $or: [
       isParticipant,
       roleHierarchyFilter,
+      organizationSentVisibility,
       ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
     ]
   };
@@ -354,6 +365,13 @@ exports.getMessage = async function getMessage(req, res) {
     if (!hasAccess && senderId) {
       const seniorsOfSender = await getManagementChainFromHierarchy(ownerId, senderId);
       if (seniorsOfSender.includes(userId)) hasAccess = true;
+    }
+
+    // Check organization-wide sent visibility (all users can see non-pending sent/scheduled emails in the company)
+    if (!hasAccess && (msg.status === "sent" || msg.status === "scheduled") && msg.approvalStatus !== "pending") {
+      if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
+        hasAccess = true;
+      }
     }
 
     if (!hasAccess) {

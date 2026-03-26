@@ -336,11 +336,22 @@ async function applyVisibility(q, req) {
     ]
   };
 
-  // Base visibility (Participant OR Hierarchy OR Client-assigned)
+  // Base visibility rules:
+  // 1. You are a participant (sender/receiver)
+  // 2. You have role-based visibility (Manager/Lead/Senior)
+  // 3. You are assigned to the client (Team visibility)
+  // 4. Organization-wide: Anyone in the organization can see "Sent" or "Scheduled" messages (once they aren't pending)
+  const organizationSentVisibility = {
+    owner: ownerId,
+    status: { $in: ["sent", "scheduled"] },
+    approvalStatus: { $ne: "pending" }
+  };
+
   const inboxVisibility = {
     $or: [
       isParticipant,
       roleHierarchyFilter,
+      organizationSentVisibility,
       ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
     ]
   };
