@@ -1248,12 +1248,17 @@ exports.getPendingLeaves = async (req, res) => {
     
 
     const query = { status: "pending" };
-
-    // RESTRICT TO COMPANY
     const tenantId = user.owner;
-    const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
-    const ownedEmployeeIds = ownedEmployees.map(e => e._id);
-    query.employee = { $in: ownedEmployeeIds };
+
+    // Use a simpler approach to get all employees of the company if needed
+    if (user.isAdmin || user.role === "hr" || user.role === "admin") {
+      const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
+      const ownedEmployeeIds = ownedEmployees.map(e => e._id);
+      query.employee = { $in: ownedEmployeeIds };
+    } else {
+      // For managers/supervisors: only show leaves where they are the current supervisor
+      query.supervisor = user.employeeId || user._id;
+    }
 
     const pendingLeaves = await Leave.find(query)
       .populate("employee", "name email department designation photographUrl status")

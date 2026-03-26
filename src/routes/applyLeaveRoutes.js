@@ -11,7 +11,7 @@ router.post("/", UnifiedAuth, leaveController.applyLeave);
 router.get("/", UnifiedAuth, leaveController.getLeaves);
 
 // Get leaves pending approval
-router.get("/pending", requireAuth, leaveController.getPendingLeaves);
+router.get("/pending", UnifiedAuth, leaveController.getPendingLeaves);
 router.get("/my-leaves", UnifiedAuth, leaveController.getMyLeaves); // Add this line
 
 // Get leave statistics
