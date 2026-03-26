@@ -46,13 +46,14 @@ exports.updateConfig = async (req, res, next) => {
     const ownerId = req.user.owner || req.user.createdBy || req.user._id;
     const userId = req.user._id;
 
-    // Match either the normalized (owner+createdBy) doc or any legacy owner doc
+    // Convert to ObjectId for proper MongoDB querying
+    const ownerOid = new mongoose.Types.ObjectId(ownerId);
+    const userOid = new mongoose.Types.ObjectId(userId);
+
+    // Since owner field has unique constraint, just match by owner
+    // This ensures upsert doesn't violate the uniqueness constraint
     const filter = {
-      $or: [
-        { owner: ownerId, createdBy: userId }, // new normalized record
-        { owner: ownerId }, // tenant-scoped legacy
-        { owner: userId }, // self-scoped legacy
-      ],
+      owner: ownerOid,
     };
 
     // Optional: coerce numeric limits safely if provided
@@ -67,8 +68,8 @@ exports.updateConfig = async (req, res, next) => {
 
     const update = {
       $set: {
-        owner: ownerId,
-        createdBy: userId, // record who configured it
+        owner: ownerOid,
+        createdBy: userOid, // record who configured it
         markAbsentManually,
         allowDeleteRecords,
         allowEditRecords,
