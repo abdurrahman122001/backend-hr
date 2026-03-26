@@ -14,6 +14,7 @@ const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
 const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
 const { applyRealTimeLogoutBonus } = require("../utils/bonusService");
+const { logAttendanceChange } = require("../utils/attendanceLogger");
 
 const router = express.Router();
 
@@ -219,6 +220,25 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     }
 
     const freshAttendance = await Attendance.findById(existingAttendance._id).lean();
+    
+    // LOG SESSION RESTORE
+    try {
+      await logAttendanceChange({
+        ownerId: emp.owner,
+        performerId: emp._id,
+        performerType: 'Employee',
+        performerName: emp.name,
+        employeeId: emp._id,
+        attendanceDate: todayKarachi,
+        oldStatus: existingAttendance.status,
+        newStatus: statusToRestore,
+        oldLeaveType: existingAttendance.leaveType,
+        newLeaveType: existingAttendance.leaveType, // Keeping same leave type for restore
+        outcome: "Session Restored",
+        details: "Auto Login (Session Restore)"
+      });
+    } catch (err) { console.error("Restore log error:", err); }
+
     return { attendance: freshAttendance, sessionStatus: freshAttendance.status, attendanceExists: true };
   }
 
@@ -270,6 +290,33 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     } else if (sessionStatus === "Half Day") {
       await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi, attendance._id);
     }
+
+    // LOG NEW ATTENDANCE
+    try {
+      let outcome = "None";
+      let adjDays = 0;
+      if (sessionStatus === "Late") outcome = "Potential Late Deduction";
+      else if (sessionStatus === "Half Day") {
+        outcome = "Half Day Deduction";
+        adjDays = 0.5;
+      }
+
+      await logAttendanceChange({
+        ownerId: emp.owner,
+        performerId: emp._id,
+        performerType: 'Employee',
+        performerName: emp.name,
+        employeeId: emp._id,
+        attendanceDate: todayKarachi,
+        oldStatus: "None",
+        newStatus: sessionStatus,
+        oldLeaveType: "None",
+        newLeaveType: "Unpaid", // Default for auto-login if not overridden by leave
+        outcome: outcome,
+        adjustedDays: adjDays,
+        details: "Auto Login (New Session)"
+      });
+    } catch (err) { console.error("New login log error:", err); }
 
     return { attendance, sessionStatus, attendanceExists: false };
   }

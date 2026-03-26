@@ -18,6 +18,7 @@ const LoanDetail = require("../models/LoanDetail");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const AttendanceChangeLog = require("../models/AttendanceChangeLog");
+const { logAttendanceChange } = require("../utils/attendanceLogger");
 
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
@@ -228,56 +229,7 @@ async function reverseOldBonus(oldRec) {
   );
 }
 
-async function logAttendanceChange(reqUser, employeeId, date, oldStatus, newStatus, oldLeaveType, newLeaveType, overrideOutcome = null) {
-  if (oldStatus === newStatus && oldLeaveType === newLeaveType) return;
-  
-  let outcome = "None";
-  let adjustedDays = 0;
-  
-  if (newStatus === "Half Day") {
-    adjustedDays = 0.5;
-  } else if (newStatus === "Absent" || newStatus === "Leave") {
-    adjustedDays = 1;
-  }
-
-  if (overrideOutcome) {
-    outcome = overrideOutcome;
-  } else if (newStatus === "Absent" || newStatus === "Half Day") {
-     outcome = newLeaveType === "Unpaid" ? "Salary Deduction" : "Leave Consumption";
-  } else if (newStatus === "Leave") {
-     outcome = newLeaveType === "Paid" ? "Leave Consumption" : "Salary Deduction";
-  } else if (newStatus === "Late") {
-     outcome = "Potential Late Deduction";
-  }
-
-  let actualPerformerName = reqUser.name;
-  if (reqUser.isDelegated && reqUser.employeeId) {
-    const delegatedPerformer = await Employee.findById(reqUser.employeeId).select('name designation');
-    if (delegatedPerformer) {
-      actualPerformerName = `${delegatedPerformer.name} (${delegatedPerformer.designation || 'Delegated Employee'})`;
-    }
-  }
-
-  const employee = await Employee.findById(employeeId).select('name designation');
-  const employeeDisplay = employee ? `${employee.name} (${employee.designation || 'Employee'})` : "Unknown";
-
-  await AttendanceChangeLog.create({
-    owner: reqUser.owner || reqUser._id,
-    performedBy: reqUser.employeeId || reqUser._id,
-    performerType: reqUser.isDelegated ? 'Employee' : 'User',
-    performerName: actualPerformerName || "Admin",
-    employee: employeeId,
-    employeeName: employeeDisplay,
-    attendanceDate: date,
-    oldStatus: oldStatus || "None",
-    newStatus: newStatus || "None",
-    oldLeaveType: oldLeaveType || "None",
-    newLeaveType: newLeaveType || "None",
-    outcome: outcome,
-    adjustedDays: adjustedDays,
-    details: reqUser.isDelegated ? "Changed via delegation" : "Changed by Admin"
-  });
-}
+// Local function removed. Now uses exported logAttendanceChange from utils.
 
 /**
  * Reverses any leave balance or bonus effects of an attendance record.
@@ -762,7 +714,40 @@ exports.markAttendance = async (req, res) => {
 
     // LOG THE CHANGE
     try {
-      await logAttendanceChange(req.user, employeeId, date, oldRec?.status, rec.status, oldRec?.leaveType, rec.leaveType);
+      let outcome = "None";
+      let adjustedDays = 0;
+      if (rec.status === "Half Day") adjustedDays = 0.5;
+      else if (rec.status === "Absent" || rec.status === "Leave") adjustedDays = 1;
+      
+      if (rec.status === "Absent" || rec.status === "Half Day") {
+        outcome = rec.leaveType === "Unpaid" ? "Salary Deduction" : "Leave Consumption";
+      } else if (rec.status === "Leave") {
+        outcome = rec.leaveType === "Paid" ? "Leave Consumption" : "Salary Deduction";
+      } else if (rec.status === "Late") {
+        outcome = "Potential Late Deduction";
+      }
+
+      let actualPerformerName = req.user.name;
+      if (req.user.isDelegated && req.user.employeeId) {
+        const delegatedPerformer = await Employee.findById(req.user.employeeId).select('name');
+        if (delegatedPerformer) actualPerformerName = `${delegatedPerformer.name} (Delegated)`;
+      }
+
+      await logAttendanceChange({
+        ownerId,
+        performerId: req.user.employeeId || req.user._id,
+        performerType: req.user.isDelegated ? 'Employee' : 'User',
+        performerName: actualPerformerName || "Admin",
+        employeeId: employeeId,
+        attendanceDate: date,
+        oldStatus: oldRec?.status,
+        newStatus: rec.status,
+        oldLeaveType: oldRec?.leaveType,
+        newLeaveType: rec.leaveType,
+        outcome: outcome,
+        adjustedDays: adjustedDays,
+        details: req.user.isDelegated ? "Marked by HR (via delegation)" : "Marked by HR"
+      });
     } catch (logErr) {
       console.error("Failed to write to AttendanceChangeLog", logErr);
     }

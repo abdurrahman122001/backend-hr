@@ -196,7 +196,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
 }
 
 // GET /leave-summary/:employeeId?month=&year=
-router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
+router.get("/leave-summary/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { month, year } = req.query;
@@ -261,7 +261,7 @@ router.get("/leave-summary/:employeeId", attendanceAuth, async (req, res) => {
 });
 
 // GET /leave-summary-history/:employeeId?year=
-router.get("/:employeeId", attendanceAuth, async (req, res) => {
+router.get("/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year } = req.query;
@@ -327,7 +327,7 @@ router.get("/:employeeId", attendanceAuth, async (req, res) => {
 });
 
 // GET /leave-transactions/:employeeId?year=&month=
-router.get("/leave-transactions/:employeeId", attendanceAuth, async (req, res) => {
+router.get("/leave-transactions/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { year, month } = req.query;
@@ -370,7 +370,7 @@ router.get("/leave-transactions/:employeeId", attendanceAuth, async (req, res) =
 });
 
 // GET /leave-balance/:employeeId?date=
-router.get("/leave-balance/:employeeId", attendanceAuth, async (req, res) => {
+router.get("/leave-balance/:employeeId", async (req, res) => {
     try {
         const { employeeId } = req.params;
         const { date } = req.query;
@@ -408,7 +408,7 @@ router.get("/leave-balance/:employeeId", attendanceAuth, async (req, res) => {
     }
 });
 
-router.get("/available-years", attendanceAuth, async (req, res) => {
+router.get("/available-years", async (req, res) => {
     try {
         const rawOwnerId = req.user.owner;
         const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
@@ -421,8 +421,8 @@ router.get("/available-years", attendanceAuth, async (req, res) => {
     }
 });
 
-router.get("/employee/:employeeId/current", attendanceAuth, leaveYearBalanceController.getCurrentYearLeaveBalance);
-router.put("/update-balance/:employeeId", attendanceAuth, leaveYearBalanceController.upsertLeaveBalance);
-router.put("/admin/update-balance/:employeeId", requireAuth, leaveYearBalanceController.upsertLeaveBalance);
+router.get("/employee/:employeeId/current", leaveYearBalanceController.getCurrentYearLeaveBalance);
+router.put("/update-balance/:employeeId", leaveYearBalanceController.upsertLeaveBalance);
+router.put("/admin/update-balance/:employeeId", leaveYearBalanceController.upsertLeaveBalance);
 
 module.exports = router;
