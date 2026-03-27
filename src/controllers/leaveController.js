@@ -716,6 +716,17 @@ exports.approveLeave = async (req, res) => {
       isSuperAdmin = true;
     }
 
+    // Multi-stage Hierarchy Enforcement:
+    // Admin/HR CANNOT approve if it's currently assigned to a senior/manager.
+    // They can ONLY approve if it's their turn as supervisor or if the senior phase is complete.
+    if (isSuperAdmin && !isSupervisor && leave.supervisor && 
+        leave.supervisor.role !== "admin" && leave.supervisor.role !== "hr") {
+      return res.status(403).json({
+        message: `Strict Hierarchy Policy: This request is still awaiting approval from ${leave.supervisor.name || "the senior supervisor"}. Administrators can only take the final decision after senior approval.`,
+        currentSupervisor: leave.supervisor.name
+      });
+    }
+
     // Only admins/HR or supervisors can approve
     if (!isSuperAdmin && !isSupervisor) {
       return res.status(403).json({
@@ -783,10 +794,10 @@ exports.approveLeave = async (req, res) => {
     const isLastInChain = !leave.approvalChain || leave.approvalChain.length === 0 ||
       leave.currentApprovalIndex >= leave.approvalChain.length - 1;
 
-    // If user is Admin or HR, we'll treat it as final approval regardless of where they are in the chain
-    // UNLESS they are specifically the current supervisor and NOT the last one, but usually admins want final say.
-    // For now, let's say Admin/HR approval is ALWAYS final to give them power.
-    const isFinalApproval = isSuperAdmin || isLastInChain;
+    // The user wants the super admin to take the FINAL decision only AFTER the senior has approved.
+    // So we follow the hierarchy chain. Initial senior approval moves it to next level (Admin).
+    // Final approval only happens when the chain is completed.
+    const isFinalApproval = isLastInChain;
 
     if (!isFinalApproval) {
       // Move to next level in hierarchy
@@ -1206,13 +1217,23 @@ exports.getLeaves = async (req, res) => {
         "employee",
         "name email department position employeeId photographUrl status"
       )
+      .populate("supervisor", "name email role")
+      .populate("approvalChain", "name email role")
+      .populate("workflowHistory.performedBy", "name email role")
       .lean();
 
     // Process employee data
-    const processedLeaves = leaves.map((leave) => ({
-      ...leave,
-      employee: processEmployeeWithPhoto(leave.employee, req),
-    }));
+    const processedLeaves = leaves.map((leave) => {
+      const isAwaitingSenior = leave.supervisor && 
+        leave.supervisor.role !== "admin" && 
+        leave.supervisor.role !== "hr";
+        
+      return {
+        ...leave,
+        employee: processEmployeeWithPhoto(leave.employee, req),
+        awaitingSenior: isAwaitingSenior,
+      };
+    });
 
     res.json({
       success: true,
@@ -1261,15 +1282,25 @@ exports.getPendingLeaves = async (req, res) => {
     }
 
     const pendingLeaves = await Leave.find(query)
-      .populate("employee", "name email department designation photographUrl status")
+      .populate("employee", "name email department designation photographUrl status owner")
+      .populate("supervisor", "name email role")
       .populate("appliedBy", "name email")
+      .populate("approvalChain", "name email role")
+      .populate("workflowHistory.performedBy", "name email role")
       .sort({ appliedDate: -1 })
       .lean();
 
-    const processedPendingLeaves = pendingLeaves.map((leave) => ({
-      ...leave,
-      employee: processEmployeeWithPhoto(leave.employee, req),
-    }));
+    const processedPendingLeaves = pendingLeaves.map((leave) => {
+      const isAwaitingSenior = leave.supervisor && 
+        leave.supervisor.role !== "admin" && 
+        leave.supervisor.role !== "hr";
+        
+      return {
+        ...leave,
+        employee: processEmployeeWithPhoto(leave.employee, req),
+        awaitingSenior: isAwaitingSenior, // Flag to show "Awaiting Manager" vs "Your Turn"
+      };
+    });
 
     res.json({
       success: true,
