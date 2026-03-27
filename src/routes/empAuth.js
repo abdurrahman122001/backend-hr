@@ -550,7 +550,7 @@ router.post("/login", async (req, res) => {
       const when = formatTimeForDisplay(nowKarachi);
 
       await sendMail({
-        to: "nashfintechnologies@gmail.com",
+        to: "qaziabdurrahman12@gmail.com",
         subject: "Employee login verification requested",
         text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
         html: `<p><b>New device login verification requested</b></p>
@@ -1094,28 +1094,31 @@ router.get("/me", requireAuth, authCtrl.getMe);
 // ---------------------
 router.get("/sessions", requireAuth, async (req, res) => {
   try {
-    // ✅ FETCH FROM ATTENDANCE INSTEAD OF EMPLOYEE SESSION
+    // ✅ FETCH ALL ATTENDANCE RECORDS WITHOUT LIMIT
+    const mongoose = require("mongoose");
     const attendanceRecords = await Attendance.find({
-      employee: req.employee._id,
+      employee: new mongoose.Types.ObjectId(req.employee._id),
     })
-      .sort({ date: -1 })
-      .limit(30);
+      .sort({ date: -1 });
 
     // Convert times to expected format for frontend
-    const formattedSessions = attendanceRecords.map(record => ({
-      ...record.toObject(),
-      date: record.date, // YYYY-MM-DD
-      status: record.status, // on-time, late, half-day, absent, leave
-      actualLoginTime: record.checkIn, // HH:mm format
-      actualLogoutTime: record.checkOut, // HH:mm format
-      loginTime: record.loginTime, // UTC date
-      logoutTime: record.logoutTime, // UTC date
-      totalHours: record.totalHours || 0,
-      active: record.active || false,
-      loginTimeLocal: record.loginTime ? moment(record.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
-      logoutTimeLocal: record.logoutTime ?
-        moment(record.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
-    }));
+    const formattedSessions = attendanceRecords.map(record => {
+      const recObj = record.toObject();
+      return {
+        ...recObj,
+        date: record.date, // YYYY-MM-DD
+        status: record.status, // Present, Late, Half Day, Absent, Leave
+        actualLoginTime: record.checkIn, // HH:mm format
+        actualLogoutTime: record.checkOut, // HH:mm format
+        loginTime: record.loginTime, // UTC date
+        logoutTime: record.logoutTime, // UTC date
+        totalHours: record.totalHours || 0,
+        active: record.active || false,
+        loginTimeLocal: record.loginTime ? moment(record.loginTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
+        logoutTimeLocal: record.logoutTime ?
+          moment(record.logoutTime).tz(TIMEZONE).format("YYYY-MM-DD HH:mm:ss") : null,
+      };
+    });
 
     res.json({ sessions: formattedSessions });
   } catch (err) {

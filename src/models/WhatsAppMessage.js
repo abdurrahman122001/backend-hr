@@ -111,6 +111,24 @@ const WhatsAppMessageSchema = new Schema(
     originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
     forwardedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
+    // Approval tracking
+    approvedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+    approvedAt: { type: Date, default: null },
+    disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+    disapprovedAt: { type: Date, default: null },
+    // Stores each approval step: [{ approver, approvedAt, level }]
+    approvalChain: {
+      type: [
+        {
+          approver: { type: Schema.Types.ObjectId, ref: "Employee" },
+          approvedAt: { type: Date },
+          hierarchyLevel: { type: Number },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
+
     // Edit tracking fields
     isEdited: { type: Boolean, default: false },
     editedAt: { type: Date },

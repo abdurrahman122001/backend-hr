@@ -29,7 +29,7 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
     // Fetch employee with permissions
     const emp = await Employee.findById(payload.id).select(
-      "_id role companyEmail name owner department permissions"
+      "_id role companyEmail name owner department permissions joiningDate"
     );
 
     if (!emp) {
@@ -90,6 +90,7 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
       owner: emp.owner,
       department: emp.department,
       permissions: emp.permissions || {},
+      joiningDate: emp.joiningDate,
     };
 
     next();

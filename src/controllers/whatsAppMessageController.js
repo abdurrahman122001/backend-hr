@@ -1504,101 +1504,119 @@ exports.approveMessage = async function approveMessage(req, res) {
       });
     }
 
-    const userRole = normalizeRole(req.employee?.role || "");
     const currentUserId = String(req.employee?._id);
     const ownerId = msg.owner;
-    const isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
 
-    const isManagerOrOwner = userRole === "manager" || userRole === "owner";
-    if (!isManagerOrOwner && !isReceiver) {
-      return res
-        .status(403)
-        .json({ error: "Only designated supervisors or managers can approve messages" });
+    // ✅ Verify current user is one of the designated receivers (approvers)
+    const isReceiver = msg.receiver.some(
+      (r) => String(r._id || r) === currentUserId
+    );
+    if (!isReceiver) {
+      return res.status(403).json({
+        error: "You are not a designated approver for this message.",
+      });
     }
 
+    // Prevent double-approving
+    if (msg.approvalStatus === "approved") {
+      return res.status(400).json({ error: "Message is already fully approved." });
+    }
 
-    // 🔥 HIERARCHY-BASED: Check if current approver has a senior in hierarchy who is ACTIVE for this client
-    const nextSupervisors = await findNextActiveSupervisors(
+    // ─────────────────────────────────────────────────────────────────
+    // 🔥 HIERARCHY-BASED 1-BY-1 APPROVAL using EmployeeHierarchy DB
+    // Find the immediate senior of the CURRENT APPROVER in the hierarchy
+    // ─────────────────────────────────────────────────────────────────
+
+    // Fetch the approver's own hierarchy link to record the level
+    const approverLink = await EmployeeHierarchy.findOne({
+      owner: ownerId,
+      junior: currentUserId,
+    })
+      .select("senior hierarchyLevel")
+      .lean();
+    const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
+
+    // Find the immediate seniors of the current approver (1 level up)
+    const immediateSeniors = await findSupervisorsFromHierarchy(
       ownerId,
-      currentUserId,
-      client?.supervisedBy || []
+      currentUserId
     );
-    const hasNextLevel = nextSupervisors.length > 0;
 
+    // Record this approval step
+    if (!msg.approvalChain) msg.approvalChain = [];
+    msg.approvalChain.push({
+      approver: req.employee._id,
+      approvedAt: new Date(),
+      hierarchyLevel: currentHierarchyLevel,
+    });
 
     let approvalFinalized = false;
     let responseStatusMessage = "Message approved successfully";
 
-    if (hasNextLevel) {
-      // Move up to next level - keep status pending, update receivers
+    if (immediateSeniors.length > 0) {
+      // ✅ Route to the immediate next senior — keep pending
       msg.approvalStatus = "pending";
-      msg.receiver = nextSupervisors;
-      responseStatusMessage = "Message approved and moved to next level supervisor";
+      msg.receiver = immediateSeniors;
+      responseStatusMessage = "Message approved and escalated to next-level supervisor";
     } else {
-      // At top of hierarchy or no hierarchy - finalize approval
+      // ✅ Current approver is at the top — finalize
       msg.approvalStatus = "approved";
+      msg.approvedBy = req.employee._id;
+      msg.approvedAt = new Date();
+      msg.status = "sent";
+      msg.sentAt = new Date();
       approvalFinalized = true;
     }
 
     await msg.save();
 
-    // Get fully populated message for real-time emission
+    // Populate the fully updated message
     const populatedMsg = await WhatsAppMessage.findById(id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
+      { path: "approvedBy", select: "_id name companyEmail" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
       { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
-    // Add client supervision info to the message
     const updatedMessage = {
       ...populatedMsg.toObject(),
-      approvalStatus: msg.approvalStatus,
       clientSupervision: clientSupervision,
       requiresApproval: clientSupervision === "needs_approval",
+      approvalFinalized,
     };
 
-    // 🔥 CRITICAL FIX: Emit events to ALL relevant users
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
-
-      // 🎯 CRITICAL: Emit to ALL users involved in this message
+    // 🔔 Emit real-time events to all involved users
+    const io = req.app.get("io");
+    if (io) {
       const allInvolvedUsers = new Set();
 
-      // Add sender
-      if (msg.sender && msg.sender._id) {
-        allInvolvedUsers.add(String(msg.sender._id));
-      }
+      // Original message sender
+      if (msg.sender?._id) allInvolvedUsers.add(String(msg.sender._id));
 
-      // Add all receivers
-      if (msg.receiver && Array.isArray(msg.receiver)) {
-        msg.receiver.forEach((receiver) => {
-          const receiverId =
-            typeof receiver === "object" ? receiver._id : receiver;
-          if (receiverId) {
-            allInvolvedUsers.add(String(receiverId));
-          }
+      // The current approver
+      allInvolvedUsers.add(currentUserId);
+
+      // New receivers (next-level supervisors or managers)
+      if (Array.isArray(msg.receiver)) {
+        msg.receiver.forEach((r) => {
+          const rid = typeof r === "object" ? r._id : r;
+          if (rid) allInvolvedUsers.add(String(rid));
         });
       }
 
-      // Add the person who just approved
-      allInvolvedUsers.add(String(req.employee._id));
-
-      // Convert to array and emit to each user
-      const involvedUsersArray = Array.from(allInvolvedUsers);
-
-      involvedUsersArray.forEach((userId) => {
+      allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
-          type: "message_updated",
-          action: "approved",
-          approvedBy: req.employee._id,
+          type: approvalFinalized ? "message_approved" : "message_escalated",
+          action: approvalFinalized ? "approved" : "escalated_to_senior",
+          approvedBy: currentUserId,
           timestamp: new Date(),
-          hasNextLevel: hasNextLevel,
-          nextSupervisors: nextSupervisors,
+          approvalFinalized,
+          nextSupervisors: approvalFinalized ? [] : immediateSeniors,
         });
       });
     }
@@ -1671,7 +1689,7 @@ exports.approveMessage = async function approveMessage(req, res) {
             ...updatedMessage,
             forwardedToManagers: true,
             forwardedMessage: populatedForwardWithEmployeeInfo,
-            message: "Message approved and forwarded to managers",
+            message: "Message fully approved and forwarded to managers",
             clientSupervision: clientSupervision,
           });
         }
@@ -1682,7 +1700,8 @@ exports.approveMessage = async function approveMessage(req, res) {
       ...updatedMessage,
       message: responseStatusMessage,
       clientSupervision: clientSupervision,
-      hasNextLevel: hasNextLevel,
+      approvalFinalized,
+      nextSupervisors: approvalFinalized ? [] : immediateSeniors,
     });
   } catch (e) {
     console.error("❌ Error in approveMessage:", e);

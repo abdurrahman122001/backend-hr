@@ -175,6 +175,10 @@ const leaveSchema = new Schema(
       type: Number,
       default: 0,
     },
+    isAbsenceJustification: {
+      type: Boolean,
+      default: false,
+    },
   },
   {
     timestamps: true,

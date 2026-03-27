@@ -414,7 +414,7 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
 // @access  Private
 exports.applyLeave = async (req, res) => {
   try {
-    const { dates, leaveType, customLeaveType, reason } = req.body;
+    const { dates, leaveType, customLeaveType, reason, isAbsenceJustification = false } = req.body;
     const employeeId = req.user.employeeId || req.user.id;
 
     // Validate dates
@@ -560,6 +560,7 @@ exports.applyLeave = async (req, res) => {
       policyAnalysis: policyAnalysis,
       approvalChain: approvalChain,
       currentApprovalIndex: 0,
+      isAbsenceJustification,
     });
 
     // IMPORTANT: Use "submitted" instead of "applied" to match your enum
@@ -888,12 +889,23 @@ exports.approveLeave = async (req, res) => {
           if (!attendance.originalStatus) {
             attendance.originalStatus = attendance.status;
           }
+          
+          // Special handling for absence justifications
+          const wasAbsent = attendance.status === "Absent";
+          
           attendance.status = "Leave";
           attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
           attendance.markedByHR = true;
+          
+          let updateNote = "Marked as Leave via approved leave request";
+          if (leave.isAbsenceJustification && wasAbsent) {
+            updateNote = `Unexplained absence on ${dateStr} justified and converted to ${finalIsPaid ? "Paid" : "Unpaid"} Leave`;
+          }
+          
           attendance.notes = attendance.notes 
-            ? `${attendance.notes}; Updated to Leave via approved leave request`
-            : "Marked as Leave via approved leave request";
+            ? `${attendance.notes}; ${updateNote}`
+            : updateNote;
+            
           await attendance.save();
         } else {
           // Create new attendance record as Leave
@@ -904,7 +916,9 @@ exports.approveLeave = async (req, res) => {
             status: "Leave",
             leaveType: finalIsPaid ? "Paid" : "Unpaid",
             markedByHR: true,
-            notes: "Auto-created from approved leave request",
+            notes: leave.isAbsenceJustification 
+              ? "Auto-created from approved absence justification" 
+              : "Auto-created from approved leave request",
           });
           await attendance.save();
         }
