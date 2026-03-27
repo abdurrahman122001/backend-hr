@@ -844,4 +844,106 @@ exports.getTaxCalculationDetails = async (req, res) => {
   }
 };
 
-module.exports = exports;
+/* ═══════════════════════════════════════════════════════════════
+   NEW: Tax Config CRUD  (called by admin Tax Settings UI)
+   ═══════════════════════════════════════════════════════════════ */
+
+/**
+ * GET /api/tax/config?fiscalYear=2025-26
+ * Returns the TaxConfig document (slabs + fiscal year boundaries + applyTo).
+ * If no fiscalYear is provided, returns ALL configs for listing.
+ */
+exports.getTaxConfig = async (req, res) => {
+  try {
+    const { fiscalYear } = req.query;
+
+    if (fiscalYear) {
+      const cfg = await TaxConfig.findOne({ fiscalYear })
+        .populate("employeeIds", "_id name companyEmail")
+        .lean();
+      return res.json({ success: true, config: cfg || null });
+    }
+
+    // Return all fiscal years as a list (for the dropdown)
+    const all = await TaxConfig.find({})
+      .select("fiscalYear fiscalYearStart fiscalYearEnd slabs enableMedicalExemption applyTo autoApplyEnabled")
+      .lean();
+    return res.json({ success: true, configs: all });
+  } catch (err) {
+    console.error("getTaxConfig error:", err);
+    return res.status(500).json({ error: "Failed to fetch tax config" });
+  }
+};
+
+/**
+ * POST /api/tax/config
+ * Body: { fiscalYear, fiscalYearStart, fiscalYearEnd, slabs, enableMedicalExemption, applyTo, employeeIds }
+ * Creates or fully replaces the TaxConfig for that fiscal year.
+ */
+exports.saveTaxConfig = async (req, res) => {
+  try {
+    const {
+      fiscalYear,
+      fiscalYearStart,
+      fiscalYearEnd,
+      slabs = [],
+      enableMedicalExemption = true,
+      applyTo = "all",
+      employeeIds = [],
+    } = req.body;
+
+    if (!fiscalYear) {
+      return res.status(400).json({ error: "fiscalYear is required" });
+    }
+
+    // Validate slabs
+    for (const slab of slabs) {
+      if (slab.from === undefined || slab.from === null) {
+        return res.status(400).json({ error: "Each slab must have a 'from' value" });
+      }
+    }
+
+    const update = {
+      fiscalYear,
+      slabs,
+      enableMedicalExemption,
+      applyTo,
+      employeeIds: applyTo === "selected" ? employeeIds : [],
+    };
+
+    if (fiscalYearStart) update.fiscalYearStart = fiscalYearStart;
+    if (fiscalYearEnd)   update.fiscalYearEnd   = fiscalYearEnd;
+
+    const cfg = await TaxConfig.findOneAndUpdate(
+      { fiscalYear },
+      { $set: update },
+      { upsert: true, new: true }
+    );
+
+    return res.json({
+      success: true,
+      message: `Tax configuration saved for ${fiscalYear}`,
+      config: cfg,
+    });
+  } catch (err) {
+    console.error("saveTaxConfig error:", err);
+    return res.status(500).json({ error: "Failed to save tax config" });
+  }
+};
+
+/**
+ * DELETE /api/tax/config/:fiscalYear
+ * Removes the TaxConfig document for the given fiscal year.
+ */
+exports.deleteTaxConfig = async (req, res) => {
+  try {
+    const { fiscalYear } = req.params;
+    await TaxConfig.deleteOne({ fiscalYear });
+    return res.json({ success: true, message: `Tax config for ${fiscalYear} deleted` });
+  } catch (err) {
+    console.error("deleteTaxConfig error:", err);
+    return res.status(500).json({ error: "Failed to delete tax config" });
+  }
+};
+
+module.exports = exports;

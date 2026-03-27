@@ -162,16 +162,24 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     console.log(`🔄 [RESTORE] ${emp.name} re-connecting, restoring session...`);
 
     let statusToRestore = existingAttendance.originalStatus;
+    
     // If no originalStatus was saved during logout, calculate it from check-in time
     if (!statusToRestore) {
-      const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
-      const reportingTime = emp.rt ? timeToMinutes(emp.rt) : (await getReportingTimeFromShift(emp._id));
-      const graceEnd = reportingTime + GRACE_PERIOD_MINUTES;
-      const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+      // Check if session was already restored (no checkOut but status is not "Half Day" from logout)
+      // This handles the case where /reactivate-session was already called
+      if (!existingAttendance.checkOut && existingAttendance.status !== "Half Day") {
+        console.log(`🔄 [RESTORE] Session already restored for ${emp.name}, keeping status: ${existingAttendance.status}`);
+        statusToRestore = existingAttendance.status;
+      } else {
+        const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
+        const reportingTime = emp.rt ? timeToMinutes(emp.rt) : (await getReportingTimeFromShift(emp._id));
+        const graceEnd = reportingTime + GRACE_PERIOD_MINUTES;
+        const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
 
-      if (checkInMinutes <= graceEnd) statusToRestore = "Present";
-      else if (checkInMinutes < halfDayThreshold) statusToRestore = "Late";
-      else statusToRestore = "Half Day";
+        if (checkInMinutes <= graceEnd) statusToRestore = "Present";
+        else if (checkInMinutes < halfDayThreshold) statusToRestore = "Late";
+        else statusToRestore = "Half Day";
+      }
     }
 
     await Attendance.findByIdAndUpdate(existingAttendance._id, {
@@ -604,8 +612,11 @@ router.post("/login", async (req, res) => {
 
     // 5. AUTHORIZED: NORMAL LOGIN (Create or Restore Attendance)
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
-    const attendance = attendanceResult.attendance;
-    sessionStatus = attendanceResult.sessionStatus;
+    
+    // ✅ RE-FETCH attendance to get updated status after restoration
+    const freshAttendance = await Attendance.findById(attendanceResult.attendance._id).lean();
+    const attendance = freshAttendance || attendanceResult.attendance;
+    sessionStatus = attendance.status || attendanceResult.sessionStatus;
 
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
@@ -741,7 +752,11 @@ router.post("/confirm-code", async (req, res) => {
 
     // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation (Not restricted)
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
-    const attendance = attendanceResult.attendance;
+    
+    // ✅ RE-FETCH attendance to get updated status after restoration
+    const freshAttendance = await Attendance.findById(attendanceResult.attendance._id).lean();
+    const attendance = freshAttendance || attendanceResult.attendance;
+    const sessionStatus = attendance.status || attendanceResult.sessionStatus;
 
     // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
     await EmployeeSession.updateMany(
@@ -829,6 +844,9 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     let finalStatus = attendance.status;
     const originalStatusBeforeLogout = attendance.status;
+    
+    console.log(`[LOGOUT-DEBUG] Initial status: ${attendance.status}, finalStatus: ${finalStatus}, originalStatusBeforeLogout: ${originalStatusBeforeLogout}`);
+    
     let shiftEndMinutes = null;
     try {
       const empForShift = await Employee.findById(employeeId).select("shifts").lean();
@@ -907,15 +925,14 @@ router.post("/logout", requireAuth, async (req, res) => {
         `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
       );
 
-      if (finalStatus === "Half Day" && attendance.status !== "Half Day") {
+      console.log(`[LOGOUT-DEBUG] Checking deduction condition: finalStatus=${finalStatus}, originalStatusBeforeLogout=${originalStatusBeforeLogout}`);
+      console.log(`[LOGOUT-DEBUG] Condition result: ${finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day"}`);
+
+      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day") {
         console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
         try {
-          if (!isAutoLogout) {
-            await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
-            console.log(`✅ [LOGOUT-DEDUCTION] Manual half-day deduction applied for ${employeeId} on ${attendanceDate}`);
-          } else {
-            console.log(`ℹ️ [LOGOUT-DEDUCTION] Skipping immediate deduction for auto-logout; will resolve on refresh/re-login or midnight.`);
-          }
+          await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, updated._id);
+          console.log(`✅ [LOGOUT-DEDUCTION] Half-day deduction applied for ${employeeId} on ${attendanceDate}`);
         } catch (derr) {
           console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
         }

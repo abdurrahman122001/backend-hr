@@ -1541,8 +1541,8 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "sender", select: "_id name companyEmail role photographUrl imageUrl" },
+          { path: "receiver", select: "_id name companyEmail role photographUrl imageUrl" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
