@@ -2,10 +2,49 @@ const Employee            = require('./models/Employees');
 const Attendance          = require('./models/Attendance');
 const LeaveTransaction    = require('./models/LeaveTransaction');
 const LeaveYearBalance    = require('./models/LeaveYearBalance');
+const SpecificNonWorkingDay = require('./models/SpecificNonWorkingDay');
+const PayrollPeriod       = require('./models/PayrollPeriod');
 
 async function backfillForDate(dateStr, ownerId) {
   const dateObj = new Date(dateStr);
   const year = dateObj.getFullYear();
+  const period = await PayrollPeriod.findOne({ owner: ownerId })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  const isNonWorkingDayHelper = async (dateIso) => {
+    const dObj = new Date(dateIso);
+    const dayName = dObj.toLocaleDateString("en-US", { weekday: "long" }).toLowerCase();
+    const isSpecific = await SpecificNonWorkingDay.findOne({ owner: ownerId, date: dateIso }).lean();
+    if (isSpecific) return true;
+    if (period && period.nonWorkingDays && Array.isArray(period.nonWorkingDays) && period.nonWorkingDays.includes(dayName)) {
+      return true;
+    }
+    return false;
+  };
+
+  if (await isNonWorkingDayHelper(dateStr)) {
+    console.log(`[backfillForDate] Skipping backfill for ${dateStr} - non-working day.`);
+    return 0;
+  }
+
+  // Sandwich Rule Logic: count consecutive non-working days after this date
+  const dayMs = 24 * 60 * 60 * 1000;
+  let nextNonWorkingCount = 0;
+  for (
+    let d = new Date(dateObj.getTime() + dayMs);
+    ;
+    d = new Date(d.getTime() + dayMs)
+  ) {
+    const iso = d.toISOString().slice(0, 10);
+    const isNwd = await isNonWorkingDayHelper(iso);
+    if (isNwd) {
+      nextNonWorkingCount += 1;
+      continue;
+    }
+    break;
+  }
+  const effectiveDays = 1 + nextNonWorkingCount;
 
   // 1) Get active employees
   const employees = await Employee.find(
@@ -112,7 +151,7 @@ async function backfillForDate(dateStr, ownerId) {
       year,
       date: dateObj,
       type: "UNPAID_LEAVE_USED",
-      value: 1,
+      value: effectiveDays,
       sourceModel: "Attendance",
       sourceId: att._id,
       reason: "Auto-marked absent by system",

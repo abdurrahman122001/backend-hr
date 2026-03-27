@@ -710,7 +710,7 @@ cron.schedule(
 // auto absent 
 
 cron.schedule(
-  "59 23 * * *", // 11:59 PM
+  "59 11 * * *", // 11:59 PM
   async () => {
     try {
       const nowKarachi = moment().tz("Asia/Karachi");
