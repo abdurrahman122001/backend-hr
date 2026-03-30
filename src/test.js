@@ -106,6 +106,7 @@ const chatThreadRoutes = require("./routes/chatThreadRoutes");
 const attendanceAccessRouter = require("./routes/attendanceAccess");
 const emailReceiverRoutes = require("./routes/emailReceiverRoutes");
 const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
+const specificNonWorkingDayRouter = require("./routes/specificNonWorkingDay");
 
 const app = express();
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
