@@ -1336,12 +1336,12 @@ exports.markAttendance = async (req, res) => {
         ownerId,
         employeeId,
         date,
-        effectiveDays,
+        1,
         "absent",
         true
       );
       console.log(
-        `[DEDUCTION][${employee.name}] Sandwich Absent(Unpaid) -> Days=${effectiveDays}`
+        `[DEDUCTION][${employee.name}] Sandwich Absent(Unpaid) -> Days=1`
       );
       await Attendance.findOneAndUpdate(
         { owner: ownerId, employee: employeeId, date },
