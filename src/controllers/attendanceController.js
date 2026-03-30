@@ -703,7 +703,7 @@ async function deductBonusForEarlyDeparture(
     deductedHours = earlyHours;
   } else {
     // Use all accumulated hours first
-    const remainingToDeduct = earlyHours - newAccumulated;
+    let remainingToDeduct = earlyHours - newAccumulated;
     deductedHours = newAccumulated;
     newAccumulated = 0;
 
