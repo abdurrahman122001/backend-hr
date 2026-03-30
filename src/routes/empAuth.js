@@ -16,6 +16,9 @@ const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfD
 const { applyRealTimeLogoutBonus } = require("../utils/bonusService");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 
+// Import early departure bonus deduction from attendance controller
+const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
+
 const router = express.Router();
 
 // ---------------------
@@ -990,6 +993,47 @@ router.post("/logout", requireAuth, async (req, res) => {
       }
     }
 
+    // ✅ PROCESS EARLY DEPARTURE BONUS DEDUCTION
+    let earlyDepartureResult = null;
+    if (updated && updated.checkIn && updated.checkOut) {
+      try {
+        // Get shift details for early departure calculation
+        let shiftStart = null;
+        let shiftEnd = null;
+        
+        const empForShift = await Employee.findById(employeeId).select("shifts").lean();
+        if (empForShift && empForShift.shifts && empForShift.shifts.length > 0) {
+          const shiftDoc = await Shift.findById(empForShift.shifts[0]).lean();
+          if (shiftDoc) {
+            shiftStart = shiftDoc.start;
+            shiftEnd = shiftDoc.end;
+          }
+        }
+
+        // Apply early departure deduction if shift details are available
+        if (shiftStart && shiftEnd) {
+          earlyDepartureResult = await deductBonusForEarlyDeparture(
+            employeeId,
+            updated.checkIn,
+            shiftStart,
+            shiftEnd,
+            updated.checkOut,
+            attendanceDate
+          );
+
+          if (earlyDepartureResult && earlyDepartureResult.totalEarlyHours > 0) {
+            console.log(
+              `[LOGOUT] Early Departure Bonus Deduction -> Total Early Hours=${earlyDepartureResult.totalEarlyHours}, ` +
+              `Deducted=${earlyDepartureResult.deducted}h, Negative=${earlyDepartureResult.negativeHours}h, ` +
+              `Remaining Bonus=${earlyDepartureResult.remainingBonus}`
+            );
+          }
+        }
+      } catch (edErr) {
+        console.error("[LOGOUT] Error processing early departure deduction:", edErr);
+      }
+    }
+
     return res.json({
       status: "success",
       message: "Logged out successfully",
@@ -997,7 +1041,8 @@ router.post("/logout", requireAuth, async (req, res) => {
       sessionStatus: updated ? updated.status : finalStatus,
       totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
       lateDeductionResult: lateDeductionResult || null,
-      bonusResult: bonusResult || null
+      bonusResult: bonusResult || null,
+      earlyDepartureResult: earlyDepartureResult || null
     });
   } catch (err) {
     console.error("Logout error:", err);

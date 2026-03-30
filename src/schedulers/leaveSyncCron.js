@@ -58,6 +58,12 @@ cron.schedule("45 23 * * *", async () => {
                     continue;
                 }
 
+                // Skip if already processed by approveLeave (status is Leave and markedByHR)
+                if (existingAttendance && existingAttendance.status === "Leave" && existingAttendance.markedByHR) {
+                    console.log(`[LeaveSync] Employee ${employeeId} already processed for ${todayStr} (approved via leave request). Skipping.`);
+                    continue;
+                }
+
                 // Logic for deduction and marking
                 let daysToDeduct = (dateEntry.type === "half") ? 0.5 : 1;
                 let attendanceStatus = "Leave";

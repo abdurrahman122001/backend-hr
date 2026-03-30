@@ -327,6 +327,88 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
 }
 
 /**
+ * Helper function to revert salary deduction when absence justification is approved as paid
+ * @param {string} employeeId 
+ * @param {number} totalDays 
+ * @param {Date} startDate 
+ * @returns {Promise<boolean>}
+ */
+async function revertLeaveSalaryDeduction(employeeId, totalDays, startDate) {
+  try {
+    const leaveDate = new Date(startDate);
+    const now = new Date();
+
+    const leaveMonthNum = (leaveDate.getMonth() + 1).toString();
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const leaveMonthName = monthNames[leaveDate.getMonth()];
+    const yearStr = leaveDate.getFullYear().toString();
+
+    // Find salary slip for the month of leave OR the current month
+    const salarySlip = await SalarySlip.findOne({
+      employee: employeeId,
+      $or: [
+        { month: leaveMonthNum, year: yearStr },
+        { month: leaveMonthName, year: yearStr },
+        { month: (now.getMonth() + 1).toString(), year: now.getFullYear().toString() },
+        { month: monthNames[now.getMonth()], year: now.getFullYear().toString() }
+      ]
+    }).sort({ updatedAt: -1 });
+
+    if (!salarySlip) {
+      console.warn(`⚠️ No salary slip found for employee ${employeeId} to revert deduction.`);
+      return false;
+    }
+
+    // Try to get Gross, fallback to Basic
+    let decryptedAmt = "";
+    if (salarySlip.grossSalary && salarySlip.grossSalary !== "") {
+      decryptedAmt = await decrypt(salarySlip.grossSalary);
+    }
+
+    // If gross decryption failed or was empty, try basic
+    if ((!decryptedAmt || decryptedAmt === "[Decryption Error]") && salarySlip.basic) {
+      decryptedAmt = await decrypt(salarySlip.basic);
+    }
+
+    const baseSalary = Number(decryptedAmt) || 0;
+
+    if (baseSalary > 0) {
+      const perDaySalary = baseSalary / 22; // Using 22 working days as standard
+      const revertAmount = Math.round(perDaySalary * totalDays);
+
+      // Read current leave deduction
+      let currentDeduction = 0;
+      if (salarySlip.leaveDeductions) {
+        try {
+          const decDed = await decrypt(salarySlip.leaveDeductions);
+          currentDeduction = Number(decDed) || 0;
+        } catch (e) {
+          currentDeduction = 0;
+        }
+      }
+
+      // Revert the deduction (subtract the amount)
+      const newDeduction = Math.max(0, currentDeduction - revertAmount);
+      salarySlip.leaveDeductions = await encrypt(newDeduction.toString());
+
+      // Use the exported controller function to recalculate tax, total deductions, and net payable
+      if (salaryController && salaryController.autoCalculateAndSaveTax) {
+        await salaryController.autoCalculateAndSaveTax(salarySlip);
+      } else {
+        await salarySlip.save();
+      }
+      return true;
+    } else {
+      console.error(`❌ Could not determine base salary for slip ${salarySlip._id}.`);
+      return false;
+    }
+  } catch (error) {
+    console.error("❌ [revertLeaveSalaryDeduction] Error:", error);
+    return false;
+  }
+}
+
+/**
  * Helper function to handle salary deduction for unpaid or rejected leave
  * @param {string} employeeId 
  * @param {number} totalDays 
@@ -396,8 +478,6 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
       } else {
         await salarySlip.save();
       }
-      
-      console.log(`✅ Salary deduction applied for ${employeeId}: ${deductionAmount} for ${totalDays} days.`);
       return true;
     } else {
       console.error(`❌ Could not determine base salary for slip ${salarySlip._id}.`);
@@ -644,7 +724,6 @@ exports.applyLeave = async (req, res) => {
   }
 };
 
-// @desc    Approve leave request (Admin/Supervisor only)
 // @route   PUT /api/leaves/:id/approve
 // @access  Private (Supervisors/Admins)
 exports.approveLeave = async (req, res) => {
@@ -657,7 +736,6 @@ exports.approveLeave = async (req, res) => {
         error: "Please log in again",
       });
     }
-
     const {
       notes,
       overridePolicy = false,
@@ -720,8 +798,8 @@ exports.approveLeave = async (req, res) => {
     // Multi-stage Hierarchy Enforcement:
     // Admin/HR CANNOT approve if it's currently assigned to a senior/manager.
     // They can ONLY approve if it's their turn as supervisor or if the senior phase is complete.
-    if (isSuperAdmin && !isSupervisor && leave.supervisor && 
-        leave.supervisor.role !== "admin" && leave.supervisor.role !== "hr") {
+    if (isSuperAdmin && !isSupervisor && leave.supervisor &&
+      leave.supervisor.role !== "admin" && leave.supervisor.role !== "hr") {
       return res.status(403).json({
         message: `Strict Hierarchy Policy: This request is still awaiting approval from ${leave.supervisor.name || "the senior supervisor"}. Administrators can only take the final decision after senior approval.`,
         currentSupervisor: leave.supervisor.name
@@ -758,7 +836,8 @@ exports.approveLeave = async (req, res) => {
     }
 
     // Determine payment status
-    let finalIsPaid = leave.isPaid;
+    // Default to PAID for final approvals unless explicitly marked as unpaid
+    let finalIsPaid = true; // Default to paid
     let paymentNotes = "";
 
     if (markAsPaid !== null) {
@@ -767,9 +846,12 @@ exports.approveLeave = async (req, res) => {
       paymentNotes = markAsPaid
         ? "Manually marked as paid"
         : "Manually marked as unpaid";
+    } else if (leave.isPaid === false) {
+      // If originally marked as unpaid by policy, still default to paid on final approval
+      // unless the admin explicitly wants to keep it unpaid
+      finalIsPaid = true;
+      paymentNotes = "Auto-converted to paid on final approval";
     }
-    // Removed automatic payment upgrade on policy override to respect user request:
-    // "if the employee violates policy than if is approved than only leave deduction will apply"
 
 
     // Handle partial approval
@@ -792,18 +874,40 @@ exports.approveLeave = async (req, res) => {
     }
 
     // Check if there's someone next in the hierarchy chain
+    // OR if current approver is not admin (require admin final approval)
+    const isCurrentApproverAdmin = isSuperAdmin;
+    const hasMoreApprovers = leave.approvalChain && leave.currentApprovalIndex < leave.approvalChain.length - 1;
+
+    // If current approver is not admin, we need to find an admin for final approval
+    let needsAdminApproval = !isCurrentApproverAdmin;
+
     const isLastInChain = !leave.approvalChain || leave.approvalChain.length === 0 ||
       leave.currentApprovalIndex >= leave.approvalChain.length - 1;
 
     // The user wants the super admin to take the FINAL decision only AFTER the senior has approved.
     // So we follow the hierarchy chain. Initial senior approval moves it to next level (Admin).
-    // Final approval only happens when the chain is completed.
-    const isFinalApproval = isLastInChain;
+    // Final approval only happens when admin approves.
+    const isFinalApproval = isLastInChain && !needsAdminApproval;
 
     if (!isFinalApproval) {
       // Move to next level in hierarchy
       leave.currentApprovalIndex += 1;
-      const nextSupervisorId = leave.approvalChain[leave.currentApprovalIndex];
+      let nextSupervisorId = leave.approvalChain[leave.currentApprovalIndex];
+
+      // If no next supervisor in chain but we need admin approval, find an admin
+      if (!nextSupervisorId && needsAdminApproval) {
+        const admin = await Employee.findOne({
+          $or: [{ role: "admin" }, { role: "hr" }],
+          owner: leave.employee.owner
+        }).sort({ createdAt: 1 });
+
+        if (admin) {
+          nextSupervisorId = admin._id;
+          // Add admin to the chain
+          leave.approvalChain.push(admin._id);
+        }
+      }
+
       leave.supervisor = nextSupervisorId;
       leave.status = "pending"; // Stay pending
 
@@ -819,11 +923,24 @@ exports.approveLeave = async (req, res) => {
       };
       leave.workflowHistory.push(historyEntry);
 
+      // Mark as modified to ensure save
+      leave.markModified('currentApprovalIndex');
+      leave.markModified('supervisor');
+      leave.markModified('approvalChain');
+      leave.markModified('workflowHistory');
+
       await leave.save();
+
+      // Re-fetch to ensure we have the latest data
+      const updatedLeave = await Leave.findById(leave._id)
+        .populate("employee", "name email department photographUrl")
+        .populate("supervisor", "name email role")
+        .populate("approvalChain", "name email role")
+        .lean();
 
       return res.json({
         success: true,
-        data: leave,
+        data: updatedLeave,
         message: `Leave approved by you and moved to ${nextSupervisor ? nextSupervisor.name : "next supervisor"} for final approval.`,
         nextApprover: nextSupervisor ? { id: nextSupervisor._id, name: nextSupervisor.name } : null,
       });
@@ -862,68 +979,171 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
+    // Handle salary deduction reversal for absence justifications
+    // If this was an absence justification and is now approved as paid, revert the deduction
+    if (leave.isAbsenceJustification && finalIsPaid) {
+      await revertLeaveSalaryDeduction(leave.employee._id, actualApprovedDays, leave.startDate);
+    }
+
     // APPLY SALARY DEDUCTION IF UNPAID
     if (!finalIsPaid) {
-      console.log(`ℹ️ Leave approved as UNPAID. Applying salary deduction for ${actualApprovedDays} days.`);
       await deductLeaveFromSalary(leave.employee._id, actualApprovedDays, leave.startDate);
+    }
+
+    // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
+    try {
+      const leaveYear = getLeaveYear(leave.startDate);
+      const employeeId = leave.employee._id;
+      const ownerId = leave.employee.owner;
+
+      // Calculate days to deduct (handle partial approval)
+      let daysToDeduct = actualApprovedDays;
+
+      // Handle half days
+      for (const dateObj of leave.dates) {
+        if (dateObj.type === 'half') {
+          daysToDeduct -= 0.5; // Reduce by 0.5 for each half day (already counted as 1)
+          daysToDeduct += 0.5; // Add back as 0.5
+        }
+      }
+
+      if (finalIsPaid) {
+        // Increment usedPaid in Employee model
+        await Employee.findByIdAndUpdate(employeeId, {
+          $inc: { "leaveEntitlement.usedPaid": daysToDeduct },
+        });
+
+        // Update LeaveYearBalance
+        const balance = await LeaveYearBalance.findOneAndUpdate(
+          { employee: employeeId, year: leaveYear },
+          {
+            $inc: { usedPaid: daysToDeduct },
+            $set: { owner: ownerId }
+          },
+          { upsert: true, new: true }
+        );
+
+        // Create Transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: leave.startDate,
+          type: "PAID_LEAVE_USED",
+          value: daysToDeduct,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId,
+          notes: leave.isAbsenceJustification ? "Absence justification approved as paid leave" : "Leave approved"
+        });
+
+      } else {
+        // Increment usedUnpaid in Employee model
+        await Employee.findByIdAndUpdate(employeeId, {
+          $inc: { "leaveEntitlement.usedUnpaid": daysToDeduct },
+        });
+
+        // Update LeaveYearBalance
+        const balance = await LeaveYearBalance.findOneAndUpdate(
+          { employee: employeeId, year: leaveYear },
+          {
+            $inc: { usedUnpaid: daysToDeduct },
+            $set: { owner: ownerId }
+          },
+          { upsert: true, new: true }
+        );
+
+        // Create Transaction
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: leave.startDate,
+          type: "UNPAID_LEAVE_USED",
+          value: daysToDeduct,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId,
+          notes: leave.isAbsenceJustification ? "Absence justification approved as unpaid leave" : "Leave approved as unpaid"
+        });
+      }
+    } catch (balanceError) {
+      console.error("⚠️ Error updating leave balance:", balanceError);
+      // Don't fail the approval if balance update fails
     }
 
     // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
     // When leave is approved, mark all leave dates as "Leave" in attendance
     try {
       const Attendance = require("../models/Attendance");
-      
+
       for (const dateObj of leave.dates) {
-        const dateStr = dateObj.date; // Format: YYYY-MM-DD
+        // Convert date to YYYY-MM-DD format consistently
+        let dateStr;
+        if (typeof dateObj.date === 'string') {
+          // If already a string, check if it needs parsing
+          if (dateObj.date.includes('T')) {
+            dateStr = dateObj.date.split('T')[0];
+          } else {
+            dateStr = dateObj.date;
+          }
+        } else if (dateObj.date instanceof Date) {
+          // If it's a Date object, convert to YYYY-MM-DD
+          dateStr = dateObj.date.toISOString().split('T')[0];
+        } else {
+          // Fallback
+          dateStr = new Date(dateObj.date).toISOString().split('T')[0];
+        }
+
         const leaveDate = new Date(dateStr);
-        
+
         // Check if attendance record exists for this date
         let attendance = await Attendance.findOne({
-          employee: leave.employee,
+          employee: leave.employee._id || leave.employee,
           date: dateStr,
-          owner: leave.employee.owner,
+          owner: leave.employee.owner || ownerId,
         });
-        
+
         if (attendance) {
           // Update existing attendance - preserve original status if needed
           if (!attendance.originalStatus) {
             attendance.originalStatus = attendance.status;
           }
-          
+
           // Special handling for absence justifications
           const wasAbsent = attendance.status === "Absent";
-          
+
           attendance.status = "Leave";
           attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
           attendance.markedByHR = true;
-          
+
           let updateNote = "Marked as Leave via approved leave request";
           if (leave.isAbsenceJustification && wasAbsent) {
             updateNote = `Unexplained absence on ${dateStr} justified and converted to ${finalIsPaid ? "Paid" : "Unpaid"} Leave`;
           }
-          
-          attendance.notes = attendance.notes 
+
+          attendance.notes = attendance.notes
             ? `${attendance.notes}; ${updateNote}`
             : updateNote;
-            
+
           await attendance.save();
         } else {
           // Create new attendance record as Leave
           attendance = new Attendance({
-            owner: leave.employee.owner,
-            employee: leave.employee,
+            owner: leave.employee.owner || ownerId,
+            employee: leave.employee._id || leave.employee,
             date: dateStr,
             status: "Leave",
             leaveType: finalIsPaid ? "Paid" : "Unpaid",
             markedByHR: true,
-            notes: leave.isAbsenceJustification 
-              ? "Auto-created from approved absence justification" 
+            notes: leave.isAbsenceJustification
+              ? "Auto-created from approved absence justification"
               : "Auto-created from approved leave request",
           });
           await attendance.save();
         }
-        
-        console.log(`✅ Attendance updated for ${dateStr}: Leave (${finalIsPaid ? "Paid" : "Unpaid"})`);
       }
     } catch (attendanceError) {
       console.error("⚠️ Error updating attendance for leave:", attendanceError);
@@ -1053,21 +1273,21 @@ exports.rejectLeave = async (req, res) => {
     // Mark leave dates as "Absent" and "Unpaid" unless already Absent and Unpaid
     try {
       const Attendance = require("../models/Attendance");
-      
+
       for (const dateObj of leave.dates) {
         const dateStr = dateObj.date; // Format: YYYY-MM-DD
-        
+
         // Check if attendance record exists for this date
         let attendance = await Attendance.findOne({
           employee: leave.employee._id,
           date: dateStr,
           owner: leave.employee.owner,
         });
-        
+
         if (attendance) {
           // Only update if NOT already Absent and Unpaid
           const isAlreadyAbsentUnpaid = attendance.status === "Absent" && attendance.leaveType === "Unpaid";
-          
+
           if (!isAlreadyAbsentUnpaid) {
             // Update existing attendance to Absent/Unpaid
             if (!attendance.originalStatus) {
@@ -1076,11 +1296,10 @@ exports.rejectLeave = async (req, res) => {
             attendance.status = "Absent";
             attendance.leaveType = "Unpaid";
             attendance.markedByHR = true;
-            attendance.notes = attendance.notes 
+            attendance.notes = attendance.notes
               ? `${attendance.notes}; Marked as Absent due to rejected leave`
               : "Marked as Absent - leave request was rejected";
             await attendance.save();
-            console.log(`⚠️ Attendance updated for ${dateStr}: Absent (Unpaid) - leave rejected`);
           } else {
             console.log(`ℹ️ Attendance for ${dateStr} already Absent/Unpaid - no change needed`);
           }
@@ -1096,7 +1315,6 @@ exports.rejectLeave = async (req, res) => {
             notes: "Auto-created from rejected leave request",
           });
           await attendance.save();
-          console.log(`⚠️ Attendance created for ${dateStr}: Absent (Unpaid) - leave rejected`);
         }
       }
     } catch (attendanceError) {
@@ -1238,10 +1456,10 @@ exports.getLeaves = async (req, res) => {
 
     // Process employee data
     const processedLeaves = leaves.map((leave) => {
-      const isAwaitingSenior = leave.supervisor && 
-        leave.supervisor.role !== "admin" && 
+      const isAwaitingSenior = leave.supervisor &&
+        leave.supervisor.role !== "admin" &&
         leave.supervisor.role !== "hr";
-        
+
       return {
         ...leave,
         employee: processEmployeeWithPhoto(leave.employee, req),
@@ -1280,7 +1498,7 @@ exports.getLeaves = async (req, res) => {
 exports.getPendingLeaves = async (req, res) => {
   try {
     const user = req.user;
-    
+
 
     const query = { status: "pending" };
     const tenantId = user.owner;
@@ -1305,10 +1523,10 @@ exports.getPendingLeaves = async (req, res) => {
       .lean();
 
     const processedPendingLeaves = pendingLeaves.map((leave) => {
-      const isAwaitingSenior = leave.supervisor && 
-        leave.supervisor.role !== "admin" && 
+      const isAwaitingSenior = leave.supervisor &&
+        leave.supervisor.role !== "admin" &&
         leave.supervisor.role !== "hr";
-        
+
       return {
         ...leave,
         employee: processEmployeeWithPhoto(leave.employee, req),
@@ -1391,18 +1609,18 @@ exports.cancelLeave = async (req, res) => {
 
     // Check if user can cancel this leave
     let employee;
-    
+
     if (user.isEmployee && user.employeeId) {
       // Employee user - use employeeId
       employee = await Employee.findById(user.employeeId);
     } else if (!user.isEmployee && (user.role === 'admin' || user.role === 'hr' || user.role === 'super-admin')) {
       // Admin user - find linked employee record or use admin privileges
-      
+
       // Try to find linked employee first
       if (user.employeeInfo && user.employeeInfo.employeeId) {
         employee = await Employee.findById(user.employeeInfo.employeeId);
       }
-      
+
       // If no linked employee found, create a minimal employee object for authorization
       if (!employee) {
         employee = {
@@ -1417,11 +1635,11 @@ exports.cancelLeave = async (req, res) => {
       const employeeId = user.employeeId || user.id || user._id;
       employee = await Employee.findById(employeeId);
     }
-    
+
     if (!employee) {
       return res.status(404).json({ message: "Employee not found" });
     }
-    
+
     const isLeaveOwner = leave.employee.toString() === employee._id.toString();
     const isSuperAdmin = employee.role === "admin" || employee.role === "hr" || employee.role === "super-admin" || employee.isSuperAdmin;
 
@@ -2076,6 +2294,8 @@ exports.getMyLeaves = async (req, res) => {
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
       .populate("cancelledBy", "name email")
+      .populate("approvalChain", "name email role")
+      .populate("supervisor", "name email role")
       .lean();
 
     // Process employee data to include full photo URLs

@@ -52,6 +52,15 @@ router.get('/absences-without-leave', async (req, res) => {
     const absentRecords = await Attendance.find(query).lean();
     console.log('[DEBUG] Found absent records:', absentRecords.length, absentRecords.map(r => ({ date: r.date, status: r.status })));
 
+    // Find holidays for this owner to exclude from absences
+    const holidayRecords = await Attendance.find({
+      isHoliday: true,
+      owner: req.employee.owner,
+      date: { $lt: todayStr }
+    }).select('date').lean();
+    const holidayDates = new Set(holidayRecords.map(h => h.date));
+    console.log('[DEBUG] Found holidays:', holidayDates.size);
+
     // Find all leave applications for this employee (non-trashed)
     const Leave = require('../models/ApplyLeave');
     const leaveApplications = await Leave.find({ 
@@ -64,12 +73,32 @@ router.get('/absences-without-leave', async (req, res) => {
       console.log('[DEBUG] Leave app dates:', app.dates?.map(d => d.date));
     });
 
-    // Filter out absences that have a corresponding leave application
+    // Filter out absences that have a corresponding leave application, or are weekends/holidays, or have been acknowledged
     const unexplainedAbsences = absentRecords.filter(record => {
       // The attendance record date is a string "YYYY-MM-DD"
       const recordDateStr = record.date; 
       
       console.log('[DEBUG] Checking record date:', recordDateStr);
+
+      // Skip if it's a holiday
+      if (holidayDates.has(recordDateStr)) {
+        console.log('[DEBUG] Record', recordDateStr, 'is a holiday - skipping');
+        return false;
+      }
+
+      // Skip if it's a weekend (Saturday=6, Sunday=0)
+      const recordDate = new Date(recordDateStr);
+      const dayOfWeek = recordDate.getDay();
+      if (dayOfWeek === 0 || dayOfWeek === 6) {
+        console.log('[DEBUG] Record', recordDateStr, 'is a weekend - skipping');
+        return false;
+      }
+
+      // Skip if already acknowledged by employee (unpaid acknowledgment)
+      if (record.acknowledgedByEmployee) {
+        console.log('[DEBUG] Record', recordDateStr, 'already acknowledged by employee - skipping');
+        return false;
+      }
       
       // Check if any leave application covers this date
       const hasLeave = leaveApplications.some(app => {
@@ -97,6 +126,63 @@ router.get('/absences-without-leave', async (req, res) => {
   } catch (err) {
     console.error("[DEBUG] Fetch unexplained absences failed:", err);
     res.status(500).json({ error: "Failed to fetch unexplained absences" });
+  }
+});
+
+// POST /api/emp-attendance/acknowledge-absence
+// Employee acknowledges absence as unpaid - attendance stays as "Absent"
+router.post('/acknowledge-absence', async (req, res) => {
+  try {
+    const { date, reason, isPaid } = req.body;
+    const employeeId = req.employee._id;
+    const ownerId = req.employee.owner;
+
+    if (!date || !reason) {
+      return res.status(400).json({ error: "Date and reason are required" });
+    }
+
+    // Find the attendance record for this date
+    let attendance = await Attendance.findOne({
+      employee: employeeId,
+      date: date,
+      owner: ownerId,
+    });
+
+    if (!attendance) {
+      return res.status(404).json({ error: "Attendance record not found for this date" });
+    }
+
+    // Add acknowledgment note but keep status as "Absent"
+    const acknowledgmentNote = `Employee acknowledged absence on ${date} as UNPAID. Reason: ${reason}`;
+    
+    attendance.notes = attendance.notes 
+      ? `${attendance.notes}; ${acknowledgmentNote}`
+      : acknowledgmentNote;
+    
+    // Mark as acknowledged by employee
+    attendance.acknowledgedByEmployee = true;
+    attendance.acknowledgedAt = new Date();
+    attendance.acknowledgmentReason = reason;
+    attendance.acknowledgmentType = 'unpaid';
+    
+    await attendance.save();
+
+    console.log(`✅ Absence on ${date} acknowledged by employee ${employeeId} as unpaid. Status remains: ${attendance.status}`);
+    
+    res.json({
+      success: true,
+      message: "Absence acknowledged as unpaid. Attendance remains as Absent.",
+      attendance: {
+        date: attendance.date,
+        status: attendance.status,
+        notes: attendance.notes,
+        acknowledgedByEmployee: attendance.acknowledgedByEmployee,
+        acknowledgmentType: attendance.acknowledgmentType
+      }
+    });
+  } catch (err) {
+    console.error("❌ Acknowledge absence failed:", err);
+    res.status(500).json({ error: "Failed to acknowledge absence" });
   }
 });
 
