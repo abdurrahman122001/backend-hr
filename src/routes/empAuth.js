@@ -539,10 +539,8 @@ router.post("/login", async (req, res) => {
     // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
     const isTrusted = emp.trustedDevices?.some(
       (d) =>
-        deviceFingerprint &&
-        deviceToken &&
-        d.deviceFingerprint === deviceFingerprint &&
-        d.deviceId === deviceToken
+        (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
+        (deviceToken && d.deviceId === deviceToken)
     );
 
     // UNRECOGNIZED DEVICE (2FA flow)
