@@ -21,7 +21,7 @@ const AttendanceSchema = new Schema({
   bonusApplied: { type: Boolean, default: false },
   bonusType: { type: String, enum: ["EarlyBird", "NonWorkingDay", null], default: null },
   bonusHoursGiven: { type: Number, default: 0 },
-  
+
   // Employee acknowledgment fields for unpaid absences
   acknowledgedByEmployee: { type: Boolean, default: false },
   acknowledgedAt: { type: Date },

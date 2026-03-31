@@ -717,11 +717,6 @@ exports.updateClientSupervision = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me) return res.status(404).json({ error: "Employee not found" });
 
-    // Managers should not manually toggle supervision via the panel
-    if (isManagerLike(me.role)) {
-      return res.status(403).json({ error: "Managers cannot modify supervision" });
-    }
-
     const { id } = req.params; // client id
     const { supervision } = req.body;
 
@@ -808,11 +803,6 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
     const me = await Employee.findById(req.employee._id).select("_id owner role");
     if (!me || !me.owner) {
       return res.status(403).json({ error: "Access denied" });
-    }
-
-    // managers should not flip batch supervision either
-    if (isManagerLike(me.role)) {
-      return res.status(403).json({ error: "Managers cannot modify supervision" });
     }
 
     const { employeeId } = req.params;
