@@ -545,7 +545,7 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
       slip.lateDeductionDaysCredited = lateDeductionDays;
       await balance.save();
       await slip.save();
-      
+
       // LOG THE LATE RULE APPLICATION
       try {
         await logAttendanceChange({
@@ -748,7 +748,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
         // Restore the paid leave
         balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
 
-        // Create a reversal transaction with same source reference
+        // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
           employee: employeeId,
@@ -757,8 +757,6 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           date: new Date(attendanceDate),
           type: "PAID_LEAVE_REVERSED",
           value: reversalValue,
-          sourceModel: "System",
-          sourceId: leaveTransaction._id, // Reference to original transaction
           reason: "Half Day Reversal (Session Reactivated)"
         });
 
@@ -781,7 +779,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           }
         }
 
-        // Create a reversal transaction with same source reference
+        // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
           employee: employeeId,
@@ -790,15 +788,14 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
           date: new Date(attendanceDate),
           type: "UNPAID_LEAVE_REVERSED",
           value: reversalValue,
-          sourceModel: "System",
-          sourceId: leaveTransaction._id, // Reference to original transaction
           reason: "Half Day Reversal (Session Reactivated)"
         });
 
         console.log(`[REVERSAL] ${employee.name}: Reversed salary deduction (Between-shift login)`);
       }
 
-      // No longer need to delete the original transaction - it serves as the source reference
+      // Delete the original half-day deduction transaction
+      await LeaveTransaction.deleteOne({ _id: leaveTransaction._id });
 
       // Clear the leaveType from attendance
       await Attendance.updateOne(
@@ -876,7 +873,7 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
         // Restore the paid leave
         balance.usedPaid = Math.max(0, Number(balance.usedPaid || 0) - reversalValue);
 
-        // Create a reversal transaction with source reference
+        // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
           employee: employeeId,
@@ -885,8 +882,6 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
           date: new Date(attendanceDate),
           type: "PAID_LEAVE_REVERSED",
           value: reversalValue,
-          sourceModel: "System",
-          sourceId: leaveTransaction._id, // Reference to original transaction
           reason: "Between-Shift Login - Late Deduction Reversal"
         });
 
@@ -910,7 +905,7 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
           }
         }
 
-        // Create a reversal transaction with source reference
+        // Create a reversal transaction
         await LeaveTransaction.create({
           owner: ownerId,
           employee: employeeId,
@@ -919,14 +914,14 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
           date: new Date(attendanceDate),
           type: "UNPAID_LEAVE_REVERSED",
           value: reversalValue,
-          sourceModel: "System",
-          sourceId: leaveTransaction._id, // Reference to original transaction
           reason: "Between-Shift Login - Late Deduction Reversal"
         });
 
         console.log(`[REVERSAL] ${employee.name}: Reversed salary deduction for late (Between-shift login)`);
       }
 
+      // Delete the original late deduction transaction
+      await LeaveTransaction.deleteOne({ _id: leaveTransaction._id });
 
       await balance.save();
       await slip.save();

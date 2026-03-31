@@ -35,7 +35,7 @@ async function createSalarySlip(employeeId, slipData, encryptionKey) {
     // Notice loanBenefits is added above, check if it's needed! But I will copy all.
     const deductions = [
       "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction", "providentFundDeduction",
-      "gratuityFundDeduction", "vehicleLoanDeduction", "otherLoanDeductions", "advanceSalaryDeductions",
+      "gratuityFundDeduction", "advanceSalaryDeductions",
       "medicalInsurance", "lifeInsurance", "penalties", "othersDeductions", "taxDeduction"
     ];
 
@@ -52,7 +52,30 @@ async function createSalarySlip(employeeId, slipData, encryptionKey) {
       }
     }
     
-    // Check if loanDeductions nested exists
+    // Handle loan deductions - map flat fields to nested structure
+    if (slipData.vehicleLoanDeduction !== undefined || slipData.otherLoanDeductions !== undefined) {
+        slipData.loanDeductions = {};
+        if (slipData.vehicleLoanDeduction !== undefined) {
+            let val = slipData.vehicleLoanDeduction;
+            if (typeof val === "string" && val.includes(":")) {
+                slipData.loanDeductions.vehicleLoan = val;
+            } else {
+                slipData.loanDeductions.vehicleLoan = await encrypt(val, encryptionKey);
+            }
+            delete slipData.vehicleLoanDeduction; // Remove flat field
+        }
+        if (slipData.otherLoanDeductions !== undefined) {
+            let val = slipData.otherLoanDeductions;
+            if (typeof val === "string" && val.includes(":")) {
+                slipData.loanDeductions.otherLoans = val;
+            } else {
+                slipData.loanDeductions.otherLoans = await encrypt(val, encryptionKey);
+            }
+            delete slipData.otherLoanDeductions; // Remove flat field
+        }
+    }
+    
+    // Check if loanDeductions nested exists (for direct nested input)
     if (slipData.loanDeductions && typeof slipData.loanDeductions === "object") {
         for (const subKey of ["vehicleLoan", "otherLoans"]) {
              if (slipData.loanDeductions[subKey] !== undefined) {

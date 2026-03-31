@@ -239,6 +239,33 @@ router.patch("/:id", requireAuth, async (req, res) => {
     // Handle top-level fields
     for (let key of Object.keys(req.body)) {
       if (allowedFields.includes(key)) {
+        // Special mapping: flat fields -> nested loanDeductions structure
+        if (key === "vehicleLoanDeduction") {
+          try {
+            updates["loanDeductions.vehicleLoan"] = await encrypt(req.body[key], encryptionKey);
+          } catch (encryptErr) {
+            return res.status(500).json({
+              status: "error",
+              message: `Encryption failed for loanDeductions.vehicleLoan: ${encryptErr.message}`,
+            });
+          }
+          editedFields["loanDeductions.vehicleLoan"] = true;
+          continue;
+        }
+        if (key === "otherLoanDeductions") {
+          try {
+            updates["loanDeductions.otherLoans"] = await encrypt(req.body[key], encryptionKey);
+          } catch (encryptErr) {
+            return res.status(500).json({
+              status: "error",
+              message: `Encryption failed for loanDeductions.otherLoans: ${encryptErr.message}`,
+            });
+          }
+          editedFields["loanDeductions.otherLoans"] = true;
+          continue;
+        }
+        
+        // Regular fields
         let value = req.body[key];
         if (typeof value === "string" && value.includes(":")) {
           updates[key] = value; // Already encrypted
