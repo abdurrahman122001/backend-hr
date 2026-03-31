@@ -186,7 +186,7 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     }
 
     await Attendance.findByIdAndUpdate(existingAttendance._id, {
-      $unset: { checkOut: 1, logoutTime: 1, originalStatus: 1 },
+      $unset: { checkOut: 1, logoutTime: 1, originalStatus: 1, halfDayFromAutoLogout: 1 },
       $set: { status: statusToRestore, totalHours: 0 }
     });
 
@@ -195,12 +195,17 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     const previousStatusLower = (existingAttendance.status || "").toLowerCase().replace(/\s+/g, '-');
     const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
-    if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
+    // Only reverse half-day deduction if it came from auto-logout (page refresh)
+    // This prevents incorrect reversals when actual early logout deductions should remain
+    if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day" && existingAttendance.halfDayFromAutoLogout === true) {
       try {
         await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+        console.log(`🔄 [RESTORE] Half-day deduction reversed for ${emp.name} (auto-logout half-day)`);
       } catch (err) {
         console.error(`[RESTORE] Error reversing half-day deduction:`, err);
       }
+    } else if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
+      console.log(`🔄 [RESTORE] Half-day deduction NOT reversed for ${emp.name} - was actual early logout (halfDayFromAutoLogout=${existingAttendance.halfDayFromAutoLogout})`);
     }
 
     try {
@@ -902,6 +907,9 @@ router.post("/logout", requireAuth, async (req, res) => {
     const actualLogoutTime = formatTimeOnly(nowKarachi);
 
     let updated = null;
+    // Determine if this is an auto-logout half-day (page refresh) vs actual early logout
+    const isAutoLogoutHalfDay = isAutoLogout && finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day";
+
     try {
       updated = await Attendance.findByIdAndUpdate(
         attendance._id,
@@ -910,7 +918,9 @@ router.post("/logout", requireAuth, async (req, res) => {
           checkOut: actualLogoutTime,
           status: finalStatus,
           totalHours: parseFloat(totalHours.toFixed(2)),
-          originalStatus: originalStatusBeforeLogout
+          originalStatus: originalStatusBeforeLogout,
+          // Flag to track if Half Day came from auto-logout (page refresh) - used to prevent incorrect deduction reversals
+          halfDayFromAutoLogout: isAutoLogoutHalfDay
         },
         { new: true }
       );
@@ -926,17 +936,21 @@ router.post("/logout", requireAuth, async (req, res) => {
         `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
       );
 
-      console.log(`[LOGOUT-DEBUG] Checking deduction condition: finalStatus=${finalStatus}, originalStatusBeforeLogout=${originalStatusBeforeLogout}`);
-      console.log(`[LOGOUT-DEBUG] Condition result: ${finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day"}`);
+      console.log(`[LOGOUT-DEBUG] Checking deduction condition: finalStatus=${finalStatus}, originalStatusBeforeLogout=${originalStatusBeforeLogout}, isAutoLogout=${isAutoLogout}`);
+      console.log(`[LOGOUT-DEBUG] isAutoLogoutHalfDay=${isAutoLogoutHalfDay}`);
 
-      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day") {
-        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
+      // Only apply half-day deduction for MANUAL logout (actual early departure)
+      // Skip deduction for auto-logout (page refresh) - deduction will be applied on actual logout
+      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day" && !isAutoLogout) {
+        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (Manual Logout)`);
         try {
           await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, updated._id);
           console.log(`✅ [LOGOUT-DEDUCTION] Half-day deduction applied for ${employeeId} on ${attendanceDate}`);
         } catch (derr) {
           console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
         }
+      } else if (isAutoLogoutHalfDay) {
+        console.log(`[LOGOUT-DEDUCTION] Skipping half-day deduction for ${employeeId} - Auto-logout (page refresh). Flag set for tracking.`);
       }
 
       // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
@@ -1110,25 +1124,31 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
     if (attendance && attendance.checkOut) {
       const previousStatus = attendance.status;
       const statusToRestore = attendance.originalStatus || attendance.status;
+      // Check if the half-day was from auto-logout (page refresh) - only reverse deduction in this case
+      const isAutoLogoutHalfDay = attendance.halfDayFromAutoLogout === true;
 
       await Attendance.findByIdAndUpdate(attendance._id, {
-        $unset: { logoutTime: 1, checkOut: 1, originalStatus: 1 },
+        $unset: { logoutTime: 1, checkOut: 1, originalStatus: 1, halfDayFromAutoLogout: 1 },
         $set: { status: statusToRestore, totalHours: 0 }
       });
 
       const previousStatusLower = (previousStatus || "").toLowerCase().replace(/\s+/g, '-');
       const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
-      if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
+      // Only reverse half-day deduction if it came from auto-logout (page refresh)
+      // This prevents incorrect reversals when actual early logout deductions should remain
+      if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day" && isAutoLogoutHalfDay) {
         try {
           const emp = await Employee.findById(employeeId).select("owner").lean();
           if (emp) {
             await reverseHalfDayDeduction(employeeId, emp.owner, employeeId, session.date || todayKarachi);
-            console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId}`);
+            console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId} (auto-logout half-day)`);
           }
         } catch (derr) {
           console.error("[REACTIVATE-SESSION] Error reversing half-day deduction:", derr);
         }
+      } else if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
+        console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction NOT reversed for ${employeeId} - was actual early logout (halfDayFromAutoLogout=${attendance.halfDayFromAutoLogout})`);
       }
 
       console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status: ${previousStatus} → ${statusToRestore}`);

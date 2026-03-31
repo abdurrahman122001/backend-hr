@@ -28,6 +28,8 @@ const AttendanceSchema = new Schema({
   acknowledgmentReason: { type: String },
   acknowledgmentType: { type: String, enum: ['unpaid', 'paid', null], default: null },
 
+  // Track if Half Day status came from auto-logout (page refresh) - used to prevent incorrect deduction reversals
+  halfDayFromAutoLogout: { type: Boolean, default: false },
 
 }, { timestamps: true });
 
