@@ -731,7 +731,13 @@ exports.getMessages = async (req, res) => {
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
-      .populate("replyTo")
+      .populate({
+        path: "replyTo",
+        populate: {
+          path: "sender",
+          select: "name companyEmail avatar",
+        },
+      })
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
@@ -3165,7 +3171,13 @@ exports.getSpaceMessages = async (req, res) => {
       .populate("receivers", "name companyEmail avatar")
       .populate("readBy.employee", "name companyEmail avatar")
       .populate("space")
-      .populate("replyTo") // ✅ ADD: Populate replyTo reference
+      .populate({
+        path: "replyTo",
+        populate: {
+          path: "sender",
+          select: "name companyEmail avatar",
+        },
+      })
       .sort({ createdAt: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit)
