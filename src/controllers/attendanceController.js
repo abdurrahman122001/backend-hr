@@ -1331,22 +1331,6 @@ exports.markAttendance = async (req, res) => {
           }
         );
       }
-    } else {
-      await updateLeaveEntitlementForEmployee(
-        ownerId,
-        employeeId,
-        date,
-        1,
-        "absent",
-        true
-      );
-      console.log(
-        `[DEDUCTION][${employee.name}] Sandwich Absent(Unpaid) -> Days=1`
-      );
-      await Attendance.findOneAndUpdate(
-        { owner: ownerId, employee: employeeId, date },
-        { $set: { leaveType: "Unpaid", proportionate: false } }
-      );
     }
 
     // ========= LEAVE =========
