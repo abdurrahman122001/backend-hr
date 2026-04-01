@@ -195,17 +195,15 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     const previousStatusLower = (existingAttendance.status || "").toLowerCase().replace(/\s+/g, '-');
     const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
-    // Only reverse half-day deduction if it came from auto-logout (page refresh)
-    // This prevents incorrect reversals when actual early logout deductions should remain
-    if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day" && existingAttendance.halfDayFromAutoLogout === true) {
+    // Reverse half-day deduction if status is being restored from Half Day to something else
+    // This applies to both auto-logout (page refresh) and manual logout scenarios
+    if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
       try {
         await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-        console.log(`🔄 [RESTORE] Half-day deduction reversed for ${emp.name} (auto-logout half-day)`);
+        console.log(`🔄 [RESTORE] Half-day deduction reversed for ${emp.name} (relogin after ${existingAttendance.halfDayFromAutoLogout ? 'auto' : 'manual'}-logout)`);
       } catch (err) {
         console.error(`[RESTORE] Error reversing half-day deduction:`, err);
       }
-    } else if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
-      console.log(`🔄 [RESTORE] Half-day deduction NOT reversed for ${emp.name} - was actual early logout (halfDayFromAutoLogout=${existingAttendance.halfDayFromAutoLogout})`);
     }
 
     try {
@@ -939,18 +937,16 @@ router.post("/logout", requireAuth, async (req, res) => {
       console.log(`[LOGOUT-DEBUG] Checking deduction condition: finalStatus=${finalStatus}, originalStatusBeforeLogout=${originalStatusBeforeLogout}, isAutoLogout=${isAutoLogout}`);
       console.log(`[LOGOUT-DEBUG] isAutoLogoutHalfDay=${isAutoLogoutHalfDay}`);
 
-      // Only apply half-day deduction for MANUAL logout (actual early departure)
-      // Skip deduction for auto-logout (page refresh) - deduction will be applied on actual logout
-      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day" && !isAutoLogout) {
-        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (Manual Logout)`);
+      // Apply half-day deduction for BOTH auto-logout and manual logout
+      // This deduction will be reversed when session is reactivated (via reverseHalfDayDeduction)
+      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day") {
+        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
         try {
           await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, updated._id);
           console.log(`✅ [LOGOUT-DEDUCTION] Half-day deduction applied for ${employeeId} on ${attendanceDate}`);
         } catch (derr) {
           console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
         }
-      } else if (isAutoLogoutHalfDay) {
-        console.log(`[LOGOUT-DEDUCTION] Skipping half-day deduction for ${employeeId} - Auto-logout (page refresh). Flag set for tracking.`);
       }
 
       // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
@@ -1135,20 +1131,18 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       const previousStatusLower = (previousStatus || "").toLowerCase().replace(/\s+/g, '-');
       const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
-      // Only reverse half-day deduction if it came from auto-logout (page refresh)
-      // This prevents incorrect reversals when actual early logout deductions should remain
-      if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day" && isAutoLogoutHalfDay) {
+      // Only reverse half-day deduction if status is being restored from Half Day to something else
+      // This applies to both auto-logout (page refresh) and manual logout scenarios
+      if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
         try {
           const emp = await Employee.findById(employeeId).select("owner").lean();
           if (emp) {
             await reverseHalfDayDeduction(employeeId, emp.owner, employeeId, session.date || todayKarachi);
-            console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId} (auto-logout half-day)`);
+            console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId} (relogin after ${isAutoLogoutHalfDay ? 'auto' : 'manual'}-logout)`);
           }
         } catch (derr) {
           console.error("[REACTIVATE-SESSION] Error reversing half-day deduction:", derr);
         }
-      } else if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
-        console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction NOT reversed for ${employeeId} - was actual early logout (halfDayFromAutoLogout=${attendance.halfDayFromAutoLogout})`);
       }
 
       console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status: ${previousStatus} → ${statusToRestore}`);
