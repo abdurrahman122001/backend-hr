@@ -175,7 +175,7 @@ async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
   return Math.max(0, incomeBase - medExemptMonthly);
 }
 
-async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
+async function calculateTaxForMasterSalary(salarySlip, taxCfg) {
   try {
     // 1) Calculate Gross Monthly Salary
     let grossMonthly = 0;
@@ -312,7 +312,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       netPayable,
     };
   } catch (error) {
-    console.error("Error in calculateTaxForSalarySlip:", error);
+    console.error("Error in calculateTaxForMasterSalary:", error);
     throw error;
   }
 }
@@ -324,7 +324,7 @@ async function autoCalculateAndSaveTax(salarySlip) {
       taxCfg = await TaxConfig.findOne().sort({ createdAt: -1 }).lean();
     if (!taxCfg) return null;
 
-    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
+    const taxCalculation = await calculateTaxForMasterSalary(salarySlip, taxCfg);
 
     await writeEnc(salarySlip, "grossSalary", taxCalculation.grossMonthly);
     await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
@@ -366,7 +366,7 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       return res.status(404).json({ error: "Employee not found" });
     }
 
-    const salarySlip = await SalarySlip.findOne({ employee: req.params.id });
+    const salarySlip = await MasterSalary.findOne({ employee: req.params.id });
 
     // fetch shifts (by owner)
     let shifts = [];
@@ -398,27 +398,27 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     employeeObj.providentFund.override = !!employeeObj.providentFund.override;
 
     // salary slip -> decrypted view for FE (including tax fields)
-    let decryptedSalarySlip = salarySlip ? { ...salarySlip.toObject() } : {};
+    let decryptedMasterSalary = salarySlip ? { ...salarySlip.toObject() } : {};
     const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
 
     if (salarySlip) {
       for (const field of ALL_FIELDS) {
-        if (decryptedSalarySlip[field]) {
+        if (decryptedMasterSalary[field]) {
           try {
-            const dv = await decrypt(decryptedSalarySlip[field], req.query.key);
-            decryptedSalarySlip[field] = safeNumber(dv, 0);
+            const dv = await decrypt(decryptedMasterSalary[field], req.query.key);
+            decryptedMasterSalary[field] = safeNumber(dv, 0);
           } catch (err) {
             console.warn(`Failed to decrypt ${field}:`, err);
-            decryptedSalarySlip[field] = 0;
+            decryptedMasterSalary[field] = 0;
           }
         } else {
-          decryptedSalarySlip[field] = 0;
+          decryptedMasterSalary[field] = 0;
         }
       }
-      decryptedSalarySlip.isActive = decryptedSalarySlip.isActive ?? true;
+      decryptedMasterSalary.isActive = decryptedMasterSalary.isActive ?? true;
     } else {
       // default view if no slip yet
-      decryptedSalarySlip = {
+      decryptedMasterSalary = {
         candidateName: employeeObj.name || "",
         candidateEmail: employeeObj.email || "",
         position: employeeObj.designation || "",
@@ -429,18 +429,18 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
         year: new Date().getFullYear().toString(),
         isActive: true,
       };
-      for (const f of ALL_FIELDS) decryptedSalarySlip[f] = 0;
+      for (const f of ALL_FIELDS) decryptedMasterSalary[f] = 0;
     }
 
     res.status(200).json({
       employee: employeeObj,
-      salarySlip: decryptedSalarySlip,
-      encryptedSalarySlip: salarySlip ? salarySlip.toObject() : null,
+      salarySlip: decryptedMasterSalary,
+      encryptedMasterSalary: salarySlip ? salarySlip.toObject() : null,
       shifts,
     });
 
   } catch (err) {
-    console.error("Error in getEmployeeAndSalarySlip:", err);
+    console.error("Error in getEmployeeAndMasterSalary:", err);
     res
       .status(500)
       .json({ error: "Internal server error", details: err.message });
@@ -463,7 +463,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     }
 
     // Fetch existing salary slip
-    const existingSalarySlip = await SalarySlip.findOne({
+    const existingMasterSalary = await MasterSalary.findOne({
       employee: req.params.id,
     });
 
@@ -572,7 +572,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
     /* ------------------ SALARY SLIP UPDATE ------------------ */
 
-    let updatedSalarySlip;
+    let updatedMasterSalary;
     let taxCalculationResult = null;
 
     if (salarySlipData && Object.keys(salarySlipData).length > 0) {
@@ -582,11 +582,11 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       let hasRevisedInSalary = false;
       const salaryFieldsToCheck = [...COMP_FIELDS];
 
-      if (existingSalarySlip) {
+      if (existingMasterSalary) {
         for (const field of salaryFieldsToCheck) {
           if (field in salarySlipData) {
             const newVal = safeNumber(salarySlipData[field], 0);
-            const oldVal = await readEncNumberAsync(existingSalarySlip[field]);
+            const oldVal = await readEncNumberAsync(existingMasterSalary[field]);
             // If the values are different (ignoring minor precision issues), it's a change
             if (Math.abs(newVal - oldVal) >= 0.01) {
               hasActualSalaryChange = true;
@@ -615,7 +615,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
         }
       }
 
-      if ((hasActualSalaryChange || hasRevisedInSalary) && existingSalarySlip) {
+      if ((hasActualSalaryChange || hasRevisedInSalary) && existingMasterSalary) {
         try {
           // Helper function to parse dates in various formats (DD/MM/YYYY, ISO, etc.)
           const parseDate = (dateStr) => {
@@ -709,27 +709,27 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
           console.log('Position end date found:', positionEndDate); // Debug logging
 
           await SalaryRevisionHistory.create({
-            owner: existingSalarySlip.owner,
-            employee: existingSalarySlip.employee,
+            owner: existingMasterSalary.owner,
+            employee: existingMasterSalary.employee,
             designation: existingEmployee.designation, // captured before update
-            basic: existingSalarySlip.basic,
-            dearnessAllowance: existingSalarySlip.dearnessAllowance,
-            houseRentAllowance: existingSalarySlip.houseRentAllowance,
-            conveyanceAllowance: existingSalarySlip.conveyanceAllowance,
-            medicalAllowance: existingSalarySlip.medicalAllowance,
-            utilityAllowance: existingSalarySlip.utilityAllowance,
-            overtimeCompensation: existingSalarySlip.overtimeCompensation,
-            dislocationAllowance: existingSalarySlip.dislocationAllowance,
-            leaveEncashment: existingSalarySlip.leaveEncashment,
-            bonus: existingSalarySlip.bonus,
-            arrears: existingSalarySlip.arrears,
-            autoAllowance: existingSalarySlip.autoAllowance,
-            incentive: existingSalarySlip.incentive,
-            fuelAllowance: existingSalarySlip.fuelAllowance,
-            othersAllowances: existingSalarySlip.othersAllowances,
-            grossSalary: existingSalarySlip.grossSalary,
-            taxDeduction: existingSalarySlip.taxDeduction,
-            netPayable: existingSalarySlip.netPayable,
+            basic: existingMasterSalary.basic,
+            dearnessAllowance: existingMasterSalary.dearnessAllowance,
+            houseRentAllowance: existingMasterSalary.houseRentAllowance,
+            conveyanceAllowance: existingMasterSalary.conveyanceAllowance,
+            medicalAllowance: existingMasterSalary.medicalAllowance,
+            utilityAllowance: existingMasterSalary.utilityAllowance,
+            overtimeCompensation: existingMasterSalary.overtimeCompensation,
+            dislocationAllowance: existingMasterSalary.dislocationAllowance,
+            leaveEncashment: existingMasterSalary.leaveEncashment,
+            bonus: existingMasterSalary.bonus,
+            arrears: existingMasterSalary.arrears,
+            autoAllowance: existingMasterSalary.autoAllowance,
+            incentive: existingMasterSalary.incentive,
+            fuelAllowance: existingMasterSalary.fuelAllowance,
+            othersAllowances: existingMasterSalary.othersAllowances,
+            grossSalary: existingMasterSalary.grossSalary,
+            taxDeduction: existingMasterSalary.taxDeduction,
+            netPayable: existingMasterSalary.netPayable,
             endDate: positionEndDate, // Store the position end date
           });
         } catch (historyErr) {
@@ -775,55 +775,55 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       slipSet.owner = ownerId;
       slipSet.month =
         salarySlipData.month ||
-        existingSalarySlip?.month ||
+        existingMasterSalary?.month ||
         (new Date().getMonth() + 1).toString();
       slipSet.year =
         salarySlipData.year ||
-        existingSalarySlip?.year ||
+        existingMasterSalary?.year ||
         new Date().getFullYear().toString();
 
-      if (existingSalarySlip) {
-        updatedSalarySlip = await SalarySlip.findOneAndUpdate(
+      if (existingMasterSalary) {
+        updatedMasterSalary = await MasterSalary.findOneAndUpdate(
           { employee: req.params.id },
           { $set: { ...slipSet, employee: req.params.id } },
           { new: true }
         );
       } else {
-        updatedSalarySlip = await SalarySlip.create({
+        updatedMasterSalary = await MasterSalary.create({
           ...slipSet,
           employee: req.params.id,
         });
       }
 
-      if (updatedSalarySlip) {
-        taxCalculationResult = await autoCalculateAndSaveTax(updatedSalarySlip);
+      if (updatedMasterSalary) {
+        taxCalculationResult = await autoCalculateAndSaveTax(updatedMasterSalary);
       }
     } else {
-      updatedSalarySlip = existingSalarySlip;
+      updatedMasterSalary = existingMasterSalary;
     }
 
     /* ------------------ RESPONSE ------------------ */
 
-    let decryptedSalarySlip = null;
-    if (updatedSalarySlip) {
-      const raw = updatedSalarySlip.toObject();
-      decryptedSalarySlip = { ...raw };
+    let decryptedMasterSalary = null;
+    if (updatedMasterSalary) {
+      const raw = updatedMasterSalary.toObject();
+      decryptedMasterSalary = { ...raw };
       const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
 
       for (const f of ALL_FIELDS) {
         try {
           const dv = await decrypt(raw[f], req.query.key);
-          decryptedSalarySlip[f] = safeNumber(dv, 0);
+          decryptedMasterSalary[f] = safeNumber(dv, 0);
         } catch {
-          decryptedSalarySlip[f] = 0;
+          decryptedMasterSalary[f] = 0;
         }
       }
     }
 
     res.status(200).json({
       employee: updatedEmployee,
-      salarySlip: decryptedSalarySlip,
-      encryptedSalarySlip: updatedSalarySlip ? updatedSalarySlip.toObject() : null,
+      salarySlip: decryptedMasterSalary,
+      encryptedMasterSalary: updatedMasterSalary ? updatedMasterSalary.toObject() : null,
       taxCalculation: taxCalculationResult
         ? {
           monthlyTax: taxCalculationResult.monthlyTax,
@@ -838,7 +838,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Error in updateEmployeeAndSalarySlip:", err);
+    console.error("Error in updateEmployeeAndMasterSalary:", err);
     res
       .status(500)
       .json({ error: "Internal server error", details: err.message });
@@ -855,7 +855,7 @@ exports.calculateTaxForEmployee = async (req, res) => {
       return res.status(400).json({ error: "Invalid employee ID format" });
     }
 
-    const salarySlip = await SalarySlip.findOne({ employee: id });
+    const salarySlip = await MasterSalary.findOne({ employee: id });
     if (!salarySlip) {
       return res
         .status(404)
@@ -869,7 +869,7 @@ exports.calculateTaxForEmployee = async (req, res) => {
         .json({ error: `Tax config for ${fiscalYear} not found` });
     }
 
-    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
+    const taxCalculation = await calculateTaxForMasterSalary(salarySlip, taxCfg);
 
     // Update the salary slip with calculated tax
     await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
@@ -992,7 +992,7 @@ exports.calculatePreviewTax = async (req, res) => {
       ...salaryBreakup,
     };
 
-    const calc = await calculateTaxForSalarySlip(fakeSlip, taxCfg);
+    const calc = await calculateTaxForMasterSalary(fakeSlip, taxCfg);
 
     return res.json({
       success: true,
@@ -1058,7 +1058,7 @@ exports.getAllMasterSalaries = async (req, res) => {
     const ownerId = req.user.owner || req.user._id;
 
     // Fetch all salary templates for this company
-    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).populate("employee").lean();
+    const salaryTemplates = await MasterSalary.find({ owner: ownerId }).populate("employee").lean();
 
     // Filter out any templates where the employee has been deleted (employee is null)
     const validTemplates = salaryTemplates.filter(sal => sal.employee != null);
