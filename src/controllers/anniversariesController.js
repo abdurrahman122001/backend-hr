@@ -43,23 +43,27 @@ exports.getUpcomingAnniversaries = async (req, res) => {
 
     emps.forEach((emp) => {
       // ------------------------------------------------------
-      // 🎂 Birthday Anniversary
+      // 🎂 Birthday Anniversary (includes TODAY)
       // ------------------------------------------------------
       if (emp.dateOfBirth) {
         const upcoming = normalizeToCurrentYear(emp.dateOfBirth);
-
-        if (upcoming && upcoming.isAfter(today) && upcoming.isBefore(next30)) {
-          result.push({
-            type: "birthday",
-            ...emp.toObject(),
-            upcomingDate: upcoming.format("YYYY-MM-DD"),
-            daysLeft: upcoming.diff(today, "day")
-          });
+        
+        if (upcoming) {
+          const daysLeft = upcoming.diff(today, "day");
+          // Include today (daysLeft === 0) and upcoming within next 30 days
+          if (daysLeft >= 0 && daysLeft <= 30) {
+            result.push({
+              type: "birthday",
+              ...emp.toObject(),
+              upcomingDate: upcoming.format("YYYY-MM-DD"),
+              daysLeft: daysLeft
+            });
+          }
         }
       }
 
       // ------------------------------------------------------
-      // 🏆 Work Anniversary
+      // 🏆 Work Anniversary (includes TODAY)
       // ------------------------------------------------------
       if (emp.joiningDate) {
         const joining = dayjs(emp.joiningDate);
@@ -71,13 +75,17 @@ exports.getUpcomingAnniversaries = async (req, res) => {
 
         const upcoming = normalizeToCurrentYear(emp.joiningDate);
 
-        if (upcoming && upcoming.isAfter(today) && upcoming.isBefore(next30)) {
-          result.push({
-            type: "work_anniversary",
-            ...emp.toObject(),
-            upcomingDate: upcoming.format("YYYY-MM-DD"),
-            daysLeft: upcoming.diff(today, "day")
-          });
+        if (upcoming) {
+          const daysLeft = upcoming.diff(today, "day");
+          // Include today (daysLeft === 0) and upcoming within next 30 days
+          if (daysLeft >= 0 && daysLeft <= 30) {
+            result.push({
+              type: "work_anniversary",
+              ...emp.toObject(),
+              upcomingDate: upcoming.format("YYYY-MM-DD"),
+              daysLeft: daysLeft
+            });
+          }
         }
       }
     });
