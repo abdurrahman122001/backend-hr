@@ -131,18 +131,19 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  let grossMonthly = 0;
-  for (const key of COMP_FIELDS) {
-    if (key !== "grossSalary") {
-      const value = await readFirstNumAsync(salarySlip, [key]);
-      grossMonthly += value;
-    }
-  }
-  const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
-  const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
-  const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
-  const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
-  return Math.max(0, finalGrossMonthly - medExemptMonthly);
+  const net = await readFirstNumAsync(salarySlip, ["netPayable"]);
+  const tax = await readFirstNumAsync(salarySlip, ["taxDeduction"]);
+  const vLoan = await readFirstNumAsync(salarySlip, ["loanDeductions.vehicleLoan", "vehicleLoanDeduction"]);
+  const oLoan = await readFirstNumAsync(salarySlip, ["loanDeductions.otherLoans", "otherLoanDeductions"]);
+  const lBenefit = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
+
+  // User Formula: Net + Tax + Loan Deductions + Virtual Benefit
+  const calculatedGross = net + tax + vLoan + oLoan + lBenefit;
+
+  const medTotal = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
+  const medExempt = taxCfg?.enableMedicalExemption ? medTotal : 0;
+
+  return Math.max(0, calculatedGross - medExempt);
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
@@ -160,21 +161,27 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
 
     const basic = await readFirstNumAsync(salarySlip, ["basic"]);
-    const medMonthly = await readFirstNumAsync(salarySlip, [
-      "medicalAllowance",
-    ]);
+    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
 
-    /* ------------------------------------------------------------
-       2) MEDICAL EXEMPTION (Pakistan Law)
-    ------------------------------------------------------------ */
-    const medExemptMonthly = taxCfg?.enableMedicalExemption
-      ? medMonthly   // FULL medical allowance exempt
-      : 0;
+    // Calculate other deductions (non-tax, non-loan repayments) to get the "net" base
+    const deductionKeys = [
+      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
+      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
+      "lifeInsurance", "penalties", "othersDeductions"
+    ];
+    let baseDeductionsMonthly = 0;
+    for (const dKey of deductionKeys) {
+      baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
+    }
+
+    const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
 
     /* ------------------------------------------------------------
        3) TAXABLE MONTHLY INCOME
     ------------------------------------------------------------ */
-    const taxableMonthly = Math.max(0, finalGrossMonthly - medExemptMonthly);
+    const taxableBase = Math.max(0, (finalGrossMonthly + loanBenefitTotal) - baseDeductionsMonthly);
+    const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
+    const taxableMonthly = Math.max(0, taxableBase - medExemptMonthly);
 
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT

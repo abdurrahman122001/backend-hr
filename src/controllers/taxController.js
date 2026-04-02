@@ -179,25 +179,19 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function calculateTaxableMonthlyOnly(slip, taxCfg) {
-  let grossMonthly = 0;
-  for (const key of ALLOWANCE_KEYS) {
-    const value = await readFirstNumAsync(slip, [key]);
-    grossMonthly += value;
-  }
+  const net = await readFirstNumAsync(slip, ["netPayable"]);
+  const tax = await readFirstNumAsync(slip, ["taxDeduction"]);
+  const vLoan = await readFirstNumAsync(slip, ["loanDeductions.vehicleLoan", "vehicleLoanDeduction"]);
+  const oLoan = await readFirstNumAsync(slip, ["loanDeductions.otherLoans", "otherLoanDeductions"]);
+  const lBenefit = await readFirstNumAsync(slip, ["loanBenefits"]);
 
-  let baseDeductionsMonthly = 0;
-  for (const key of BASE_DEDUCTION_KEYS) {
-    const value = await readFirstNumAsync(slip, [key]);
-    baseDeductionsMonthly += value;
-  }
+  // Calculation per User Request: Net + Tax + Loan Deductions + Virtual Loan Benefit
+  const calculatedGross = net + tax + vLoan + oLoan + lBenefit;
 
-  const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
+  const medTotal = await readFirstNumAsync(slip, ["medicalAllowance"]);
+  const medExempt = taxCfg?.enableMedicalExemption ? medTotal : 0;
 
-  const medExemptMonthly = taxCfg?.enableMedicalExemption
-    ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
-    : 0;
-
-  const taxableMonthly = Math.max(0, netBeforeTax - medExemptMonthly);
+  const taxableMonthly = Math.max(0, calculatedGross - medExempt);
   return taxableMonthly;
 }
 
