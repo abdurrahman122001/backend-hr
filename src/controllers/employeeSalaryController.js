@@ -511,6 +511,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       // --- SALARY REVISION HISTORY ---
       // If any compensation fields are being updated, save the current record to history
       let hasActualSalaryChange = false;
+      let hasRevisedInSalary = false;
       const salaryFieldsToCheck = [...COMP_FIELDS];
 
       if (existingSalarySlip) {
@@ -527,8 +528,118 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
         }
       }
 
-      if (hasActualSalaryChange && existingSalarySlip) {
+      // Check if any position has revisedInSalary checked
+      // Fetch employee with experiences from DB since experiences are saved separately
+      const employeeWithExperiences = await Employee.findById(req.params.id).select('experiences');
+      const experiencesFromDB = employeeWithExperiences?.experiences || [];
+      
+      if (experiencesFromDB && Array.isArray(experiencesFromDB)) {
+        for (const exp of experiencesFromDB) {
+          if (exp.positions && Array.isArray(exp.positions)) {
+            for (const pos of exp.positions) {
+              if (pos.revisedInSalary) {
+                hasRevisedInSalary = true;
+                break;
+              }
+            }
+          }
+          if (hasRevisedInSalary) break;
+        }
+      }
+
+      if ((hasActualSalaryChange || hasRevisedInSalary) && existingSalarySlip) {
         try {
+          // Helper function to parse dates in various formats (DD/MM/YYYY, ISO, etc.)
+          const parseDate = (dateStr) => {
+            if (!dateStr) return null;
+            // Try ISO format first
+            let d = new Date(dateStr);
+            if (!isNaN(d.getTime())) return d;
+            
+            // Try DD/MM/YYYY format
+            const parts = dateStr.split('/');
+            if (parts.length === 3) {
+              const day = parseInt(parts[0], 10);
+              const month = parseInt(parts[1], 10) - 1; // JS months are 0-indexed
+              const year = parseInt(parts[2], 10);
+              d = new Date(year, month, day);
+              if (!isNaN(d.getTime())) return d;
+            }
+            
+            // Try MM/DD/YYYY format
+            if (parts.length === 3) {
+              const month = parseInt(parts[0], 10) - 1;
+              const day = parseInt(parts[1], 10);
+              const year = parseInt(parts[2], 10);
+              d = new Date(year, month, day);
+              if (!isNaN(d.getTime())) return d;
+            }
+            
+            return null;
+          };
+
+          // Find the endDate from the previous position (non-current role with end date)
+          let positionEndDate = null;
+          if (experiencesFromDB && Array.isArray(experiencesFromDB)) {
+            for (const exp of experiencesFromDB) {
+              if (exp.positions && Array.isArray(exp.positions) && exp.positions.length > 0) {
+                // Sort positions by startDate to get correct order (oldest first)
+                const sortedPositions = [...exp.positions].sort((a, b) => {
+                  const dateA = a.startDate ? new Date(a.startDate) : new Date(0);
+                  const dateB = b.startDate ? new Date(b.startDate) : new Date(0);
+                  return dateA - dateB;
+                });
+                
+                console.log('Sorted positions:', sortedPositions.map(p => ({ 
+                  title: p.title, 
+                  revisedInSalary: p.revisedInSalary, 
+                  endDate: p.endDate,
+                  isCurrentRole: p.isCurrentRole 
+                })));
+                
+                // Find the position that has revisedInSalary checked
+                // and use the PREVIOUS position's end date
+                for (let i = 0; i < sortedPositions.length; i++) {
+                  const pos = sortedPositions[i];
+                  if (pos.revisedInSalary && i > 0) {
+                    // Get the previous position's end date
+                    const prevPos = sortedPositions[i - 1];
+                    if (prevPos.endDate) {
+                      positionEndDate = parseDate(prevPos.endDate);
+                      console.log('Found previous position end date (position', i, '):', positionEndDate);
+                      break;
+                    }
+                  }
+                }
+                
+                // Fallback: if no end date found yet, use the old logic
+                if (!positionEndDate) {
+                  for (const pos of sortedPositions) {
+                    if (!pos.isCurrentRole && pos.endDate) {
+                      positionEndDate = parseDate(pos.endDate);
+                      break;
+                    }
+                  }
+                }
+                
+                // Second fallback: any position with endDate
+                if (!positionEndDate) {
+                  for (const pos of sortedPositions) {
+                    if (pos.endDate) {
+                      positionEndDate = parseDate(pos.endDate);
+                      break;
+                    }
+                  }
+                }
+              }
+              if (positionEndDate) break;
+            }
+          }
+          
+          console.log('Final position end date for history:', positionEndDate);
+
+          console.log('Position end date found:', positionEndDate); // Debug logging
+
           await SalaryRevisionHistory.create({
             owner: existingSalarySlip.owner,
             employee: existingSalarySlip.employee,
@@ -551,6 +662,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
             grossSalary: existingSalarySlip.grossSalary,
             taxDeduction: existingSalarySlip.taxDeduction,
             netPayable: existingSalarySlip.netPayable,
+            endDate: positionEndDate, // Store the position end date
           });
         } catch (historyErr) {
           console.error("Failed to save salary history:", historyErr);

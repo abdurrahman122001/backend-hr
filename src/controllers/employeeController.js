@@ -158,6 +158,11 @@ exports.getUpcomingBirthdays = async (req, res) => {
       dateOfBirth: { $exists: true, $ne: null, $ne: "" },
       status: { $ne: "offboarded" }, // Exclude offboarded employees
       isTrashed: false, // Also exclude trashed employees
+      $or: [
+        { resignationDate: { $exists: false } },
+        { resignationDate: null },
+        { resignationDate: "" }
+      ], // Exclude employees in notice period (resigned)
     }).select("name dateOfBirth photographUrl email status");
 
     const now = dayjs();
@@ -193,6 +198,11 @@ exports.getUpcomingAnniversaries = async (req, res) => {
       owner: { $in: [ownerId] },
       status: { $ne: "offboarded" },
       isTrashed: false,
+      $or: [
+        { resignationDate: { $exists: false } },
+        { resignationDate: null },
+        { resignationDate: "" }
+      ], // Exclude employees in notice period (resigned)
     }).select(
       "name dateOfBirth joiningDate department designation photographUrl email"
     );

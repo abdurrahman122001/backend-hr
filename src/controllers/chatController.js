@@ -771,7 +771,9 @@ exports.getMessages = async (req, res) => {
 
     console.log(`📨 Found ${messages.length} messages`);
 
-    // Mark messages as read
+    // Mark messages as read and track views for space messages
+    const isSpace = conversation.isGroup || conversation.space;
+    
     const unreadMessages = messages.filter((msg) => {
       if (msg.isGroupMessage || msg.space) {
         return !msg.readBy.some(
@@ -789,8 +791,8 @@ exports.getMessages = async (req, res) => {
     if (unreadMessages.length > 0) {
       console.log(`📖 Marking ${unreadMessages.length} messages as read`);
 
-      if (conversation.isGroup || conversation.space) {
-        // Space/Group message
+      if (isSpace) {
+        // Space/Group message - mark as read AND add view
         await Message.updateMany(
           {
             _id: { $in: unreadMessages.map((m) => m._id) },
@@ -801,7 +803,12 @@ exports.getMessages = async (req, res) => {
                 employee: req.employee._id,
                 readAt: new Date(),
               },
+              viewedBy: {
+                employee: req.employee._id,
+                viewedAt: new Date(),
+              },
             },
+            $inc: { viewCount: 1 },
           }
         );
       } else {
@@ -825,7 +832,6 @@ exports.getMessages = async (req, res) => {
       // ✅ CRITICAL FIX: Emit proper socket events
       const io = req.app.get("io");
       if (io) {
-        const isSpace = conversation.isGroup || conversation.space;
         const room = isSpace
           ? `space_${conversation.space || conversationId}`
           : `conversation_${conversationId}`;
@@ -856,6 +862,41 @@ exports.getMessages = async (req, res) => {
 
         console.log(
           `✅ Emitted read receipts for ${unreadMessages.length} messages to ${room}`
+        );
+      }
+    }
+
+    // ✅ ADDED: Track views for already-read space messages (not just unread ones)
+    if (isSpace) {
+      const alreadyReadMessages = messages.filter((msg) => {
+        // Skip user's own messages
+        if (msg.sender._id.toString() === req.employee._id.toString()) {
+          return false;
+        }
+        // Only include messages already read by this user
+        return msg.readBy.some(
+          (read) => read.employee.toString() === req.employee._id.toString()
+        ) && !msg.viewedBy?.some(
+          (view) => view.employee.toString() === req.employee._id.toString()
+        );
+      });
+
+      if (alreadyReadMessages.length > 0) {
+        console.log(`👁️ Adding views for ${alreadyReadMessages.length} already-read messages`);
+        
+        await Message.updateMany(
+          {
+            _id: { $in: alreadyReadMessages.map((m) => m._id) },
+          },
+          {
+            $addToSet: {
+              viewedBy: {
+                employee: req.employee._id,
+                viewedAt: new Date(),
+              },
+            },
+            $inc: { viewCount: 1 },
+          }
         );
       }
     }
@@ -1502,7 +1543,12 @@ exports.markAsRead = async (req, res) => {
               employee: req.employee._id,
               readAt: new Date(),
             },
+            viewedBy: {
+              employee: req.employee._id,
+              viewedAt: new Date(),
+            },
           },
+          $inc: { viewCount: 1 },
         }
       );
     } else {
@@ -1790,7 +1836,7 @@ exports.spaceMarkAsRead = async (req, res) => {
     });
 
     if (unreadMessages.length > 0) {
-      // Add user to readBy array for all unread messages
+      // Add user to readBy array for all unread messages and track views
       await Message.updateMany(
         {
           _id: { $in: unreadMessages.map((m) => m._id) },
@@ -1802,7 +1848,12 @@ exports.spaceMarkAsRead = async (req, res) => {
               employee: req.employee._id,
               readAt: new Date(),
             },
+            viewedBy: {
+              employee: req.employee._id,
+              viewedAt: new Date(),
+            },
           },
+          $inc: { viewCount: 1 },
         }
       );
     }

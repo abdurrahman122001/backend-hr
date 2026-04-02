@@ -27,7 +27,8 @@ const SalaryRevisionHistorySchema = new Schema({
     taxDeduction: { type: String, default: "" },
     netPayable: { type: String, default: "" },
 
-    revisionDate: { type: Date, default: Date.now }
+    revisionDate: { type: Date, default: Date.now },
+    endDate: { type: Date }  // Position end date from Designation Journey
 }, { timestamps: true });
 
 module.exports = mongoose.model('SalaryRevisionHistory', SalaryRevisionHistorySchema);

@@ -13,7 +13,6 @@ const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
 const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
-const { applyRealTimeLogoutBonus } = require("../utils/bonusService");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 
 // Import early departure bonus deduction from attendance controller
@@ -986,23 +985,6 @@ router.post("/logout", requireAuth, async (req, res) => {
       }
     }
 
-    // ✅ PROCESS BONUS (Early Bird or Non-Working Day)
-    let bonusResult = null;
-    // ✅ SKIP for auto-logouts
-    if (!isAutoLogout) {
-      try {
-        // Use attendanceDate so cross-midnight logouts credit bonus against the login date
-        bonusResult = await applyRealTimeLogoutBonus(
-          employeeId,
-          ownerId,
-          updated._id,
-          attendanceDate
-        );
-      } catch (berr) {
-        console.error("[LOGOUT] Error processing bonuses:", berr);
-      }
-    }
-
     // ✅ PROCESS EARLY DEPARTURE BONUS DEDUCTION
     let earlyDepartureResult = null;
     if (updated && updated.checkIn && updated.checkOut) {
@@ -1051,7 +1033,6 @@ router.post("/logout", requireAuth, async (req, res) => {
       sessionStatus: updated ? updated.status : finalStatus,
       totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
       lateDeductionResult: lateDeductionResult || null,
-      bonusResult: bonusResult || null,
       earlyDepartureResult: earlyDepartureResult || null
     });
   } catch (err) {
