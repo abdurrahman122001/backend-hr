@@ -1,5 +1,6 @@
 const SalarySlip = require("../models/SalarySlip");
 const TaxConfig = require("../models/TaxConfig");
+const LoanDetail = require("../models/LoanDetail");
 const { encrypt, decrypt } = require("../utils/encryption");
 
 const DEBUG_TAX = true;
@@ -193,11 +194,36 @@ async function calculateTaxableMonthlyOnly(slip, taxCfg) {
 
   const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
 
+  // Fetch loan benefits (virtual income) on the fly since they are not in the schema
+  let loanBenefitAmount = 0;
+  try {
+    const employeeId = slip.employee?._id || slip.employee;
+    const loans = await LoanDetail.find({ employee: employeeId });
+    for (const loan of loans) {
+      if (loan.paymentSchedule) {
+        const scheduleItem = loan.paymentSchedule.find(
+          (item) => item.month === slip.month && Number(item.year) === Number(slip.year)
+        );
+        if (scheduleItem && scheduleItem.markupAmount) {
+          // Decrypt and add to benefits
+          const val = Number(await decrypt(scheduleItem.markupAmount)) || 0;
+          loanBenefitAmount += val;
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Error fetching virtual loan benefits for tax:", e);
+  }
+
+  const finalTaxableBase = netBeforeTax + loanBenefitAmount;
+
+  // Medical exemption usually 10% of (basic) or 1/11 of (gross - medical)
+  // User says "medical allowance excempt", fulfilling logic.
   const medExemptMonthly = taxCfg?.enableMedicalExemption
-    ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
+    ? Math.min(finalTaxableBase, Math.round(finalTaxableBase / 11))
     : 0;
 
-  const taxableMonthly = Math.max(0, netBeforeTax - medExemptMonthly);
+  const taxableMonthly = Math.max(0, finalTaxableBase - medExemptMonthly);
   return taxableMonthly;
 }
 

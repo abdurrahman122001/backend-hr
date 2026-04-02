@@ -1,8 +1,10 @@
 const Employee = require("../models/Employees");
-const SalarySlip = require("../models/Salaries");
+const MasterSalary = require("../models/Salaries");
+const MonthlySlip = require("../models/SalarySlip");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
+const LoanDetail = require("../models/LoanDetail");
 const { encrypt, decrypt } = require("../utils/encryption");
 const { sendCompleteProfileLink } = require("../services/profileEmailService");
 const path = require("path");
@@ -133,16 +135,44 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
   let grossMonthly = 0;
   for (const key of COMP_FIELDS) {
-    if (key !== "grossSalary") {
+    if (key !== "grossSalary" && key !== "loanBenefits") {
       const value = await readFirstNumAsync(salarySlip, [key]);
       grossMonthly += value;
     }
   }
-  const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
-  const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
+
+  // Deductions that reduce taxable base (Net Salary logic)
+  const baseDeductionKeys = ["leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction", "providentFundDeduction", "gratuityFundDeduction", "advanceSalaryDeductions", "advanceSalaryDeduction", "medicalInsurance", "lifeInsurance", "penalties", "othersDeductions"];
+  let baseDeductions = 0;
+  for (const k of baseDeductionKeys) {
+    baseDeductions += await readFirstNumAsync(salarySlip, [k]);
+  }
+
+  // Virtual loan benefits
+  let loanBenefitAmount = 0;
+  try {
+    const employeeId = salarySlip.employee?._id || salarySlip.employee;
+    if (employeeId) {
+      const loans = await LoanDetail.find({ employee: employeeId });
+      for (const loan of loans) {
+        if (loan.paymentSchedule) {
+          const scheduleItem = loan.paymentSchedule.find(
+            (item) => item.month === salarySlip.month && Number(item.year) === Number(salarySlip.year)
+          );
+          if (scheduleItem && scheduleItem.markupAmount) {
+            loanBenefitAmount += Number(await decrypt(scheduleItem.markupAmount)) || 0;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Error fetching loan benefits in getTaxableMonthlyOnly:", e);
+  }
+
+  const incomeBase = (grossMonthly - baseDeductions) + loanBenefitAmount;
   const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
   const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
-  return Math.max(0, finalGrossMonthly - medExemptMonthly);
+  return Math.max(0, incomeBase - medExemptMonthly);
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
@@ -172,9 +202,9 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       : 0;
 
     /* ------------------------------------------------------------
-       3) TAXABLE MONTHLY INCOME
+       3) TAXABLE MONTHLY INCOME (Using logic from getTaxableMonthlyOnly)
     ------------------------------------------------------------ */
-    const taxableMonthly = Math.max(0, finalGrossMonthly - medExemptMonthly);
+    const taxableMonthly = await getTaxableMonthlyOnly(salarySlip, taxCfg);
 
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT
@@ -225,7 +255,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     ------------------------------------------------------------ */
     // NEW: Sum actual gross from previous slips in the same fiscal year
     const employeeId = salarySlip.employee?._id || salarySlip.employee;
-    const allSlipsInYear = await SalarySlip.find({
+    const allSlipsInYear = await MonthlySlip.find({
       employee: employeeId,
       owner: salarySlip.owner
     }).lean();
