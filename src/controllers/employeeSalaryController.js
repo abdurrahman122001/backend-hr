@@ -130,6 +130,21 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   return 0;
 }
 
+async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
+  let grossMonthly = 0;
+  for (const key of COMP_FIELDS) {
+    if (key !== "grossSalary") {
+      const value = await readFirstNumAsync(salarySlip, [key]);
+      grossMonthly += value;
+    }
+  }
+  const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
+  const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
+  const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
+  const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
+  return Math.max(0, finalGrossMonthly - medExemptMonthly);
+}
+
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
     // 1) Calculate Gross Monthly Salary
@@ -176,13 +191,13 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
 
     const slipMonth = salarySlip.month;
     const slipYearNum = parseInt(salarySlip.year || new Date().getFullYear());
-    
+
     // Month name to index lookup
     const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const slipMonthIndex = monthNames.indexOf(slipMonth);
 
     const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
-    
+
     // If slip month is Jan–Jun, fiscal year started last calendar year
     if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) {
       fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
@@ -206,9 +221,32 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     if (monthsRemaining < 1) monthsRemaining = 1; // Safety
 
     /* ------------------------------------------------------------
-       5) Annual Taxable Income Using Remaining Months
+       5) Annual Taxable Income Using Remaining Months & Past Slips
     ------------------------------------------------------------ */
-    const annualTaxable = taxableMonthly * monthsRemaining;
+    // NEW: Sum actual gross from previous slips in the same fiscal year
+    const employeeId = salarySlip.employee?._id || salarySlip.employee;
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: salarySlip.owner
+    }).lean();
+
+    const pastFiscalSlips = allSlipsInYear.filter(s => {
+      const sMonthIndex = monthNames.indexOf(s.month);
+      const sYearNum = parseInt(s.year);
+      const sDate = new Date(sYearNum, sMonthIndex, 1);
+      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
+      return sDate >= fiscalStart && sDate < currentSlipDate;
+    });
+
+    let sumPastTaxable = 0;
+    for (const ps of pastFiscalSlips) {
+      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
+    }
+
+    const monthsAlreadyCovered = pastFiscalSlips.length;
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
+
+    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     /* ------------------------------------------------------------
        6) Slab Calculation (annual)
@@ -532,7 +570,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       // Fetch employee with experiences from DB since experiences are saved separately
       const employeeWithExperiences = await Employee.findById(req.params.id).select('experiences');
       const experiencesFromDB = employeeWithExperiences?.experiences || [];
-      
+
       if (experiencesFromDB && Array.isArray(experiencesFromDB)) {
         for (const exp of experiencesFromDB) {
           if (exp.positions && Array.isArray(exp.positions)) {
@@ -555,7 +593,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
             // Try ISO format first
             let d = new Date(dateStr);
             if (!isNaN(d.getTime())) return d;
-            
+
             // Try DD/MM/YYYY format
             const parts = dateStr.split('/');
             if (parts.length === 3) {
@@ -565,7 +603,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
               d = new Date(year, month, day);
               if (!isNaN(d.getTime())) return d;
             }
-            
+
             // Try MM/DD/YYYY format
             if (parts.length === 3) {
               const month = parseInt(parts[0], 10) - 1;
@@ -574,7 +612,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
               d = new Date(year, month, day);
               if (!isNaN(d.getTime())) return d;
             }
-            
+
             return null;
           };
 
@@ -589,14 +627,14 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
                   const dateB = b.startDate ? new Date(b.startDate) : new Date(0);
                   return dateA - dateB;
                 });
-                
-                console.log('Sorted positions:', sortedPositions.map(p => ({ 
-                  title: p.title, 
-                  revisedInSalary: p.revisedInSalary, 
+
+                console.log('Sorted positions:', sortedPositions.map(p => ({
+                  title: p.title,
+                  revisedInSalary: p.revisedInSalary,
                   endDate: p.endDate,
-                  isCurrentRole: p.isCurrentRole 
+                  isCurrentRole: p.isCurrentRole
                 })));
-                
+
                 // Find the position that has revisedInSalary checked
                 // and use the PREVIOUS position's end date
                 for (let i = 0; i < sortedPositions.length; i++) {
@@ -611,7 +649,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
                     }
                   }
                 }
-                
+
                 // Fallback: if no end date found yet, use the old logic
                 if (!positionEndDate) {
                   for (const pos of sortedPositions) {
@@ -621,7 +659,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
                     }
                   }
                 }
-                
+
                 // Second fallback: any position with endDate
                 if (!positionEndDate) {
                   for (const pos of sortedPositions) {
@@ -635,7 +673,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
               if (positionEndDate) break;
             }
           }
-          
+
           console.log('Final position end date for history:', positionEndDate);
 
           console.log('Position end date found:', positionEndDate); // Debug logging
