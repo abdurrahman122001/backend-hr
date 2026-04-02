@@ -1,10 +1,8 @@
 const Employee = require("../models/Employees");
-const MasterSalary = require("../models/Salaries");
-const MonthlySlip = require("../models/SalarySlip");
+const SalarySlip = require("../models/Salaries");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
-const LoanDetail = require("../models/LoanDetail");
 const { encrypt, decrypt } = require("../utils/encryption");
 const { sendCompleteProfileLink } = require("../services/profileEmailService");
 const path = require("path");
@@ -135,47 +133,19 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
   let grossMonthly = 0;
   for (const key of COMP_FIELDS) {
-    if (key !== "grossSalary" && key !== "loanBenefits") {
+    if (key !== "grossSalary") {
       const value = await readFirstNumAsync(salarySlip, [key]);
       grossMonthly += value;
     }
   }
-
-  // Deductions that reduce taxable base (Net Salary logic)
-  const baseDeductionKeys = ["leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction", "providentFundDeduction", "gratuityFundDeduction", "advanceSalaryDeductions", "advanceSalaryDeduction", "medicalInsurance", "lifeInsurance", "penalties", "othersDeductions"];
-  let baseDeductions = 0;
-  for (const k of baseDeductionKeys) {
-    baseDeductions += await readFirstNumAsync(salarySlip, [k]);
-  }
-
-  // Virtual loan benefits
-  let loanBenefitAmount = 0;
-  try {
-    const employeeId = salarySlip.employee?._id || salarySlip.employee;
-    if (employeeId) {
-      const loans = await LoanDetail.find({ employee: employeeId });
-      for (const loan of loans) {
-        if (loan.paymentSchedule) {
-          const scheduleItem = loan.paymentSchedule.find(
-            (item) => item.month === salarySlip.month && Number(item.year) === Number(salarySlip.year)
-          );
-          if (scheduleItem && scheduleItem.markupAmount) {
-            loanBenefitAmount += Number(await decrypt(scheduleItem.markupAmount)) || 0;
-          }
-        }
-      }
-    }
-  } catch (e) {
-    console.error("Error fetching loan benefits in getTaxableMonthlyOnly:", e);
-  }
-
-  const incomeBase = (grossMonthly - baseDeductions) + loanBenefitAmount;
+  const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
+  const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
   const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
   const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
-  return Math.max(0, incomeBase - medExemptMonthly);
+  return Math.max(0, finalGrossMonthly - medExemptMonthly);
 }
 
-async function calculateTaxForMasterSalary(salarySlip, taxCfg) {
+async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
     // 1) Calculate Gross Monthly Salary
     let grossMonthly = 0;
@@ -202,9 +172,9 @@ async function calculateTaxForMasterSalary(salarySlip, taxCfg) {
       : 0;
 
     /* ------------------------------------------------------------
-       3) TAXABLE MONTHLY INCOME (Using logic from getTaxableMonthlyOnly)
+       3) TAXABLE MONTHLY INCOME
     ------------------------------------------------------------ */
-    const taxableMonthly = await getTaxableMonthlyOnly(salarySlip, taxCfg);
+    const taxableMonthly = Math.max(0, finalGrossMonthly - medExemptMonthly);
 
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT
@@ -255,7 +225,7 @@ async function calculateTaxForMasterSalary(salarySlip, taxCfg) {
     ------------------------------------------------------------ */
     // NEW: Sum actual gross from previous slips in the same fiscal year
     const employeeId = salarySlip.employee?._id || salarySlip.employee;
-    const allSlipsInYear = await MonthlySlip.find({
+    const allSlipsInYear = await SalarySlip.find({
       employee: employeeId,
       owner: salarySlip.owner
     }).lean();
@@ -312,7 +282,7 @@ async function calculateTaxForMasterSalary(salarySlip, taxCfg) {
       netPayable,
     };
   } catch (error) {
-    console.error("Error in calculateTaxForMasterSalary:", error);
+    console.error("Error in calculateTaxForSalarySlip:", error);
     throw error;
   }
 }
@@ -324,7 +294,7 @@ async function autoCalculateAndSaveTax(salarySlip) {
       taxCfg = await TaxConfig.findOne().sort({ createdAt: -1 }).lean();
     if (!taxCfg) return null;
 
-    const taxCalculation = await calculateTaxForMasterSalary(salarySlip, taxCfg);
+    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
 
     await writeEnc(salarySlip, "grossSalary", taxCalculation.grossMonthly);
     await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
@@ -366,7 +336,7 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       return res.status(404).json({ error: "Employee not found" });
     }
 
-    const salarySlip = await MasterSalary.findOne({ employee: req.params.id });
+    const salarySlip = await SalarySlip.findOne({ employee: req.params.id });
 
     // fetch shifts (by owner)
     let shifts = [];
@@ -398,27 +368,27 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     employeeObj.providentFund.override = !!employeeObj.providentFund.override;
 
     // salary slip -> decrypted view for FE (including tax fields)
-    let decryptedMasterSalary = salarySlip ? { ...salarySlip.toObject() } : {};
+    let decryptedSalarySlip = salarySlip ? { ...salarySlip.toObject() } : {};
     const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
 
     if (salarySlip) {
       for (const field of ALL_FIELDS) {
-        if (decryptedMasterSalary[field]) {
+        if (decryptedSalarySlip[field]) {
           try {
-            const dv = await decrypt(decryptedMasterSalary[field], req.query.key);
-            decryptedMasterSalary[field] = safeNumber(dv, 0);
+            const dv = await decrypt(decryptedSalarySlip[field], req.query.key);
+            decryptedSalarySlip[field] = safeNumber(dv, 0);
           } catch (err) {
             console.warn(`Failed to decrypt ${field}:`, err);
-            decryptedMasterSalary[field] = 0;
+            decryptedSalarySlip[field] = 0;
           }
         } else {
-          decryptedMasterSalary[field] = 0;
+          decryptedSalarySlip[field] = 0;
         }
       }
-      decryptedMasterSalary.isActive = decryptedMasterSalary.isActive ?? true;
+      decryptedSalarySlip.isActive = decryptedSalarySlip.isActive ?? true;
     } else {
       // default view if no slip yet
-      decryptedMasterSalary = {
+      decryptedSalarySlip = {
         candidateName: employeeObj.name || "",
         candidateEmail: employeeObj.email || "",
         position: employeeObj.designation || "",
@@ -429,18 +399,18 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
         year: new Date().getFullYear().toString(),
         isActive: true,
       };
-      for (const f of ALL_FIELDS) decryptedMasterSalary[f] = 0;
+      for (const f of ALL_FIELDS) decryptedSalarySlip[f] = 0;
     }
 
     res.status(200).json({
       employee: employeeObj,
-      salarySlip: decryptedMasterSalary,
-      encryptedMasterSalary: salarySlip ? salarySlip.toObject() : null,
+      salarySlip: decryptedSalarySlip,
+      encryptedSalarySlip: salarySlip ? salarySlip.toObject() : null,
       shifts,
     });
 
   } catch (err) {
-    console.error("Error in getEmployeeAndMasterSalary:", err);
+    console.error("Error in getEmployeeAndSalarySlip:", err);
     res
       .status(500)
       .json({ error: "Internal server error", details: err.message });
@@ -463,7 +433,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     }
 
     // Fetch existing salary slip
-    const existingMasterSalary = await MasterSalary.findOne({
+    const existingSalarySlip = await SalarySlip.findOne({
       employee: req.params.id,
     });
 
@@ -572,7 +542,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
     /* ------------------ SALARY SLIP UPDATE ------------------ */
 
-    let updatedMasterSalary;
+    let updatedSalarySlip;
     let taxCalculationResult = null;
 
     if (salarySlipData && Object.keys(salarySlipData).length > 0) {
@@ -582,11 +552,11 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       let hasRevisedInSalary = false;
       const salaryFieldsToCheck = [...COMP_FIELDS];
 
-      if (existingMasterSalary) {
+      if (existingSalarySlip) {
         for (const field of salaryFieldsToCheck) {
           if (field in salarySlipData) {
             const newVal = safeNumber(salarySlipData[field], 0);
-            const oldVal = await readEncNumberAsync(existingMasterSalary[field]);
+            const oldVal = await readEncNumberAsync(existingSalarySlip[field]);
             // If the values are different (ignoring minor precision issues), it's a change
             if (Math.abs(newVal - oldVal) >= 0.01) {
               hasActualSalaryChange = true;
@@ -615,7 +585,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
         }
       }
 
-      if ((hasActualSalaryChange || hasRevisedInSalary) && existingMasterSalary) {
+      if ((hasActualSalaryChange || hasRevisedInSalary) && existingSalarySlip) {
         try {
           // Helper function to parse dates in various formats (DD/MM/YYYY, ISO, etc.)
           const parseDate = (dateStr) => {
@@ -709,27 +679,27 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
           console.log('Position end date found:', positionEndDate); // Debug logging
 
           await SalaryRevisionHistory.create({
-            owner: existingMasterSalary.owner,
-            employee: existingMasterSalary.employee,
+            owner: existingSalarySlip.owner,
+            employee: existingSalarySlip.employee,
             designation: existingEmployee.designation, // captured before update
-            basic: existingMasterSalary.basic,
-            dearnessAllowance: existingMasterSalary.dearnessAllowance,
-            houseRentAllowance: existingMasterSalary.houseRentAllowance,
-            conveyanceAllowance: existingMasterSalary.conveyanceAllowance,
-            medicalAllowance: existingMasterSalary.medicalAllowance,
-            utilityAllowance: existingMasterSalary.utilityAllowance,
-            overtimeCompensation: existingMasterSalary.overtimeCompensation,
-            dislocationAllowance: existingMasterSalary.dislocationAllowance,
-            leaveEncashment: existingMasterSalary.leaveEncashment,
-            bonus: existingMasterSalary.bonus,
-            arrears: existingMasterSalary.arrears,
-            autoAllowance: existingMasterSalary.autoAllowance,
-            incentive: existingMasterSalary.incentive,
-            fuelAllowance: existingMasterSalary.fuelAllowance,
-            othersAllowances: existingMasterSalary.othersAllowances,
-            grossSalary: existingMasterSalary.grossSalary,
-            taxDeduction: existingMasterSalary.taxDeduction,
-            netPayable: existingMasterSalary.netPayable,
+            basic: existingSalarySlip.basic,
+            dearnessAllowance: existingSalarySlip.dearnessAllowance,
+            houseRentAllowance: existingSalarySlip.houseRentAllowance,
+            conveyanceAllowance: existingSalarySlip.conveyanceAllowance,
+            medicalAllowance: existingSalarySlip.medicalAllowance,
+            utilityAllowance: existingSalarySlip.utilityAllowance,
+            overtimeCompensation: existingSalarySlip.overtimeCompensation,
+            dislocationAllowance: existingSalarySlip.dislocationAllowance,
+            leaveEncashment: existingSalarySlip.leaveEncashment,
+            bonus: existingSalarySlip.bonus,
+            arrears: existingSalarySlip.arrears,
+            autoAllowance: existingSalarySlip.autoAllowance,
+            incentive: existingSalarySlip.incentive,
+            fuelAllowance: existingSalarySlip.fuelAllowance,
+            othersAllowances: existingSalarySlip.othersAllowances,
+            grossSalary: existingSalarySlip.grossSalary,
+            taxDeduction: existingSalarySlip.taxDeduction,
+            netPayable: existingSalarySlip.netPayable,
             endDate: positionEndDate, // Store the position end date
           });
         } catch (historyErr) {
@@ -775,55 +745,55 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       slipSet.owner = ownerId;
       slipSet.month =
         salarySlipData.month ||
-        existingMasterSalary?.month ||
+        existingSalarySlip?.month ||
         (new Date().getMonth() + 1).toString();
       slipSet.year =
         salarySlipData.year ||
-        existingMasterSalary?.year ||
+        existingSalarySlip?.year ||
         new Date().getFullYear().toString();
 
-      if (existingMasterSalary) {
-        updatedMasterSalary = await MasterSalary.findOneAndUpdate(
+      if (existingSalarySlip) {
+        updatedSalarySlip = await SalarySlip.findOneAndUpdate(
           { employee: req.params.id },
           { $set: { ...slipSet, employee: req.params.id } },
           { new: true }
         );
       } else {
-        updatedMasterSalary = await MasterSalary.create({
+        updatedSalarySlip = await SalarySlip.create({
           ...slipSet,
           employee: req.params.id,
         });
       }
 
-      if (updatedMasterSalary) {
-        taxCalculationResult = await autoCalculateAndSaveTax(updatedMasterSalary);
+      if (updatedSalarySlip) {
+        taxCalculationResult = await autoCalculateAndSaveTax(updatedSalarySlip);
       }
     } else {
-      updatedMasterSalary = existingMasterSalary;
+      updatedSalarySlip = existingSalarySlip;
     }
 
     /* ------------------ RESPONSE ------------------ */
 
-    let decryptedMasterSalary = null;
-    if (updatedMasterSalary) {
-      const raw = updatedMasterSalary.toObject();
-      decryptedMasterSalary = { ...raw };
+    let decryptedSalarySlip = null;
+    if (updatedSalarySlip) {
+      const raw = updatedSalarySlip.toObject();
+      decryptedSalarySlip = { ...raw };
       const ALL_FIELDS = [...COMP_FIELDS, ...TAX_FIELDS];
 
       for (const f of ALL_FIELDS) {
         try {
           const dv = await decrypt(raw[f], req.query.key);
-          decryptedMasterSalary[f] = safeNumber(dv, 0);
+          decryptedSalarySlip[f] = safeNumber(dv, 0);
         } catch {
-          decryptedMasterSalary[f] = 0;
+          decryptedSalarySlip[f] = 0;
         }
       }
     }
 
     res.status(200).json({
       employee: updatedEmployee,
-      salarySlip: decryptedMasterSalary,
-      encryptedMasterSalary: updatedMasterSalary ? updatedMasterSalary.toObject() : null,
+      salarySlip: decryptedSalarySlip,
+      encryptedSalarySlip: updatedSalarySlip ? updatedSalarySlip.toObject() : null,
       taxCalculation: taxCalculationResult
         ? {
           monthlyTax: taxCalculationResult.monthlyTax,
@@ -838,7 +808,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     });
 
   } catch (err) {
-    console.error("Error in updateEmployeeAndMasterSalary:", err);
+    console.error("Error in updateEmployeeAndSalarySlip:", err);
     res
       .status(500)
       .json({ error: "Internal server error", details: err.message });
@@ -855,7 +825,7 @@ exports.calculateTaxForEmployee = async (req, res) => {
       return res.status(400).json({ error: "Invalid employee ID format" });
     }
 
-    const salarySlip = await MasterSalary.findOne({ employee: id });
+    const salarySlip = await SalarySlip.findOne({ employee: id });
     if (!salarySlip) {
       return res
         .status(404)
@@ -869,7 +839,7 @@ exports.calculateTaxForEmployee = async (req, res) => {
         .json({ error: `Tax config for ${fiscalYear} not found` });
     }
 
-    const taxCalculation = await calculateTaxForMasterSalary(salarySlip, taxCfg);
+    const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
 
     // Update the salary slip with calculated tax
     await writeEnc(salarySlip, "taxDeduction", taxCalculation.monthlyTax);
@@ -992,7 +962,7 @@ exports.calculatePreviewTax = async (req, res) => {
       ...salaryBreakup,
     };
 
-    const calc = await calculateTaxForMasterSalary(fakeSlip, taxCfg);
+    const calc = await calculateTaxForSalarySlip(fakeSlip, taxCfg);
 
     return res.json({
       success: true,
@@ -1058,7 +1028,7 @@ exports.getAllMasterSalaries = async (req, res) => {
     const ownerId = req.user.owner || req.user._id;
 
     // Fetch all salary templates for this company
-    const salaryTemplates = await MasterSalary.find({ owner: ownerId }).populate("employee").lean();
+    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).populate("employee").lean();
 
     // Filter out any templates where the employee has been deleted (employee is null)
     const validTemplates = salaryTemplates.filter(sal => sal.employee != null);
