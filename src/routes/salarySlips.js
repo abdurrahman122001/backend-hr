@@ -716,6 +716,15 @@ router.get("/fiscal-year/:employeeId", requireAuth, async (req, res) => {
     const ytdTax = allSlips.reduce((sum, s) => sum + (s.decrypted.taxDeduction || 0), 0);
     const ytdMedical = allSlips.reduce((sum, s) => sum + (s.decrypted.medicalAllowance || 0), 0);
 
+    console.log(`[FiscalYearAPI] Summary for ${employeeId}:`, {
+      monthsFound: allSlips.length,
+      ytdGross,
+      ytdNet,
+      ytdTax,
+      ytdMedical,
+      fiscalYear: `${fiscalStartYear}-${String(fiscalEndYear).slice(-2)}`
+    });
+
     res.json({
       status: "success",
       employeeId,
