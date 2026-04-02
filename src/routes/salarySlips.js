@@ -691,6 +691,15 @@ router.get("/fiscal-year/:employeeId", requireAuth, async (req, res) => {
           }
         }
 
+        // Debug logging for each slip
+        console.log(`[FiscalYearAPI] ${month} ${year} - Slip for ${employeeId}:`, {
+          gross: decryptedFields.grossSalary,
+          medical: decryptedFields.medicalAllowance,
+          tax: decryptedFields.taxDeduction,
+          hasEncryptedGross: !!slipObj.grossSalary,
+          encryptedGrossPreview: slipObj.grossSalary ? slipObj.grossSalary.substring(0, 20) + '...' : 'none'
+        });
+
         // Calculate net salary from decrypted fields
         const netSalary = decryptedFields.netPayable ||
           (decryptedFields.grossSalary - decryptedFields.totalDeductions) ||
