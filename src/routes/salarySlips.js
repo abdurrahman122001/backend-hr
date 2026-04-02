@@ -646,13 +646,18 @@ router.get("/fiscal-year/:employeeId", requireAuth, async (req, res) => {
     const allSlips = [];
     const encKey = encryptionKey || process.env.ENCRYPTION_KEY;
 
+    // Debug logging
+    console.log(`[FiscalYearAPI] Employee: ${employeeId}, Fiscal: ${fiscalStartYear}-${fiscalEndYear}, Key exists: ${!!encKey}`);
+
     for (const { month, year } of fiscalMonths) {
+      // Query using number format since year is stored as number in database
       const slips = await SalarySlip.find({
         employee: new ObjectId(employeeId),
         month: { $regex: new RegExp(`^${month}$`, "i") },
-        year: year,
-        isLocked: true // Only count locked (finalized) slips
+        year: Number(year)
       }).sort({ createdAt: -1 });
+
+      console.log(`[FiscalYearAPI] ${month} ${year}: Found ${slips.length} slips`);
 
       // Take the most recent slip for each month (in case of corrections)
       if (slips.length > 0) {
