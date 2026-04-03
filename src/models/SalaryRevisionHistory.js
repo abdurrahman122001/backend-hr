@@ -26,6 +26,7 @@ const SalaryRevisionHistorySchema = new Schema({
 
     taxDeduction: { type: String, default: "" },
     netPayable: { type: String, default: "" },
+    positionId: { type: String }, // Links to the position in experiences.positions
 
     revisionDate: { type: Date, default: Date.now },
     endDate: { type: Date }  // Position end date from Designation Journey

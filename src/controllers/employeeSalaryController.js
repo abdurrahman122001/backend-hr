@@ -110,9 +110,9 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 
   for (const s of slabs) {
     if (A >= s.from && A <= s.to) {
-      // ⭐ FIXED FORMULA:
-      // annualTax = fixed + (A - s.from) * rate
-      const over = Math.max(0, A - s.from);
+      // ⭐ FIXED FORMULA: Subtract (from - 1) to get amount over the previous slab's limit
+      const baseInclusive = Math.max(0, s.from - 1);
+      const over = Math.max(0, A - baseInclusive);
       const tax = Math.round(s.fixed + over * s.rate);
       return tax;
     }
@@ -120,10 +120,10 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 
   // If highest slab (open ended)
   const last = slabs[slabs.length - 1];
-  if (last.to === Infinity) {
-    const over = Math.max(0, A - last.from);
+  if (last && A >= last.from) {
+    const baseInclusive = Math.max(0, last.from - 1);
+    const over = Math.max(0, A - baseInclusive);
     const tax = Math.round(last.fixed + over * last.rate);
-
     return tax;
   }
 
@@ -131,36 +131,29 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  const net = await readFirstNumAsync(salarySlip, ["netPayable"]);
-  const tax = await readFirstNumAsync(salarySlip, ["taxDeduction"]);
-  const vLoan = await readFirstNumAsync(salarySlip, ["loanDeductions.vehicleLoan", "vehicleLoanDeduction"]);
-  const oLoan = await readFirstNumAsync(salarySlip, ["loanDeductions.otherLoans", "otherLoanDeductions"]);
-  const lBenefit = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
-
-  // User Formula: Net + Tax + Loan Deductions + Virtual Benefit
-  const calculatedGross = net + tax + vLoan + oLoan + lBenefit;
-
-  const medTotal = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
-  const medExempt = taxCfg?.enableMedicalExemption ? medTotal : 0;
-
-  return Math.max(0, calculatedGross - medExempt);
+  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
+  let grossMonthly = 0;
+  for (const key of GROSS_KEYS) {
+    grossMonthly += await readFirstNumAsync(salarySlip, [key]);
+  }
+  return grossMonthly;
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    // 1) Calculate Gross Monthly Salary
+    // 1) Gross Monthly Salary = Basic + Conveyance + Incentive (per policy)
+    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
     let grossMonthly = 0;
-    for (const key of COMP_FIELDS) {
-      if (key !== "grossSalary") {
-        const value = await readFirstNumAsync(salarySlip, [key]);
-        grossMonthly += value;
-      }
+    for (const key of GROSS_KEYS) {
+      grossMonthly += await readFirstNumAsync(salarySlip, [key]);
     }
 
-    const providedGross = await readFirstNumAsync(salarySlip, ["grossSalary"]);
-    const finalGrossMonthly = providedGross > 0 ? providedGross : grossMonthly;
+    // finalGrossMonthly is always basic + conveyance + incentive (ignore any stored grossSalary)
+    const finalGrossMonthly = grossMonthly;
 
     const basic = await readFirstNumAsync(salarySlip, ["basic"]);
+    const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
+    const incentive = await readFirstNumAsync(salarySlip, ["incentive"]);
     const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
 
     // Calculate other deductions (non-tax, non-loan repayments) to get the "net" base
@@ -177,11 +170,10 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
 
     /* ------------------------------------------------------------
-       3) TAXABLE MONTHLY INCOME
+       3) TAXABLE MONTHLY INCOME = Basic + Conveyance + Incentive
     ------------------------------------------------------------ */
-    const taxableBase = Math.max(0, (finalGrossMonthly + loanBenefitTotal) - baseDeductionsMonthly);
-    const medExemptMonthly = taxCfg?.enableMedicalExemption ? medMonthly : 0;
-    const taxableMonthly = Math.max(0, taxableBase - medExemptMonthly);
+    const taxableMonthly = finalGrossMonthly;
+    const medExemptMonthly = 0; // Medical exemption not applicable as per fixed gross rule
 
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT
@@ -273,6 +265,17 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const totalAllowances = finalGrossMonthly - basic;
     const totalDeductions = monthlyTax + leaveDeductions;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
+
+    console.log(`[tax DEBUG] Fiscal Start      = ${fiscalStart.toDateString()}`);
+    console.log(`[tax DEBUG] Joining Date      = ${joiningDate ? joiningDate.toDateString() : "N/A"}`);
+    console.log(`[tax DEBUG] Effective Start    = ${effectiveStart.toDateString()}`);
+    console.log(`[tax DEBUG] Months in Period   = ${monthsRemaining}`);
+    console.log(`[tax DEBUG] Taxable Monthly    = ${taxableMonthly}`);
+    console.log(`[tax DEBUG] Annual Taxable     = ${annualTaxable}`);
+    console.log(`[tax DEBUG] Annual Tax         = ${annualTax}`);
+    console.log(`[tax DEBUG] Monthly Tax        = ${monthlyTax}`);
+    console.log(`[tax DEBUG] TOTAL Deductions   = ${totalDeductions}`);
+    console.log(`[tax DEBUG] Net Payable        = ${netPayable}`);
 
     return {
       grossMonthly: finalGrossMonthly,
@@ -578,12 +581,14 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       const employeeWithExperiences = await Employee.findById(req.params.id).select('experiences');
       const experiencesFromDB = employeeWithExperiences?.experiences || [];
 
+      let revisedPositionId = null;
       if (experiencesFromDB && Array.isArray(experiencesFromDB)) {
         for (const exp of experiencesFromDB) {
           if (exp.positions && Array.isArray(exp.positions)) {
             for (const pos of exp.positions) {
               if (pos.revisedInSalary) {
                 hasRevisedInSalary = true;
+                revisedPositionId = pos._id ? pos._id.toString() : null;
                 break;
               }
             }
@@ -635,13 +640,6 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
                   return dateA - dateB;
                 });
 
-                console.log('Sorted positions:', sortedPositions.map(p => ({
-                  title: p.title,
-                  revisedInSalary: p.revisedInSalary,
-                  endDate: p.endDate,
-                  isCurrentRole: p.isCurrentRole
-                })));
-
                 // Find the position that has revisedInSalary checked
                 // and use the PREVIOUS position's end date
                 for (let i = 0; i < sortedPositions.length; i++) {
@@ -651,7 +649,6 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
                     const prevPos = sortedPositions[i - 1];
                     if (prevPos.endDate) {
                       positionEndDate = parseDate(prevPos.endDate);
-                      console.log('Found previous position end date (position', i, '):', positionEndDate);
                       break;
                     }
                   }
@@ -681,14 +678,28 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
             }
           }
 
-          console.log('Final position end date for history:', positionEndDate);
+          // Find if there's an existing revision to update for this position OR the same designation
+          let existingRevision = null;
+          if (revisedPositionId) {
+            existingRevision = await SalaryRevisionHistory.findOne({
+              employee: req.params.id,
+              positionId: revisedPositionId
+            });
+          }
 
-          console.log('Position end date found:', positionEndDate); // Debug logging
+          if (!existingRevision) {
+            // Fallback: Check if the latest revision for this employee is for the same designation
+            const latest = await SalaryRevisionHistory.findOne({ employee: req.params.id })
+              .sort({ createdAt: -1 });
+            if (latest && latest.designation === existingEmployee.designation) {
+              existingRevision = latest;
+            }
+          }
 
-          await SalaryRevisionHistory.create({
+          const revisionData = {
             owner: existingSalarySlip.owner,
             employee: existingSalarySlip.employee,
-            designation: existingEmployee.designation, // captured before update
+            designation: existingEmployee.designation,
             basic: existingSalarySlip.basic,
             dearnessAllowance: existingSalarySlip.dearnessAllowance,
             houseRentAllowance: existingSalarySlip.houseRentAllowance,
@@ -707,8 +718,19 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
             grossSalary: existingSalarySlip.grossSalary,
             taxDeduction: existingSalarySlip.taxDeduction,
             netPayable: existingSalarySlip.netPayable,
-            endDate: positionEndDate, // Store the position end date
-          });
+            endDate: positionEndDate || (existingRevision ? existingRevision.endDate : null),
+            positionId: revisedPositionId || (existingRevision ? existingRevision.positionId : undefined)
+          };
+
+          if (existingRevision) {
+            // Update existing revision IF salary fields actually changed (optional but cleaner)
+            // Or just update anyway to keep the latest values before current transition
+            await SalaryRevisionHistory.findByIdAndUpdate(existingRevision._id, { $set: revisionData });
+            console.log('Updated existing salary revision history entry:', existingRevision._id);
+          } else {
+            // Create new revision (new designation or first time check)
+            await SalaryRevisionHistory.create(revisionData);
+          }
         } catch (historyErr) {
           console.error("Failed to save salary history:", historyErr);
         }

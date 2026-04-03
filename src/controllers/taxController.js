@@ -89,24 +89,11 @@ const readFirstNumAsync = async (obj, keys) => {
 
 /* ----------------------------- config ----------------------------- */
 
-// Allowances → gross
+// Allowances → gross (Basic + Conveyance + Incentive, per policy)
 const ALLOWANCE_KEYS = [
   "basic",
-  "dearnessAllowance",
-  "houseRentAllowance",
   "conveyanceAllowance",
-  "medicalAllowance",
-  "utilityAllowance",
-  "overtimeCompensation",
-  "overtimeComp",
-  "dislocationAllowance",
-  "leaveEncashment",
-  "bonus",
-  "arrears",
-  "autoAllowance",
   "incentive",
-  "fuelAllowance",
-  "othersAllowances",
 ];
 
 // Base deductions → included in taxable base
@@ -179,20 +166,11 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function calculateTaxableMonthlyOnly(slip, taxCfg) {
-  const net = await readFirstNumAsync(slip, ["netPayable"]);
-  const tax = await readFirstNumAsync(slip, ["taxDeduction"]);
-  const vLoan = await readFirstNumAsync(slip, ["loanDeductions.vehicleLoan", "vehicleLoanDeduction"]);
-  const oLoan = await readFirstNumAsync(slip, ["loanDeductions.otherLoans", "otherLoanDeductions"]);
-  const lBenefit = await readFirstNumAsync(slip, ["loanBenefits"]);
-
-  // Calculation per User Request: Net + Tax + Loan Deductions + Virtual Loan Benefit
-  const calculatedGross = net + tax + vLoan + oLoan + lBenefit;
-
-  const medTotal = await readFirstNumAsync(slip, ["medicalAllowance"]);
-  const medExempt = taxCfg?.enableMedicalExemption ? medTotal : 0;
-
-  const taxableMonthly = Math.max(0, calculatedGross - medExempt);
-  return taxableMonthly;
+  let grossMonthly = 0;
+  for (const key of ALLOWANCE_KEYS) {
+    grossMonthly += await readFirstNumAsync(slip, [key]);
+  }
+  return grossMonthly;
 }
 
 /* ---------------------- slip calculation (async) ---------------------- */
@@ -220,16 +198,9 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     baseDeductionsMonthly += value;
   }
 
-  // 3) Net BEFORE income tax
-  const netBeforeTax = Math.max(0, grossMonthly - baseDeductionsMonthly);
-
-  // 4) Medical exemption
-  const medExemptMonthly = taxCfg?.enableMedicalExemption
-    ? Math.min(netBeforeTax, Math.round(netBeforeTax / 11))
-    : 0;
-
-  // 5) Taxable monthly
-  const taxableMonthly = Math.max(0, netBeforeTax - medExemptMonthly);
+  // 3) Taxable monthly (Basic + Conveyance + Incentive)
+  const taxableMonthly = grossMonthly;
+  const medExemptMonthly = 0; // Not applicable for the fixed gross rule
 
   // 6.1) Calculate pro-rated months remaining in fiscal year (July to June)
   const fiscalStartMonth = 7; // July
@@ -296,11 +267,13 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     console.log("---------------------------------------------------");
     console.log(`[tax DEBUG] Slip ID: ${slip._id}`);
     console.log(`[tax DEBUG] Basic Salary       = ${basic}`);
-    console.log(`[tax DEBUG] Medical Allowance  = ${medMonthly}`);
-    console.log(`[tax DEBUG] Gross Monthly      = ${grossMonthly}`);
+    console.log(`[tax DEBUG] Gross = Basic+Conveyance = ${grossMonthly}`);
     console.log(`[tax DEBUG] Base Deductions    = ${baseDeductionsMonthly}`);
     console.log(`[tax DEBUG] Net Before Tax     = ${netBeforeTax}`);
     console.log(`[tax DEBUG] Medical Exemptions = ${medExemptMonthly}`);
+    console.log(`[tax DEBUG] Joining Date      = ${joiningDate ? joiningDate.toDateString() : "N/A"}`);
+    console.log(`[tax DEBUG] Effective Start    = ${effectiveStart.toDateString()}`);
+    console.log(`[tax DEBUG] Months in Period   = ${monthsRemaining}`);
     console.log(`[tax DEBUG] Taxable Monthly    = ${taxableMonthly}`);
     console.log(`[tax DEBUG] Annual Taxable     = ${annualTaxable}`);
     console.log(`[tax DEBUG] Annual Tax         = ${annualTax}`);

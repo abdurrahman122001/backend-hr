@@ -12,6 +12,7 @@ const PositionSchema = new Schema({
   endDate: { type: Date },
   isCurrentRole: { type: Boolean, default: false },
   description: { type: String },
+  revisedInSalary: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 });
