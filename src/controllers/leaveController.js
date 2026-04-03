@@ -208,7 +208,8 @@ async function analyzeLeaveWithPolicy(employee, leaveData, ownerId) {
       const usedAnnual = leaveSummary.annual
         ? leaveSummary.annual.totalDays
         : 0;
-      const requestedDays = leaveData.dates.length;
+      const requestedHours = leaveData.dates.reduce((sum, day) => sum + (Number(day.hours) || 0), 0);
+      const requestedDays = requestedHours / 8;
       const availableDays = rules.totalPaidLeavesPerYear - usedAnnual;
 
       if (usedAnnual + requestedDays > rules.totalPaidLeavesPerYear) {
@@ -521,9 +522,9 @@ exports.applyLeave = async (req, res) => {
     const startDate = new Date(sortedDates[0].date);
     const endDate = new Date(sortedDates[sortedDates.length - 1].date);
 
-    // Calculate totals
-    const totalDays = dates.length;
-    const totalHours = dates.reduce((sum, day) => sum + day.hours, 0);
+    // Calculate totals based on hours (8 hours = 1 day)
+    const totalHours = dates.reduce((sum, day) => sum + (Number(day.hours) || 0), 0);
+    const totalDays = totalHours / 8;
 
     // Get employee details
     const employee = await Employee.findById(employeeId);

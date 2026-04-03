@@ -40,11 +40,11 @@ router.get('/absences-without-leave', async (req, res) => {
     
     console.log('[DEBUG] Checking absences for employee:', employeeId, 'Name:', req.employee.name);
     
-    // Find all absences for this employee that occurred in the last 7 days
+    // Find all absences or half days for this employee that occurred in the last 7 days
     // and ON OR AFTER their joining date
     const query = { 
       employee: employeeId, 
-      status: 'Absent',
+      status: { $in: ['Absent', 'Abscent', 'Half Day', 'halfday', 'half-day', 'Half-Day'] },
       date: { $lt: todayStr, $gte: sevenDaysAgoStr }
     };
     
