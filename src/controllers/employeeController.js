@@ -156,7 +156,7 @@ exports.getUpcomingBirthdays = async (req, res) => {
     const employees = await Employee.find({
       owner: { $in: [ownerId] },
       dateOfBirth: { $exists: true, $ne: null, $ne: "" },
-      status: { $ne: "offboarded" }, // Exclude offboarded employees
+      status: { $nin: ["offboarded", "resigned", "terminated"] }, // Exclude offboarded, resigned, or terminated
       isTrashed: false, // Also exclude trashed employees
       $or: [
         { resignationDate: { $exists: false } },
@@ -196,7 +196,7 @@ exports.getUpcomingAnniversaries = async (req, res) => {
 
     const emps = await Employee.find({
       owner: { $in: [ownerId] },
-      status: { $ne: "offboarded" },
+      status: { $nin: ["offboarded", "resigned", "terminated"] },
       isTrashed: false,
       $or: [
         { resignationDate: { $exists: false } },

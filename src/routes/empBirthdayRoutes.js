@@ -37,7 +37,13 @@ router.get("/birthdays", requireEmployeeAuth, async (req, res) => {
     const employees = await Employee.find({
       owner: emp.owner,
       dateOfBirth: { $exists: true, $ne: null, $ne: "" },
-      status: { $ne: "offboarded" }, // Exclude offboarded employee
+      status: { $nin: ["offboarded", "resigned", "terminated"] },
+      isTrashed: { $ne: true },
+      $or: [
+        { resignationDate: { $exists: false } },
+        { resignationDate: null },
+        { resignationDate: "" }
+      ],
     }).select("name dateOfBirth photographUrl email");
 
     const now = dayjs();
@@ -71,6 +77,13 @@ router.get("/anniversaries", requireAuth, async (req, res) => {
     const employees = await Employee.find({
       owner: emp.owner,
       dateOfJoining: { $exists: true, $ne: null, $ne: "" },
+      status: { $nin: ["offboarded", "resigned", "terminated"] },
+      isTrashed: { $ne: true },
+      $or: [
+        { resignationDate: { $exists: false } },
+        { resignationDate: null },
+        { resignationDate: "" }
+      ],
     }).select("name dateOfJoining photographUrl email");
 
     const now = dayjs();
