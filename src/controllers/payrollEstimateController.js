@@ -59,7 +59,7 @@ exports.getEstimates = async (req, res) => {
     const owner = req.user._id;
 
     const estimates = await PayrollEstimate.find({ month, year, owner });
-    
+
     // Decrypt overrides before sending to frontend if needed
     // Actually, it's better to send encrypted and let frontend decrypt with its key
     // But since the frontend sends its key, we could decrypt here too.
@@ -138,8 +138,7 @@ exports.clearEstimates = async (req, res) => {
     const owner = req.user._id;
 
     await Promise.all([
-      PayrollEstimate.deleteMany({ month, year, owner }),
-      TaxOverride.deleteMany({ month, year, owner })
+      PayrollEstimate.deleteMany({ month, year, owner })
     ]);
 
     res.json({ success: true, message: "Estimates and tax overrides cleared" });
