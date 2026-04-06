@@ -76,10 +76,10 @@ exports.getEstimates = async (req, res) => {
  */
 exports.upsertTaxOverride = async (req, res) => {
   try {
-    const { employeeId, month, year, taxValue, encryptionKey } = req.body;
+    const { employeeId, taxValue, encryptionKey } = req.body;
     const owner = req.user._id;
 
-    if (!employeeId || !month || !year || taxValue === undefined) {
+    if (!employeeId || taxValue === undefined) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
@@ -87,16 +87,12 @@ exports.upsertTaxOverride = async (req, res) => {
 
     let override = await TaxOverride.findOne({
       employeeId,
-      month,
-      year,
       owner
     });
 
     if (!override) {
       override = new TaxOverride({
         employeeId,
-        month,
-        year,
         owner,
         taxValue: encryptedTaxValue
       });
@@ -106,7 +102,7 @@ exports.upsertTaxOverride = async (req, res) => {
 
     await override.save();
 
-    res.json({ success: true, message: "Tax override updated", override });
+    res.json({ success: true, message: "Tax override updated globally for this employee", override });
   } catch (err) {
     console.error("upsertTaxOverride error:", err);
     res.status(500).json({ error: "Failed to update tax override" });
@@ -118,10 +114,10 @@ exports.upsertTaxOverride = async (req, res) => {
  */
 exports.getTaxOverrides = async (req, res) => {
   try {
-    const { month, year } = req.query;
     const owner = req.user._id;
 
-    const overrides = await TaxOverride.find({ month, year, owner });
+    // Fetch all tax overrides for all employees (global for each)
+    const overrides = await TaxOverride.find({ owner });
     res.json({ overrides });
   } catch (err) {
     console.error("getTaxOverrides error:", err);
