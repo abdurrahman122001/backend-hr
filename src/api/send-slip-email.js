@@ -22,6 +22,12 @@ const monthsList = [
   "November",
   "December",
 ];
+// Helper to normalize month names
+function normMonth(m) {
+  if (!m || typeof m !== "string") return "";
+  const t = m.trim();
+  return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+}
 // Helper to format numbers as currency
 function formatDate(dt) {
   if (!dt) return "-";
@@ -165,90 +171,6 @@ function safeAmountCell(val) {
   }
   const num = Math.round(Number(val));
   return !isNaN(num) ? num.toLocaleString() : "-";
-}
-
-// Render the Loan Table with updated field names - UPDATED TO SHOW ZERO
-function renderLoanTable(loans = []) {
-  const arr = Array.isArray(loans) && loans.length ? loans : [{}];
-
-  console.log("Rendering loan table with data:", loans);
-
-  return `
-    <div style="margin-bottom: 24px;">
-      <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
-        Loan Details
-      </div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
-        <thead>
-          <tr style="background:#f1f5f9;">
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Type</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Current Month</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Previous Month(s)</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Markup)</th>
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Net Balance</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${arr
-            .map(
-              (loan) => `
-            <tr>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.type || "-"
-              }</td>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.amountPaidCurrentMonth !== undefined &&
-                loan.amountPaidCurrentMonth !== null &&
-                loan.amountPaidCurrentMonth !== "" &&
-                !isNaN(Number(loan.amountPaidCurrentMonth))
-                  ? Math.round(
-                      Number(loan.amountPaidCurrentMonth)
-                    ).toLocaleString()
-                  : "-"
-              }</td>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.amountPaidPreviousMonths !== undefined &&
-                loan.amountPaidPreviousMonths !== null &&
-                loan.amountPaidPreviousMonths !== "" &&
-                !isNaN(Number(loan.amountPaidPreviousMonths))
-                  ? Math.round(
-                      Number(loan.amountPaidPreviousMonths)
-                    ).toLocaleString()
-                  : "-"
-              }</td>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.balancePrincipal !== undefined &&
-                loan.balancePrincipal !== null &&
-                loan.balancePrincipal !== "" &&
-                !isNaN(Number(loan.balancePrincipal))
-                  ? Math.round(Number(loan.balancePrincipal)).toLocaleString()
-                  : "-"
-              }</td>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.balanceMarkup !== undefined &&
-                loan.balanceMarkup !== null &&
-                loan.balanceMarkup !== "" &&
-                !isNaN(Number(loan.balanceMarkup))
-                  ? Math.round(Number(loan.balanceMarkup)).toLocaleString()
-                  : "-"
-              }</td>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.netBalance !== undefined &&
-                loan.netBalance !== null &&
-                loan.netBalance !== "" &&
-                !isNaN(Number(loan.netBalance))
-                  ? Math.round(Number(loan.netBalance)).toLocaleString()
-                  : "-"
-              }</td>
-            </tr>
-          `
-            )
-            .join("")}
-        </tbody>
-      </table>
-    </div>
-  `;
 }
 
 function safeDecimalCell(val) {
@@ -870,7 +792,8 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
   }
 
   // Extract month and year from monthYear (e.g. "July 2025")
-  const [monthName, yearStr] = monthYear.split(" ");
+  const [monthNameRaw, yearStr] = monthYear.split(" ");
+  const monthName = normMonth(monthNameRaw);
   const year = parseInt(yearStr);
 
   if (!monthName || !yearStr || isNaN(year)) {
@@ -892,7 +815,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
 
     // Find the matching schedule entry for current month
     const currentMonthEntry = loan.paymentSchedule.find(
-      (ps) => ps.month === monthName && ps.year === year
+      (ps) => normMonth(ps.month) === monthName && Number(ps.year) === year
     );
 
     if (!currentMonthEntry) continue;
@@ -940,7 +863,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
       
       for (const scheduleEntry of loan.paymentSchedule) {
         const scheduleYear = Number(scheduleEntry.year);
-        const scheduleMonth = scheduleEntry.month;
+        const scheduleMonth = normMonth(scheduleEntry.month);
         const currentMonthIndex = monthsList.indexOf(monthName);
         const scheduleMonthIndex = monthsList.indexOf(scheduleMonth);
 
@@ -994,7 +917,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
       let remainingMarkup = 0;
       for (const scheduleEntry of loan.paymentSchedule) {
         const scheduleYear = Number(scheduleEntry.year);
-        const scheduleMonth = scheduleEntry.month;
+        const scheduleMonth = normMonth(scheduleEntry.month);
         const currentMonthIndex = monthsList.indexOf(monthName);
         const scheduleMonthIndex = monthsList.indexOf(scheduleMonth);
 

@@ -22,7 +22,7 @@ ensureDir(cvDir);
 /* ---------- multer setup (PDF only) ---------- */
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    if (file.fieldname === "cnic") {
+    if (file.fieldname === "cnicFront" || file.fieldname === "cnicBack") {
       cb(null, cnicDir);
     } else if (file.fieldname === "resume") {
       cb(null, cvDir);
@@ -82,8 +82,9 @@ router.get("/:employeeId", async (req, res) => {
 router.post(
   "/:employeeId",
   upload.fields([
-    { name: "cnic",   maxCount: 1 },
-    { name: "resume", maxCount: 1 },
+    { name: "cnicFront", maxCount: 1 },
+    { name: "cnicBack",  maxCount: 1 },
+    { name: "resume",    maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -94,13 +95,20 @@ router.post(
 
       const existing = await EmployeeDocument.findOne({ employee: emp._id });
 
-      let cnicUrl   = existing?.cnicUrl   || "";
-      let resumeUrl = existing?.resumeUrl || "";
+      let cnicFrontUrl = existing?.cnicFrontUrl || "";
+      let cnicBackUrl  = existing?.cnicBackUrl  || "";
+      let resumeUrl    = existing?.resumeUrl     || "";
 
-      if (req.files?.cnic?.[0]) {
-        const file = req.files.cnic[0];
-        if (cnicUrl) removeFileIfExists(path.join(__dirname, "..", cnicUrl));
-        cnicUrl = relPath(file.path);
+      if (req.files?.cnicFront?.[0]) {
+        const file = req.files.cnicFront[0];
+        if (cnicFrontUrl) removeFileIfExists(path.join(__dirname, "..", cnicFrontUrl));
+        cnicFrontUrl = relPath(file.path);
+      }
+
+      if (req.files?.cnicBack?.[0]) {
+        const file = req.files.cnicBack[0];
+        if (cnicBackUrl) removeFileIfExists(path.join(__dirname, "..", cnicBackUrl));
+        cnicBackUrl = relPath(file.path);
       }
 
       if (req.files?.resume?.[0]) {
@@ -111,7 +119,7 @@ router.post(
 
       const updated = await EmployeeDocument.findOneAndUpdate(
         { employee: emp._id },
-        { $set: { cnicUrl, resumeUrl } },
+        { $set: { cnicFrontUrl, cnicBackUrl, resumeUrl } },
         { upsert: true, new: true }
       );
 
@@ -131,7 +139,7 @@ router.post(
 router.delete("/:employeeId/:type", async (req, res) => {
   try {
     const { employeeId, type } = req.params;
-    if (!["cnic", "resume"].includes(type)) {
+    if (!["cnicFront", "cnicBack", "resume"].includes(type)) {
       return res.status(400).json({ success: false, error: "Invalid type" });
     }
 
@@ -141,7 +149,12 @@ router.delete("/:employeeId/:type", async (req, res) => {
     const doc = await EmployeeDocument.findOne({ employee: emp._id });
     if (!doc) return res.json({ success: true, data: null });
 
-    const field = type === "cnic" ? "cnicUrl" : "resumeUrl";
+    const fieldMap = {
+      cnicFront: "cnicFrontUrl",
+      cnicBack: "cnicBackUrl",
+      resume: "resumeUrl",
+    };
+    const field = fieldMap[type];
 
     if (doc[field]) {
       removeFileIfExists(path.join(__dirname, "..", doc[field]));

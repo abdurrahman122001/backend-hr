@@ -10,8 +10,9 @@ const EmployeeDocumentSchema = new mongoose.Schema(
     },
 
     // File URLs (relative to server, e.g. /uploads/...)
-    cnicUrl:   { type: String, default: "" },  // single PDF for CNIC (front+back together)
-    resumeUrl: { type: String, default: "" },
+    cnicFrontUrl: { type: String, default: "" }, // PDF for CNIC front
+    cnicBackUrl:  { type: String, default: "" }, // PDF for CNIC back
+    resumeUrl:    { type: String, default: "" },
 
     // Optional metadata
     verified: { type: Boolean, default: false },

@@ -50,6 +50,9 @@ router.post(
     { name: "interCertificate",    maxCount: 1 },
     { name: "graduateCertificate", maxCount: 1 },
     { name: "mastersCertificate",  maxCount: 1 },
+    { name: "cnicFrontFile",       maxCount: 1 },
+    { name: "cnicBackFile",        maxCount: 1 },
+    { name: "cvFile",              maxCount: 1 },
   ]),
   async (req, res) => {
     try {
@@ -174,6 +177,44 @@ router.post(
 
         const fileUrl = `/uploads/certificates/${emp._id}/${type}/${fileName}`;
         await Certificate.create({ employee: emp._id, type, fileUrl });
+      }
+
+      // — Save CNIC Front & Back and Resume to EmployeeDocument —
+      let cnicFrontUrl = "";
+      let cnicBackUrl  = "";
+      let resumeUrl    = "";
+      if (req.files.cnicFrontFile?.[0]) {
+        const file = req.files.cnicFrontFile[0];
+        const dest = path.join(__dirname, "../uploads/cnic");
+        fs.mkdirSync(dest, { recursive: true });
+        const fileName = `${Date.now()}_front_${file.originalname.replace(/\s+/g, "_")}`;
+        fs.renameSync(file.path, path.join(dest, fileName));
+        cnicFrontUrl = `/uploads/cnic/${fileName}`;
+      }
+      if (req.files.cnicBackFile?.[0]) {
+        const file = req.files.cnicBackFile[0];
+        const dest = path.join(__dirname, "../uploads/cnic");
+        fs.mkdirSync(dest, { recursive: true });
+        const fileName = `${Date.now()}_back_${file.originalname.replace(/\s+/g, "_")}`;
+        fs.renameSync(file.path, path.join(dest, fileName));
+        cnicBackUrl = `/uploads/cnic/${fileName}`;
+      }
+      if (req.files.cvFile?.[0]) {
+        const file = req.files.cvFile[0];
+        const dest = path.join(__dirname, "../uploads/cv");
+        fs.mkdirSync(dest, { recursive: true });
+        const fileName = `${Date.now()}_resume_${file.originalname.replace(/\s+/g, "_")}`;
+        fs.renameSync(file.path, path.join(dest, fileName));
+        resumeUrl = `/uploads/cv/${fileName}`;
+      }
+      if (cnicFrontUrl || cnicBackUrl || resumeUrl) {
+        const EmployeeDocument = require("../models/EmployeeDocument");
+        await EmployeeDocument.create({
+          employee: emp._id,
+          cnicFrontUrl,
+          cnicBackUrl,
+          resumeUrl,
+        });
       }
 
       // — Create initial Salaries using the same encrypted values —
