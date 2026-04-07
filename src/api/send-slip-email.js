@@ -471,6 +471,7 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
   hasActiveLoans,
+  isDraft = false, // Flag for draft watermark
 }) {
   const amountInWords =
     netSalary != null && netSalary !== 0
@@ -687,14 +688,31 @@ function buildSalarySlipHtml({
     <head>
       <meta charset="UTF-8">
       <title>Pay Slip - ${company.name}</title>
+      <style>
+        .draft-watermark {
+          position: relative;
+          background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><text x="400" y="500" font-size="180" font-weight="900" fill="rgba(239, 68, 68, 0.12)" text-anchor="middle" transform="rotate(-45 400 500)" letter-spacing="8">DRAFT</text></svg>') center center no-repeat;
+          background-size: contain;
+          background-attachment: fixed;
+        }
+      </style>
     </head>
     <body style="background:#f1f5f9; margin:0; padding:0; font-family:Segoe UI,Arial,sans-serif; color:#1e293b;">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
         <tr>
           <td align="center">
-            <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe;">
+            <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe; position:relative;">
+              ${isDraft ? `
               <tr>
-                <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb;">
+                <td align="center" valign="middle" style="padding:0; position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; pointer-events:none;">
+                  <div style="position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
+                    <span style="font-size:180px; font-weight:900; color:rgba(239, 68, 68, 0.12); transform:rotate(-45deg); white-space:nowrap; letter-spacing:8px; font-family:Arial, sans-serif;">DRAFT</span>
+                  </div>
+                </td>
+              </tr>
+              ` : ''}
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb; position:relative; background:#fff;">
                   <table width="100%">
                     <tr>
                       <td valign="middle" style="padding:0;">
@@ -713,20 +731,20 @@ function buildSalarySlipHtml({
                   </table>
                 </td>
               </tr>
-              <tr>
-                <td style="padding:32px 32px 8px 32px;">${employeeTable}</td>
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:32px 32px 8px 32px; position:relative; background:#fff;">${employeeTable}</td>
               </tr>
-              <tr>
-                <td style="padding:8px 32px 8px 32px;">${salaryDeductionTable}</td>
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:8px 32px 8px 32px; position:relative; background:#fff;">${salaryDeductionTable}</td>
               </tr>
-              <tr>
-                <td style="padding:24px 32px;">${netSalaryTable}</td>
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:24px 32px; position:relative; background:#fff;">${netSalaryTable}</td>
               </tr>
-              <tr>
-                <td style="padding:10px 32px 24px 32px;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:10px 32px 24px 32px; position:relative; background:#fff;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
               </tr>
-              <tr>
-                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb;">
+              <tr style="position:relative; z-index:1;">
+                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; position:relative; background:#fff;">
                   This is a system generated pay slip and does not require signature.
                 </td>
               </tr>
@@ -1026,6 +1044,7 @@ module.exports = async function sendSlipEmail(req, res) {
       deductions,
       netSalary,
       loans: manualLoans, // Allow manual loan data to be passed
+      isDraft = false, // Flag for draft watermark
     } = req.body;
 
     let slip,
@@ -1439,6 +1458,7 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledCompFields,
       enabledDedFields,
       hasActiveLoans,
+      isDraft, // Pass draft flag
     });
 
     // Send email

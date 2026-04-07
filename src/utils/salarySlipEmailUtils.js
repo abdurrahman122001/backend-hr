@@ -113,6 +113,7 @@ function buildSalarySlipHtml({
   dedLabels = {},       // (optional)
   enabledCompFields = [],
   enabledDedFields = [],
+  isDraft = false,      // Flag to show DRAFT watermark
 }) {
   // Employee Info Table
   function renderEmployeeInfo(empObj) {
@@ -213,9 +214,16 @@ function buildSalarySlipHtml({
         <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
           <tr>
             <td align="center">
-              <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe;">
+              <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe; position:relative; overflow:hidden;">
+                ${isDraft ? `
                 <tr>
-                  <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb;">
+                  <td colspan="2" style="padding:0; position:relative; height:0;">
+                    <div style="position:absolute; top:50%; left:50%; transform:translate(-50%, -50%) rotate(-45deg); font-size:150px; font-weight:bold; color:rgba(239, 68, 68, 0.15); white-space:nowrap; z-index:1; pointer-events:none; line-height:1;">DRAFT</div>
+                  </td>
+                </tr>
+                ` : ''}
+                <tr>
+                  <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb; position:relative; z-index:2;">
                     <table width="100%">
                       <tr>
                         <td valign="middle" style="padding:0;">
@@ -231,27 +239,27 @@ function buildSalarySlipHtml({
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:32px 32px 8px 32px;">
+                  <td style="padding:32px 32px 8px 32px; position:relative; z-index:2;">
                     ${renderEmployeeInfo(employee || {})}
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:8px 32px 8px 32px;">
+                  <td style="padding:8px 32px 8px 32px; position:relative; z-index:2;">
                     ${renderTable(compensation || {}, enabledCompFields, compLabels, "Earnings & Allowances", "#d1fae5")}
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:8px 32px 8px 32px;">
+                  <td style="padding:8px 32px 8px 32px; position:relative; z-index:2;">
                     ${renderTable(deductions || {}, enabledDedFields, dedLabels, "Deductions", "#fee2e2")}
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:24px 32px;">
+                  <td style="padding:24px 32px; position:relative; z-index:2;">
                     ${renderNetSalaryTable(netSalary)}
                   </td>
                 </tr>
                 <tr>
-                  <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb;">
+                  <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; position:relative; z-index:2;">
                     This is a system generated pay slip and does not require signature.
                   </td>
                 </tr>
