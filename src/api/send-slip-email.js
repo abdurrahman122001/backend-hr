@@ -450,6 +450,42 @@ function buildNetSalaryTable({
   `;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// DRAFT WATERMARK BANNER — email-safe, no CSS position/transform required
+// Renders a full-width banner right below the header row when isDraft=true.
+// Uses a base64-encoded inline SVG so every email client renders the text.
+// ─────────────────────────────────────────────────────────────────────────────
+function buildDraftBannerRow() {
+  // SVG: 800 × 80 px — large red "DRAFT" centred on a very light red wash
+  // Use an HTML-based banner (no external images) to avoid data-URI loading issues in some clients
+  const bannerBg = "#fee2e2";
+  const bannerTextColor = "rgba(220,38,38,0.22)";
+
+  return `
+    <tr>
+      <td align="center" style="padding:0; background:#fff;">
+        <!--[if !mso]><!-->
+        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0; padding:0;">
+          <tr>
+            <td align="center" style="background:${bannerBg}; padding:18px 0;">
+              <div style="display:inline-block; max-width:880px; width:100%; text-align:center; font-size:72px; line-height:1; font-weight:900; color:${bannerTextColor}; letter-spacing:18px; font-family:Arial, Helvetica, sans-serif;">DRAFT</div>
+            </td>
+          </tr>
+        </table>
+        <!--<![endif]-->
+        <!--[if mso]>
+        <table width="1200" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td align="center" style="background:#fee2e2; padding:18px 0;">
+              <span style="font-size:64px; font-weight:900; color:#b91c1c; font-family:Arial,sans-serif; letter-spacing:18px; opacity:0.35; display:block;">DRAFT</span>
+            </td>
+          </tr>
+        </table>
+        <![endif]-->
+      </td>
+    </tr>`;
+}
+
 function buildSalarySlipHtml({
   employee,
   compensation,
@@ -471,7 +507,7 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
   hasActiveLoans,
-  isDraft = false, // Flag for draft watermark
+  isDraft = false,
 }) {
   const amountInWords =
     netSalary != null && netSalary !== 0
@@ -557,11 +593,9 @@ function buildSalarySlipHtml({
     let totalEarnings = 0;
     let totalDeductions = 0;
 
-    // Generate rows for allowances in the specified order
     compKeys.forEach((compKey) => {
       const rawVal = compObj[compKey];
       const numVal = Number(rawVal);
-      // Only add to totalEarnings if it is a valid number
       if (!isNaN(numVal)) totalEarnings += numVal;
       compRows += `
     <tr>
@@ -578,7 +612,6 @@ function buildSalarySlipHtml({
     dedKeys.forEach((dedKey) => {
       const rawVal = dedObj[dedKey];
       const numVal = Number(rawVal);
-      // Only add to totalDeductions if it is a valid number
       if (!isNaN(numVal)) totalDeductions += numVal;
       dedRows += `
     <tr>
@@ -592,21 +625,20 @@ function buildSalarySlipHtml({
   `;
     });
 
-    // Add padding rows if one table has more rows than the other
     const maxRows = Math.max(compKeys.length, dedKeys.length);
     for (let i = compKeys.length; i < maxRows; i++) {
       compRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
       </tr>
     `;
     }
     for (let i = dedKeys.length; i < maxRows; i++) {
       dedRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;"> </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px;"> </td>
       </tr>
     `;
     }
@@ -622,7 +654,7 @@ function buildSalarySlipHtml({
         <tr>
           <td valign="top" width="50%" style="padding-right:10px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
-              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Salary & Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
+              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Salary &amp; Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:11px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${compRows}</tbody>
               <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${
                 totalEarnings != null && totalEarnings !== 0
@@ -683,71 +715,88 @@ function buildSalarySlipHtml({
     enabledNetSalaryFields,
   });
 
+  // Build the centered watermark HTML (inlined SVG for modern clients + MSO fallback)
+  const watermarkHtml = `
+    <tr>
+      <td style="padding:0; background:#fff;">
+        <!--[if !mso]><!-->
+        <div style="width:100%; text-align:center; margin-top:-120px; pointer-events:none;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="700" height="700" viewBox="0 0 700 700" style="opacity:0.12; transform:rotate(-30deg); display:inline-block;">
+            <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="180" font-weight="900" font-family="Arial, Helvetica, sans-serif" fill="#DC2626">DRAFT</text>
+          </svg>
+        </div>
+        <!--<![endif]-->
+        <!--[if mso]>
+        <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" style="padding:0; margin:0;">
+          <span style="font-size:64px; color:#f3caca; font-weight:900; opacity:0.18; display:block;">DRAFT</span>
+        </td></tr></table>
+        <![endif]-->
+      </td>
+    </tr>`;
+
+  // Keep old top banner if needed (not injected by default)
+  const draftBannerRow = "";
+
   return `<!DOCTYPE html>
   <html>
     <head>
       <meta charset="UTF-8">
-      <title>Pay Slip - ${company.name}</title>
-      <style>
-        .draft-watermark {
-          position: relative;
-          background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="800" height="1000"><text x="400" y="500" font-size="180" font-weight="900" fill="rgba(239, 68, 68, 0.12)" text-anchor="middle" transform="rotate(-45 400 500)" letter-spacing="8">DRAFT</text></svg>') center center no-repeat;
-          background-size: contain;
-          background-attachment: fixed;
-        }
-      </style>
+      <title>Pay Slip${isDraft ? " [DRAFT]" : ""} - ${company.name}</title>
     </head>
     <body style="background:#f1f5f9; margin:0; padding:0; font-family:Segoe UI,Arial,sans-serif; color:#1e293b;">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
         <tr>
           <td align="center">
-            <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe; position:relative;">
-              ${isDraft ? `
+            <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe;">
+
+              <!-- ── HEADER ── -->
               <tr>
-                <td align="center" valign="middle" style="padding:0; position:absolute; top:0; left:0; width:100%; height:100%; z-index:0; pointer-events:none;">
-                  <div style="position:relative; width:100%; height:100%; display:flex; align-items:center; justify-content:center;">
-                    <span style="font-size:180px; font-weight:900; color:rgba(239, 68, 68, 0.12); transform:rotate(-45deg); white-space:nowrap; letter-spacing:8px; font-family:Arial, sans-serif;">DRAFT</span>
-                  </div>
-                </td>
-              </tr>
-              ` : ''}
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb; position:relative; background:#fff;">
-                  <table width="100%">
+                <td style="padding:24px 32px 16px 32px; border-bottom:1px solid #e5e7eb; background:#fff; border-radius:14px 14px 0 0;">
+                  <table width="100%" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td valign="middle" style="padding:0;">
-                        <span style="font-size:22px; font-weight:700; color:#1d4ed8;">${
-                          company.name
-                        }</span><br>
-                        <span style="color:#334155; font-size:15px; font-weight:500;">${
-                          company.address
-                        }</span>
+                        <span style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</span><br>
+                        <span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>
                       </td>
                       <td valign="top" align="right" style="padding:0;">
-                        <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip – ${monthYear}</span><br>
+                        <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip &#8211; ${monthYear}</span><br>
                         <span style="color:#64748b; font-size:13px;">Generated: ${new Date().toLocaleString()}</span>
                       </td>
                     </tr>
                   </table>
                 </td>
               </tr>
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:32px 32px 8px 32px; position:relative; background:#fff;">${employeeTable}</td>
+
+              <!-- ── CENTERED WATERMARK (inlined SVG, overlaps content where supported) ── -->
+              ${watermarkHtml}
+
+              <!-- ── EMPLOYEE PROFILE ── -->
+              <tr>
+                <td style="padding:32px 32px 8px 32px; background:#fff;">${employeeTable}</td>
               </tr>
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:8px 32px 8px 32px; position:relative; background:#fff;">${salaryDeductionTable}</td>
+
+              <!-- ── SALARY & DEDUCTIONS ── -->
+              <tr>
+                <td style="padding:8px 32px 8px 32px; background:#fff;">${salaryDeductionTable}</td>
               </tr>
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:24px 32px; position:relative; background:#fff;">${netSalaryTable}</td>
+
+              <!-- ── NET SALARY ── -->
+              <tr>
+                <td style="padding:24px 32px; background:#fff;">${netSalaryTable}</td>
               </tr>
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:10px 32px 24px 32px; position:relative; background:#fff;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
+
+              <!-- ── LOANS / PF / GRATUITY / LEAVES ── -->
+              <tr>
+                <td style="padding:10px 32px 24px 32px; background:#fff;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
               </tr>
-              <tr style="position:relative; z-index:1;">
-                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; position:relative; background:#fff;">
+
+              <!-- ── FOOTER ── -->
+              <tr>
+                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; background:#fff; border-radius:0 0 14px 14px;">
                   This is a system generated pay slip and does not require signature.
                 </td>
               </tr>
+
             </table>
           </td>
         </tr>
@@ -798,18 +847,17 @@ function normalizeFields(fieldArr, orderArr) {
         Array.isArray(f) ? f[1] : typeof f === "object" && f.key ? f.key : f
       )
     : [];
-  // Ensure loanBenefits is included if not explicitly disabled
   if (!keys.includes("loanBenefits")) {
     keys.push("loanBenefits");
   }
   return orderArr.filter((key) => keys.includes(key));
 }
+
 async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
   if (!monthYear) {
     throw new Error("monthYear is required");
   }
 
-  // Extract month and year from monthYear (e.g. "July 2025")
   const [monthNameRaw, yearStr] = monthYear.split(" ");
   const monthName = normMonth(monthNameRaw);
   const year = parseInt(yearStr);
@@ -820,10 +868,8 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
     );
   }
 
-  // Find all loans for this employee
   const loans = await LoanDetail.find({ employee: employeeId }).lean();
 
-  // Process each loan's payment schedule
   const loanDetails = [];
   let totalLoanBenefits = 0;
   let totalLoanInstallments = 0;
@@ -831,7 +877,6 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
   for (const loan of loans) {
     if (!loan.paymentSchedule || !Array.isArray(loan.paymentSchedule)) continue;
 
-    // Find the matching schedule entry for current month
     const currentMonthEntry = loan.paymentSchedule.find(
       (ps) => normMonth(ps.month) === monthName && Number(ps.year) === year
     );
@@ -839,7 +884,6 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
     if (!currentMonthEntry) continue;
 
     try {
-      // Decrypt the relevant amounts
       const loanAmount = loan.loanAmount
         ? parseFloat(await decrypt(loan.loanAmount, decryptionKey)) || 0
         : 0;
@@ -860,7 +904,7 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
 
       let currentMonthPayment = 0;
       let currentMonthPrincipal = 0;
-      
+
       if (currentMonthEntry.totalPayment) {
         currentMonthPayment =
           parseFloat(
@@ -871,21 +915,18 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
           parseFloat(await decrypt(loan.monthlyInstallment, decryptionKey)) ||
           0;
       }
-      
-      // Calculate current month principal (total payment - markup)
+
       currentMonthPrincipal = Math.max(0, currentMonthPayment - currentMonthMarkup);
 
-      // Calculate previous months PRINCIPAL payments (all principal payments before current month)
       let previousMonthsPrincipal = 0;
       let previousMonthsTotalPayment = 0;
-      
+
       for (const scheduleEntry of loan.paymentSchedule) {
         const scheduleYear = Number(scheduleEntry.year);
         const scheduleMonth = normMonth(scheduleEntry.month);
         const currentMonthIndex = monthsList.indexOf(monthName);
         const scheduleMonthIndex = monthsList.indexOf(scheduleMonth);
 
-        // Check if this schedule entry is before the current month
         const isBeforeCurrentMonth =
           scheduleYear < year ||
           (scheduleYear === year && scheduleMonthIndex < currentMonthIndex);
@@ -893,45 +934,39 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         if (isBeforeCurrentMonth) {
           let entryTotalPayment = 0;
           let entryMarkup = 0;
-          
+
           if (scheduleEntry.totalPayment) {
             entryTotalPayment =
               parseFloat(
                 await decrypt(scheduleEntry.totalPayment, decryptionKey)
               ) || 0;
           }
-          
+
           if (scheduleEntry.markupAmount) {
             entryMarkup =
               parseFloat(
                 await decrypt(scheduleEntry.markupAmount, decryptionKey)
               ) || 0;
           }
-          
-          // Calculate principal for this entry
+
           const entryPrincipal = Math.max(0, entryTotalPayment - entryMarkup);
           previousMonthsPrincipal += entryPrincipal;
           previousMonthsTotalPayment += entryTotalPayment;
         }
       }
 
-      // Get outstanding balance from current month's schedule entry (if available)
-      // This should be the principal balance AFTER this month's payment
       let principalBalance = 0;
       if (currentMonthEntry.outstanding) {
         principalBalance = parseFloat(
           await decrypt(currentMonthEntry.outstanding, decryptionKey)
         ) || 0;
       } else {
-        // Calculate principal balance if outstanding field is not available
-        // Principal balance = original loan amount - (previous principal + current principal)
         principalBalance = Math.max(
-          0, 
+          0,
           loanAmount - (previousMonthsPrincipal + currentMonthPrincipal)
         );
       }
 
-      // Calculate remaining markup balance (future markup payments)
       let remainingMarkup = 0;
       for (const scheduleEntry of loan.paymentSchedule) {
         const scheduleYear = Number(scheduleEntry.year);
@@ -939,7 +974,6 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         const currentMonthIndex = monthsList.indexOf(monthName);
         const scheduleMonthIndex = monthsList.indexOf(scheduleMonth);
 
-        // Check if this schedule entry is after the current month
         const isAfterCurrentMonth =
           scheduleYear > year ||
           (scheduleYear === year && scheduleMonthIndex > currentMonthIndex);
@@ -953,20 +987,16 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         }
       }
 
-      // Calculate TOTAL paid so far (for reference)
       const totalPaidSoFar = previousMonthsTotalPayment + currentMonthPayment;
-      
-      // NET BALANCE: Just the principal balance (NOT principal + markup)
       const netBalance = principalBalance;
 
       loanDetails.push({
         type: loan.type || "Personal Loan",
-        amountPaidCurrentMonth: currentMonthPayment, // Total installment for current month
-        amountPaidPreviousMonths: previousMonthsPrincipal, // Only principal for previous months
+        amountPaidCurrentMonth: currentMonthPayment,
+        amountPaidPreviousMonths: previousMonthsPrincipal,
         balancePrincipal: principalBalance,
         balanceMarkup: remainingMarkup,
-        netBalance: netBalance, // Just the principal balance
-        // Additional details for reference
+        netBalance: netBalance,
         loanAmount: loanAmount,
         totalMarkup: totalMarkup,
         totalToBePaid: totalToBePaid,
@@ -974,9 +1004,8 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
         markupValue: loan.markupValue || 0,
         markupType: loan.markupType || "fixed",
         loanId: loan._id.toString(),
-        // For debugging/verification
         totalPaidSoFar: totalPaidSoFar,
-        principalPaidSoFar: previousMonthsPrincipal + currentMonthPrincipal
+        principalPaidSoFar: previousMonthsPrincipal + currentMonthPrincipal,
       });
 
       totalLoanBenefits += currentMonthMarkup;
@@ -1017,7 +1046,6 @@ module.exports = async function sendSlipEmail(req, res) {
     const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
 
-    // Ensure loanBenefits is included in enabledCompFields
     let enabledCompFields = normalizeFields(
       salaryFieldsDoc?.enabledSalaryFields || [...ALLOWANCE_ORDER],
       ALLOWANCE_ORDER
@@ -1043,8 +1071,8 @@ module.exports = async function sendSlipEmail(req, res) {
       compensation,
       deductions,
       netSalary,
-      loans: manualLoans, // Allow manual loan data to be passed
-      isDraft = false, // Flag for draft watermark
+      loans: manualLoans,
+      isDraft = false,
     } = req.body;
 
     let slip,
@@ -1059,7 +1087,6 @@ module.exports = async function sendSlipEmail(req, res) {
     let hasActiveLoans = false;
 
     if (slipId) {
-      // Database-driven slip
       slip = await SalarySlip.findById(slipId)
         .populate({
           path: "employee",
@@ -1072,7 +1099,6 @@ module.exports = async function sendSlipEmail(req, res) {
           .json({ success: false, message: "Salary slip not found" });
       }
 
-      // Fetch leave records
       leaves = {
         annualEntitled: "-",
         annualAvailedYTD: "-",
@@ -1096,9 +1122,7 @@ module.exports = async function sendSlipEmail(req, res) {
         otherBalance: "-",
       };
 
-      // --- New monthly leave calculation (uses the helper)
       if (slip && slip.employee && slip.employee._id) {
-        // Get month/year for this slip (e.g., "July 2025" => "July", 2025)
         let slipMonth = "";
         let slipYear = "";
         if (monthYearFromBody) {
@@ -1111,13 +1135,11 @@ module.exports = async function sendSlipEmail(req, res) {
           slipYear = now.getFullYear();
         }
 
-        // Get entitlement (total + bonus) exactly like your router
         const emp = slip.employee;
         const total = emp.leaveEntitlement?.total || 0;
         const bonus = emp.leaveEntitlement?.bonus || 0;
         const entitled = total + bonus;
 
-        // Calculate using the exact same helper as in router
         const leaveSummaryResult =
           await leaveSummary.calculateYTDLeaveWithRunningBalance(
             emp._id,
@@ -1126,7 +1148,6 @@ module.exports = async function sendSlipEmail(req, res) {
             slipMonth
           );
 
-        // Fill your leaves object accordingly (annual only, for now)
         leaves.annualEntitled = total;
         leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
         leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
@@ -1134,7 +1155,6 @@ module.exports = async function sendSlipEmail(req, res) {
         leaves.annualBonus = bonus;
       }
 
-      // Decrypt fields
       const decryptField = async (encryptedValue) => {
         if (!encryptedValue || encryptedValue === "" || encryptedValue === 0)
           return "-";
@@ -1148,7 +1168,6 @@ module.exports = async function sendSlipEmail(req, res) {
 
       const employeeId = slip.employee?._id;
 
-      // Calculate loan benefits and details
       let totalLoanBenefits = 0;
       hasActiveLoans = false;
 
@@ -1188,17 +1207,14 @@ module.exports = async function sendSlipEmail(req, res) {
         }
       }
 
-      // Compensation
       const compensationPromises = enabledCompFields
-        .filter((key) => key !== "loanBenefits") // Handle loanBenefits separately
+        .filter((key) => key !== "loanBenefits")
         .map(async (key) => [key, await decryptField(slip[key])]);
       compensationData = Object.fromEntries(
         await Promise.all(compensationPromises)
       );
-      // Add loan benefits to compensation
       compensationData.loanBenefits = totalLoanBenefits;
 
-      // Deductions
       deductionsData = {};
       for (const key of enabledDedFields) {
         if (
@@ -1217,7 +1233,6 @@ module.exports = async function sendSlipEmail(req, res) {
         }
       }
 
-      // Convert to numbers for calculations
       const toSafeNumber = (v) =>
         v === "-" ||
         v === undefined ||
@@ -1233,7 +1248,6 @@ module.exports = async function sendSlipEmail(req, res) {
         Object.entries(deductionsData).map(([k, v]) => [k, toSafeNumber(v)])
       );
 
-      // Net salary
       const totalEarnings = enabledCompFields.reduce(
         (sum, key) => sum + (compensationData[key] || 0),
         0
@@ -1244,10 +1258,8 @@ module.exports = async function sendSlipEmail(req, res) {
       );
       netSalaryData = totalEarnings - totalDeductions;
 
-      // Employee data
       employeeData = slip.employee;
 
-      // Provident Fund Calculations
       const basicSalary = Number(await decryptField(slip.basic)) || 0;
       const pfRate =
         Number(await decryptField(slip.employee?.providentFund?.pfRate)) || 0;
@@ -1271,7 +1283,6 @@ module.exports = async function sendSlipEmail(req, res) {
             : "-",
       };
 
-      // Gratuity Fund Calculations
       const currentDate = new Date();
       const yearsOfService = calculateYearsOfService(
         slip.employee?.joiningDate,
@@ -1316,7 +1327,6 @@ module.exports = async function sendSlipEmail(req, res) {
             : "-",
       };
     } else {
-      // Manual slip mode
       if (
         !employee ||
         !email ||
@@ -1331,7 +1341,6 @@ module.exports = async function sendSlipEmail(req, res) {
         });
       }
 
-      // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(email)) {
         return res
@@ -1339,23 +1348,19 @@ module.exports = async function sendSlipEmail(req, res) {
           .json({ success: false, message: "Invalid email address" });
       }
 
-      // Use provided data directly
       employeeData = employee;
       compensationData = compensation;
       deductionsData = deductions;
       netSalaryData = netSalary;
 
-      // LOAN DATA: use loan field if provided, else empty array (needed by renderLoanTable)
       loans = Array.isArray(manualLoans)
         ? manualLoans
         : req.body.loan
         ? [req.body.loan]
         : [];
 
-      // Set hasActiveLoans based on provided loans
       hasActiveLoans = loans.length > 0;
 
-      // LEAVE DATA: use leaves field if provided, else default object (needed by renderLeaveTable)
       leaves = req.body.leaves || {
         annualEntitled: "-",
         annualAvailedYTD: "-",
@@ -1379,7 +1384,6 @@ module.exports = async function sendSlipEmail(req, res) {
         otherBalance: "-",
       };
 
-      // Provident Fund & Gratuity Fund
       providentFundData = {
         providentFundBalanceBF: "-",
         employeeProvidentFundContribution: "-",
@@ -1405,7 +1409,6 @@ module.exports = async function sendSlipEmail(req, res) {
       }
     }
 
-    // Month/Year handling
     let monthYear = monthYearFromBody;
     if (!monthYear) {
       monthYear = new Date().toLocaleDateString("en-GB", {
@@ -1414,7 +1417,6 @@ module.exports = async function sendSlipEmail(req, res) {
       });
     }
 
-    // Labels (use provided labels or defaults)
     const labelsData = labels || {
       compensation: Object.fromEntries(
         enabledCompFields.map((key) => [key, ALLOWANCES_LABELS[key] || key])
@@ -1425,7 +1427,6 @@ module.exports = async function sendSlipEmail(req, res) {
       employee: PROFILE_LABELS,
     };
 
-    // Debug logging
     console.log("Final loan data for email:", {
       showLoanDetails,
       hasActiveLoans,
@@ -1458,7 +1459,7 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledCompFields,
       enabledDedFields,
       hasActiveLoans,
-      isDraft, // Pass draft flag
+      isDraft,
     });
 
     // Send email
@@ -1483,7 +1484,7 @@ module.exports = async function sendSlipEmail(req, res) {
         process.env.MAIL_FROM_ADDRESS
       }>`,
       to: email,
-      subject: `Salary Slip${
+      subject: `${isDraft ? "[DRAFT] " : ""}Salary Slip${
         employeeData?.name ? " - " + employeeData.name : ""
       }`,
       html,

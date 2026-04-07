@@ -109,6 +109,7 @@ const salaryStructureRoutes = require("./routes/salaryStructure");
 const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
 const chatThreadRoutes = require("./routes/chatThreadRoutes");
 const attendanceAccessRouter = require("./routes/attendanceAccess");
+const payrollAccessRouter = require("./routes/payrollAccess");
 const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 
 const app = express();
@@ -234,19 +235,19 @@ app.use("/api/admin/specific-non-working-days", requireAuth, specificNonWorkingD
 
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
-app.use("/api/company-profile", requireAuth, companyProfile);
+app.use("/api/company-profile", unifiedAuth, companyProfile);
 app.use("/api/docs", requireAuth, docsRouter);
 app.use("/api/employee-salary", employeeSalaryRouter);
 app.use("/api/departments", requireAuth, departmentsRouter);
 app.use("/api/designations", requireAuth, designationsRouter);
 app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
-app.use("/api/salary-fields", requireAuth, salarySlipFields);
+app.use("/api/salary-fields", unifiedAuth, salarySlipFields);
 app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
 app.use("/api/onboarding", requireAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
 // Mount at /api so /api/leave-summary-history works
 // Mount leave-related summary routes under /api/attendance
-app.use("/api/leave-summary-history", attendanceAuth, attendanceLeaveSummaryRouter);
+app.use("/api/leave-summary-history", unifiedAuth, attendanceLeaveSummaryRouter);
 app.use("/api/admin/leave-summary-history", requireAuth, attendanceLeaveSummaryRouter);
 
 app.use("/api", employeeLeaveSummary);
@@ -306,6 +307,7 @@ app.use("/api/promotion", requireAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
 app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
 app.use("/api/attendance-access", attendanceAccessRouter);
+app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", requireAuth, payrollEstimateRouter);
 // ---------- MongoDB ----------

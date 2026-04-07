@@ -32,6 +32,7 @@ const {
   MAIL_FROM_ADDRESS,
   MAIL_FROM_NAME,
   MAIL_ENCRYPTION,
+  NODE_ENV,
 } = process.env;
 
 // ---------------------
@@ -542,14 +543,17 @@ router.post("/login", async (req, res) => {
     }
 
     // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
-    const isTrusted = emp.trustedDevices?.some(
+    // ✅ DEV MODE: Auto-trust devices if NODE_ENV=development (skip 2FA for testing)
+    const devModeAutoTrust = NODE_ENV === "development";
+    
+    const isTrusted = devModeAutoTrust || emp.trustedDevices?.some(
       (d) =>
         (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
         (deviceToken && d.deviceId === deviceToken)
     );
 
-    // UNRECOGNIZED DEVICE (2FA flow)
-    if (!isTrusted) {
+    // UNRECOGNIZED DEVICE (2FA flow) — SKIPPED IN DEV MODE
+    if (!isTrusted && !devModeAutoTrust) {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const expires = Date.now() + 10 * 60 * 1000;
       codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
@@ -614,6 +618,24 @@ router.post("/login", async (req, res) => {
     }
 
     // 5. AUTHORIZED: NORMAL LOGIN (Create or Restore Attendance)
+    
+    // ✅ DEV MODE: Auto-register device as trusted on first login
+    if (devModeAutoTrust && !isTrusted) {
+      const deviceId = crypto.randomBytes(32).toString("hex");
+      const userAgent = req.headers["user-agent"] || "unknown";
+      const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
+      
+      emp.trustedDevices.push({
+        deviceId,
+        deviceFingerprint,
+        userAgent,
+        ip,
+        addedAt: new Date(),
+      });
+      await emp.save();
+      console.log(`✅ [DEV MODE] Auto-registered device for ${emp.companyEmail}`);
+    }
+    
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
     
     // ✅ RE-FETCH attendance to get updated status after restoration

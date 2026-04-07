@@ -4,10 +4,15 @@ const SalarySlipFields = require("../models/SalarySlipFields");
 
 // Utility to get correct owner for settings (super-admin for admins, else self)
 function getFieldsOwner(req) {
+  // If it's an employee (unifiedAuth), they already have the owner ID attached
+  if (req.user.isEmployee) {
+    return req.user.owner;
+  }
+  // Admin logic
   if (req.user.role === "admin" && req.user.createdBy) {
     return req.user.createdBy;
   }
-  return req.user._id;
+  return req.user.owner || req.user._id;
 }
 
 exports.getForLoggedInUser = async (req, res) => {
