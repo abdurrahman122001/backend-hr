@@ -2355,12 +2355,8 @@ exports.editMessage = async function editMessage(req, res) {
             approvedBy: req.employee._id,
             clientSupervision: clientSupervision,
           });
-        });
-
-        // 🔥 CRITICAL FIX: REMOVED overly-permissive manager notification
-        // Don't notify ALL managers about every auto-approved message
-        // Only involved users (sender, receivers, current user) should be notified
-        // (Already handled in involvedUsersArray above)
+        })
+        
       } else if (msg.approvalStatus === "pending" && clientRequiresApproval) {
         // Notify ALL involved users about pending status
         involvedUsersArray.forEach((userId) => {
