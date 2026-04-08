@@ -1,25 +1,25 @@
 const express = require('express');
 const router  = express.Router();
 const taxController = require('../controllers/taxController');
-const auth = require('../middleware/auth');
+const anyPayrollAuth = require('../middleware/anyPayrollAuth');
 
 // ──────────── Tax Config CRUD (slabs + fiscal year) ────────────
-router.get('/config',           auth, taxController.getTaxConfig);
-router.post('/config',          auth, taxController.saveTaxConfig);
-router.delete('/config/:fiscalYear', auth, taxController.deleteTaxConfig);
+router.get('/config',           anyPayrollAuth, taxController.getTaxConfig);
+router.post('/config',          anyPayrollAuth, taxController.saveTaxConfig);
+router.delete('/config/:fiscalYear', anyPayrollAuth, taxController.deleteTaxConfig);
 
 // ──────────── Auto-tax management ────────────
-router.post('/auto-tax/enable',  auth, taxController.enableAutoTax);
-router.post('/auto-tax/disable', auth, taxController.disableAutoTax);
-router.get('/auto-tax/status',   auth, taxController.getAutoTaxStatus);
+router.post('/auto-tax/enable',  anyPayrollAuth, taxController.enableAutoTax);
+router.post('/auto-tax/disable', anyPayrollAuth, taxController.disableAutoTax);
+router.get('/auto-tax/status',   anyPayrollAuth, taxController.getAutoTaxStatus);
 
 // ──────────── Apply / recalculate ────────────
-router.post('/manual-apply',    auth, taxController.manualApplyTax);
-router.post('/enable',          auth, taxController.enableTaxForOwner);
-router.post('/update',          auth, taxController.updateTaxForOwner);
+router.post('/manual-apply',    anyPayrollAuth, taxController.manualApplyTax);
+router.post('/enable',          anyPayrollAuth, taxController.enableTaxForOwner);
+router.post('/update',          anyPayrollAuth, taxController.updateTaxForOwner);
 
 // ──────────── Reporting ────────────
-router.get('/owner-slips',              auth, taxController.getOwnerSlipSummaries);
-router.get('/calculation/:slipId',      auth, taxController.getTaxCalculationDetails);
+router.get('/owner-slips',              anyPayrollAuth, taxController.getOwnerSlipSummaries);
+router.get('/calculation/:slipId',      anyPayrollAuth, taxController.getTaxCalculationDetails);
 
 module.exports = router;

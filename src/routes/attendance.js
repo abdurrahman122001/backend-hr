@@ -11,7 +11,7 @@ const {
   getChangeLogs
 } = require('../controllers/attendanceController');
 const AttendanceLog = require('../models/AttendanceLog');
-const requireAuth = require('../middleware/auth');
+const anyPayrollAuth = require('../middleware/anyPayrollAuth');
 const leaveYearBalanceController = require('../controllers/leaveYearBalanceController');
 const Employee = require("../models/Employees");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
@@ -24,7 +24,7 @@ const attendanceAuth = require('../middleware/attendanceAuth');
 router.post('/', markAttendance);      // upsert by {employee, date}
 router.get('/', getRecordsByDate);    // GET /api/attendance?date=YYYY-MM-DD
 router.get('/stats', getStats);            // GET /api/attendance/stats?date=YYYY-MM-DD
-router.get('/change-logs', requireAuth, getChangeLogs); // GET /api/attendance/change-logs (admin)
+router.get('/change-logs', anyPayrollAuth, getChangeLogs); // GET /api/attendance/change-logs (admin)
 router.get('/audit-logs', attendanceAuth, getChangeLogs); // GET /api/attendance/audit-logs (attendance app)
 
 // Fiscal month logic (26th to 25th)
@@ -191,7 +191,7 @@ async function calculateMonthlyBalances(ownerId, employeeId, leaveYear) {
     };
 }
 // GET between-shift login logs
-router.get('/logs/between-shift', requireAuth, async (req, res) => {
+router.get('/logs/between-shift', anyPayrollAuth, async (req, res) => {
   try {
     let { ownerId, startDate, endDate, employeeId } = req.query;
 
@@ -233,7 +233,7 @@ router.get('/logs/between-shift', requireAuth, async (req, res) => {
 });
 
 // UPDATE LOG STATUS (for admin review)
-router.patch('/logs/between-shift/:id', requireAuth, async (req, res) => {
+router.patch('/logs/between-shift/:id', anyPayrollAuth, async (req, res) => {
   try {
     const { status, notes } = req.body;
     const logId = req.params.id;

@@ -211,67 +211,69 @@ app.use("/api/attendance", attendanceAuth, attendanceRouter);
 app.use("/api/attendances", requireAuth, attendanceRouter); // For super-admin access
 
 // Separate routes for different access levels
-app.use("/api/admin/employees", requireAuth, employeesRouter); // Super-admin only
-app.use("/api/admin/attendances", requireAuth, attendanceRouter); // Super-admin attendance
+const anyPayrollAuth = require("./middleware/anyPayrollAuth");
 
-app.use("/api/leaves", requireAuth, leavesRouter);
-app.use("/api/settings", attendanceAuth, settingsRouter);
-app.use("/api/admin/settings", requireAuth, settingsRouter);
+app.use("/api/admin/employees", anyPayrollAuth, employeesRouter); // Allowed for delegated
+app.use("/api/admin/attendances", anyPayrollAuth, attendanceRouter); // Allowed for delegated
 
-app.use("/api/payroll-periods", attendanceAuth, payrollPeriodsRouter);
-app.use("/api/admin/payroll-periods", requireAuth, payrollPeriodsRouter);
+app.use("/api/leaves", anyPayrollAuth, leavesRouter);
+app.use("/api/settings", anyPayrollAuth, settingsRouter);
+app.use("/api/admin/settings", anyPayrollAuth, settingsRouter);
+
+app.use("/api/payroll-periods", anyPayrollAuth, payrollPeriodsRouter);
+app.use("/api/admin/payroll-periods", anyPayrollAuth, payrollPeriodsRouter);
 
 
-app.use("/api/staff", requireAuth, staffRouter);
-app.use("/api/salary-slips", requireAuth, salarySlipsRouter);
-app.use("/api/shifts", attendanceAuth, shiftsRouter);
-app.use("/api/admin/shifts", requireAuth, shiftsRouter);
+app.use("/api/staff", anyPayrollAuth, staffRouter);
+app.use("/api/salary-slips", anyPayrollAuth, salarySlipsRouter);
+app.use("/api/shifts", anyPayrollAuth, shiftsRouter);
+app.use("/api/admin/shifts", anyPayrollAuth, shiftsRouter);
 
-app.use("/api/offer-letter", requireAuth, offerLetterRoutes);
-app.use("/api/attendance-config", attendanceAuth, attendanceConfigRouter);
-app.use("/api/admin/attendance-config", requireAuth, attendanceConfigRouter);
-app.use("/api/specific-non-working-days", attendanceAuth, specificNonWorkingDayRouter);
-app.use("/api/admin/specific-non-working-days", requireAuth, specificNonWorkingDayRouter);
+app.use("/api/offer-letter", anyPayrollAuth, offerLetterRoutes);
+app.use("/api/attendance-config", anyPayrollAuth, attendanceConfigRouter);
+app.use("/api/admin/attendance-config", anyPayrollAuth, attendanceConfigRouter);
+app.use("/api/specific-non-working-days", anyPayrollAuth, specificNonWorkingDayRouter);
+app.use("/api/admin/specific-non-working-days", anyPayrollAuth, specificNonWorkingDayRouter);
 
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", unifiedAuth, companyProfile);
-app.use("/api/docs", requireAuth, docsRouter);
-app.use("/api/employee-salary", employeeSalaryRouter);
-app.use("/api/departments", requireAuth, departmentsRouter);
-app.use("/api/designations", requireAuth, designationsRouter);
-app.use("/api/salary-settings", requireAuth, salarySettingsRoutes);
+app.use("/api/docs", anyPayrollAuth, docsRouter);
+app.use("/api/employee-salary", anyPayrollAuth, employeeSalaryRouter);
+app.use("/api/departments", anyPayrollAuth, departmentsRouter);
+app.use("/api/designations", anyPayrollAuth, designationsRouter);
+app.use("/api/salary-settings", anyPayrollAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", unifiedAuth, salarySlipFields);
-app.use("/api/send-slip-email", requireAuth, sendSlipEmail);
-app.use("/api/onboarding", requireAuth, onboardingRouter);
+app.use("/api/send-slip-email", anyPayrollAuth, sendSlipEmail);
+app.use("/api/onboarding", anyPayrollAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
 // Mount at /api so /api/leave-summary-history works
 // Mount leave-related summary routes under /api/attendance
 app.use("/api/leave-summary-history", unifiedAuth, attendanceLeaveSummaryRouter);
-app.use("/api/admin/leave-summary-history", requireAuth, attendanceLeaveSummaryRouter);
+app.use("/api/admin/leave-summary-history", anyPayrollAuth, attendanceLeaveSummaryRouter);
 
 app.use("/api", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
-app.use("/api/loans", loansRoutes);
-app.use("/api/loan", loansRoutes);
+app.use("/api/loans", anyPayrollAuth, loansRoutes);
+app.use("/api/loan", anyPayrollAuth, loansRoutes);
 
 app.use("/api/probation-periods", probationPeriodRouter);
-app.use("/api/leave-records", requireAuth, leaveRecordsRouter);
+app.use("/api/leave-records", anyPayrollAuth, leaveRecordsRouter);
 app.use("/api/certificates", certificateRoutes);
 app.use("/api/font-setting", fontSettingRoute);
-app.use("/api/decryption-keys", requireAuth, decryptionKeysRoute);
-app.use("/api/extra-fields", requireAuth, ExtraFields);
-app.use("/api/pf", pfRoute);
-app.use("/api/gratuity", requireAuth, gratuityRoute);
-app.use("/api/role", requireAuth, roleRoutes);
-app.use("/api/pages", requireAuth, pageRoute);
-app.use("/api/users", requireAuth, usersRoute);
-app.use("/api/setDate", requireAuth, setDateRoute);
-app.use("/api/signature", requireAuth, signatureRoute);
+app.use("/api/decryption-keys", anyPayrollAuth, decryptionKeysRoute);
+app.use("/api/extra-fields", anyPayrollAuth, ExtraFields);
+app.use("/api/pf", anyPayrollAuth, pfRoute);
+app.use("/api/gratuity", anyPayrollAuth, gratuityRoute);
+app.use("/api/role", anyPayrollAuth, roleRoutes);
+app.use("/api/pages", anyPayrollAuth, pageRoute);
+app.use("/api/users", anyPayrollAuth, usersRoute);
+app.use("/api/setDate", anyPayrollAuth, setDateRoute);
+app.use("/api/signature", anyPayrollAuth, signatureRoute);
 app.use("/api/emp-attendance", requireEmployeeAuth, empAttendanceRouter);
 app.use("/api/emp-birthdays", employeeBirthdays);
-app.use("/api/tax", taxRoutes);
+app.use("/api/tax", anyPayrollAuth, taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
 app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
 
@@ -279,18 +281,18 @@ app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/client-info", clientInfoRoutes);
 app.use("/api/assignment-messages", assignMessageRoutes);
-app.use("/api/generate", requireAuth, generateRouter);
+app.use("/api/generate", anyPayrollAuth, generateRouter);
 app.get("/api/health", (_req, res) => res.json({ ok: true }));
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
-app.use("/api/offer-email", requireAuth, offerEmail);
-app.use("/api/events", requireAuth, eventRoutes);
+app.use("/api/offer-email", anyPayrollAuth, offerEmail);
+app.use("/api/events", anyPayrollAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
 app.use("/api/team-anniversaries", empAuth, anniversariesRoute);
-app.use("/api/notice-period", requireAuth, noticePeriodRouter);
-app.use("/api/hr-policies", requireAuth, hrPolicyRoute);
+app.use("/api/notice-period", anyPayrollAuth, noticePeriodRouter);
+app.use("/api/hr-policies", anyPayrollAuth, hrPolicyRoute);
 app.use("/api/bugs", bugRoutes);
-app.use("/api/hierarchy", requireAuth, hierarchyRoute);
+app.use("/api/hierarchy", anyPayrollAuth, hierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);
@@ -303,13 +305,13 @@ app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
 app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
-app.use("/api/promotion", requireAuth, promotionRoutes);
+app.use("/api/promotion", anyPayrollAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
-app.use("/api/probation-leave-approvals", requireAuth, probationLeaveApprovalsRouter);
+app.use("/api/probation-leave-approvals", anyPayrollAuth, probationLeaveApprovalsRouter);
 app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
-app.use("/api/payroll-estimates", requireAuth, payrollEstimateRouter);
+app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
