@@ -58,7 +58,7 @@ const IGNORED_SENDERS = [
 // Cleanup function
 function cleanupOldEntries() {
   const now = Date.now();
-  
+
   // Clean processed emails
   if (processedEmails.size > MAX_PROCESSED_EMAILS) {
     const entries = Array.from(processedEmails.entries());
@@ -68,13 +68,13 @@ function cleanupOldEntries() {
       processedEmails.delete(entries[i][0]);
     }
   }
-  
+
   for (const [key, timestamp] of processedEmails.entries()) {
     if (now - timestamp > EMAIL_PROCESS_TTL) {
       processedEmails.delete(key);
     }
   }
-  
+
   // Clean rate limit
   for (const [key, data] of emailRateLimit.entries()) {
     if (now - data.timestamp > RATE_LIMIT_WINDOW * 2) {
@@ -110,7 +110,7 @@ function classifyEmail(text) {
     if (!text || typeof text !== 'string') return "hr_related";
     const cleaned = text.toLowerCase().replace(/[\n\r]+/g, " ").trim();
     if (!cleaned) return "hr_related";
-    
+
     // Check for rejection
     const rejectionPatterns = [
       /\b(reject|decline|regret)\b/,
@@ -120,13 +120,13 @@ function classifyEmail(text) {
       /\b(not interested|withdraw|not accepted|no longer|not joining)\b/,
       /\b(will not be able to join|don't want|do not want)\b/
     ];
-    
+
     for (const pattern of rejectionPatterns) {
       if (pattern.test(cleaned)) {
         return "offer_rejection";
       }
     }
-    
+
     // Check for acceptance
     if (
       /\b(accepted|accept|acceptance|i will join|happy to join|excited to join|looking forward to join|thank you for the offer)\b/.test(cleaned) &&
@@ -135,18 +135,18 @@ function classifyEmail(text) {
     ) {
       return "offer_acceptance";
     }
-    
+
     if (/\bapprove|approved|reject|rejected\b/.test(cleaned)) {
       return "approval_response";
     }
-    
+
     if (
       /\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})\b/.test(cleaned) ||
       /\b(today|tomorrow|leave|vacation|holiday|day off|sick|absent)\b/.test(cleaned)
     ) {
       return "leave_request";
     }
-    
+
     return "hr_related";
   } catch (error) {
     console.error("Email classification error:", error);
@@ -162,13 +162,11 @@ async function getSignatureBlock(ownerId) {
 
     return `
       <div style="margin-top:32px;margin-bottom:12px;">
-        ${
-          signature.signatureImage
-            ? `<img src="${process.env.SERVER_URL || ""}${
-                signature.signatureImage
-              }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-            : ""
-        }
+        ${signature.signatureImage
+        ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage
+        }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+        : ""
+      }
         <div style="text-align:left;">
           ${signature.signatureText || ""}
         </div>
@@ -236,10 +234,10 @@ async function sendSafeEmail({ to, subject, html, ownerId, type = 'general' }) {
 
     console.log(`📧 Sending email to ${to} (${type})`);
     await sendEmail({ to, subject, html });
-    
+
     console.log(`✅ Email sent successfully to ${to}`);
     return { success: true };
-    
+
   } catch (error) {
     console.error(`❌ Failed to send email to ${to}:`, error.message);
     return { success: false, reason: error.message };
@@ -277,13 +275,13 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerI
       ${signatureBlock}
     </div>
   `;
-  
-  return await sendSafeEmail({ 
-    to, 
-    subject, 
-    html, 
-    ownerId, 
-    type: 'profile_completion' 
+
+  return await sendSafeEmail({
+    to,
+    subject,
+    html,
+    ownerId,
+    type: 'profile_completion'
   });
 }
 
@@ -298,7 +296,7 @@ async function ensureDocsGenerated(emp) {
         generateAndSaveContract(emp),
         generateAndSaveSalaryCertificate(emp)
       ]);
-      
+
       if (ndaPath && emp.ndaPath !== ndaPath) {
         emp.ndaPath = ndaPath;
         emp.ndaGenerated = true;
@@ -332,7 +330,7 @@ async function processMessage(stream, uid) {
     }
 
     const parsed = await parseStream(stream);
-    
+
     if (!parsed.from?.value?.[0]?.address) {
       console.warn("Email missing from address");
       return;
@@ -366,7 +364,7 @@ async function processMessage(stream, uid) {
     let emp = await Employee.findOne({ email: fromAddr });
     let extractedName = "";
     let ownerId = emp?.owner || DEFAULT_OWNER_ID;
-    
+
     // Validate owner
     ownerId = await validateOwnerId(ownerId);
 
@@ -389,17 +387,17 @@ async function processMessage(stream, uid) {
     // Process attachments
     if (parsed.attachments?.length) {
       console.log(`📎 Found ${parsed.attachments.length} attachment(s)`);
-      
+
       for (const att of parsed.attachments) {
         const fname = (att.filename || "").toLowerCase();
         console.log(`📄 Processing attachment: ${fname}`);
-        
+
         // Validate attachment
         if (att.size > MAX_ATTACHMENT_SIZE) {
           console.warn(`⚠️ Attachment too large: ${fname} (${att.size} bytes)`);
           continue;
         }
-        
+
         if (/\.(png|jpe?g|pdf)$/i.test(fname)) {
           docSent = true;
           const buf = att.content;
@@ -425,7 +423,7 @@ async function processMessage(stream, uid) {
       // Handle document submission
       if (docSent) {
         console.log(`📝 Processing documents from ${fromAddr}`);
-        
+
         // Use findOneAndUpdate to prevent race conditions
         const [updatedEmp] = await Promise.all([
           Employee.findOneAndUpdate(
@@ -434,21 +432,21 @@ async function processMessage(stream, uid) {
               ...data,
               email: fromAddr,
               owner: ownerId,
-              $setOnInsert: { 
+              $setOnInsert: {
                 name: extractedName || parsed.from.value[0]?.name || "Candidate",
                 status: "Document Submitted"
               }
             },
-            { 
-              upsert: true, 
+            {
+              upsert: true,
               new: true,
-              setDefaultsOnInsert: true 
+              setDefaultsOnInsert: true
             }
           ),
         ]);
-        
+
         emp = updatedEmp;
-        
+
         // Send profile link
         const sendResult = await sendCompleteProfileLink(
           emp._id,
@@ -457,13 +455,13 @@ async function processMessage(stream, uid) {
           COMPANY_NAME,
           ownerId
         );
-        
+
         if (sendResult.success) {
           console.log(`✅ Profile link sent to ${fromAddr}`);
         } else {
           console.warn(`⚠️ Could not send profile link: ${sendResult.reason}`);
         }
-        
+
         return;
       }
     }
@@ -472,10 +470,10 @@ async function processMessage(stream, uid) {
     if (!emp) {
       emp = await Employee.findOne({ email: fromAddr });
     }
-    
+
     if (emp) {
       ownerId = await validateOwnerId(emp.owner || DEFAULT_OWNER_ID);
-      ensureDocsGenerated(emp).catch(err => 
+      ensureDocsGenerated(emp).catch(err =>
         console.error("Background doc generation failed:", err)
       );
     }
@@ -501,7 +499,7 @@ async function processMessage(stream, uid) {
         }
 
         const bestName = emp?.name || "Candidate";
-        
+
         // Send welcome email
         await sendSafeEmail({
           to: fromAddr,
@@ -510,13 +508,13 @@ async function processMessage(stream, uid) {
           ownerId,
           type: 'offer_acceptance'
         });
-        
+
         // Notify admins
         const admins = await User.find({
           role: { $in: ["admin", "super-admin"] },
           email: { $exists: true, $ne: "" }
         });
-        
+
         for (const admin of admins) {
           await sendSafeEmail({
             to: admin.email,
@@ -527,7 +525,7 @@ async function processMessage(stream, uid) {
           });
         }
       },
-      
+
       offer_rejection: async () => {
         await sendSafeEmail({
           to: fromAddr,
@@ -537,7 +535,7 @@ async function processMessage(stream, uid) {
           type: 'offer_rejection'
         });
       },
-      
+
       approval_response: async () => {
         await sendSafeEmail({
           to: fromAddr,
@@ -547,7 +545,7 @@ async function processMessage(stream, uid) {
           type: 'approval_response'
         });
       },
-      
+
       leave_request: async () => {
         await sendSafeEmail({
           to: fromAddr,
@@ -557,7 +555,7 @@ async function processMessage(stream, uid) {
           type: 'leave_request'
         });
       },
-      
+
       hr_related: async () => {
         await sendSafeEmail({
           to: fromAddr,
@@ -583,7 +581,7 @@ async function processMessage(stream, uid) {
 async function processMessageWithTimeout(stream, uid, timeout = 30000) {
   return Promise.race([
     processMessage(stream, uid),
-    new Promise((_, reject) => 
+    new Promise((_, reject) =>
       setTimeout(() => reject(new Error(`Processing timeout after ${timeout}ms`)), timeout)
     )
   ]);
@@ -599,16 +597,16 @@ function checkLatest() {
     console.log("⚠️ Already processing, skipping...");
     return;
   }
-  
+
   isProcessing = true;
-  
+
   imap.search(["UNSEEN"], (err, uids) => {
     if (err) {
       console.error("IMAP search error:", err);
       isProcessing = false;
       return;
     }
-    
+
     if (!uids?.length) {
       console.log("No new emails found");
       isProcessing = false;
@@ -616,18 +614,18 @@ function checkLatest() {
     }
 
     console.log(`📬 Found ${uids.length} new email(s)`);
-    
-    const fetcher = imap.fetch(uids, { 
-      bodies: [""], 
+
+    const fetcher = imap.fetch(uids, {
+      bodies: [""],
       markSeen: true,
-      struct: true 
+      struct: true
     });
-    
+
     let processedCount = 0;
-    
+
     fetcher.on("message", (msg, seqno) => {
       console.log(`Processing email ${++processedCount} of ${uids.length}`);
-      
+
       msg.on("body", (stream) => {
         (async () => {
           try {
@@ -637,17 +635,17 @@ function checkLatest() {
           }
         })();
       });
-      
+
       msg.on("error", (error) => {
         console.error(`Message stream error for email ${seqno}:`, error);
       });
     });
-    
+
     fetcher.once("error", (error) => {
       console.error("Fetch error:", error);
       isProcessing = false;
     });
-    
+
     fetcher.once("end", () => {
       console.log("✅ Done processing new messages");
       isProcessing = false;
@@ -659,21 +657,21 @@ function checkLatest() {
 function startWatcher() {
   imap.once("ready", () => {
     reconnectAttempts = 0;
-    
+
     imap.openBox("INBOX", false, (err, box) => {
       if (err) {
         console.error("IMAP openBox error:", err);
         return;
       }
-      
+
       console.log(`📪 Connected to INBOX, ${box.messages.total} total messages`);
       console.log("👀 Watching for new emails...");
-      
+
       imap.on("mail", () => {
         console.log("📩 New mail event detected");
         setTimeout(checkLatest, 1000);
       });
-      
+
       checkLatest();
       setInterval(checkLatest, 30000);
     });
@@ -685,15 +683,15 @@ function startWatcher() {
 
   imap.on("end", () => {
     console.log("IMAP connection ended");
-    
+
     if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
       console.error("Max reconnection attempts reached. Exiting...");
       process.exit(1);
     }
-    
+
     const delay = Math.min(30000 * Math.pow(2, reconnectAttempts), 300000);
     reconnectAttempts++;
-    
+
     setTimeout(() => {
       console.log(`Attempting to reconnect (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
       imap.connect();

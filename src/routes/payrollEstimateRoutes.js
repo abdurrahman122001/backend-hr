@@ -1,15 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const payrollEstimateController = require('../controllers/payrollEstimateController');
-const auth = require('../middleware/auth');
+const anyPayrollAuth = require('../middleware/anyPayrollAuth');
 
 // Estimate routes
-router.post('/upsert-estimate', auth, payrollEstimateController.upsertEstimate);
-router.get('/estimates', auth, payrollEstimateController.getEstimates);
-router.post('/clear-estimates', auth, payrollEstimateController.clearEstimates);
+router.post('/upsert-estimate', anyPayrollAuth, payrollEstimateController.upsertEstimate);
+router.get('/estimates', anyPayrollAuth, payrollEstimateController.getEstimates);
+router.post('/clear-estimates', anyPayrollAuth, payrollEstimateController.clearEstimates);
 
 // Tax override routes
-router.post('/upsert-tax-override', auth, payrollEstimateController.upsertTaxOverride);
-router.get('/tax-overrides', auth, payrollEstimateController.getTaxOverrides);
+router.post('/upsert-tax-override', anyPayrollAuth, payrollEstimateController.upsertTaxOverride);
+router.get('/tax-overrides', anyPayrollAuth, payrollEstimateController.getTaxOverrides);
 
 module.exports = router;
