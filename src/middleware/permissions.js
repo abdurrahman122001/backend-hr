@@ -3,17 +3,8 @@ const Employee = require("../models/Employees");
 const checkPermission = (permissionName) => {
   return async (req, res, next) => {
     try {
-      console.log(`🔐 [Permissions] Checking: ${permissionName} for:`, {
-        userId: req.user._id,
-        name: req.user.name,
-        role: req.user.role,
-        isEmployee: req.user.isEmployee,
-        hasPermissions: !!req.user.permissions,
-      });
-
       // 1. Check if user already has permissions attached
       if (req.user.permissions && req.user.permissions[permissionName]) {
-        console.log(`🔐 [Permissions] Granted via req.user.permissions`);
         return next();
       }
 
@@ -23,9 +14,6 @@ const checkPermission = (permissionName) => {
         req.user.role === "admin" ||
         req.user.role === "super-admin"
       ) {
-        console.log(
-          `🔐 [Permissions] Granted via admin role: ${req.user.role}`
-        );
         return next();
       }
 
@@ -51,34 +39,21 @@ const checkPermission = (permissionName) => {
       }
 
       if (!employee) {
-        console.log("🔐 [Permissions] Employee record not found");
         return res.status(403).json({
           message: "Employee record not found",
           userId: req.user._id,
         });
       }
 
-      console.log("🔐 [Permissions] Employee found:", {
-        hasPermissions: !!employee.permissions,
-        role: employee.role,
-      });
-
       // 4. Check if employee has the permission
       if (employee.permissions && employee.permissions[permissionName]) {
-        console.log(`🔐 [Permissions] Granted via employee.permissions`);
         return next();
       }
 
       // 5. Check if employee role grants permission
       if (employee.role === "admin" || employee.role === "super-admin") {
-        console.log(
-          `🔐 [Permissions] Granted via employee admin role: ${employee.role}`
-        );
         return next();
       }
-
-      // Permission denied
-      console.log(`🔐 [Permissions] DENIED: ${permissionName}`);
       return res.status(403).json({
         message: `Access denied: You need ${permissionName} permission`,
         user: {
@@ -113,13 +88,6 @@ const checkPermission = (permissionName) => {
 const checkPermissions = (permissionNames) => {
   return async (req, res, next) => {
     try {
-      console.log(
-        `🔐 Checking permissions: ${permissionNames.join(", ")} for user:`,
-        {
-          userId: req.user._id,
-          role: req.user.role,
-        }
-      );
 
       // Check 1: If permissions are attached to req.user
       if (req.user.permissions) {
@@ -127,7 +95,6 @@ const checkPermissions = (permissionNames) => {
           (permission) => req.user.permissions[permission]
         );
         if (hasAnyPermission) {
-          console.log(`🔐 Permissions granted via req.user.permissions`);
           return next();
         }
       }
@@ -135,7 +102,6 @@ const checkPermissions = (permissionNames) => {
       // Check 2: For admin users, allow all
       const userRole = req.user.employeeRole || req.user.role;
       if (userRole === "admin" || userRole === "super-admin") {
-        console.log(`🔐 Permissions granted via admin role: ${userRole}`);
         return next();
       }
 
@@ -159,9 +125,6 @@ const checkPermissions = (permissionNames) => {
       if (!hasPermission) {
         // Check if employee is admin
         if (employee.role === "admin" || employee.role === "super-admin") {
-          console.log(
-            `🔐 Permissions granted via employee admin role: ${employee.role}`
-          );
           req.employee = employee;
           return next();
         }

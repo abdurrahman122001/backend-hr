@@ -8,6 +8,13 @@ const TIMEZONE = "Asia/Karachi";
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
+  // Show whether header is present and a short token snippet for debugging
+  try {
+    const tokenSnippet = authHeader && authHeader.startsWith('Bearer ') ? (authHeader.split(' ')[1] || '').slice(0, 8) + '...' : 'none';
+  } catch (e) {
+    // ignore logging errors
+  }
+
   let token = authHeader.startsWith("Bearer ")
     ? authHeader.split(" ")[1]
     : null;

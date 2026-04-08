@@ -210,7 +210,11 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
             return res.status(404).json({ error: "Employee not found" });
         }
 
-        if (String(employee.owner) !== String(req.user.owner)) {
+        // Allow self-access for employees OR check owner match for admins
+        const isSelf = String(employee._id) === String(req.user.employeeId || req.user._id);
+        const isAdminOfOwner = String(employee.owner) === String(req.user.owner);
+
+        if (!isSelf && !isAdminOfOwner) {
             return res.status(403).json({ error: "Unauthorized access to employee data" });
         }
 
