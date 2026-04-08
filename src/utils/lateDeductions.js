@@ -988,6 +988,204 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
   }
 }
 
+/**
+ * EARLY DEPARTURE: Deduct hours from bonusHoursAccumulated (NOT from bonus count)
+ * Applied when: Employee stayed until 9 PM but logged out before shift end
+ * @param {ObjectId} employeeId - Employee ID
+ * @param {ObjectId} ownerId - Owner/Company ID
+ * @param {ObjectId} userId - User who performed the action
+ * @param {string} attendanceDate - Attendance date (YYYY-MM-DD)
+ * @param {number} hoursEarly - Number of hours early they departed
+ * @returns {Promise<Object>} - { success: boolean, hoursDeducted: number, message: string }
+ */
+async function applyEarlyDepartureHoursDeduction(employeeId, ownerId, userId, attendanceDate, hoursEarly) {
+  try {
+    if (hoursEarly <= 0) {
+      return { success: false, hoursDeducted: 0, message: "No early departure to deduct" };
+    }
+
+    const employee = await Employee.findById(employeeId).select("name").lean();
+    if (!employee) {
+      return { success: false, hoursDeducted: 0, message: "Employee not found" };
+    }
+
+    // Get leave year
+    const leaveYear = getLeaveYear(attendanceDate);
+
+    // Get or create leave balance for this year
+    let balance = await LeaveYearBalance.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      year: leaveYear,
+    });
+
+    if (!balance) {
+      balance = await LeaveYearBalance.create({
+        owner: ownerId,
+        employee: employeeId,
+        year: leaveYear,
+        total: 0,
+        bonus: 0,
+        bonusHoursAccumulated: 0,
+        usedPaid: 0,
+        usedUnpaid: 0,
+        remainingPaid: 0,
+        lastRecalculatedAt: new Date(),
+      });
+    }
+
+    // Check if already deducted for this day (avoid duplicate deductions)
+    // BUT allow deduction if previous one was reversed (re-login scenario)
+    const existingDeduction = await LeaveTransaction.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
+      reason: new RegExp("Early Departure Hours"),
+      type: "BONUS_HOURS_DEDUCTED"
+    }).sort({ _id: -1 });
+
+    if (existingDeduction) {
+      // Check if this deduction has been reversed
+      const hasReversal = await LeaveTransaction.findOne({
+        owner: ownerId,
+        employee: employeeId,
+        sourceId: existingDeduction._id,
+        type: "BONUS_HOURS_REVERSED"
+      });
+
+      // Only skip if there's NO reversal (i.e., deduction still active)
+      if (!hasReversal) {
+        console.log(`[EARLY-DEPARTURE] Already deducted for ${employee.name} on ${attendanceDate} and not yet reversed. Skipping duplicate.`);
+        return { success: false, hoursDeducted: 0, message: "Early departure already deducted for this day" };
+      }
+      // If reversal exists, we allow a new deduction
+      console.log(`[EARLY-DEPARTURE] Previous deduction was reversed for ${employee.name}. Allowing new deduction.`);
+    }
+
+    // Deduct from bonusHoursAccumulated
+    const previousHours = Number(balance.bonusHoursAccumulated || 0);
+    
+    // Always deduct, even if it goes negative (tracks deficit)
+    const deductedHours = hoursEarly;
+    const newHours = previousHours - hoursEarly;
+
+    balance.bonusHoursAccumulated = newHours;
+    await balance.save();
+
+    // Create leave transaction record for audit trail
+    await LeaveTransaction.create({
+      owner: ownerId,
+      employee: employeeId,
+      leaveYearBalance: balance._id,
+      year: leaveYear,
+      date: new Date(attendanceDate),
+      type: "BONUS_HOURS_DEDUCTED",
+      value: deductedHours,
+      sourceModel: "Attendance",
+      reason: `Early Departure Hours: ${hoursEarly.toFixed(2)} hours deducted (stayed until 9 PM but left before shift end). Previous: ${previousHours.toFixed(2)}, Deducted: ${deductedHours.toFixed(2)}, New: ${newHours.toFixed(2)}`,
+      createdBy: userId,
+    });
+
+    console.log(
+      `[EARLY-DEPARTURE] ${employee.name}: Deducted ${deductedHours.toFixed(2)} from bonusHoursAccumulated (was ${previousHours.toFixed(2)}, now ${newHours.toFixed(2)})`
+    );
+
+    return {
+      success: true,
+      hoursDeducted: deductedHours,
+      message: `Deducted ${deductedHours.toFixed(2)} hours from bonus hours (${newHours.toFixed(2)} remaining)`,
+    };
+  } catch (err) {
+    console.error("[EARLY-DEPARTURE] Error:", err);
+    return {
+      success: false,
+      hoursDeducted: 0,
+      message: `Error: ${err.message}`,
+    };
+  }
+}
+
+/**
+ * REVERSE early departure deduction when employee logs in again on same day
+ * @param {ObjectId} employeeId - Employee ID
+ * @param {ObjectId} ownerId - Owner/Company ID
+ * @param {ObjectId} userId - User who performed the action
+ * @param {string} attendanceDate - Attendance date (YYYY-MM-DD)
+ * @returns {Promise<void>}
+ */
+async function reverseEarlyDepartureHoursDeduction(employeeId, ownerId, userId, attendanceDate) {
+  try {
+    const employee = await Employee.findById(employeeId).select("name").lean();
+    if (!employee) return;
+
+    // Get leave year
+    const leaveYear = getLeaveYear(attendanceDate);
+
+    // Get leave balance
+    let balance = await LeaveYearBalance.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      year: leaveYear,
+    });
+
+    if (!balance) return;
+
+    // Find the early departure deduction transaction for this day
+    const deductionTransaction = await LeaveTransaction.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      date: { $gte: new Date(attendanceDate + 'T00:00:00'), $lte: new Date(attendanceDate + 'T23:59:59') },
+      reason: new RegExp("Early Departure Hours"),
+      type: "BONUS_HOURS_DEDUCTED"
+    }).sort({ _id: -1 });
+
+    if (!deductionTransaction) {
+      console.log(`[EARLY-DEPARTURE-REVERSAL] No early departure deduction found for ${employee.name} on ${attendanceDate}`);
+      return;
+    }
+
+    // Check if already reversed (prevent duplicate reversals)
+    const existingReversal = await LeaveTransaction.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      sourceId: deductionTransaction._id,
+      type: "BONUS_HOURS_REVERSED"
+    });
+
+    if (existingReversal) {
+      console.log(`[EARLY-DEPARTURE-REVERSAL] Already reversed for ${employee.name} on ${attendanceDate}. Skipping duplicate.`);
+      return;
+    }
+
+    const reversalValue = deductionTransaction.value;
+
+    // Restore hours to bonusHoursAccumulated
+    balance.bonusHoursAccumulated = Number(balance.bonusHoursAccumulated || 0) + reversalValue;
+    await balance.save();
+
+    // Create reversal transaction
+    await LeaveTransaction.create({
+      owner: ownerId,
+      employee: employeeId,
+      leaveYearBalance: balance._id,
+      year: leaveYear,
+      date: new Date(attendanceDate),
+      type: "BONUS_HOURS_REVERSED",
+      value: reversalValue,
+      sourceModel: "LeaveTransaction",
+      sourceId: deductionTransaction._id,
+      reason: `Early Departure Hours Reversal (Session Reactivated): ${reversalValue.toFixed(2)} hours restored`,
+      createdBy: userId,
+    });
+
+    console.log(
+      `[EARLY-DEPARTURE-REVERSAL] ${employee.name}: Restored ${reversalValue.toFixed(2)} bonus hours (Session Reactivated)`
+    );
+  } catch (err) {
+    console.error("[EARLY-DEPARTURE-REVERSAL] Error:", err);
+  }
+}
+
 module.exports = {
   countLateSessionsInPeriod,
   isLateDeductionProcessed,
@@ -998,4 +1196,6 @@ module.exports = {
   applyRealTimeHalfDayDeduction,
   reverseHalfDayDeduction,
   reverseLateDayDeduction,
+  applyEarlyDepartureHoursDeduction,
+  reverseEarlyDepartureHoursDeduction,
 };
