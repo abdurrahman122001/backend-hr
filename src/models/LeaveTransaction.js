@@ -45,6 +45,8 @@ const LeaveTransactionSchema = new Schema(
         "PAID_LEAVE_REVERSED",
         "UNPAID_LEAVE_REVERSED",
         "PAID_LEAVE_CREDITED",
+        "BONUS_HOURS_DEDUCTED",
+        "BONUS_HOURS_REVERSED",
       ],
       required: true,
       index: true,

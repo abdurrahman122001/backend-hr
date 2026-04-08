@@ -12,7 +12,7 @@ const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
-const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
+const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 
 // Import early departure bonus deduction from attendance controller
@@ -203,6 +203,13 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       } catch (err) {
         console.error(`[RESTORE] Error reversing half-day deduction:`, err);
       }
+    }
+
+    // ✅ Reverse early departure hours deduction if it was previously applied
+    try {
+      await reverseEarlyDepartureHoursDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+    } catch (err) {
+      console.error(`[RESTORE] Error reversing early departure deduction:`, err);
     }
 
     try {
@@ -874,14 +881,16 @@ router.post("/logout", requireAuth, async (req, res) => {
       // No shift configured — use the 9:00 PM threshold
       isShiftComplete = stayedUntil9PM;
     } else if (shiftEndMinutes === 0) {
-      isShiftComplete = isCrossMidnightLogout || logoutTotalMinutes === 0 || stayedUntil9PM;
+      // For midnight shift: only complete if cross-midnight logout or actually reached midnight
+      // staying until 9 PM does NOT complete a midnight shift
+      isShiftComplete = isCrossMidnightLogout;
     } else {
       isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
     }
 
     if (isCrossMidnightLogout) {
       console.log(`[LOGOUT] Cross-midnight logout detected (attendance: ${attendanceDate}, logout date: ${todayKarachi}). Keeping original status: ${finalStatus}`);
-    } else if (isShiftComplete) {
+    } else if (isShiftComplete || stayedUntil9PM) {
       console.log(`[LOGOUT] Shift completed or stayed until 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Keeping status: ${finalStatus}`);
     } else {
       finalStatus = "Half Day";
@@ -985,44 +994,43 @@ router.post("/logout", requireAuth, async (req, res) => {
       }
     }
 
-    // ✅ PROCESS EARLY DEPARTURE BONUS DEDUCTION
+    // ✅ PROCESS EARLY DEPARTURE BONUS HOURS DEDUCTION
+    // Only apply when: Employee stayed until 9 PM (stayedUntil9PM=true) BUT didn't complete shift
     let earlyDepartureResult = null;
-    if (updated && updated.checkIn && updated.checkOut) {
+    if (stayedUntil9PM && !isShiftComplete && shiftEndMinutes !== null && !isCrossMidnightLogout) {
       try {
-        // Get shift details for early departure calculation
-        let shiftStart = null;
-        let shiftEnd = null;
-        
-        const empForShift = await Employee.findById(employeeId).select("shifts").lean();
-        if (empForShift && empForShift.shifts && empForShift.shifts.length > 0) {
-          const shiftDoc = await Shift.findById(empForShift.shifts[0]).lean();
-          if (shiftDoc) {
-            shiftStart = shiftDoc.start;
-            shiftEnd = shiftDoc.end;
-          }
+        let minutesEarly = 0;
+
+        // Handle midnight shifts specially (shiftEndMinutes === 0 means shift ends at 00:00 next day)
+        if (shiftEndMinutes === 0) {
+          // For midnight shift: if logout before midnight, they're early
+          // Hours early = (24*60 - logoutTotalMinutes) / 60
+          minutesEarly = (24 * 60) - logoutTotalMinutes;
+        } else {
+          // For regular shifts: normal calculation
+          minutesEarly = Math.max(0, shiftEndMinutes - logoutTotalMinutes);
         }
 
-        // Apply early departure deduction if shift details are available
-        if (shiftStart && shiftEnd) {
-          earlyDepartureResult = await deductBonusForEarlyDeparture(
+        const hoursEarly = minutesEarly / 60;
+
+        if (hoursEarly > 0) {
+          console.log(`[EARLY-DEPARTURE] ${emp?.name} stayed until 9 PM but left ${hoursEarly.toFixed(2)} hours early (logout: ${logoutTotalMinutes}min, shift end: ${shiftEndMinutes}min)`);
+          
+          earlyDepartureResult = await applyEarlyDepartureHoursDeduction(
             employeeId,
-            updated.checkIn,
-            shiftStart,
-            shiftEnd,
-            updated.checkOut,
-            attendanceDate
+            ownerId,
+            userId,
+            attendanceDate,
+            hoursEarly
           );
 
-          if (earlyDepartureResult && earlyDepartureResult.totalEarlyHours > 0) {
-            console.log(
-              `[LOGOUT] Early Departure Bonus Deduction -> Total Early Hours=${earlyDepartureResult.totalEarlyHours}, ` +
-              `Deducted=${earlyDepartureResult.deducted}h, Negative=${earlyDepartureResult.negativeHours}h, ` +
-              `Remaining Bonus=${earlyDepartureResult.remainingBonus}`
-            );
+          if (earlyDepartureResult.success) {
+            console.log(`[EARLY-DEPARTURE] ✅ Deducted ${earlyDepartureResult.hoursDeducted.toFixed(2)} hours from bonusHoursAccumulated`);
           }
         }
       } catch (edErr) {
-        console.error("[LOGOUT] Error processing early departure deduction:", edErr);
+        console.error("[EARLY-DEPARTURE] Error processing early departure deduction:", edErr);
+        earlyDepartureResult = { success: false, message: edErr.message };
       }
     }
 
@@ -1124,6 +1132,16 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
         } catch (derr) {
           console.error("[REACTIVATE-SESSION] Error reversing half-day deduction:", derr);
         }
+      }
+
+      // ✅ Reverse early departure hours deduction if it was previously applied
+      try {
+        const emp = await Employee.findById(employeeId).select("owner").lean();
+        if (emp) {
+          await reverseEarlyDepartureHoursDeduction(employeeId, emp.owner, employeeId, session.date || todayKarachi);
+        }
+      } catch (err) {
+        console.error("[REACTIVATE-SESSION] Error reversing early departure deduction:", err);
       }
 
       console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status: ${previousStatus} → ${statusToRestore}`);
