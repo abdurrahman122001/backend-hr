@@ -750,6 +750,9 @@ exports.listMessages = async function listMessages(req, res) {
           path: "replyContent.originalSender",
           select: "_id name companyEmail",
         },
+        { path: "editedBy", select: "_id name companyEmail" },
+        { path: "approvedBy", select: "_id name companyEmail" },
+        { path: "disapprovedBy", select: "_id name companyEmail" },
       ])
       .lean();
 
@@ -1016,6 +1019,9 @@ exports.listMessagesForManager = async function listMessagesForManager(
           path: "replyContent.originalSender",
           select: "_id name companyEmail",
         },
+        { path: "editedBy", select: "_id name companyEmail" },
+        { path: "approvedBy", select: "_id name companyEmail" },
+        { path: "disapprovedBy", select: "_id name companyEmail" },
       ])
       .lean();
 
@@ -1807,6 +1813,8 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
 
     msg.approvalStatus = "disapproved";
+    msg.disapprovedBy = req.employee._id;
+    msg.disapprovedAt = new Date();
     await msg.save();
 
     // Get fully populated message for real-time emission
@@ -1816,6 +1824,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+      { path: "disapprovedBy", select: "_id name companyEmail" },
     ]);
 
     // Add client supervision info
