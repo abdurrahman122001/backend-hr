@@ -143,3 +143,28 @@ exports.clearEstimates = async (req, res) => {
     res.status(500).json({ error: "Failed to clear estimates" });
   }
 };
+/**
+ * Delete a single estimate for an employee
+ */
+exports.deleteEstimate = async (req, res) => {
+  try {
+    const { employeeId, month, year } = req.body;
+    const owner = req.user._id;
+
+    if (!employeeId || !month || !year) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    await PayrollEstimate.deleteOne({
+      employee: employeeId,
+      month,
+      year,
+      owner
+    });
+
+    res.json({ success: true, message: "Payroll estimate removed" });
+  } catch (err) {
+    console.error("deleteEstimate error:", err);
+    res.status(500).json({ error: "Failed to remove estimate" });
+  }
+};

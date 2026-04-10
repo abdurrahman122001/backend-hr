@@ -46,18 +46,14 @@ function formatDate(dt) {
 
 function formatPhoneNumber(phone) {
   if (!phone) return "-";
-  let num = phone.replace(/[^\d]/g, "");
-  if (!num) return "-";
-  if (num.startsWith("92") && num.length === 12) {
-    num = num.slice(0, 12);
-  }
-  if (num.startsWith("92") && num.length === 12) {
-    return `+${num.slice(0, 2)} ${num.slice(2, 5)} ${num.slice(5)}`;
-  }
-  if (num.startsWith("92") && num.length === 11) {
-    return `+${num.slice(0, 2)} ${num.slice(2, 5)} ${num.slice(5)}`;
-  }
-  return `+${num}`;
+  let num = phone.replace(/[^\d+]/g, "");
+  if (!num.startsWith("+") && num.length >= 10) num = "+" + num;
+  let match = num.match(/^\+?(\d{2})(\d{3})(\d{3})(\d{4})$/);
+  if (match) return `+${match[1]} ${match[2]} ${match[3]}${match[4]}`;
+  match = num.match(/^\+?(\d{2})(\d{3})(\d{3})(\d{3})$/);
+  if (match) return `+${match[1]} ${match[2]} ${match[3]}${match[4]}`;
+  if (!num.startsWith("+")) num = "+" + num;
+  return num;
 }
 
 function calculateYearsOfService(joiningDate, currentDate) {
@@ -118,13 +114,14 @@ const PROFILE_LABELS = {
   gender: "Gender",
   maritalStatus: "Marital Status",
   religion: "Religion",
-  cnic: "CNIC",
+  cnic: "CNIC Number",
   cnicIssueDate: "CNIC Issue Date",
   cnicExpiryDate: "CNIC Expiry Date",
   latestQualification: "Latest Qualification",
   fieldOfQualification: "Field of Qualification",
-  phone: "Phone",
-  email: "Email",
+  phone: "Mobile Number",
+  email: "Personal Email",
+  companyEmail: "Company Email",
   permanentAddress: "Permanent Address",
   presentAddress: "Present Address",
   bankName: "Bank Name",
@@ -132,13 +129,48 @@ const PROFILE_LABELS = {
   department: "Department",
   designation: "Designation",
   joiningDate: "Joining Date",
+  shifts: "Shifts",
   nomineeName: "Nominee Name",
   nomineeCnic: "Nominee CNIC",
-  nomineeRelation: "Relation with Nominee",
-  nomineeEmergencyNo: "Nominee Number",
+  nomineeRelation: "Relationship with Nominee",
+  nomineeEmergencyNo: "Nominee Emergency No",
+  emergencyContactName: "Emergency Contact Name",
+  emergencyContactRelation: "Relationship with Emergency Contact",
   emergencyContactNumber: "Emergency Contact Number",
-  shifts: "Shift(s)",
 };
+
+const PROFILE_ORDER = [
+  "name",
+  "fatherOrHusbandName",
+  "dateOfBirth",
+  "gender",
+  "nationality",
+  "maritalStatus",
+  "religion",
+  "cnic",
+  "cnicIssueDate",
+  "cnicExpiryDate",
+  "latestQualification",
+  "fieldOfQualification",
+  "phone",
+  "email",
+  "companyEmail",
+  "permanentAddress",
+  "presentAddress",
+  "bankName",
+  "bankAccountNumber",
+  "department",
+  "designation",
+  "joiningDate",
+  "shifts",
+  "nomineeName",
+  "nomineeCnic",
+  "nomineeRelation",
+  "nomineeEmergencyNo",
+  "emergencyContactName",
+  "emergencyContactRelation",
+  "emergencyContactNumber",
+];
 
 const PROVIDENT_FUND_FIELDS = [
   { label: "Balance Brought Forward", key: "providentFundBalanceBF" },
@@ -499,8 +531,12 @@ function buildSalarySlipHtml({
         const idx = i * colCount + j;
         const key = fields[idx];
         if (key) {
+          // Map nomineeEmergencyNo to nomineeNo in DB
+          const dbKey = key === "nomineeEmergencyNo" ? "nomineeNo" : key;
+          const val = empObj[dbKey];
+
           let valueToShow =
-            empObj[key] != null && empObj[key] !== "" && empObj[key] !== 0
+            val != null && val !== "" && val !== 0
               ? key === "shifts"
                 ? Array.isArray(empObj.shifts) && empObj.shifts.length > 0
                   ? empObj.shifts
@@ -512,16 +548,16 @@ function buildSalarySlipHtml({
                 : key === "phone" ||
                   key === "nomineeEmergencyNo" ||
                   key === "emergencyContactNumber"
-                ? formatPhoneNumber(empObj[key])
+                ? formatPhoneNumber(val)
                 : key === "dateOfBirth" ||
                   key === "joiningDate" ||
                   key === "cnicIssueDate" ||
                   key === "cnicExpiryDate"
-                ? formatDate(empObj[key])
-                : empObj[key]
+                ? formatDate(val)
+                : val
               : "-";
           html += `
-            <td style="padding:10px 14px; font-size:14px; vertical-align:top;">
+            <td style="padding:10px 14px; font-size:14px; vertical-align:top; width:33.33%;">
               <span style="display:block; color:#64748b; font-weight:600;">${
                 labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
@@ -531,7 +567,7 @@ function buildSalarySlipHtml({
             </td>
           `;
         } else {
-          html += `<td></td>`;
+          html += `<td style="width:33.33%;"></td>`;
         }
       }
       html += "</tr>";
@@ -706,7 +742,12 @@ function buildSalarySlipHtml({
                       </td>
                       <td valign="top" align="right" style="padding:0;">
                         <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip &#8211; ${monthYear}</span><br>
-                        <span style="color:#64748b; font-size:13px;">Generated: ${new Date().toLocaleString()}</span>
+                        <span style="color:#64748b; font-size:13px;">Generated: ${(() => {
+                          const d = new Date();
+                          const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
+                          const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+                          return `${datePart}, ${timePart.toUpperCase()}`;
+                        })()}</span>
                       </td>
                     </tr>
                   </table>
@@ -991,14 +1032,11 @@ module.exports = async function sendSlipEmail(req, res) {
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
 
     let enabledCompFields = normalizeFields(
-      salaryFieldsDoc?.enabledSalaryFields || [...ALLOWANCE_ORDER],
+      salaryFieldsDoc?.enabledSalaryFields || [],
       ALLOWANCE_ORDER
     );
-    if (!enabledCompFields.includes("loanBenefits")) {
-      enabledCompFields.push("loanBenefits");
-    }
     const enabledDedFields = normalizeFields(
-      salaryFieldsDoc?.enabledDeductionFields || DEDUCTION_ORDER,
+      salaryFieldsDoc?.enabledDeductionFields || [],
       DEDUCTION_ORDER
     );
 
@@ -1074,8 +1112,8 @@ module.exports = async function sendSlipEmail(req, res) {
           slipYear = Number(y);
         } else {
           const now = new Date();
-          slipMonth = now.toLocaleString("en-US", { month: "long" });
-          slipYear = now.getFullYear();
+          slipMonth = now.toLocaleString("en-US", { month: "long", timeZone: "Asia/Karachi" });
+          slipYear = Number(now.toLocaleString("en-US", { year: "numeric", timeZone: "Asia/Karachi" }));
         }
 
         const emp = slip.employee;
@@ -1360,7 +1398,8 @@ module.exports = async function sendSlipEmail(req, res) {
       });
     }
 
-    const labelsData = labels || {
+    // STRICTLY use fields and labels from settings
+    const labelsData = {
       compensation: Object.fromEntries(
         enabledCompFields.map((key) => [key, ALLOWANCES_LABELS[key] || key])
       ),
@@ -1377,6 +1416,16 @@ module.exports = async function sendSlipEmail(req, res) {
       loans: loans,
     });
 
+    const enabledPersonalFields = salaryFieldsDoc?.enabledPersonalFields || [];
+    const enabledEmploymentFields =
+      salaryFieldsDoc?.enabledEmploymentFields || [];
+
+    // Calculate default profileFields if not provided in request
+    const defaultProfileFields = PROFILE_ORDER.filter(
+      (f) =>
+        enabledPersonalFields.includes(f) || enabledEmploymentFields.includes(f)
+    );
+
     // Generate HTML
     const html = buildSalarySlipHtml({
       employee: employeeData,
@@ -1390,10 +1439,7 @@ module.exports = async function sendSlipEmail(req, res) {
       netSalary: netSalaryData,
       monthYear,
       company,
-      profileFields: profileFields || [
-        ...enabledCompFields,
-        ...enabledDedFields,
-      ],
+      profileFields: defaultProfileFields,
       enabledNetSalaryFields,
       showLoanDetails,
       showProvidentFund,

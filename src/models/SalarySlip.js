@@ -46,7 +46,7 @@ const SalarySlipSchema = new Schema(
     medicalInsurance: { type: String, default: "" },
     lifeInsurance: { type: String, default: "" },
     penalties: { type: String, default: "" },
-    othersDeductions: { type: String, default: "" },
+    otherDeductions: { type: String, default: "" },
     taxDeduction: { type: String, default: "" },
     totalAllowances: { type: String, default: "" },
     totalDeductions: { type: String, default: "" },

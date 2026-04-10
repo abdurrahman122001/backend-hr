@@ -36,7 +36,7 @@ async function createSalarySlip(employeeId, slipData, encryptionKey) {
     const deductions = [
       "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction", "providentFundDeduction",
       "gratuityFundDeduction", "advanceSalaryDeductions",
-      "medicalInsurance", "lifeInsurance", "penalties", "othersDeductions", "taxDeduction"
+      "medicalInsurance", "lifeInsurance", "penalties", "otherDeductions", "taxDeduction"
     ];
 
     const allowedFields = [...allowances, ...deductions];

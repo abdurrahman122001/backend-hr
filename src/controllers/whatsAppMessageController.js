@@ -2942,6 +2942,24 @@ exports.getClientMessagesSeenStatus =
           ),
       );
 
+      // 🔥 NEW: Calculate pending approval count
+      const pendingQ = {
+        client: clientId,
+        approvalStatus: "pending",
+        receiver: currentUserId, // They are a designated approver for this message
+      };
+
+      if (isClientEmployeeMessage === "true" && clientEmployeeId) {
+        pendingQ.isClientEmployeeMessage = true;
+        pendingQ.clientEmployeeId = clientEmployeeId;
+      } else if (isClientEmployeeMessage === "false") {
+        pendingQ.isClientEmployeeMessage = false;
+      }
+
+      // No need for applyVisibility here as being in the receiver list 
+      // already implies they should see and action this message.
+      const pendingApprovalCount = await WhatsAppMessage.countDocuments(pendingQ);
+
       res.json({
         clientId,
         hasUnreadMessages,
@@ -2952,6 +2970,7 @@ exports.getClientMessagesSeenStatus =
               (seen) => String(seen.employee) === String(currentUserId),
             ),
         ).length,
+        pendingApprovalCount,
       });
     } catch (e) {
       console.error("Error fetching seen status:", e);
