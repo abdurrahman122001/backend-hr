@@ -451,40 +451,8 @@ function buildNetSalaryTable({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DRAFT WATERMARK BANNER — email-safe, no CSS position/transform required
-// Renders a full-width banner right below the header row when isDraft=true.
-// Uses a base64-encoded inline SVG so every email client renders the text.
+// SALARY SLIP HTML BUILDER
 // ─────────────────────────────────────────────────────────────────────────────
-function buildDraftBannerRow() {
-  // SVG: 800 × 80 px — large red "DRAFT" centred on a very light red wash
-  // Use an HTML-based banner (no external images) to avoid data-URI loading issues in some clients
-  const bannerBg = "#fee2e2";
-  const bannerTextColor = "rgba(220,38,38,0.22)";
-
-  return `
-    <tr>
-      <td align="center" style="padding:0; background:#fff;">
-        <!--[if !mso]><!-->
-        <table width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0; padding:0;">
-          <tr>
-            <td align="center" style="background:${bannerBg}; padding:18px 0;">
-              <div style="display:inline-block; max-width:880px; width:100%; text-align:center; font-size:72px; line-height:1; font-weight:900; color:${bannerTextColor}; letter-spacing:18px; font-family:Arial, Helvetica, sans-serif;">DRAFT</div>
-            </td>
-          </tr>
-        </table>
-        <!--<![endif]-->
-        <!--[if mso]>
-        <table width="1200" cellpadding="0" cellspacing="0" border="0">
-          <tr>
-            <td align="center" style="background:#fee2e2; padding:18px 0;">
-              <span style="font-size:64px; font-weight:900; color:#b91c1c; font-family:Arial,sans-serif; letter-spacing:18px; opacity:0.35; display:block;">DRAFT</span>
-            </td>
-          </tr>
-        </table>
-        <![endif]-->
-      </td>
-    </tr>`;
-}
 
 function buildSalarySlipHtml({
   employee,
@@ -507,7 +475,6 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
   hasActiveLoans,
-  isDraft = false,
 }) {
   const amountInWords =
     netSalary != null && netSalary !== 0
@@ -715,33 +682,12 @@ function buildSalarySlipHtml({
     enabledNetSalaryFields,
   });
 
-  // Build the centered watermark HTML (inlined SVG for modern clients + MSO fallback)
-  const watermarkHtml = `
-    <tr>
-      <td style="padding:0; background:#fff;">
-        <!--[if !mso]><!-->
-        <div style="width:100%; text-align:center; margin-top:-120px; pointer-events:none;">
-          <svg xmlns="http://www.w3.org/2000/svg" width="700" height="700" viewBox="0 0 700 700" style="opacity:0.12; transform:rotate(-30deg); display:inline-block;">
-            <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="180" font-weight="900" font-family="Arial, Helvetica, sans-serif" fill="#DC2626">DRAFT</text>
-          </svg>
-        </div>
-        <!--<![endif]-->
-        <!--[if mso]>
-        <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr><td align="center" style="padding:0; margin:0;">
-          <span style="font-size:64px; color:#f3caca; font-weight:900; opacity:0.18; display:block;">DRAFT</span>
-        </td></tr></table>
-        <![endif]-->
-      </td>
-    </tr>`;
-
-  // Keep old top banner if needed (not injected by default)
-  const draftBannerRow = "";
 
   return `<!DOCTYPE html>
   <html>
     <head>
       <meta charset="UTF-8">
-      <title>Pay Slip${isDraft ? " [DRAFT]" : ""} - ${company.name}</title>
+      <title>Pay Slip - ${company.name}</title>
     </head>
     <body style="background:#f1f5f9; margin:0; padding:0; font-family:Segoe UI,Arial,sans-serif; color:#1e293b;">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9;">
@@ -767,8 +713,6 @@ function buildSalarySlipHtml({
                 </td>
               </tr>
 
-              <!-- ── CENTERED WATERMARK (inlined SVG, overlaps content where supported) ── -->
-              ${watermarkHtml}
 
               <!-- ── EMPLOYEE PROFILE ── -->
               <tr>
@@ -1072,7 +1016,6 @@ module.exports = async function sendSlipEmail(req, res) {
       deductions,
       netSalary,
       loans: manualLoans,
-      isDraft = false,
     } = req.body;
 
     let slip,
@@ -1459,7 +1402,6 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledCompFields,
       enabledDedFields,
       hasActiveLoans,
-      isDraft,
     });
 
     // Send email
@@ -1484,7 +1426,7 @@ module.exports = async function sendSlipEmail(req, res) {
         process.env.MAIL_FROM_ADDRESS
       }>`,
       to: email,
-      subject: `${isDraft ? "[DRAFT] " : ""}Salary Slip${
+      subject: `Salary Slip${
         employeeData?.name ? " - " + employeeData.name : ""
       }`,
       html,
