@@ -57,6 +57,10 @@ const loanDetailSchema = new mongoose.Schema(
       required: true,
       default: "Personal Loan",
     },
+    loanAllowanceField: {
+      type: String,
+      default: null, // The allowance field key to deduct from (e.g., "houseRentAllowance")
+    },
     loanAmount: {
       type: String, // Encrypted
       required: true,
