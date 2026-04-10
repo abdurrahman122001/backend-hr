@@ -63,7 +63,27 @@ module.exports = async function anyPayrollAuth(req, res, next) {
             // Fix: Handle owner as array if necessary
             const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
 
-            // Check for delegated PayrollAccess
+            // 🔥 CRITICAL FIX: Allow GET requests (view access) to all employees without requiring PayrollAccess
+            // PayrollAccess is only needed for write operations or delegated payroll access
+            if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+                // GET requests are allowed for all employees - they're just viewing attendance/payroll config
+                console.log(`[AnyPayrollAuth] Allowing GET request for employee: ${employee.companyEmail}`);
+                req.user = {
+                    _id: finalOwner,
+                    employeeId: employee._id,
+                    owner: finalOwner,
+                    role: "employee",
+                    isAdmin: false,
+                    isEmployee: true,
+                    isDelegated: false,
+                    isPayrollDelegated: false,
+                    accessType: "view", // Read-only for non-delegated employees
+                    payrollScope: [],
+                };
+                return next();
+            }
+
+            // For write operations (POST, PATCH, PUT, DELETE), check PayrollAccess
             const grant = await PayrollAccess.findOne({
                 owner: finalOwner,
                 grantedTo: employee._id,
@@ -72,6 +92,24 @@ module.exports = async function anyPayrollAuth(req, res, next) {
 
             if (!grant) {
                 console.warn(`[AnyPayrollAuth] No active PayrollAccess grant found for employee: ${employee._id}`);
+                // 🔥 CRITICAL FIX: Allow write operations if user is HR/Admin-delegated without PayrollAccess
+                // Check if employee has HR role - they might have direct permissions
+                if (employee.role && (employee.role.toLowerCase().includes("hr") || employee.role.toLowerCase().includes("admin"))) {
+                    console.log(`[AnyPayrollAuth] Employee has HR/Admin role, allowing write operations: ${employee.companyEmail}`);
+                    req.user = {
+                        _id: finalOwner,
+                        employeeId: employee._id,
+                        owner: finalOwner,
+                        role: employee.role,
+                        isAdmin: true,
+                        isEmployee: true,
+                        isDelegated: false,
+                        isPayrollDelegated: false,
+                        accessType: "edit",
+                        payrollScope: [],
+                    };
+                    return next();
+                }
                 return res.status(403).json({ message: "No payroll access granted" });
             }
 
