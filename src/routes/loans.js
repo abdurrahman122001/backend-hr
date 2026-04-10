@@ -909,6 +909,7 @@ router.post("/loan/:employeeId", async (req, res) => {
       totalMarkup,
       totalToBePaid,
       paymentSchedule,
+      loanAllowanceField,
     } = req.body;
 
     // Encrypt sensitive data
@@ -937,6 +938,8 @@ router.post("/loan/:employeeId", async (req, res) => {
 
     if (loan) {
       // Update existing loan
+      loan.type = type || loan.type;
+      loan.loanAllowanceField = type === "Loan Allowance" ? (loanAllowanceField || null) : null;
       loan.loanAmount = encryptedData.loanAmount;
       loan.loanTerm = loanTerm;
       loan.markupType = markupType;
@@ -953,6 +956,7 @@ router.post("/loan/:employeeId", async (req, res) => {
       loan = await LoanDetail.create({
         employee: employeeId,
         type,
+        loanAllowanceField: type === "Loan Allowance" ? (loanAllowanceField || null) : null,
         loanAmount: encryptedData.loanAmount,
         loanTerm,
         markupType,
@@ -1106,6 +1110,8 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
     const loanDetails = [];
     let totalLoanBenefits = 0;
     let totalLoanInstallments = 0;
+    let regularInstallments = 0;
+    const allowanceLoans = []; // Loans of type "Loan Allowance"
 
     for (const loan of loans) {
       if (!Array.isArray(loan.paymentSchedule)) continue;
@@ -1187,8 +1193,12 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
         const markupBalance = Math.max(0, totalMarkup - markupPaidSoFar);
 
         /* ---------------- PUSH RESULT ---------------- */
+        const isAllowanceLoan = loan.type === "Loan Allowance" && loan.loanAllowanceField;
+
         loanDetails.push({
           type: loan.type || "Personal Loan",
+          loanAllowanceField: loan.loanAllowanceField || null,
+          isAllowanceLoan: !!isAllowanceLoan,
 
           // ✅ Current month includes MARKUP
           amountPaidCurrentMonth: currentMonthPayment,
@@ -1213,6 +1223,17 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
 
         totalLoanBenefits += currentMarkup; // markup only
         totalLoanInstallments += currentMonthPayment;
+
+        // Track allowance vs regular
+        if (isAllowanceLoan) {
+          allowanceLoans.push({
+            field: loan.loanAllowanceField,
+            installmentAmount: currentMonthPayment,
+            loanId: loan._id.toString(),
+          });
+        } else {
+          regularInstallments += currentMonthPayment;
+        }
       } catch (e) {
         console.error(`Decryption failed for loan ${loan._id}:`, e);
       }
@@ -1223,6 +1244,8 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
       loanDetails,
       totalLoanBenefits: Math.round(totalLoanBenefits),
       totalLoanInstallments: Math.round(totalLoanInstallments),
+      regularInstallments: Math.round(regularInstallments),
+      allowanceLoans,
       summary: {
         totalAmountPaidCurrentMonth: Math.round(totalLoanInstallments),
         totalAmountPaidPreviousMonths: Math.round(

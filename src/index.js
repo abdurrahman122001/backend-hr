@@ -406,7 +406,7 @@ const CERT_PRIVKEY =
   `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
 
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 80);
+const HTTP_PORT = Number(process.env.HTTP_PORT || 4000);
 
 let primaryServer; // the server we attach socket.io to
 let httpsEnabled = false;
@@ -452,7 +452,7 @@ if (
   primaryServer = httpServer;
 
   httpServer.listen(HTTP_PORT, () => {
-    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
+    console.log(`🔓 HTTP listening on http://localhost:${HTTP_PORT}`);
     if (ENABLE_HTTPS) {
       console.warn(
         "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
