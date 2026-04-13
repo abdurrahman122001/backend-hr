@@ -558,10 +558,10 @@ function buildSalarySlipHtml({
               : "-";
           html += `
             <td style="padding:6px 8px; font-size:14px; vertical-align:top; width:33.33%;">
-              <span style="display:block; color:#64748b; font-weight:600;">${
+              <span style="display:block; color:#0F172A; font-weight:600;">${
                 labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
-              <span style="color:#111827; font-weight:500; display:block; margin-top:2px;">
+              <span style="color:#111827; font-weight:400; display:block; margin-top:2px;">
                 ${valueToShow}
               </span>
             </td>
@@ -632,7 +632,7 @@ function buildSalarySlipHtml({
     for (let i = compKeys.length; i < maxRows; i++) {
       compRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;">&nbsp; </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#0F172A; font-size:14px;">&nbsp; </td>
         <td style="border:1px solid #e5e7eb; padding:9px 18px;">&nbsp; </td>
       </tr>
     `;
@@ -640,15 +640,15 @@ function buildSalarySlipHtml({
     for (let i = dedKeys.length; i < maxRows; i++) {
       dedRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#64748b; font-size:14px;">&nbsp; </td>
+        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#0F172A; font-size:14px;">&nbsp; </td>
         <td style="border:1px solid #e5e7eb; padding:9px 18px;">&nbsp; </td>
       </tr>
     `;
     }
 
     if (maxRows === 0) {
-      compRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td></tr>`;
-      dedRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#64748b; font-size:14px;">-</td></tr>`;
+      compRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#0F172A; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:##0F172A; font-size:14px;">-</td></tr>`;
+      dedRows = `<tr><td style="border:1px solid #cbd5e1; padding:10px 18px; color:#0F172A; font-size:14px;">-</td><td style="border:1px solid #cbd5e1; padding:10px 18px; color:##0F172A; font-size:14px;">-</td></tr>`;
     }
 
     return {
@@ -739,7 +739,7 @@ function buildSalarySlipHtml({
                       </td>
                       <td valign="top" align="right" style="padding:0;">
                         <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip &#8211; ${monthYear}</span><br>
-                        <span style="color:#64748b; font-size:13px;">Generated: ${(() => {
+                        <span style="color:#0F172A; font-size:13px;">Generated: ${(() => {
                           const d = new Date();
                           const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
                           const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
@@ -774,7 +774,7 @@ function buildSalarySlipHtml({
 
               <!-- ── FOOTER ── -->
               <tr>
-                <td style="padding:16px 32px; color:#64748b; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; background:#fff; border-radius:0 0 14px 14px;">
+                <td style="padding:16px 32px; color:#0F172A; font-size:14px; text-align:center; border-top:1px solid #e5e7eb; background:#fff; border-radius:0 0 14px 14px;">
                   This is a system generated pay slip and does not require signature.
                 </td>
               </tr>
