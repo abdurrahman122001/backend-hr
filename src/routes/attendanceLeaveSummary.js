@@ -417,11 +417,19 @@ router.get("/available-years", async (req, res) => {
         const rawOwnerId = req.user.owner;
         const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
         const years = await LeaveYearBalance.distinct("year", { owner: ownerId });
-        const yearList = years.filter(y => y != null).sort((a, b) => b - a);
-        if (yearList.length === 0) yearList.push(new Date().getFullYear());
-        res.json({ years: yearList });
+        
+        let yearList = years.filter(y => y != null);
+        const currentYear = new Date().getFullYear();
+        
+        // Ensure 2025 and 2026 are always included as requested and for current cycle
+        if (!yearList.includes(2025)) yearList.push(2025);
+        if (!yearList.includes(2026)) yearList.push(2026);
+        if (!yearList.includes(currentYear)) yearList.push(currentYear);
+        
+        const sortedYears = [...new Set(yearList)].sort((a, b) => b - a);
+        res.json({ years: sortedYears });
     } catch (e) {
-        res.json({ years: [new Date().getFullYear()] });
+        res.json({ years: [2025, 2026, new Date().getFullYear()] });
     }
 });
 
