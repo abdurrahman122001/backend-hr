@@ -111,7 +111,7 @@ const chatThreadRoutes = require("./routes/chatThreadRoutes");
 const attendanceAccessRouter = require("./routes/attendanceAccess");
 const payrollAccessRouter = require("./routes/payrollAccess");
 const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
-
+const payrollSchedule = require("./routes/scheduledAllowances");
 const app = express();
 
 // ---------- Schedulers / Cron Jobs ----------
@@ -267,6 +267,7 @@ app.use("/api/extra-fields", anyPayrollAuth, ExtraFields);
 app.use("/api/pf", anyPayrollAuth, pfRoute);
 app.use("/api/gratuity", anyPayrollAuth, gratuityRoute);
 app.use("/api/role", anyPayrollAuth, roleRoutes);
+app.use("/api/scheduled-allowances", requireAuth, payrollSchedule);
 app.use("/api/pages", anyPayrollAuth, pageRoute);
 app.use("/api/users", anyPayrollAuth, usersRoute);
 app.use("/api/setDate", anyPayrollAuth, setDateRoute);

@@ -1695,9 +1695,12 @@ exports.getRecordsByDate = async (req, res) => {
 
 // GET /api/attendance?from=YYYY-MM-DD&to=YYYY-MM-DD
 exports.getRecordsByDateRange = async (req, res) => {
-  const { from, to } = req.query;
-  if (!from || !to) {
-    return res.status(400).json({ error: "Both 'from' and 'to' are required" });
+  const { from, to, startDate, endDate } = req.query;
+  const start = from || startDate;
+  const end = to || endDate;
+
+  if (!start || !end) {
+    return res.status(400).json({ error: "Both 'start' and 'end' dates are required" });
   }
   try {
     const ownerId = resolveOwnerId(req.user);
@@ -1705,7 +1708,7 @@ exports.getRecordsByDateRange = async (req, res) => {
 
     const records = await Attendance.find({
       owner: { $in: [oid(ownerId), oid(userId)] },
-      date: { $gte: from, $lte: to },
+      date: { $gte: start, $lte: end },
     })
       .populate("employee", "name position department email status _id photographUrl imageUrl")
       .lean();

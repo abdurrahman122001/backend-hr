@@ -22,7 +22,12 @@ const attendanceAuth = require('../middleware/attendanceAuth');
 
 // existing endpoints
 router.post('/', markAttendance);      // upsert by {employee, date}
-router.get('/', getRecordsByDate);    // GET /api/attendance?date=YYYY-MM-DD
+router.get('/', (req, res) => {
+  if (req.query.from || req.query.startDate) {
+      return getRecordsByDateRange(req, res);
+  }
+  return getRecordsByDate(req, res);
+});
 router.get('/stats', getStats);            // GET /api/attendance/stats?date=YYYY-MM-DD
 router.get('/change-logs', anyPayrollAuth, getChangeLogs); // GET /api/attendance/change-logs (admin)
 router.get('/audit-logs', attendanceAuth, getChangeLogs); // GET /api/attendance/audit-logs (attendance app)

@@ -2,18 +2,13 @@ const LeaveRecord = require("../models/LeaveRecord");
 
 // Database record fetch (editable, as stored)
 exports.getMyLeaveRecordFromDb = async (req, res) => {
-  console.log('\n=== [DEBUG] /leave-records/me/db called ===');
   try {
-    console.log('[DEBUG] req.user:', req.user);
     const owner = req.user?._id;
     if (!owner) {
-      console.log('[DEBUG] No user found on req.user');
       return res.status(401).json({ success: false, error: 'Unauthorized: user not found' });
     }
 
-    console.log('[DEBUG] Looking for LeaveRecord for owner:', owner);
     let record = await LeaveRecord.findOne({ owner });
-    console.log('[DEBUG] DB record:', record);
 
     return res.json({ success: true, data: record });
   } catch (err) {
@@ -161,17 +156,17 @@ exports.getMyLeaveRecord = async (req, res) => {
     const totalBalance = totalEntitled - totalAvailed;
 
     res.json({
-    success: true,
-    data: {
-      owner,
-      year: currentYear,
-      asBreakup: true,
-      breakups,
-      totalEntitled,
-      totalAvailedYTD: totalAvailed,
-      totalBalance,
-    },
-  });
+      success: true,
+      data: {
+        owner,
+        year: currentYear,
+        asBreakup: true,
+        breakups,
+        totalEntitled,
+        totalAvailedYTD: totalAvailed,
+        totalBalance,
+      },
+    });
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }

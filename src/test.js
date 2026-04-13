@@ -109,6 +109,7 @@ const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 const specificNonWorkingDayRouter = require("./routes/specificNonWorkingDay");
 const anyPayrollAuth = require("./middleware/anyPayrollAuth");
 const unifiedAuth = require("./middleware/unifiedAuth");
+const payrollSchedule = require("./routes/scheduledAllowances");
 const app = express();
 const payrollAccessRouter = require("./routes/payrollAccess");
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
@@ -302,6 +303,8 @@ app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
+app.use("/api/scheduled-allowances", requireAuth, payrollSchedule);
+
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {

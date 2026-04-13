@@ -23,9 +23,6 @@ module.exports = async function anyPayrollAuth(req, res, next) {
         const payload = jwt.verify(token, JWT_SECRET);
         // Compatibility: handle both id and _id in payload
         const userId = payload.id || payload._id || payload.userId;
-
-        console.log(`[AnyPayrollAuth] Checking access for ID: ${userId}, method: ${req.method}`);
-
         if (!userId) {
             console.error("[AnyPayrollAuth] No user ID found in token payload");
             return res.status(401).json({ message: "Invalid token: No user ID" });
@@ -37,7 +34,6 @@ module.exports = async function anyPayrollAuth(req, res, next) {
         );
 
         if (user) {
-            console.log(`[AnyPayrollAuth] Matched as Admin User: ${user.email}`);
             // Standard admin auth logic
             const effectiveOwner = user.owner || user.createdBy || user._id;
             const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;
@@ -58,16 +54,11 @@ module.exports = async function anyPayrollAuth(req, res, next) {
         );
 
         if (employee) {
-            console.log(`[AnyPayrollAuth] Matched as Employee: ${employee.companyEmail}`);
-            
+
             // Fix: Handle owner as array if necessary
             const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
-
-            // 🔥 CRITICAL FIX: Allow GET requests (view access) to all employees without requiring PayrollAccess
-            // PayrollAccess is only needed for write operations or delegated payroll access
             if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
                 // GET requests are allowed for all employees - they're just viewing attendance/payroll config
-                console.log(`[AnyPayrollAuth] Allowing GET request for employee: ${employee.companyEmail}`);
                 req.user = {
                     _id: finalOwner,
                     employeeId: employee._id,
@@ -95,7 +86,6 @@ module.exports = async function anyPayrollAuth(req, res, next) {
                 // 🔥 CRITICAL FIX: Allow write operations if user is HR/Admin-delegated without PayrollAccess
                 // Check if employee has HR role - they might have direct permissions
                 if (employee.role && (employee.role.toLowerCase().includes("hr") || employee.role.toLowerCase().includes("admin"))) {
-                    console.log(`[AnyPayrollAuth] Employee has HR/Admin role, allowing write operations: ${employee.companyEmail}`);
                     req.user = {
                         _id: finalOwner,
                         employeeId: employee._id,
@@ -121,8 +111,6 @@ module.exports = async function anyPayrollAuth(req, res, next) {
                 console.warn(`[AnyPayrollAuth] Insufficient permissions: ${req.method} requested but grant is view-only`);
                 return res.status(403).json({ message: "Insufficient permissions (View Only)" });
             }
-
-            console.log(`[AnyPayrollAuth] Access granted for employee: ${employee.companyEmail}, role: delegated-employee`);
 
             // Allow access as a delegated employee
             req.user = {
