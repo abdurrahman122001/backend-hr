@@ -464,7 +464,7 @@ function buildNetSalaryTable({
       if (val == null || val === 0) val = "-";
       return `
       <tr>
-        <td style="font-weight:700; color:#334155; padding:10px 10px 10px 14px;">${
+        <td style="font-weight:700; color:#334155; padding:5px 10px 5px 14px;">${
           NET_FIELD_LABELS[key] || key
         }</td>
         <td style="font-weight:500; text-align:right; color:#0F172A; padding:4px 14px 4px 4px;">${val}</td>
@@ -522,7 +522,7 @@ function buildSalarySlipHtml({
       Array.isArray(profileFieldsOrder) && profileFieldsOrder.length
         ? profileFieldsOrder
         : Object.keys(empObj);
-    const colCount = 4;
+    const colCount = 3;
     const rows = Math.ceil(fields.length / colCount);
     let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto;">`;
     for (let i = 0; i < rows; i++) {
@@ -559,9 +559,9 @@ function buildSalarySlipHtml({
           html += `
             <td style="padding:6px 8px; font-size:14px; vertical-align:top; width:33.33%;">
               <span style="display:block; color:#0F172A; font-weight:600;">${
-                labelObj?.[key] || PROFILE_LABELS[key] || key
+              labelObj?.[key] === 'bankAccountNumber' || PROFILE_LABELS[key] === 'bankAccountNumber' || key === 'bankAccountNumber' ? 'Bank Account #' :  labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
-              <span style="color:#111827; font-weight:400; display:block; margin-top:2px;">
+              <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px;">
                 ${valueToShow}
               </span>
             </td>
@@ -602,10 +602,10 @@ function buildSalarySlipHtml({
       if (!isNaN(numVal)) totalEarnings += numVal;
       compRows += `
     <tr>
-      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+      <td style="border:0; border-right:1px solid #e5e7eb; padding:4px 18px; color:#111827; font-weight:500; font-size:12px; text-align:left;">
         ${compLabels[compKey] || ALLOWANCES_LABELS[compKey] || compKey}
       </td>
-      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+      <td style="border:0;  padding:4px 18px; color:#111827; font-weight:400; font-size:12px; text-align:right;">
         ${safeAmountCell(rawVal)}
       </td>
     </tr>
@@ -618,10 +618,10 @@ function buildSalarySlipHtml({
       if (!isNaN(numVal)) totalDeductions += numVal;
       dedRows += `
     <tr>
-      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:left;">
+      <td style="border:0; border-right:1px solid #e5e7eb; padding:4px 18px; color:#111827; font-weight:500; font-size:12px; text-align:left;">
         ${dedLabels[dedKey] || DEDUCTIONS_LABELS[dedKey] || dedKey}
       </td>
-      <td style="border:1px solid #e5e7eb; padding:10px 18px; color:#111827; font-weight:500; font-size:14px; text-align:center;">
+      <td style="border:0; padding:4px 18px; color:#111827; font-weight:400; font-size:12px; text-align:right;">
         ${safeAmountCell(rawVal)}
       </td>
     </tr>
@@ -632,16 +632,16 @@ function buildSalarySlipHtml({
     for (let i = compKeys.length; i < maxRows; i++) {
       compRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#0F172A; font-size:14px;">&nbsp; </td>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px;">&nbsp; </td>
+        <td style="border:0; border-right:1px solid #e5e7eb; padding:4px 18px; color:#0F172A; font-size:12px;">&nbsp; </td>
+        <td style="border:0; padding:4px 18px; font-size:12px;">&nbsp; </td>
       </tr>
     `;
     }
     for (let i = dedKeys.length; i < maxRows; i++) {
       dedRows += `
       <tr>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px; color:#0F172A; font-size:14px;">&nbsp; </td>
-        <td style="border:1px solid #e5e7eb; padding:9px 18px;">&nbsp; </td>
+        <td style="border:0; border-right:1px solid #e5e7eb; padding:4px 18px; color:#0F172A; font-size:12px;">&nbsp; </td>
+        <td style="border:0; padding:4px 18px; font-size:12px;">&nbsp; </td>
       </tr>
     `;
     }
@@ -657,9 +657,9 @@ function buildSalarySlipHtml({
         <tr>
           <td valign="top" width="50%" style="padding-right:5px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
-              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Salary &amp; Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
+              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:left; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Salary &amp; Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:right; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${compRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${
+              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${
                 totalEarnings != null && totalEarnings !== 0
                   ? safeAmountCell(totalEarnings)
                   : "-"
@@ -668,9 +668,9 @@ function buildSalarySlipHtml({
           </td>
           <td valign="top" width="50%" style="padding-left:5px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
-              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:center; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
+              <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:left; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:right; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${dedRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:10px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:center; padding:10px 18px;">${
+              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${
                 totalDeductions != null && totalDeductions !== 0
                   ? safeAmountCell(totalDeductions)
                   : "-"
