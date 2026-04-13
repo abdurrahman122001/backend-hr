@@ -467,7 +467,7 @@ function buildNetSalaryTable({
         <td style="font-weight:700; color:#334155; padding:10px 10px 10px 14px;">${
           NET_FIELD_LABELS[key] || key
         }</td>
-        <td style="font-weight:700; text-align:right; color:#334155; padding:10px 14px 10px 10px;">${val}</td>
+        <td style="font-weight:500; text-align:right; color:#0F172A; padding:4px 14px 4px 4px;">${val}</td>
       </tr>
     `;
     })
