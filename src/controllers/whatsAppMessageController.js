@@ -2145,6 +2145,16 @@ exports.editMessage = async function editMessage(req, res) {
               }
             }
           }
+          
+          // 🔥 FINAL SAFEGUARD for edits: If status is pending, ensure only active supervisors are in the receiver list
+          if (msg.approvalStatus === "pending") {
+            const clientData = await Client.findById(msg.client).select("supervisedBy").lean();
+            const supervisedByList = (clientData?.supervisedBy || []).map(id => String(id));
+            const { tls: orgTls, managers: orgManagers } = await findTLsAndManagersByOwner(msg.owner);
+            
+            const allAllowedApprovers = [...supervisedByList, ...orgTls, ...orgManagers].map(id => String(id));
+            msg.receiver = msg.receiver.filter(id => allAllowedApprovers.includes(String(id._id || id)));
+          }
         }
       }
       // CASE 3: Team Lead or Manager editing their own message (redundant but for clarity)
@@ -2947,6 +2957,7 @@ exports.getClientMessagesSeenStatus =
         client: clientId,
         approvalStatus: "pending",
         receiver: currentUserId, // They are a designated approver for this message
+        sender: { $ne: currentUserId }, // Senders don't see their own pending badge
       };
 
       if (isClientEmployeeMessage === "true" && clientEmployeeId) {
@@ -3500,7 +3511,11 @@ exports.createMessage = async function createMessage(req, res) {
               senderRole === "employee" &&
               originalSenderRole === "manager" &&
               needsApproval
-            )
+            ) &&
+            // 🔥 FIX: Never add the original sender to receivers if the reply needs approval
+            // (They shouldn't see it as a 'pending' task in their sidebar)
+            approvalStatus !== "pending" &&
+            !needsApproval
           ) {
             receivers.push(originalSenderId);
           }
@@ -3562,6 +3577,17 @@ exports.createMessage = async function createMessage(req, res) {
         id !== String(sender) &&
         isObjId(id),
     );
+    
+    // 🔥 FINAL SAFEGUARD: For PENDING messages, strictly enforce that receivers are ONLY approvers
+    // (This prevents coworkers or original senders from seeing a yellow badge for a task they can't action)
+    if (approvalStatus === "pending") {
+      const seniors = (clientDoc?.supervisedBy || []).map(id => String(id));
+      
+      // Also include the hierarchy managers/TLs as they are ultimate approvers
+      const allSeniors = [...seniors, ...tls, ...managers].map(id => String(id));
+      
+      receivers = receivers.filter(id => allSeniors.includes(String(id)));
+    }
 
     if (receivers.length === 0) {
       return res.status(400).json({ error: "No valid receivers found" });
