@@ -3,8 +3,13 @@ const express = require('express');
 const router = express.Router();
 const PayrollAccess = require('../models/PayrollAccess');
 const Employee = require('../models/Employees');
+const SalarySlip = require('../models/SalarySlip');
+const Attendance = require('../models/Attendance');
+const LeaveYearBalance = require('../models/LeaveYearBalance');
+const LeaveTransaction = require('../models/LeaveTransaction');
 const requireAuth = require('../middleware/auth');
 const requireEmpAuth = require('../middleware/empAuth');
+const Salary = require('../models/Salaries');
 const ObjectId = require('mongoose').Types.ObjectId;
 
 function safeIdEquals(a, b) {
@@ -14,6 +19,17 @@ function safeIdEquals(a, b) {
     } catch (e) {
         return false;
     }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HELPERS
+// ─────────────────────────────────────────────────────────────
+
+async function findCurrentGrant(employeeId, rawOwnerId) {
+    const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
+    const ownerObjectId = (ownerId && ObjectId.isValid(ownerId)) ? new ObjectId(ownerId) : ownerId;
+    const grants = await PayrollAccess.find({ owner: ownerObjectId, active: true }).populate('scope', '_id').lean();
+    return grants.find(g => safeIdEquals(g.grantedTo, employeeId));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -155,7 +171,8 @@ router.delete('/:id', requireAuth, async (req, res) => {
 router.get('/my-access', requireEmpAuth, async (req, res) => {
     try {
         const employeeId = req.employee._id;
-        const ownerId = req.employee.owner;
+        const rawOwnerId = req.employee.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
 
         console.log('[PAYROLL-ACCESS] my-access check:', {
             employeeId: employeeId.toString(),
@@ -244,7 +261,8 @@ router.get('/my-access-debug', requireEmpAuth, async (req, res) => {
 router.get('/my-salary-slips', requireEmpAuth, async (req, res) => {
     try {
         const employeeId = req.employee._id.toString();
-        const ownerId = req.employee.owner.toString();
+        const rawOwnerId = req.employee.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
 
         console.log('[PAYROLL-ACCESS] my-salary-slips request:', {
             employeeId,
@@ -262,9 +280,8 @@ router.get('/my-salary-slips', requireEmpAuth, async (req, res) => {
             return res.status(403).json({ error: 'No payroll access' });
         }
 
-        console.log('[PAYROLL-ACCESS] Access grant resolved:', { grantId: grant._id, accessType: grant.accessType });
+            console.log('[PAYROLL-ACCESS] Access grant resolved:', { grantId: grant._id, accessType: grant.accessType });
 
-        const SalarySlip = require('../models/SalarySlip');
         // reuse ownerObjectId computed above
 
         // Build employee filter based on scope
@@ -301,7 +318,6 @@ router.get('/my-salary-slips', requireEmpAuth, async (req, res) => {
         // If no slips found in SalarySlip, try Salary model
         if (salaryData.length === 0) {
             console.log('[PAYROLL-ACCESS] No salary slips found, checking Salary model');
-            const Salary = require('../models/Salaries');
             
             const salaryRecords = await Salary.find({
                 owner: ownerObjectId,
@@ -344,11 +360,8 @@ router.get('/debug-slips/:employeeId', requireAuth, async (req, res) => {
 
         console.log('[DEBUG-SLIPS] Checking slips for employee:', { employeeId, ownerId });
 
-        const ObjectId = require('mongoose').Types.ObjectId;
         const empObjectId = new ObjectId(employeeId);
         const ownerObjectId = new ObjectId(ownerId);
-
-        const SalarySlip = require('../models/SalarySlip');
         
         // Check total count
         const totalCount = await SalarySlip.countDocuments({});
@@ -408,7 +421,6 @@ router.get('/salary-slips/:employeeId', requireEmpAuth, async (req, res) => {
         }
 
         // Fetch salary slips for the target employee
-        const SalarySlip = require('../models/SalarySlip');
         const salarySlips = await SalarySlip.find({
             owner: ownerId,
             employee: employeeId,
@@ -427,4 +439,247 @@ router.get('/salary-slips/:employeeId', requireEmpAuth, async (req, res) => {
     }
 });
 
+
+/**
+ * GET /api/payroll-access/attendance-range?from=YYYY-MM-DD&to=YYYY-MM-DD
+ * Fetch attendance records for all employees within payroll scope for a date range.
+ * Allows employee-portal payroll access users to run full calculations like the admin dashboard.
+ */
+router.get('/attendance-range', requireEmpAuth, async (req, res) => {
+    try {
+        const employeeId = req.employee._id;
+        const rawOwnerId = req.employee.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
+        const { from, to } = req.query;
+
+        if (!from || !to) {
+            return res.status(400).json({ error: 'from and to query params are required (YYYY-MM-DD)' });
+        }
+
+        const ownerObjectId = (ownerId && ObjectId.isValid(ownerId)) ? new ObjectId(ownerId) : ownerId;
+        const grants = await PayrollAccess.find({ owner: ownerObjectId, active: true }).populate('scope', '_id').lean();
+        const grant = grants.find(g => safeIdEquals(g.grantedTo, employeeId));
+
+        if (!grant) {
+            return res.status(403).json({ error: 'No payroll access' });
+        }
+        const query = { owner: ownerObjectId, date: { $gte: from, $lte: to } };
+
+        if (grant.scope && grant.scope.length > 0) {
+            const scopeIds = grant.scope.map(emp => {
+                try { return new ObjectId(emp._id || emp); } catch (e) { return emp._id || emp; }
+            });
+            query.employee = { $in: scopeIds };
+        }
+
+        const records = await Attendance.find(query).lean();
+        res.json(records);
+    } catch (err) {
+        console.error('[PAYROLL-ACCESS] attendance-range error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+/**
+ * GET /api/payroll-access/leave-summary-batch?month=April&year=2026
+ * Fetch leave balances + current-month usage for all employees within payroll scope.
+ * Returns: { leaveMap: { [empId]: { Annual: { remainingPaid, usedPaidMonth, total, bonus } } } }
+ */
+router.get('/leave-summary-batch', requireEmpAuth, async (req, res) => {
+    try {
+        const employeeId = req.employee._id;
+        const rawOwnerId = req.employee.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
+        const { month, year } = req.query;
+
+        if (!month || !year) {
+            return res.status(400).json({ error: 'month and year are required' });
+        }
+
+        const ownerObjectId = (ownerId && ObjectId.isValid(ownerId)) ? new ObjectId(ownerId) : ownerId;
+        const grants = await PayrollAccess.find({ owner: ownerObjectId, active: true }).populate('scope', '_id').lean();
+        const grant = grants.find(g => safeIdEquals(g.grantedTo, employeeId));
+
+        if (!grant) {
+            return res.status(403).json({ error: 'No payroll access' });
+        }
+
+        const yearNum = Number(year);
+        const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+        const monthIndex = months.indexOf(month);
+
+        // Fiscal month range: 26th of previous month → 25th of current month
+        const prevMonthIndex = monthIndex === 0 ? 11 : monthIndex - 1;
+        const prevYear = monthIndex === 0 ? yearNum - 1 : yearNum;
+        const from = monthIndex === 0
+            ? `${yearNum}-01-01`
+            : `${prevYear}-${String(prevMonthIndex + 1).padStart(2, '0')}-26`;
+        const to = `${yearNum}-${String(monthIndex + 1).padStart(2, '0')}-25`;
+
+        const leaveBalanceQuery = { owner: ownerObjectId, year: yearNum };
+        if (grant.scope && grant.scope.length > 0) {
+            const scopeIds = grant.scope.map(emp => {
+                try { return new ObjectId(emp._id || emp); } catch (e) { return emp._id || emp; }
+            });
+            leaveBalanceQuery.employee = { $in: scopeIds };
+        }
+
+        const leaveBalances = await LeaveYearBalance.find(leaveBalanceQuery).lean();
+        const leaveBalanceIds = leaveBalances.map(lb => lb._id);
+
+        // Batch fetch month transactions for all employees in one query
+        const monthTxns = await LeaveTransaction.find({
+            owner: ownerObjectId,
+            leaveYearBalance: { $in: leaveBalanceIds },
+            type: { $in: ['PAID_LEAVE_USED', 'PAID_LEAVE_REVERSED'] },
+            date: { $gte: new Date(from), $lte: new Date(to + 'T23:59:59.999Z') }
+        }).lean();
+
+        const leaveMap = {};
+        for (const lb of leaveBalances) {
+            const empId = String(lb.employee);
+            const lbId = String(lb._id);
+            const empTxns = monthTxns.filter(tx => String(tx.leaveYearBalance) === lbId);
+
+            let usedPaidMonth = 0;
+            empTxns.forEach(tx => {
+                if (tx.type === 'PAID_LEAVE_USED') usedPaidMonth += tx.value || 0;
+                if (tx.type === 'PAID_LEAVE_REVERSED') usedPaidMonth -= tx.value || 0;
+            });
+
+            leaveMap[empId] = {
+                Annual: {
+                    total: lb.total || 0,
+                    bonus: lb.bonus || 0,
+                    remainingPaid: lb.remainingPaid || 0,
+                    usedPaidMonth
+                }
+            };
+        }
+
+        res.json({ leaveMap });
+    } catch (err) {
+        console.error('[PAYROLL-ACCESS] leave-summary-batch error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+/**
+ * GET /api/payroll-access/leave-summary/:employeeId?month=&year=
+ * Fetch individual leave summary (mirrors admin logic) but for payroll access users.
+ */
+router.get('/leave-summary/:targetId', requireEmpAuth, async (req, res) => {
+    try {
+        const { targetId } = req.params;
+        const { month, year } = req.query;
+        const requesterId = req.employee._id;
+        const rawOwnerId = req.employee.owner;
+        const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
+
+        if (!month || !year) return res.status(400).json({ error: 'month and year are required' });
+
+        const grant = await findCurrentGrant(requesterId, ownerId);
+        if (!grant) return res.status(403).json({ error: 'No payroll access' });
+
+        // Check scope
+        const scopeIds = (grant.scope || []).map(s => String(s._id || s));
+        const canAccess = scopeIds.length === 0 || scopeIds.includes(String(targetId));
+        if (!canAccess && String(targetId) !== String(requesterId)) {
+            return res.status(403).json({ error: 'No access to this employee' });
+        }
+
+        // Use the full calculation logic from the internal helper below
+
+        const balanceData = await calculateMonthlySummaryInternal(ownerId, targetId, Number(year));
+        const monthBalance = balanceData.monthlyBalances[month] || { balance: balanceData.initialBalance, paidUsed: 0, unpaidUsed: 0 };
+
+        const leaveBalance = await LeaveYearBalance.findOne({ owner: ownerId, employee: targetId, year: Number(year) });
+        const total = leaveBalance?.total || 0;
+        const bonus = leaveBalance?.bonus || 0;
+        
+        res.json({
+            Annual: {
+                total,
+                bonus,
+                totalWithBonus: total + bonus,
+                usedPaidYTD: balanceData.totalUsedPaid,
+                usedUnpaidYTD: balanceData.totalUsedUnpaid,
+                usedPaidMonth: monthBalance.paidUsed || 0,
+                usedUnpaidMonth: monthBalance.unpaidUsed || 0,
+                balance: monthBalance.balance,
+                remainingPaid: leaveBalance?.remainingPaid || 0
+            }
+        });
+    } catch (err) {
+        console.error('[PAYROLL-ACCESS] leave-summary error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
+// Internal helper for leave summary (replicated from attendanceLeaveSummary.js logic)
+async function calculateMonthlySummaryInternal(ownerId, employeeId, leaveYear) {
+    const leaveBalance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
+    if (!leaveBalance) {
+        // Fallback for missing balance record
+        const employee = await Employee.findById(employeeId).lean();
+        const profileYear = employee?.leaveEntitlement?.bonusYear;
+        let totalEntitled = 0;
+        if (profileYear === leaveYear) {
+            totalEntitled = employee?.leaveEntitlement?.total || 0;
+        }
+        return { initialBalance: totalEntitled, monthlyBalances: {}, totalUsedPaid: 0, totalUsedUnpaid: 0, finalBalance: totalEntitled };
+    }
+
+    const transactions = await LeaveTransaction.find({
+        owner: ownerId,
+        employee: employeeId,
+        leaveYearBalance: leaveBalance._id,
+        type: { $in: ["PAID_LEAVE_USED", "UNPAID_LEAVE_USED", "BONUS_EARNED", "PAID_LEAVE_REVERSED", "UNPAID_LEAVE_REVERSED", "PAID_LEAVE_CREDITED", "ADJUSTMENT"] }
+    }).sort({ date: 1 }).lean();
+
+    const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    const monthlyData = {};
+    months.forEach(m => { monthlyData[m] = { paidUsed: 0, unpaidUsed: 0, bonusAdded: 0, credited: 0 }; });
+
+    for (const tx of transactions) {
+        const d = new Date(tx.date);
+        const day = d.getUTCDate();
+        const month = d.getUTCMonth();
+        
+        let mName;
+        if (day >= 26) {
+            if (month === 11) mName = "January";
+            else mName = months[month + 1];
+        } else {
+            mName = months[month];
+        }
+
+        if (!monthlyData[mName]) continue;
+        if (tx.type === "PAID_LEAVE_USED") monthlyData[mName].paidUsed += tx.value || 0;
+        if (tx.type === "PAID_LEAVE_REVERSED") monthlyData[mName].paidUsed -= tx.value || 0;
+        if (tx.type === "UNPAID_LEAVE_USED") monthlyData[mName].unpaidUsed += tx.value || 0;
+        if (tx.type === "UNPAID_LEAVE_REVERSED") monthlyData[mName].unpaidUsed -= tx.value || 0;
+        if (tx.type === "BONUS_EARNED" || tx.type === "ADJUSTMENT") monthlyData[mName].bonusAdded += tx.value || 0;
+        if (tx.type === "PAID_LEAVE_CREDITED") monthlyData[mName].credited += tx.value || 0;
+    }
+
+    let runningBalance = leaveBalance.total || 0;
+    let totalUsedPaid = 0;
+    let totalUsedUnpaid = 0;
+    const monthlyBalances = {};
+
+    for (const m of months) {
+        const md = monthlyData[m];
+        totalUsedPaid += md.paidUsed;
+        totalUsedUnpaid += md.unpaidUsed;
+        
+        // balance = prev_balance + credits - used + bonus
+        runningBalance = runningBalance + (md.credited || 0) - md.paidUsed + md.bonusAdded;
+        monthlyBalances[m] = { balance: runningBalance, paidUsed: md.paidUsed, unpaidUsed: md.unpaidUsed };
+    }
+
+    return { initialBalance: leaveBalance.total || 0, monthlyBalances, totalUsedPaid, totalUsedUnpaid, finalBalance: runningBalance };
+}
+
 module.exports = router;
+
