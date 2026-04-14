@@ -29,6 +29,13 @@ const SalarySlipFields = new mongoose.Schema(
       type: [String],
       default: [],
     },
+    headerOption: {
+      type: String,
+      enum: ["logo", "companyName", "both"],
+      default: "both",
+    },
+    showHeaderAddress: { type: Boolean, default: true },
+    showHeaderGeneratedDate: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

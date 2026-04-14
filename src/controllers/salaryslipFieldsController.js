@@ -21,7 +21,7 @@ exports.getForLoggedInUser = async (req, res) => {
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
       .select(
-        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails"
+        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate"
       );
     return res.json({
       enabledPersonalFields: doc?.enabledPersonalFields || [],
@@ -33,6 +33,9 @@ exports.getForLoggedInUser = async (req, res) => {
       showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
       showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
       showLoanDetails : typeof doc?.showLoanDetails  === "boolean" ? doc.showLoanDetails  : true,
+      headerOption: doc?.headerOption || "both",
+      showHeaderAddress: typeof doc?.showHeaderAddress === "boolean" ? doc.showHeaderAddress : true,
+      showHeaderGeneratedDate: typeof doc?.showHeaderGeneratedDate === "boolean" ? doc.showHeaderGeneratedDate : true,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
@@ -52,7 +55,10 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledLeaveRecords,
       showProvidentFund, // add these two
       showGratuityFund,
-      showLoanDetails 
+      showLoanDetails,
+      headerOption,
+      showHeaderAddress,
+      showHeaderGeneratedDate,
     } = req.body;
 
     if (
@@ -78,6 +84,9 @@ exports.updateForLoggedInUser = async (req, res) => {
           showProvidentFund, 
           showGratuityFund, 
           showLoanDetails, 
+          headerOption,
+          showHeaderAddress,
+          showHeaderGeneratedDate,
           updatedAt: new Date(),
         },
       },
@@ -86,7 +95,7 @@ exports.updateForLoggedInUser = async (req, res) => {
         new: true,
         lean: true,
         select:
-          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails ",
+          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate",
       }
     );
 
@@ -100,6 +109,9 @@ exports.updateForLoggedInUser = async (req, res) => {
       showProvidentFund: typeof doc?.showProvidentFund === "boolean" ? doc.showProvidentFund : true,
       showGratuityFund: typeof doc?.showGratuityFund === "boolean" ? doc.showGratuityFund : true,
       showLoanDetails: typeof doc?.showLoanDetails === "boolean" ? doc.showLoanDetails : true,
+      headerOption: doc.headerOption,
+      showHeaderAddress: doc.showHeaderAddress,
+      showHeaderGeneratedDate: doc.showHeaderGeneratedDate,
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
