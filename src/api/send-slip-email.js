@@ -121,6 +121,7 @@ const PROFILE_LABELS = {
   fieldOfQualification: "Field of Qualification",
   phone: "Mobile Number",
   email: "Email",
+  companyEmail: "Company Email",
   permanentAddress: "Permanent Address",
   presentAddress: "Present Address",
   bankName: "Bank Name",
@@ -153,6 +154,7 @@ const PROFILE_ORDER = [
   "fieldOfQualification",
   "phone",
   "email",
+  "companyEmail",
   "permanentAddress",
   "presentAddress",
   "bankName",
@@ -222,10 +224,10 @@ function renderLoanTable(loans = []) {
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
         Loan Details
       </div>
-      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc; table-layout: fixed;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
         <thead>
           <tr style="background:#f1f5f9;">
-            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Type</th>
+            <th style="padding:10px 6px; border:1px solid #e5e7eb;">Type of Loan</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Current Month</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Amount Paid in Previous Month(s)</th>
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Balance (Principal)</th>
@@ -365,7 +367,7 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
     Entitled: "Entitled",
     Bonus: "Overtime Bonus",
     AvailedYTD: "Availed (YTD)",
-    AvailedMTH: "Availed (MTH)",
+    AvailedMTH: "Availed (mth)",
     Balance: "Balance",
   };
   const typeLabel = {
@@ -554,7 +556,7 @@ function buildSalarySlipHtml({
               <div style="display:flex;">
                 <span style="display:block; color:#0F172A; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
-                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px; margin-left: auto;">
+                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px; margin-left: auto; text-align:right;">
                   ${valueToShow}
                 </span>
               </div>
@@ -718,7 +720,8 @@ function buildSalarySlipHtml({
       <title>Pay Slip - ${company.name}</title>
     </head>
     <body style="background:#f1f5f9; margin:0; padding:0; font-family:Segoe UI,Arial,sans-serif; color:#1e293b;">
-      <div style="background:#f1f5f9; width:100%; padding:20px 0;">
+      <div style="background:#f1f5f9; width:100%; padding:20px 0; overflow-x:auto;">
+        <div style="width:800px; min-width:800px; margin:0 auto;">
             <table width="800" cellpadding="0" cellspacing="0" border="0" style="margin:40px auto 20px auto; background:#fff; border-radius:14px; box-shadow:0 4px 20px rgba(0,0,0,0.07); border:1px solid #dbeafe;">
               <!-- ── HEADER ── -->
               <tr>
@@ -726,30 +729,30 @@ function buildSalarySlipHtml({
                   <table width="100%" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td valign="middle" style="padding:0;">
-                      ${(headerOption === "logo" || headerOption === "both")
-        ? `<div><img src="${company.logo}" alt="${company.name}" style="height:50px; width:auto;"></div>`
-        : ""
-      }
-                        ${(headerOption === "companyName" || headerOption === "both")
-        ? `<div style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</div>`
-        : ""
-      }
-                        ${showHeaderAddress
-        ? `<span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>`
-        : ""
-      }
+                        ${(headerOption === "logo" || headerOption === "both")
+                          ? `<div><img src="${company.logo}" alt="${company.name}" style="height:50px; width:auto;"></div>`
+                          : ""
+                        }
+                                          ${(headerOption === "companyName" || headerOption === "both")
+                          ? `<div style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</div>`
+                          : ""
+                        }
+                                          ${showHeaderAddress
+                          ? `<span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>`
+                          : ""
+                        }
                       </td>
                       <td valign="top" align="right" style="padding:0;">
                         <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip &#8211; ${monthYear}</span><br>
                         ${showHeaderGeneratedDate
-        ? ` <span style="color:#0F172A; font-size:13px;">Generated: ${(() => {
-          const d = new Date();
-          const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
-          const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
-          return `${datePart}, ${timePart.toUpperCase()}`;
-        })()}</span>`
-        : ""
-      }
+                          ? ` <span style="color:#0F172A; font-size:13px;">Generated: ${(() => {
+                            const d = new Date();
+                            const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
+                            const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+                            return `${datePart}, ${timePart.toUpperCase()}`;
+                          })()}</span>`
+                          : ""
+                        }
                       </td>
                     </tr>
                   </table>
@@ -785,7 +788,7 @@ function buildSalarySlipHtml({
               </tr>
 
             </table>
-          
+        </div>    
   
       </div>
     </body>
