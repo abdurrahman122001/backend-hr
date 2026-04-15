@@ -13,7 +13,24 @@ exports.getMyProfile = async (req, res) => {
 exports.upsertProfile = async (req, res) => {
   try {
     const ownerId = req.user._id;
-    const data = { ...req.body, owner: ownerId };
+    let data;
+    
+    // When sending FormData, the frontend passes JSON as a string in req.body.data
+    if (req.body.data) {
+      try {
+        data = typeof req.body.data === "string" ? JSON.parse(req.body.data) : req.body.data;
+      } catch (e) {
+        data = req.body;
+      }
+    } else {
+      data = { ...req.body };
+    }
+    
+    data.owner = ownerId;
+
+    if (req.file) {
+      data.logo = `/uploads/${req.file.filename}`;
+    }
 
     // Ensure only one branch can have useForDocumentation set to true
     if (data.branches && data.branches.length > 0) {
