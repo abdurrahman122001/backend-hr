@@ -324,6 +324,23 @@ exports.getClientById = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
+
+    // 🔥 HANDLE GROUP IDs: If it starts with group_, it's not a client
+    if (id.startsWith("group_")) {
+      const gId = id.replace("group_", "");
+      const WhatsAppGroup = require("../models/WhatsAppGroup");
+      const group = await WhatsAppGroup.findById(gId);
+      if (!group) return res.status(404).json({ error: "Group not found" });
+      
+      return res.json({
+        _id: id,
+        clientName: group.name,
+        type: "group",
+        isGroup: true,
+        groupData: group
+      });
+    }
+
     const client = await ClientInfo.findById(id)
       .populate("assignedTo", "_id name companyEmail role")
       .populate("supervisedBy", "_id name companyEmail role");
@@ -392,6 +409,16 @@ exports.toggleWhatsAppFlag = async (req, res) => {
 
     if (!validFlags.includes(flag)) {
       return res.status(400).json({ error: "Invalid flag type" });
+    }
+
+    // 🔥 HANDLE GROUP IDs
+    if (id.startsWith("group_")) {
+       return res.json({
+         success: true,
+         message: `${flag} toggled locally (groups not supported yet)`,
+         flag,
+         newValue: false,
+       });
     }
 
     const client = await ClientInfo.findById(id);
@@ -471,6 +498,18 @@ exports.getWhatsAppFlags = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
+
+    // 🔥 HANDLE GROUP IDs
+    if (id.startsWith("group_")) {
+      return res.json({
+        isPinned: false,
+        isRead: true,
+        isFavourite: false,
+        isMuted: false,
+        isArchived: false,
+      });
+    }
+
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -503,6 +542,10 @@ exports.markClientRead = async (req, res) => {
   try {
     const employeeId = req.employee._id;
     const { id } = req.params; // clientId
+
+    if (id.startsWith("group_")) {
+       return res.json({ success: true, message: "Group read status not tracked here" });
+    }
 
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });

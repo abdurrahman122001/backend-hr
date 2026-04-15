@@ -88,14 +88,8 @@ const CommentSchema = new Schema(
 
 const WhatsAppMessageSchema = new Schema(
   {
-    // Organization / data ownership scope
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
-
-    // Conversation scope
-    // client is optional for pure employee-group messages (isGroupMessage=true)
     client: { type: Schema.Types.ObjectId, ref: "ClientInfo", default: null },
-
-    // Participants
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     receiver: [
       { type: Schema.Types.ObjectId, ref: "Employee", required: true },
@@ -108,16 +102,18 @@ const WhatsAppMessageSchema = new Schema(
       enum: ["pending", "approved", "disapproved"],
       default: null,
     },
+    intendedReceivers: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
+      default: [],
+    },
     isForwarded: { type: Boolean, default: false },
     originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
     forwardedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
-    // Approval tracking
     approvedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
     approvedAt: { type: Date, default: null },
     disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
     disapprovedAt: { type: Date, default: null },
-    // Stores each approval step: [{ approver, approvedAt, level }]
     approvalChain: {
       type: [
         {

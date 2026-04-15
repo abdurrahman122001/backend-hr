@@ -1,5 +1,5 @@
-// controllers/whatsAppMessageController.js
 const WhatsAppMessage = require("../models/WhatsAppMessage");
+const WhatsAppGroup = require("../models/WhatsAppGroup");
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -264,12 +264,29 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🧑‍💼 MANAGER / OWNER: can see everything for their owner
+  // 🧑‍💼 MANAGER / OWNER: can see all approved/null messages plus their own pending ones
   if (
     (currentUserRole === "manager" || currentUserRole === "owner") &&
     ownerId
   ) {
-    return { ...q, owner: ownerId };
+    return {
+      $and: [
+        { ...q, owner: ownerId },
+        {
+          $or: [
+            // Normal (no approval needed) and approved messages → always visible
+            { approvalStatus: null },
+            { approvalStatus: "approved" },
+            // Pending → only visible to the sender or designated approver
+            { approvalStatus: "pending", sender: me },
+            { approvalStatus: "pending", receiver: me },
+            { approvalStatus: "pending", receiver: { $in: [me] } },
+            // Disapproved → only sender sees it
+            { approvalStatus: "disapproved", sender: me },
+          ],
+        },
+      ],
+    };
   }
 
   // 🧑‍🤝‍🧑 TEAM LEAD: can see messages where they are involved OR manager messages for supervision
@@ -522,7 +539,11 @@ exports.listMessages = async function listMessages(req, res) {
     // Owner / client scope
     if (isObjId(owner)) q.owner = owner;
     else if (req.employee?.owner) q.owner = req.employee.owner;
-    if (isObjId(client)) q.client = client;
+    if (isObjId(client)) {
+      q.client = client;
+      // 🔥 CRITICAL: Regular client message list should NOT include group messages
+      q.isGroupMessage = { $ne: true };
+    }
 
     // 🔥 ENHANCED: Handle conversation type separation
     if (conversationType) {
@@ -924,8 +945,40 @@ exports.listMessagesForManager = async function listMessagesForManager(
       q.client = clientId;
     }
 
+    // 🔥 HANDLE GROUP FILTERING
+    const isGroupFilter = req.query.isGroupMessage === "true";
+    const groupId = req.query.groupId;
+
+    if (isGroupFilter && isObjId(groupId)) {
+        q.isGroupMessage = true;
+        q.groupId = groupId;
+        // When searching a group, we typically ignore the client filter 
+        // as the groupId is the primary identifier
+        delete q.client;
+    } else if (req.query.isGroupMessage === "false") {
+        q.isGroupMessage = false;
+        q.groupId = null;
+    } else if (!isGroupFilter && !groupId) {
+        // DEFAULT: If no group filter specified, exclude group messages from direct client chats
+        // to prevent leakage into individual threads
+        q.$or = [
+            { isGroupMessage: false },
+            { isGroupMessage: { $exists: false } }
+        ];
+    }
+
     // FIXED: Handle status filter for drafts to exclude scheduled messages
     const status = req.query.status;
+    const isClientEmployeeMessage = req.query.isClientEmployeeMessage;
+    const clientEmployeeId = req.query.clientEmployeeId;
+
+    if (isClientEmployeeMessage === "true" && clientEmployeeId) {
+      q.isClientEmployeeMessage = true;
+      q.clientEmployeeId = clientEmployeeId;
+    } else if (isClientEmployeeMessage === "false") {
+      q.isClientEmployeeMessage = false;
+    }
+
     if (
       status &&
       ["draft", "scheduled", "sent", "cancelled"].includes(status)
@@ -1615,6 +1668,17 @@ exports.approveMessage = async function approveMessage(req, res) {
       approvalFinalized = true;
     }
 
+    // 🔥 GROUP MESSAGE: When finalized, expand receiver to ALL intended group members
+    // so the socket emission below notifies all group members (not just the approver)
+    if (msg.isGroupMessage && approvalFinalized) {
+      const intendedIds = (msg.intendedReceivers || []).map((r) =>
+        typeof r === "object" ? r._id : r
+      );
+      if (intendedIds.length > 0) {
+        msg.receiver = intendedIds;
+      }
+    }
+
     await msg.save();
 
     const populatedMsg = await WhatsAppMessage.findById(id).populate([
@@ -1623,6 +1687,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "approvedBy", select: "_id name companyEmail" },
+      { path: "groupId", select: "_id name" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
       { path: "repliedTo", select: "_id note message sender attachments" },
@@ -1633,6 +1698,11 @@ exports.approveMessage = async function approveMessage(req, res) {
       clientSupervision: clientSupervision,
       requiresApproval: clientSupervision === "needs_approval",
       approvalFinalized,
+      // Use actual message flags instead of hardcoding
+      isGroupMessage: populatedMsg.isGroupMessage,
+      groupId: populatedMsg.groupId,
+      chatType: populatedMsg.chatType || (populatedMsg.groupId ? "group" : "normal"),
+      isClientEmployeeMessage: populatedMsg.isClientEmployeeMessage || false, 
     };
 
     // 🔔 Emit real-time events to all involved users
@@ -1653,6 +1723,26 @@ exports.approveMessage = async function approveMessage(req, res) {
           if (rid) allInvolvedUsers.add(String(rid));
         });
       }
+      
+      // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
+      if (msg.isGroupMessage && msg.groupId) {
+        try {
+          const group = await WhatsAppGroup.findById(msg.groupId).lean();
+          if (group && group.members) {
+            group.members.forEach(m => {
+              if (m.memberId) allInvolvedUsers.add(String(m.memberId));
+            });
+          }
+
+          // Also include all managers and CRM-like roles who supervise this owner's chats
+          const { managers, tls } = await findTLsAndManagersByOwner(msg.owner);
+          managers.forEach(id => allInvolvedUsers.add(String(id)));
+          tls.forEach(id => allInvolvedUsers.add(String(id)));
+
+        } catch (err) {
+          console.error("Error fetching group members for approval emission:", err);
+        }
+      }
 
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
@@ -1665,10 +1755,23 @@ exports.approveMessage = async function approveMessage(req, res) {
           nextSupervisors: approvalFinalized ? [] : immediateSeniors,
         });
       });
+
+      // 🔥 ALSO emit to the group room so anyone inside the chat gets the update instantly
+      if (msg.isGroupMessage && msg.groupId) {
+        io.to(`group_${msg.groupId}`).emit("new_message", {
+          message: updatedMessage,
+          type: approvalFinalized ? "message_approved" : "message_escalated",
+          action: "approved",
+          approvedBy: currentUserId,
+          timestamp: new Date(),
+          approvalFinalized: true
+        });
+      }
     }
 
-    // ✅ Forward to Managers ONLY if approval is completely finalized
-    if (approvalFinalized) {
+    // ✅ Forward to Managers ONLY if approval is finalized AND this is NOT a group message
+    // Group messages stay in the group chat only — no forwarded copy to client conversation
+    if (approvalFinalized && !msg.isGroupMessage && !msg.groupId && msg.chatType !== 'group') {
       const senderRole = normalizeRole(msg.sender?.role || "");
       if (senderRole === "employee") {
         const { managers } = await findTLsAndManagersByOwner(msg.owner);
@@ -2197,7 +2300,10 @@ exports.editMessage = async function editMessage(req, res) {
       isTeamLead &&
       !isSender &&
       msg.approvalStatus === "approved" &&
-      clientRequiresApproval
+      clientRequiresApproval &&
+      !msg.isGroupMessage &&
+      !msg.groupId &&
+      msg.chatType !== "group"
     ) {
       // ✅ Forward only if sender was an Employee under supervision
       if (isOriginalSenderEmployee) {
@@ -3095,9 +3201,10 @@ exports.searchMessages = async function searchMessages(req, res) {
         { path: "client", select: "_id clientName" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "owner", select: "_id name companyEmail" },
+        { path: "groupId", select: "_id name" },
       ])
       .select(
-        "_id note message subject sender client createdAt receiver status",
+        "_id note message subject sender client createdAt receiver status approvalStatus isGroupMessage groupId chatType",
       )
       .lean();
 
@@ -3164,6 +3271,10 @@ exports.createMessage = async function createMessage(req, res) {
       parentClientId,
       clientEmployeeName,
       clientEmployeeDesignation,
+      // 🔥 NEW: Add group fields
+      isGroupMessage,
+      groupId,
+      chatType,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -3625,6 +3736,10 @@ exports.createMessage = async function createMessage(req, res) {
       originalManagerReceiver: null,
       isEmployeeReplyToManager:
         senderRole === "employee" && isReply && needsApproval,
+      // Group messaging fields
+      isGroupMessage: isGroupMessage || false,
+      groupId: groupId || null,
+      chatType: chatType || (isGroupMessage ? 'group' : 'direct'),
     };
 
     // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval
@@ -3730,12 +3845,18 @@ exports.createMessage = async function createMessage(req, res) {
 
       receivers.forEach((receiverId) => {
         const isReceiverTeamLead = tls.includes(receiverId);
-        const isReceiverHierarchySupervisor = senderSupervisors.includes(receiverId);
+        const isReceiverManager = managers.includes(receiverId);
+        
+        // Check if receiver is a supervisor for the sender (active or hierarchy)
+        const isReceiverHierarchySupervisor = 
+          senderSupervisors.includes(receiverId) || 
+          receivers.includes(String(receiverId)); // If they are in the receivers list for a pending message, they ARE an approver
+
         const shouldNotify =
           responseWithSupervision.approvalStatus === "approved" ||
           responseWithSupervision.approvalStatus === null ||
           (responseWithSupervision.approvalStatus === "pending" &&
-            (isReceiverTeamLead || isReceiverHierarchySupervisor));
+            (isReceiverTeamLead || isReceiverManager || isReceiverHierarchySupervisor));
 
         if (shouldNotify) {
           io.to(`employee_${receiverId}`).emit("new_message", {
@@ -3753,6 +3874,21 @@ exports.createMessage = async function createMessage(req, res) {
           });
         }
       });
+
+      // 🔥 ALSO emit to the group room so anyone inside the chat gets the update instantly
+      if (isGroupMessage || (responseWithSupervision.isGroupMessage && responseWithSupervision.groupId)) {
+        const targetGroupId = groupId || responseWithSupervision.groupId;
+        if (targetGroupId) {
+          io.to(`group_${targetGroupId}`).emit("new_message", {
+            message: responseWithSupervision,
+            type: responseWithSupervision.approvalStatus === "pending"
+                ? "reply_needs_approval"
+                : "new_assignment",
+            action: "created",
+            isClientEmployeeChat: isClientEmployeeChat,
+          });
+        }
+      }
 
       // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies to client employee chat
       if (senderRole === "team_lead" && assignedEmployeeIds.length > 0) {
