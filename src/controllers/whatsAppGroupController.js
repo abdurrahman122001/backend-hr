@@ -2,6 +2,7 @@
 const WhatsAppGroup = require("../models/WhatsAppGroup");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const mongoose = require("mongoose");
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
@@ -10,8 +11,44 @@ const oid = (v) =>
 
 function normalizeRole(role) {
   if (!role) return "";
-  const r = String(role).toLowerCase().replace(/\s+/g, "_");
-  return r;
+  return String(role).toLowerCase().replace(/\s+/g, "_");
+}
+
+/** ---------- HIERARCHY HELPER FUNCTIONS ---------- **/
+
+/** Find all immediate supervisors (seniors) of an employee */
+async function findSupervisorsInHierarchy(ownerId, employeeId) {
+  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+  try {
+    const links = await EmployeeHierarchy.find({
+      owner: ownerId,
+      junior: employeeId,
+    })
+      .select("senior")
+      .lean();
+    return links.map((l) => String(l.senior));
+  } catch (err) {
+    console.error("Error finding supervisors:", err);
+    return [];
+  }
+}
+
+/** Get the full management chain (all seniors up to root) */
+async function getManagementChain(ownerId, employeeId, visited = new Set()) {
+  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+  const idStr = String(employeeId);
+  if (visited.has(idStr)) return [];
+  visited.add(idStr);
+
+  const supervisors = await findSupervisorsInHierarchy(ownerId, employeeId);
+  const chain = [...supervisors];
+
+  for (const supId of supervisors) {
+    const upper = await getManagementChain(ownerId, supId, visited);
+    chain.push(...upper);
+  }
+
+  return [...new Set(chain)];
 }
 
 /** ── CREATE GROUP ──────────────────────────────────────────── */
@@ -19,21 +56,17 @@ exports.createGroup = async function (req, res) {
   try {
     const { name, description, members } = req.body;
 
-    if (!name || !name.trim()) {
+    if (!name || !name.trim())
       return res.status(400).json({ error: "Group name is required" });
-    }
-    if (!members || !Array.isArray(members) || members.length === 0) {
+    if (!members || !Array.isArray(members) || members.length === 0)
       return res.status(400).json({ error: "At least one member is required" });
-    }
 
     const owner = req.employee?.owner || req.employee?._id;
     const createdBy = req.employee?._id;
 
-    if (!owner || !createdBy) {
+    if (!owner || !createdBy)
       return res.status(401).json({ error: "Unauthorized" });
-    }
 
-    // Derive groupType from member types
     const memberTypes = [...new Set(members.map((m) => m.memberType))];
     let groupType = "mixed";
     if (memberTypes.length === 1) {
@@ -58,7 +91,6 @@ exports.createGroup = async function (req, res) {
       .populate("createdBy", "name companyEmail role")
       .lean();
 
-    // Emit socket event so other members see the new group in real time
     const io = req.app.get("io");
     if (io) {
       members.forEach((m) => {
@@ -84,8 +116,6 @@ exports.getGroups = async function (req, res) {
     const isManager = currentUserRole.includes("manager");
 
     const query = { owner, isActive: true };
-
-    // Managers see all groups; everyone else only groups they belong to
     if (!isManager) {
       query["members.memberId"] = currentUserId;
     }
@@ -144,11 +174,24 @@ exports.getGroupMessages = async function (req, res) {
     }).lean();
     if (!group) return res.status(404).json({ error: "Group not found" });
 
+    const me = oid(String(req.employee._id));
+
     const q = {
       groupId: oid(groupId),
       isGroupMessage: true,
       owner,
       status: { $ne: "draft" },
+      // Approval visibility rules:
+      // - null / "approved"  → everyone in the group can see
+      // - "pending"          → only sender or the designated approver (in receiver[])
+      // - "disapproved"      → only the sender
+      $or: [
+        { approvalStatus: null },
+        { approvalStatus: "approved" },
+        { approvalStatus: "pending", sender: me },
+        { approvalStatus: "pending", receiver: me },
+        { approvalStatus: "disapproved", sender: me },
+      ],
     };
 
     if (cursor && isObjId(cursor)) {
@@ -194,11 +237,7 @@ exports.getGroupMessages = async function (req, res) {
       items.reverse();
     }
 
-    res.json({
-      items,
-      group,
-      pagination: { hasMore, nextCursor },
-    });
+    res.json({ items, group, pagination: { hasMore, nextCursor } });
   } catch (error) {
     console.error("Error fetching group messages:", error);
     res.status(500).json({ error: "Failed to fetch group messages" });
@@ -206,14 +245,6 @@ exports.getGroupMessages = async function (req, res) {
 };
 
 /** ── SEND GROUP MESSAGE ─────────────────────────────────────── */
-/**
- * Body fields:
- *   note             – message text (required)
- *   subject          – optional subject line
- *   receiverType     – "client" | "client_employee" | "all" (defaults to "all")
- *   receiverId       – ID of the specific client or client-employee to address
- *   parentClientId   – (client_employee only) parent client ID
- */
 exports.sendGroupMessage = async function (req, res) {
   try {
     const { groupId } = req.params;
@@ -232,6 +263,7 @@ exports.sendGroupMessage = async function (req, res) {
 
     const owner = req.employee?.owner || req.employee?._id;
     const senderId = req.employee?._id;
+    const senderRole = normalizeRole(req.employee?.role || "");
 
     const group = await WhatsAppGroup.findOne({
       _id: groupId,
@@ -240,14 +272,13 @@ exports.sendGroupMessage = async function (req, res) {
     }).lean();
     if (!group) return res.status(404).json({ error: "Group not found" });
 
-    // ── Build receiver list (always the employee members) ──────────
+    // ── All employee member IDs (excluding sender) ─────────────────
     const employeeMembers = group.members.filter(
       (m) => m.memberType === "employee"
     );
-    const receiverIds = employeeMembers
-      .map((m) => m.memberId)
-      .filter((id) => isObjId(String(id)) && String(id) !== String(senderId))
-      .map((id) => oid(String(id)));
+    const allMemberIds = employeeMembers
+      .map((m) => String(m.memberId))
+      .filter((id) => id !== String(senderId));
 
     // ── Resolve client reference ───────────────────────────────────
     let messageClientId = null;
@@ -256,14 +287,8 @@ exports.sendGroupMessage = async function (req, res) {
     let clientEmployeeData = null;
 
     if (receiverType === "client" && receiverId && isObjId(receiverId)) {
-      // Direct client message
       messageClientId = oid(receiverId);
-      isClientEmployeeMessage = false;
-    } else if (
-      receiverType === "client_employee" &&
-      receiverId
-    ) {
-      // Client-employee message
+    } else if (receiverType === "client_employee" && receiverId) {
       const ceMember = group.members.find(
         (m) => m.memberId === receiverId && m.memberType === "client_employee"
       );
@@ -280,27 +305,109 @@ exports.sendGroupMessage = async function (req, res) {
         };
       }
     } else {
-      // No specific target – pick first client in group (if any)
+      // Default: pick first client in group
       const clientMember = group.members.find((m) => m.memberType === "client");
       if (clientMember && isObjId(clientMember.memberId)) {
         messageClientId = oid(clientMember.memberId);
       }
     }
 
-    // ── Build message document ─────────────────────────────────────
+    // ── Check ClientInfo supervision settings ─────────────────────
+    let needsApproval = false;
+    let supervisedByList = [];
+
+    if (messageClientId) {
+      const ClientInfo = require("../models/ClientInfo");
+      const clientDoc = await ClientInfo.findById(messageClientId)
+        .select("supervision supervisedBy")
+        .lean();
+      // Only "employee" role needs approval; managers/team leads bypass
+      needsApproval =
+        clientDoc?.supervision === "needs_approval" &&
+        senderRole === "employee";
+      supervisedByList = (clientDoc?.supervisedBy || []).map((id) =>
+        String(id)
+      );
+    }
+
+    // ── Build receiver & approval status ──────────────────────────
+    let receiverIds = [];
+    let intendedReceiverIds = [];
+    let approvalStatus = null;
+
+    if (needsApproval) {
+      // Find first immediate supervisor who: (a) has supervision ON for this client, (b) is in this group
+      const immediateSupervisors = await findSupervisorsInHierarchy(
+        owner,
+        senderId
+      );
+      const activeSupervisors = immediateSupervisors.filter(
+        (id) =>
+          supervisedByList.includes(id) && allMemberIds.includes(id)
+      );
+
+      if (activeSupervisors.length > 0) {
+        // One-by-one approval chain: only route to the FIRST active supervisor
+        receiverIds = [oid(activeSupervisors[0])];
+        approvalStatus = "pending";
+      } else {
+        // No active supervisor in group – walk full hierarchy to find TL/manager in group
+        const fullChain = await getManagementChain(owner, String(senderId));
+        const managerInGroup = fullChain.find((id) =>
+          allMemberIds.includes(id)
+        );
+        if (managerInGroup) {
+          receiverIds = [oid(managerInGroup)];
+          approvalStatus = "pending";
+        } else {
+          // Fallback: find any manager/TL among group members
+          for (const memberId of allMemberIds) {
+            const memberDoc = await Employee.findById(memberId)
+              .select("role")
+              .lean();
+            const mRole = normalizeRole(memberDoc?.role || "");
+            if (mRole === "manager" || mRole === "team_lead") {
+              receiverIds = [oid(memberId)];
+              approvalStatus = "pending";
+              break;
+            }
+          }
+          // Absolute fallback: no supervisor found → send directly with no approval
+          if (receiverIds.length === 0) {
+            receiverIds = allMemberIds
+              .filter(isObjId)
+              .map((id) => oid(String(id)));
+            approvalStatus = null;
+          }
+        }
+      }
+
+      // Store all group employee members as intended recipients (visible after approval)
+      intendedReceiverIds = allMemberIds
+        .filter(isObjId)
+        .map((id) => oid(String(id)));
+    } else {
+      // Direct supervision OR sender is manager/team_lead → send to all group members immediately
+      receiverIds = allMemberIds.filter(isObjId).map((id) => oid(String(id)));
+      approvalStatus = null;
+    }
+
+    // ── Build & save message document ─────────────────────────────
     const msgDoc = {
       owner,
       sender: senderId,
       receiver: receiverIds,
+      // Store intended final recipients so the group conv shows correctly after approval
+      intendedReceivers:
+        intendedReceiverIds.length > 0 ? intendedReceiverIds : receiverIds,
       note: note.trim(),
-      subject:
-        subject ||
-        `Group: ${group.name}`,
+      subject: subject || `Group: ${group.name}`,
       status: "sent",
       isGroupMessage: true,
       groupId: oid(groupId),
       chatType: "group",
-      isClientEmployeeMessage,
+      isClientEmployeeMessage: false, // 🔥 Force false for group messages to prevent leakage
+      approvalStatus,
     };
 
     if (messageClientId) msgDoc.client = messageClientId;
@@ -313,7 +420,6 @@ exports.sendGroupMessage = async function (req, res) {
     const message = new WhatsAppMessage(msgDoc);
     await message.save();
 
-    // Update group metadata
     await WhatsAppGroup.findByIdAndUpdate(groupId, {
       lastMessage: note.trim().substring(0, 100),
       lastMessageAt: new Date(),
@@ -325,15 +431,32 @@ exports.sendGroupMessage = async function (req, res) {
       .populate("receiver", "_id name companyEmail role")
       .lean();
 
-    // Emit to all employee members via socket
+    // ── Real-time socket notifications ────────────────────────────
     const io = req.app.get("io");
     if (io) {
-      employeeMembers.forEach((m) => {
-        if (isObjId(m.memberId)) {
-          io
-            .to(`employee_${m.memberId}`)
-            .emit("group_message", { groupId, message: populated });
-        }
+      // Always notify sender
+      io.to(`employee_${senderId}`).emit("new_message", {
+        message: populated,
+        type: "message_created",
+        action: "sent",
+        isGroupMessage: true,
+        approvalStatus,
+      });
+
+      // Notify each receiver (supervisor for pending, all members for direct)
+      receiverIds.forEach((rid) => {
+        const ridStr = String(rid);
+        if (ridStr === String(senderId)) return; // already notified
+        io.to(`employee_${ridStr}`).emit("new_message", {
+          message: populated,
+          type:
+            approvalStatus === "pending"
+              ? "reply_needs_approval"
+              : "new_group_message",
+          action: "received",
+          requiresApproval: approvalStatus === "pending",
+          isGroupMessage: true,
+        });
       });
     }
 
