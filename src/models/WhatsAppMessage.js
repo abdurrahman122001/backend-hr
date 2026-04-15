@@ -92,7 +92,8 @@ const WhatsAppMessageSchema = new Schema(
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
 
     // Conversation scope
-    client: { type: Schema.Types.ObjectId, ref: "ClientInfo", required: true },
+    // client is optional for pure employee-group messages (isGroupMessage=true)
+    client: { type: Schema.Types.ObjectId, ref: "ClientInfo", default: null },
 
     // Participants
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
@@ -159,6 +160,22 @@ const WhatsAppMessageSchema = new Schema(
       },
       default: null,
     },
+    // ── Group chat fields ────────────────────────────────────────────────
+    /** true when this message belongs to a WhatsApp group (not a direct chat) */
+    isGroupMessage: { type: Boolean, default: false },
+    /** Reference to WhatsAppGroup document */
+    groupId: { type: Schema.Types.ObjectId, ref: "WhatsAppGroup", default: null },
+    /**
+     * chatType differentiates normal 1-to-1/broadcast messages from group
+     * messages so the listMessages query can filter correctly.
+     *   "normal" – direct client / client-employee chat
+     *   "group"  – group chat message
+     */
+    chatType: { type: String, enum: ["normal", "group"], default: "normal" },
+
+    // parentClientId stored as a plain string (mirrors isClientEmployeeMessage practice)
+    parentClientId: { type: String, default: null },
+
     sentAt: { type: Date },
     status: {
       type: String,

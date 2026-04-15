@@ -287,30 +287,17 @@ async function applyVisibility(q, req) {
     const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
     // Create visibility conditions
+    // FIX: Pending messages only visible to sender and receiver
     const visibilityConditions = {
       $or: [
         { sender: me },
         { receiver: me },
         { receiver: { $in: [me] } },
-        // Allow team leads to see manager messages
+        // Allow team leads to see manager messages (non-pending only)
         {
           sender: { $in: managers.map((id) => oid(id)) },
           owner: ownerId,
-        },
-        // 🔥 HIERARCHY-BASED: Allow supervisors to see pending messages from their juniors
-        ...(juniorIds.length > 0
-          ? [
-            {
-              sender: { $in: juniorIds },
-              approvalStatus: "pending",
-              owner: ownerId,
-            },
-          ]
-          : []),
-        // 🔥 Allow team leads to see messages from clients requiring approval
-        {
-          approvalStatus: "pending",
-          owner: ownerId,
+          approvalStatus: { $ne: "pending" },
         },
       ],
     };
@@ -322,7 +309,7 @@ async function applyVisibility(q, req) {
     };
   }
 
-  // 🔥 HIERARCHY-BASED: Check if this employee is a supervisor in the hierarchy
+  // HIERARCHY-BASED: Check if this employee is a supervisor in the hierarchy
   // Supervisors should see pending messages from their juniors even if they're not Team Leads
   const juniorLinksSupervisor = await EmployeeHierarchy.find({
     owner: ownerId,
@@ -335,18 +322,12 @@ async function applyVisibility(q, req) {
   );
 
   if (juniorIdsSupervisor.length > 0) {
-    // This employee has subordinates - they can see their juniors' pending messages
+    // This employee has subordinates
     const now = new Date();
     const visOr = [
       { sender: me },
       { receiver: me },
       { receiver: { $in: [me] } },
-      // 🔥 HIERARCHY-BASED: Supervisor can see pending messages from juniors
-      {
-        sender: { $in: juniorIdsSupervisor },
-        approvalStatus: "pending",
-        owner: ownerId,
-      },
     ];
 
     if (q.isScheduled === true && q.status === "scheduled") {
@@ -2921,18 +2902,29 @@ exports.getClientMessagesSeenStatus =
       const { clientId } = req.params;
       const currentUserId = req.employee._id;
 
-      const { clientEmployeeId, isClientEmployeeMessage } = req.query;
+      const { clientEmployeeId, isClientEmployeeMessage, isGroupMessage } = req.query;
 
       if (!isObjId(clientId)) {
-        return res.status(400).json({ error: "Valid client ID required" });
+        return res.status(400).json({ error: "Valid ID required" });
       }
 
       const q = {
-        client: clientId,
         receiver: currentUserId,
-        // Exclude messages sent by current user
         sender: { $ne: currentUserId },
       };
+
+      if (isGroupMessage === "true") {
+        q.isGroupMessage = true;
+        q.groupId = clientId;
+      } else {
+        q.client = clientId;
+        if (isClientEmployeeMessage === "true" && clientEmployeeId) {
+          q.isClientEmployeeMessage = true;
+          q.clientEmployeeId = clientEmployeeId;
+        } else if (isClientEmployeeMessage === "false") {
+          q.isClientEmployeeMessage = false;
+        }
+      }
 
       if (isClientEmployeeMessage === "true" && clientEmployeeId) {
         q.isClientEmployeeMessage = true;
@@ -2954,21 +2946,10 @@ exports.getClientMessagesSeenStatus =
 
       // 🔥 NEW: Calculate pending approval count
       const pendingQ = {
-        client: clientId,
+        ...q,
         approvalStatus: "pending",
-        receiver: currentUserId, // They are a designated approver for this message
-        sender: { $ne: currentUserId }, // Senders don't see their own pending badge
       };
 
-      if (isClientEmployeeMessage === "true" && clientEmployeeId) {
-        pendingQ.isClientEmployeeMessage = true;
-        pendingQ.clientEmployeeId = clientEmployeeId;
-      } else if (isClientEmployeeMessage === "false") {
-        pendingQ.isClientEmployeeMessage = false;
-      }
-
-      // No need for applyVisibility here as being in the receiver list 
-      // already implies they should see and action this message.
       const pendingApprovalCount = await WhatsAppMessage.countDocuments(pendingQ);
 
       res.json({
@@ -2992,25 +2973,30 @@ exports.getClientMessagesSeenStatus =
 exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
   try {
     const { clientId } = req.params;
-    const { clientEmployeeId, isClientEmployeeMessage } = req.body || {};
+    const { clientEmployeeId, isClientEmployeeMessage, isGroupMessage } = req.body || {};
     const currentUserId = req.employee._id;
 
     if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID required" });
+      return res.status(400).json({ error: "Valid ID required" });
     }
 
     const q = {
-      client: clientId,
       receiver: currentUserId,
       sender: { $ne: currentUserId }, // Exclude own messages
       "seenBy.employee": { $ne: currentUserId }, // Not already seen
     };
 
-    if (isClientEmployeeMessage === true && clientEmployeeId) {
-      q.isClientEmployeeMessage = true;
-      q.clientEmployeeId = clientEmployeeId;
-    } else if (isClientEmployeeMessage === false) {
-      q.isClientEmployeeMessage = false;
+    if (isGroupMessage === true) {
+      q.isGroupMessage = true;
+      q.groupId = clientId;
+    } else {
+      q.client = clientId;
+      if (isClientEmployeeMessage === true && clientEmployeeId) {
+        q.isClientEmployeeMessage = true;
+        q.clientEmployeeId = clientEmployeeId;
+      } else if (isClientEmployeeMessage === false) {
+        q.isClientEmployeeMessage = false;
+      }
     }
 
     // Find all unread messages for this client/employee where current user is a receiver

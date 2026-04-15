@@ -4,8 +4,19 @@ const empAuth = require("../middleware/empAuth");
 const { upload } = require("../utils/multer");
 const ctrl = require("../controllers/whatsAppMessageController");
 const commentController = require("../controllers/commentController");
+const groupCtrl = require("../controllers/whatsAppGroupController");
+
 // All routes require employee authentication
 router.use(empAuth);
+
+// ── Group routes (must come BEFORE /:id wildcards) ──────────────────────────
+// chatType differentiation: isGroupMessage=true on group messages
+router.get("/groups", groupCtrl.getGroups);
+router.post("/groups", groupCtrl.createGroup);
+router.get("/groups/:groupId", groupCtrl.getGroup);
+router.delete("/groups/:groupId", groupCtrl.deleteGroup);
+router.get("/groups/:groupId/messages", groupCtrl.getGroupMessages);
+router.post("/groups/:groupId/messages", groupCtrl.sendGroupMessage);
 
 // List / create / sent etc.
 router.get("/", ctrl.listMessages);
@@ -18,7 +29,7 @@ router.get("/messages/:clientId", ctrl.listMessagesForManager);
 router.get("/scheduled/all", ctrl.getScheduledMessages);
 router.get("/client/:clientId/scheduled", ctrl.getScheduledMessagesForClient);
 
-router.get("/search", ctrl.searchMessages); // ← MOVE THIS UP
+router.get("/search", ctrl.searchMessages);
 
 router.get("/:id/attachments", ctrl.listAttachments);
 router.post(
@@ -45,26 +56,16 @@ router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
 router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
 router.post("/:messageId/comments", commentController.addComment);
-
-// Get comments for message
 router.get("/:messageId/comments", commentController.getComments);
-
-// Edit comment
 router.put("/:messageId/comments/:commentId", commentController.editComment);
-
-// Delete comment
 router.delete(
   "/:messageId/comments/:commentId",
   commentController.deleteComment
 );
-
-// Add reaction to comment
 router.post(
   "/:messageId/comments/:commentId/reactions",
   commentController.addReaction
 );
-
-// Get comment statistics
 router.get("/:messageId/comments/stats", commentController.getCommentStats);
 
-module.exports = router;
+module.exports = router;

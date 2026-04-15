@@ -495,6 +495,12 @@ exports.listMessages = async function listMessages(req, res) {
     // User-based filtering
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
+    
+    // Defensive check for employee authentication
+    if (!req.employee?._id) {
+      return res.status(401).json({ error: "Unauthorized - employee not authenticated" });
+    }
+    
     const me = oid(String(req.employee._id));
     const between = normalizeIds(betweenRaw);
 
