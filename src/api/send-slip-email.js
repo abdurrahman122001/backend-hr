@@ -220,7 +220,7 @@ function renderLoanTable(loans = []) {
   console.log("Rendering loan table with data:", loans);
 
   return `
-    <div style="margin-bottom: 8px;">
+    <div style="margin-bottom: 14px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
         Loan Details
       </div>
@@ -237,31 +237,30 @@ function renderLoanTable(loans = []) {
         </thead>
         <tbody>
           ${arr
-            .map(
-              (loan) => `
+      .map(
+        (loan) => `
             <tr>
-              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                loan.type || "-"
-              }</td>
+              <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${loan.type || "-"
+          }</td>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(
-                loan.amountPaidCurrentMonth
-              )}</td>
+            loan.amountPaidCurrentMonth
+          )}</td>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(
-                loan.amountPaidPreviousMonths
-              )}</td>
+            loan.amountPaidPreviousMonths
+          )}</td>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(
-                loan.balancePrincipal
-              )}</td>
+            loan.balancePrincipal
+          )}</td>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(
-                loan.balanceMarkup
-              )}</td>
+            loan.balanceMarkup
+          )}</td>
               <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${safeAmountCell(
-                loan.netBalance
-              )}</td>
+            loan.netBalance
+          )}</td>
             </tr>
           `
-            )
-            .join("")}
+      )
+      .join("")}
         </tbody>
       </table>
     </div>
@@ -271,7 +270,7 @@ function renderLoanTable(loans = []) {
 // Render Provident Fund Table
 function renderProvidentFundTable(data = {}) {
   return `
-    <div style="margin-bottom: 24px;">
+    <div style="margin-bottom: 14px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
         Provident Fund
       </div>
@@ -279,24 +278,23 @@ function renderProvidentFundTable(data = {}) {
         <thead>
           <tr style="background:#f1f5f9;">
             ${PROVIDENT_FUND_FIELDS.map(
-              (f) =>
-                `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`
-            ).join("")}
+    (f) =>
+      `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`
+  ).join("")}
           </tr>
         </thead>
         <tbody>
           <tr>
             ${PROVIDENT_FUND_FIELDS.map(
-              (f) =>
-                `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                  data &&
-                  data[f.key] != null &&
-                  data[f.key] !== "" &&
-                  data[f.key] !== 0
-                    ? data[f.key]
-                    : "-"
-                }</td>`
-            ).join("")}
+    (f) =>
+      `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${data &&
+        data[f.key] != null &&
+        data[f.key] !== "" &&
+        data[f.key] !== 0
+        ? data[f.key]
+        : "-"
+      }</td>`
+  ).join("")}
           </tr>
         </tbody>
       </table>
@@ -307,7 +305,7 @@ function renderProvidentFundTable(data = {}) {
 // Render Gratuity Fund Table
 function renderGratuityFundTable(data = {}) {
   return `
-    <div style="margin-bottom: 24px;">
+    <div style="margin-bottom: 14px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">
         Gratuity Fund
       </div>
@@ -315,34 +313,34 @@ function renderGratuityFundTable(data = {}) {
         <thead>
           <tr style="background:#f1f5f9;">
             ${GRATUITY_FUND_FIELDS.map(
-              (f) =>
-                `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`
-            ).join("")}
+    (f) =>
+      `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${f.label}</th>`
+  ).join("")}
           </tr>
         </thead>
         <tbody>
           <tr>
             ${GRATUITY_FUND_FIELDS.map((f) => {
-              let value =
-                data &&
-                data[f.key] != null &&
-                data[f.key] !== "" &&
-                data[f.key] !== 0
-                  ? data[f.key]
-                  : "-";
-              if (
-                f.key === "gratuityFundBalanceBF" ||
-                f.key === "monthlyContribution" ||
-                f.key === "gratuityFundWithdrawal" ||
-                f.key === "gratuityFundProfit" ||
-                f.key === "gratuityFundBalance"
-              ) {
-                value = value !== "-" ? `Rs. ${safeDecimalCell(value)}` : "-";
-              } else if (f.key === "yearsOfService") {
-                value = value !== "-" ? `${value} years` : "-";
-              }
-              return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${value}</td>`;
-            }).join("")}
+    let value =
+      data &&
+        data[f.key] != null &&
+        data[f.key] !== "" &&
+        data[f.key] !== 0
+        ? data[f.key]
+        : "-";
+    if (
+      f.key === "gratuityFundBalanceBF" ||
+      f.key === "monthlyContribution" ||
+      f.key === "gratuityFundWithdrawal" ||
+      f.key === "gratuityFundProfit" ||
+      f.key === "gratuityFundBalance"
+    ) {
+      value = value !== "-" ? `Rs. ${safeDecimalCell(value)}` : "-";
+    } else if (f.key === "yearsOfService") {
+      value = value !== "-" ? `${value} years` : "-";
+    }
+    return `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${value}</td>`;
+  }).join("")}
           </tr>
         </tbody>
       </table>
@@ -388,43 +386,40 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
           <tr style="background:#f1f5f9;">
             <th style="padding:10px 6px; border:1px solid #e5e7eb;">Leave Type</th>
             ${cols
-              .map(
-                (c) =>
-                  `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${colLabel[c]}</th>`
-              )
-              .join("")}
+      .map(
+        (c) =>
+          `<th style="padding:10px 6px; border:1px solid #e5e7eb;">${colLabel[c]}</th>`
+      )
+      .join("")}
           </tr>
         </thead>
         <tbody>
           ${enabledLeaveRecords
-            .map((type) => {
-              const entitled = leaves[`${type.toLowerCase()}Entitled`] ?? "-";
-              const bonus = leaves[`${type.toLowerCase()}Bonus`] ?? 0;
-              const availedYTD =
-                leaves[`${type.toLowerCase()}AvailedYTD`] ?? "-";
-              const availedMTH =
-                leaves[`${type.toLowerCase()}AvailedMTH`] ?? "-";
-              const balance = leaves[`${type.toLowerCase()}Balance`] ?? "-";
-              return `
+      .map((type) => {
+        const entitled = leaves[`${type.toLowerCase()}Entitled`] ?? "-";
+        const bonus = leaves[`${type.toLowerCase()}Bonus`] ?? 0;
+        const availedYTD =
+          leaves[`${type.toLowerCase()}AvailedYTD`] ?? "-";
+        const availedMTH =
+          leaves[`${type.toLowerCase()}AvailedMTH`] ?? "-";
+        const balance = leaves[`${type.toLowerCase()}Balance`] ?? "-";
+        return `
               <tr>
-                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                  typeLabel[type] || type
-                }</td>
+                <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${typeLabel[type] || type
+          }</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${entitled}</td>
-                ${
-                  hasAnyBonus
-                    ? `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${
-                        Number(bonus) > 0 ? bonus : "-"
-                      }</td>`
-                    : ""
-                }
+                ${hasAnyBonus
+            ? `<td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${Number(bonus) > 0 ? bonus : "-"
+            }</td>`
+            : ""
+          }
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${availedYTD}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${availedMTH}</td>
                 <td style="padding:8px 6px; border:1px solid #e5e7eb; text-align:center;">${balance}</td>
               </tr>
             `;
-            })
-            .join("")}
+      })
+      .join("")}
         </tbody>
       </table>
     </div>
@@ -464,8 +459,7 @@ function buildNetSalaryTable({
       if (val == null || val === 0) val = "-";
       return `
       <tr>
-        <td style="font-weight:700; color:#334155; padding:5px 10px 5px 14px;">${
-          NET_FIELD_LABELS[key] || key
+        <td style="font-weight:700; color:#334155; padding:5px 10px 5px 14px;">${NET_FIELD_LABELS[key] || key
         }</td>
         <td style="font-weight:500; text-align:right; color:#0F172A; padding:4px 14px 4px 4px;">${val}</td>
       </tr>
@@ -475,7 +469,7 @@ function buildNetSalaryTable({
   return `
     <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#f1f5f9; border:1px solid #dbeafe; border-radius:10px; font-size:15px;">
       <tr>
-        <td colspan="2" style="font-weight:700; color:#1d4ed8; font-size:16.5px; background:#dbeafe; border-top-left-radius:10px; border-top-right-radius:10px; padding:10px 14px; border-bottom:1px solid #e5e7eb;">Net Salary</td>
+        <td colspan="2" style="font-weight:bold;color:#1d4ed8;background:#dbeafe;border-radius:8px 8px 0 0;padding:8px 18px; font-size: 13px;">Net Salary</td>
       </tr>
       ${netRows}
     </table>
@@ -507,12 +501,15 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
   hasActiveLoans,
+  headerOption = "both",
+  showHeaderAddress = true,
+  showHeaderGeneratedDate = true,
 }) {
   const amountInWords =
     netSalary != null && netSalary !== 0
       ? `${numberToWords
-          .toWords(netSalary)
-          .replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, (m) =>
+        .toWords(netSalary)
+        .replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, (m) =>
           m.toUpperCase()
         )
       : "-";
@@ -522,9 +519,9 @@ function buildSalarySlipHtml({
       Array.isArray(profileFieldsOrder) && profileFieldsOrder.length
         ? profileFieldsOrder
         : Object.keys(empObj);
-    const colCount = 3;
+    const colCount = 2;
     const rows = Math.ceil(fields.length / colCount);
-    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto;">`;
+    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto; padding: 8px 0; padding-top:0;">`;
     for (let i = 0; i < rows; i++) {
       html += "<tr>";
       for (let j = 0; j < colCount; j++) {
@@ -540,30 +537,31 @@ function buildSalarySlipHtml({
               ? key === "shifts"
                 ? Array.isArray(empObj.shifts) && empObj.shifts.length > 0
                   ? empObj.shifts
-                      .map((s) =>
-                        typeof s === "object" && s && s.name ? s.name : "-"
-                      )
-                      .join(", ")
+                    .map((s) =>
+                      typeof s === "object" && s && s.name ? s.name : "-"
+                    )
+                    .join(", ")
                   : "-"
                 : key === "phone" ||
                   key === "nomineeEmergencyNo" ||
                   key === "emergencyContactNumber"
-                ? formatPhoneNumber(val)
-                : key === "dateOfBirth" ||
-                  key === "joiningDate" ||
-                  key === "cnicIssueDate" ||
-                  key === "cnicExpiryDate"
-                ? formatDate(val)
-                : val
+                  ? formatPhoneNumber(val)
+                  : key === "dateOfBirth" ||
+                    key === "joiningDate" ||
+                    key === "cnicIssueDate" ||
+                    key === "cnicExpiryDate"
+                    ? formatDate(val)
+                    : val
               : "-";
           html += `
-            <td style="padding:6px 8px; font-size:14px; vertical-align:top; width:33.33%;">
-              <span style="display:block; color:#0F172A; font-weight:600;">${
-              labelObj?.[key] === 'bankAccountNumber' || PROFILE_LABELS[key] === 'bankAccountNumber' || key === 'bankAccountNumber' ? 'Bank Account #' :  labelObj?.[key] || PROFILE_LABELS[key] || key
+            <td style="padding:8px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
+              <div style="display:flex;">
+                <span style="display:block; color:#0F172A; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
-              <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px;">
-                ${valueToShow}
-              </span>
+                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px; margin-left: auto;">
+                  ${valueToShow}
+                </span>
+              </div>
             </td>
           `;
         } else {
@@ -659,22 +657,20 @@ function buildSalarySlipHtml({
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:left; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Salary &amp; Allowance</th><th style="background:#f1f5f9; font-weight:bold; text-align:right; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${compRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${
-                totalEarnings != null && totalEarnings !== 0
-                  ? safeAmountCell(totalEarnings)
-                  : "-"
-              }</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Additions</td><td style="background:#dbeafe; color:#15803d; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${totalEarnings != null && totalEarnings !== 0
+          ? safeAmountCell(totalEarnings)
+          : "-"
+        }</td></tr></tfoot>
             </table>
           </td>
           <td valign="top" width="50%" style="padding-left:5px;">
             <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#fff; border-radius:10px; border:1px solid #cbd5e1; box-shadow:0 2px 8px 0 rgba(0,0,0,0.04); font-size:0.97rem;">
               <thead><tr><th style="background:#f1f5f9; font-weight:bold; text-align:left; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Deductions</th><th style="background:#f1f5f9; font-weight:bold; text-align:right; border:1px solid #cbd5e1; padding:6px 18px; font-size:14px;">Amount</th></tr></thead>
               <tbody>${dedRows}</tbody>
-              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${
-                totalDeductions != null && totalDeductions !== 0
-                  ? safeAmountCell(totalDeductions)
-                  : "-"
-              }</td></tr></tfoot>
+              <tfoot><tr><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; padding:4px 18px;">Total Deductions</td><td style="background:#dbeafe; color:#b91c1c; font-weight:bold; border:1px solid #cbd5e1; font-size:14px; text-align:right; padding:4px 18px;">${totalDeductions != null && totalDeductions !== 0
+          ? safeAmountCell(totalDeductions)
+          : "-"
+        }</td></tr></tfoot>
             </table>
           </td>
         </tr>
@@ -734,17 +730,30 @@ function buildSalarySlipHtml({
                   <table width="100%" cellpadding="0" cellspacing="0" border="0">
                     <tr>
                       <td valign="middle" style="padding:0;">
-                        <span style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</span><br>
-                        <span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>
+                      ${(headerOption === "logo" || headerOption === "both")
+        ? `<div><img src="https://new.mavensadvisor.com/assets/logo-CcJKPurh.png" alt="${company.name}" style="height:50px; width:auto;"></div>`
+        : ""
+      }
+                        ${(headerOption === "companyName" || headerOption === "both")
+        ? `<div style="font-size:22px; font-weight:700; color:#1d4ed8;">${company.name}</div>`
+        : ""
+      }
+                        ${showHeaderAddress
+        ? `<span style="color:#334155; font-size:15px; font-weight:500;">${company.address}</span>`
+        : ""
+      }
                       </td>
                       <td valign="top" align="right" style="padding:0;">
                         <span style="color:#334155; font-size:18px; font-weight:700;">Pay slip &#8211; ${monthYear}</span><br>
-                        <span style="color:#0F172A; font-size:13px;">Generated: ${(() => {
-                          const d = new Date();
-                          const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
-                          const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
-                          return `${datePart}, ${timePart.toUpperCase()}`;
-                        })()}</span>
+                        ${showHeaderGeneratedDate
+        ? ` <span style="color:#0F172A; font-size:13px;">Generated: ${(() => {
+          const d = new Date();
+          const datePart = d.toLocaleDateString("en-GB", { timeZone: "Asia/Karachi", day: "2-digit", month: "2-digit", year: "numeric" });
+          const timePart = d.toLocaleTimeString("en-GB", { timeZone: "Asia/Karachi", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true });
+          return `${datePart}, ${timePart.toUpperCase()}`;
+        })()}</span>`
+        : ""
+      }
                       </td>
                     </tr>
                   </table>
@@ -764,7 +773,7 @@ function buildSalarySlipHtml({
 
               <!-- ── NET SALARY ── -->
               <tr>
-                <td style="padding:8px 32px; background:#fff;">${netSalaryTable}</td>
+                <td style="padding:7px 32px; background:#fff;">${netSalaryTable}</td>
               </tr>
 
               <!-- ── LOANS / PF / GRATUITY / LEAVES ── -->
@@ -826,8 +835,8 @@ const DEDUCTION_ORDER = [
 function normalizeFields(fieldArr, orderArr) {
   const keys = Array.isArray(fieldArr)
     ? fieldArr.map((f) =>
-        Array.isArray(f) ? f[1] : typeof f === "object" && f.key ? f.key : f
-      )
+      Array.isArray(f) ? f[1] : typeof f === "object" && f.key ? f.key : f
+    )
     : [];
   if (!keys.includes("loanBenefits")) {
     keys.push("loanBenefits");
@@ -880,8 +889,8 @@ async function calculateLoanBenefits(employeeId, monthYear, decryptionKey) {
 
       const currentMonthMarkup = currentMonthEntry.markupAmount
         ? parseFloat(
-            await decrypt(currentMonthEntry.markupAmount, decryptionKey)
-          ) || 0
+          await decrypt(currentMonthEntry.markupAmount, decryptionKey)
+        ) || 0
         : 0;
 
       let currentMonthPayment = 0;
@@ -1011,9 +1020,13 @@ module.exports = async function sendSlipEmail(req, res) {
     const companyProfile = await CompanyProfile.findOne({
       owner: req.user._id,
     }).lean();
+    const documentationBranch = companyProfile?.branches?.find(
+      (branch) => branch.useForDocumentation === true
+    );
+
     const company = {
       name: companyProfile?.name || "Company Name",
-      address: companyProfile?.address || "",
+      address: documentationBranch?.address || "",
       email: companyProfile?.email || "",
     };
 
@@ -1027,6 +1040,10 @@ module.exports = async function sendSlipEmail(req, res) {
     const showProvidentFund = salaryFieldsDoc?.showProvidentFund !== false;
     const showGratuityFund = salaryFieldsDoc?.showGratuityFund !== false;
     const enabledLeaveRecords = salaryFieldsDoc?.enabledLeaveRecords || [];
+    const headerOption = salaryFieldsDoc?.headerOption || "both";
+    const showHeaderAddress = salaryFieldsDoc?.showHeaderAddress !== false;
+    const showHeaderGeneratedDate =
+      salaryFieldsDoc?.showHeaderGeneratedDate !== false;
 
     let enabledCompFields = normalizeFields(
       salaryFieldsDoc?.enabledSalaryFields || [],
@@ -1154,10 +1171,10 @@ module.exports = async function sendSlipEmail(req, res) {
           const loanData = await calculateLoanBenefits(
             employeeId,
             monthYearFromBody ||
-              new Date().toLocaleDateString("en-GB", {
-                month: "long",
-                year: "numeric",
-              }),
+            new Date().toLocaleDateString("en-GB", {
+              month: "long",
+              year: "numeric",
+            }),
             decryptionKey
           );
           loans = loanData.loanDetails || [];
@@ -1213,10 +1230,10 @@ module.exports = async function sendSlipEmail(req, res) {
 
       const toSafeNumber = (v) =>
         v === "-" ||
-        v === undefined ||
-        v === null ||
-        v === "" ||
-        isNaN(Number(v))
+          v === undefined ||
+          v === null ||
+          v === "" ||
+          isNaN(Number(v))
           ? 0
           : Number(v);
       compensationData = Object.fromEntries(
@@ -1269,11 +1286,11 @@ module.exports = async function sendSlipEmail(req, res) {
       const monthlyContribution =
         netSalaryData > 0 && yearsOfService > 0
           ? Number(
-              (
-                (netSalaryData * yearsOfService) /
-                (yearsOfService * 12)
-              ).toFixed(2)
-            )
+            (
+              (netSalaryData * yearsOfService) /
+              (yearsOfService * 12)
+            ).toFixed(2)
+          )
           : 0;
       const gfBalanceBroughtForward =
         netSalaryData > 0 && yearsOfService > 0
@@ -1334,8 +1351,8 @@ module.exports = async function sendSlipEmail(req, res) {
       loans = Array.isArray(manualLoans)
         ? manualLoans
         : req.body.loan
-        ? [req.body.loan]
-        : [];
+          ? [req.body.loan]
+          : [];
 
       hasActiveLoans = loans.length > 0;
 
@@ -1445,6 +1462,9 @@ module.exports = async function sendSlipEmail(req, res) {
       enabledCompFields,
       enabledDedFields,
       hasActiveLoans,
+      headerOption,
+      showHeaderAddress,
+      showHeaderGeneratedDate,
     });
 
     // Send email
@@ -1465,13 +1485,11 @@ module.exports = async function sendSlipEmail(req, res) {
     });
 
     await transporter.sendMail({
-      from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${
-        process.env.MAIL_FROM_ADDRESS
-      }>`,
+      from: `"${process.env.MAIL_FROM_NAME || "HR System"}" <${process.env.MAIL_FROM_ADDRESS
+        }>`,
       to: email,
-      subject: `Salary Slip${
-        employeeData?.name ? " - " + employeeData.name : ""
-      }`,
+      subject: `Salary Slip${employeeData?.name ? " - " + employeeData.name : ""
+        }`,
       html,
     });
 
