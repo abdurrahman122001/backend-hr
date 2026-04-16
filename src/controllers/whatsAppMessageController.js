@@ -177,11 +177,11 @@ async function findFirstManagerOrTeamLeadInChain(ownerId, employeeId) {
         const seniorDoc = await Employee.findById(seniorId)
           .select("role")
           .lean();
-        
+
         if (!seniorDoc) continue;
-        
+
         const role = normalizeRole(seniorDoc.role || "");
-        
+
         // If we find a manager or team lead, return it
         if (role === "manager" || role === "team_lead") {
           return seniorId;
@@ -919,6 +919,7 @@ exports.listMessages = async function listMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch assignment messages" });
   }
 };
+
 exports.listMessagesForManager = async function listMessagesForManager(
   req,
   res,
@@ -945,26 +946,25 @@ exports.listMessagesForManager = async function listMessagesForManager(
       q.client = clientId;
     }
 
-    // 🔥 HANDLE GROUP FILTERING
+    // 🔥 HANDLE GROUP FILTERING - FIXED FOR OLDER MESSAGES
     const isGroupFilter = req.query.isGroupMessage === "true";
     const groupId = req.query.groupId;
 
     if (isGroupFilter && isObjId(groupId)) {
-        q.isGroupMessage = true;
-        q.groupId = groupId;
-        // When searching a group, we typically ignore the client filter 
-        // as the groupId is the primary identifier
-        delete q.client;
+      q.isGroupMessage = true;
+      q.groupId = groupId;
+      // When searching a group, we typically ignore the client filter 
+      // as the groupId is the primary identifier
+      delete q.client;
     } else if (req.query.isGroupMessage === "false") {
-        q.isGroupMessage = false;
-        q.groupId = null;
+      q.isGroupMessage = false;
+      q.groupId = null;
     } else if (!isGroupFilter && !groupId) {
-        // DEFAULT: If no group filter specified, exclude group messages from direct client chats
-        // to prevent leakage into individual threads
-        q.$or = [
-            { isGroupMessage: false },
-            { isGroupMessage: { $exists: false } }
-        ];
+      // 🔥 FIX: DEFAULT - Include regular messages AND older messages without isGroupMessage field
+      q.$or = [
+        { isGroupMessage: false },
+        { isGroupMessage: { $exists: false } }  // Include older messages that don't have this field
+      ];
     }
 
     // FIXED: Handle status filter for drafts to exclude scheduled messages
@@ -1126,6 +1126,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
     return res.status(500).json({ error: "Failed to load message history" });
   }
 };
+
 exports.searchMessages = async function searchMessages(req, res) {
   try {
     const { query, limit = 20 } = req.query;
@@ -1643,9 +1644,9 @@ exports.approveMessage = async function approveMessage(req, res) {
     // Check if immediate seniors have supervision enabled before escalating
     const clientData = await Client.findById(msg.client).select("supervisedBy").lean();
     const supervisedByList = (clientData?.supervisedBy || []).map(id => String(id));
-    
+
     // Filter seniors to only those with supervision enabled
-    const activeSeniors = immediateSeniors.filter(seniorId => 
+    const activeSeniors = immediateSeniors.filter(seniorId =>
       supervisedByList.includes(String(seniorId))
     );
 
@@ -1702,7 +1703,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       isGroupMessage: populatedMsg.isGroupMessage,
       groupId: populatedMsg.groupId,
       chatType: populatedMsg.chatType || (populatedMsg.groupId ? "group" : "normal"),
-      isClientEmployeeMessage: populatedMsg.isClientEmployeeMessage || false, 
+      isClientEmployeeMessage: populatedMsg.isClientEmployeeMessage || false,
     };
 
     // 🔔 Emit real-time events to all involved users
@@ -1723,7 +1724,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           if (rid) allInvolvedUsers.add(String(rid));
         });
       }
-      
+
       // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
       if (msg.isGroupMessage && msg.groupId) {
         try {
@@ -2124,18 +2125,18 @@ exports.editMessage = async function editMessage(req, res) {
           if (!msg.approvalStatus || msg.approvalStatus === "disapproved") {
             msg.approvalStatus = "pending";
           }
-          
+
           // If message is ALREADY pending with a receiver, validate they have supervision enabled
           if (msg.approvalStatus === "pending" && msg.receiver && msg.receiver.length > 0) {
-             const clientData = await Client.findById(msg.client)
+            const clientData = await Client.findById(msg.client)
               .select("supervisedBy")
               .lean();
             const supervisedByList = (clientData?.supervisedBy || []).map(id => String(id));
             const currentReceiverIds = msg.receiver.map(r => String(r._id || r));
-            const validReceivers = currentReceiverIds.filter(id => 
+            const validReceivers = currentReceiverIds.filter(id =>
               supervisedByList.includes(id)
             );
-            
+
             if (validReceivers.length === 0) {
               // Current receivers don't have supervision - recalculate
               const senderId = msg.sender?._id || msg.sender;
@@ -2229,13 +2230,13 @@ exports.editMessage = async function editMessage(req, res) {
               }
             }
           }
-          
+
           // 🔥 FINAL SAFEGUARD for edits: If status is pending, ensure only active supervisors are in the receiver list
           if (msg.approvalStatus === "pending") {
             const clientData = await Client.findById(msg.client).select("supervisedBy").lean();
             const supervisedByList = (clientData?.supervisedBy || []).map(id => String(id));
             const { tls: orgTls, managers: orgManagers } = await findTLsAndManagersByOwner(msg.owner);
-            
+
             const allAllowedApprovers = [...supervisedByList, ...orgTls, ...orgManagers].map(id => String(id));
             msg.receiver = msg.receiver.filter(id => allAllowedApprovers.includes(String(id._id || id)));
           }
@@ -2462,7 +2463,7 @@ exports.editMessage = async function editMessage(req, res) {
             clientSupervision: clientSupervision,
           });
         })
-        
+
       } else if (msg.approvalStatus === "pending" && clientRequiresApproval) {
         // Notify ALL involved users about pending status
         involvedUsersArray.forEach((userId) => {
@@ -3467,7 +3468,7 @@ exports.createMessage = async function createMessage(req, res) {
           }
         });
       }
-      
+
       // Add CRM
       const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
       if (crmEmployeeId && !receivers.includes(crmEmployeeId) && crmEmployeeId !== String(sender)) {
@@ -3497,7 +3498,7 @@ exports.createMessage = async function createMessage(req, res) {
               // Only add if receiver has supervision enabled for this client
               // OR if they're not a senior (managers, tls, peers are always allowed)
               const isSupervisorWithEnabledSupervision = supervisedByList.includes(receiverId);
-              
+
               // Check if this receiver is actually a senior supervisor in hierarchy
               const isSeniorInHierarchy = async () => {
                 const hierarchyLink = await EmployeeHierarchy.findOne({
@@ -3507,7 +3508,7 @@ exports.createMessage = async function createMessage(req, res) {
                 }).lean();
                 return !!hierarchyLink;
               };
-              
+
               // For now, add all - but the supervision check below will clear receivers
               // and set only the active supervisors when needsApproval is true
               receivers.push(receiverId);
@@ -3550,7 +3551,7 @@ exports.createMessage = async function createMessage(req, res) {
               } else {
                 // 🔥 NO ACTIVE SUPERVISORS - KEEP PENDING & SKIP EMPLOYEES
                 approvalStatus = "pending";
-                
+
                 // Find FIRST MANAGER/TEAM LEAD in hierarchy
                 const managerInChain = await findFirstManagerOrTeamLeadInChain(owner, String(sender));
                 if (managerInChain) {
@@ -3662,7 +3663,7 @@ exports.createMessage = async function createMessage(req, res) {
           // 🔥 NO ACTIVE SUPERVISORS - BUT DON'T AUTO-APPROVE!
           // Keep pending and route through hierarchy chain, SKIP EMPLOYEES
           approvalStatus = "pending";
-          
+
           // 🔥 Find FIRST MANAGER/TEAM LEAD in hierarchy (skip employees)
           const managerInChain = await findFirstManagerOrTeamLeadInChain(owner, String(sender));
           if (managerInChain) {
@@ -3691,7 +3692,7 @@ exports.createMessage = async function createMessage(req, res) {
         id !== String(sender) &&
         isObjId(id),
     );
-    
+
     // 🔥 FINAL SAFEGUARD: For PENDING messages, strictly enforce that receivers are ONLY approvers
     // (This prevents coworkers or original senders from seeing a yellow badge for a task they can't action)
     // 🔥 CRITICAL: Preserve ALL intended receivers for when message is approved
@@ -3699,10 +3700,10 @@ exports.createMessage = async function createMessage(req, res) {
 
     if (approvalStatus === "pending") {
       const seniors = (clientDoc?.supervisedBy || []).map(id => String(id));
-      
+
       // Also include the hierarchy managers/TLs as they are ultimate approvers
       const allSeniors = [...seniors, ...tls, ...managers].map(id => String(id));
-      
+
       receivers = receivers.filter(id => allSeniors.includes(String(id)));
     }
 
@@ -3867,10 +3868,10 @@ exports.createMessage = async function createMessage(req, res) {
       receivers.forEach((receiverId) => {
         const isReceiverTeamLead = tls.includes(receiverId);
         const isReceiverManager = managers.includes(receiverId);
-        
+
         // Check if receiver is a supervisor for the sender (active or hierarchy)
-        const isReceiverHierarchySupervisor = 
-          senderSupervisors.includes(receiverId) || 
+        const isReceiverHierarchySupervisor =
+          senderSupervisors.includes(receiverId) ||
           receivers.includes(String(receiverId)); // If they are in the receivers list for a pending message, they ARE an approver
 
         const shouldNotify =
@@ -3903,8 +3904,8 @@ exports.createMessage = async function createMessage(req, res) {
           io.to(`group_${targetGroupId}`).emit("new_message", {
             message: responseWithSupervision,
             type: responseWithSupervision.approvalStatus === "pending"
-                ? "reply_needs_approval"
-                : "new_assignment",
+              ? "reply_needs_approval"
+              : "new_assignment",
             action: "created",
             isClientEmployeeChat: isClientEmployeeChat,
           });
