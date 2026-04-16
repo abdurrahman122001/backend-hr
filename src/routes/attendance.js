@@ -8,8 +8,10 @@ const {
   getRecordsByDateRange,
   deleteRecord,
   creditBonusLeavesForPayrollPeriod,
-  getChangeLogs
+  getChangeLogs,
+  updateChallengeStatus
 } = require('../controllers/attendanceController');
+const Attendance = require('../models/Attendance');
 const AttendanceLog = require('../models/AttendanceLog');
 const anyPayrollAuth = require('../middleware/anyPayrollAuth');
 const leaveYearBalanceController = require('../controllers/leaveYearBalanceController');
@@ -19,6 +21,29 @@ const LeaveTransaction = require("../models/LeaveTransaction");
 const { getLeaveYear } = require("../utils/leaveEntitlement");
 
 const attendanceAuth = require('../middleware/attendanceAuth');
+
+router.get('/challenges', async (req, res) => {
+  try {
+    const query = { challengeStatus: 'Pending' };
+    const ownerId = req.user.owner || req.user._id;
+
+    // Apply scope if delegated
+    if (req.user.isDelegated && Array.isArray(req.user.attendanceScope) && req.user.attendanceScope.length > 0) {
+      query.employee = { $in: req.user.attendanceScope };
+    } else {
+        query.owner = ownerId;
+    }
+
+    const challenges = await Attendance.find(query)
+      .populate('employee', 'name email companyEmail designation department')
+      .sort({ challengeAt: -1 });
+
+    res.json(challenges);
+  } catch (err) {
+    console.error('Fetch challenges failed:', err);
+    res.status(500).json({ error: 'Failed to fetch challenges' });
+  }
+});
 
 // existing endpoints
 router.post('/', markAttendance);      // upsert by {employee, date}
@@ -276,6 +301,7 @@ router.get('/employee/:employeeId/current', leaveYearBalanceController.getCurren
 // GET aggregated totals for one employee
 router.get('/employee/:id/stats', getStatsByEmployee);
 router.get('/range', getRecordsByDateRange);
+router.patch('/:id/challenge', attendanceAuth, updateChallengeStatus);
 router.delete('/:id', deleteRecord);
 // GET /leave-summary/:employeeId?month=&year=
 router.get("/leave-summary/:employeeId", async (req, res) => {

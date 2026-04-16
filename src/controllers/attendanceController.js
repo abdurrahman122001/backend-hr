@@ -817,6 +817,8 @@ exports.markAttendance = async (req, res) => {
       notes,
       leaveType,
       isHoliday,
+      challengeStatus,
+      challengeAdminNotes,
     } = req.body;
 
     // ========= Helpers =========
@@ -890,6 +892,9 @@ exports.markAttendance = async (req, res) => {
         markedByHR: true,
       },
     };
+
+    if (challengeStatus) updateDoc.$set.challengeStatus = challengeStatus;
+    if (challengeAdminNotes) updateDoc.$set.challengeAdminNotes = challengeAdminNotes;
     if (status === "Absent" || status === "Half Day" || status === "Unpaid Half Day") {
       updateDoc.$set.leaveType = (status === "Unpaid Half Day" ? "Unpaid" : (leaveType || "Unpaid"));
     } else {
@@ -1919,3 +1924,32 @@ exports.getChangeLogs = async (req, res) => {
 
 // Export the early departure function for use in other modules
 exports.deductBonusForEarlyDeparture = deductBonusForEarlyDeparture;
+
+exports.updateChallengeStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { challengeStatus, challengeAdminNotes } = req.body;
+    const ownerId = resolveOwnerId(req.user);
+
+    const attendance = await Attendance.findOneAndUpdate(
+      { _id: id, owner: ownerId },
+      { 
+        $set: { 
+          challengeStatus, 
+          challengeAdminNotes,
+          challengeAt: new Date()
+        } 
+      },
+      { new: true }
+    );
+
+    if (!attendance) {
+      return res.status(404).json({ error: "Attendance record not found" });
+    }
+
+    res.json({ success: true, attendance });
+  } catch (err) {
+    console.error("Update challenge status failed:", err);
+    res.status(500).json({ error: "Failed to update challenge status" });
+  }
+};

@@ -186,10 +186,62 @@ router.post('/acknowledge-absence', async (req, res) => {
       }
     });
   } catch (err) {
-    console.error("❌ Acknowledge absence failed:", err);
     res.status(500).json({ error: "Failed to acknowledge absence" });
   }
 });
 
+// POST /api/emp-attendance/challenge
+// Employee challenges an attendance record for a specific date
+router.post('/challenge', async (req, res) => {
+  try {
+    const { date, reason } = req.body;
+    const employeeId = req.employee._id;
+    const ownerId = req.employee.owner;
+
+    if (!date || !reason) {
+      return res.status(400).json({ error: "Date and reason are required" });
+    }
+
+    // Find or create the attendance record for this date
+    // If it doesn't exist, we create an "Absent" record that is challenged
+    let attendance = await Attendance.findOne({
+      employee: employeeId,
+      date: date,
+      owner: ownerId,
+    });
+
+    if (!attendance) {
+      attendance = new Attendance({
+        employee: employeeId,
+        date: date,
+        owner: ownerId,
+        status: 'Absent', // Default to absent if no record exists
+        markedByHR: false
+      });
+    }
+
+    // Update challenge fields
+    attendance.challengeStatus = 'Pending';
+    attendance.challengeReason = reason;
+    attendance.challengeAt = new Date();
+    
+    await attendance.save();
+
+    console.log(`✅ Attendance on ${date} challenged by employee ${employeeId}. Reason: ${reason}`);
+    
+    res.json({
+      success: true,
+      message: "Attendance challenged successfully. Awaiting review.",
+      attendance: {
+        date: attendance.date,
+        challengeStatus: attendance.challengeStatus,
+        challengeReason: attendance.challengeReason
+      }
+    });
+  } catch (err) {
+    console.error("❌ Challenge attendance failed:", err);
+    res.status(500).json({ error: "Failed to challenge attendance" });
+  }
+});
 
 module.exports = router;
