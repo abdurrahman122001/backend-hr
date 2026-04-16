@@ -3458,6 +3458,23 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
+    // 🔥 FOR GROUPS: Always include managers/crm so they get unread counts
+    if (isGroupMessage || chatType === 'group' || groupId) {
+      if (managers.length > 0) {
+        managers.forEach((managerId) => {
+          if (!receivers.includes(managerId) && managerId !== String(sender)) {
+            receivers.push(managerId);
+          }
+        });
+      }
+      
+      // Add CRM
+      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+      if (crmEmployeeId && !receivers.includes(crmEmployeeId) && crmEmployeeId !== String(sender)) {
+        receivers.push(crmEmployeeId);
+      }
+    }
+
     // 🔥 FIXED: Handle reply scenario
     if (isReply && repliedTo) {
       try {
@@ -3677,6 +3694,9 @@ exports.createMessage = async function createMessage(req, res) {
     
     // 🔥 FINAL SAFEGUARD: For PENDING messages, strictly enforce that receivers are ONLY approvers
     // (This prevents coworkers or original senders from seeing a yellow badge for a task they can't action)
+    // 🔥 CRITICAL: Preserve ALL intended receivers for when message is approved
+    const intendedReceivers = [...receivers];
+
     if (approvalStatus === "pending") {
       const seniors = (clientDoc?.supervisedBy || []).map(id => String(id));
       
@@ -3739,7 +3759,8 @@ exports.createMessage = async function createMessage(req, res) {
       // Group messaging fields
       isGroupMessage: isGroupMessage || false,
       groupId: groupId || null,
-      chatType: chatType || (isGroupMessage ? 'group' : 'direct'),
+      chatType: chatType || (isGroupMessage ? 'group' : 'normal'),
+      intendedReceivers: intendedReceivers, // 🔥 PRESERVE FOR APPROVAL
     };
 
     // 🔥 SPECIAL CASE: For Employee → Manager reply with needs_approval

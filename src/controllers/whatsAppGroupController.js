@@ -254,6 +254,9 @@ exports.sendGroupMessage = async function (req, res) {
       receiverType = "all",
       receiverId,
       parentClientId,
+      isReply,
+      repliedTo,
+      replyContent,
     } = req.body;
 
     if (!isObjId(groupId))
@@ -315,11 +318,12 @@ exports.sendGroupMessage = async function (req, res) {
     // ── Check ClientInfo supervision settings ─────────────────────
     let needsApproval = false;
     let supervisedByList = [];
+    let clientManagers = [];
 
     if (messageClientId) {
       const ClientInfo = require("../models/ClientInfo");
       const clientDoc = await ClientInfo.findById(messageClientId)
-        .select("supervision supervisedBy")
+        .select("supervision supervisedBy assignedTo")
         .lean();
       // Only "employee" role needs approval; managers/team leads bypass
       needsApproval =
@@ -328,7 +332,17 @@ exports.sendGroupMessage = async function (req, res) {
       supervisedByList = (clientDoc?.supervisedBy || []).map((id) =>
         String(id)
       );
+      
+      // Collect all managers/assigned employees for unread counts
+      if (clientDoc?.assignedTo) clientManagers.push(String(clientDoc.assignedTo));
+      if (clientDoc?.supervisedBy) {
+        clientDoc.supervisedBy.forEach(id => clientManagers.push(id.toString()));
+      }
     }
+
+    // Add CRM to managers list
+    const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
+    if (crmEmployeeId) clientManagers.push(crmEmployeeId);
 
     // ── Build receiver & approval status ──────────────────────────
     let receiverIds = [];
@@ -381,14 +395,23 @@ exports.sendGroupMessage = async function (req, res) {
           }
         }
       }
+    }
 
-      // Store all group employee members as intended recipients (visible after approval)
-      intendedReceiverIds = allMemberIds
-        .filter(isObjId)
-        .map((id) => oid(String(id)));
-    } else {
-      // Direct supervision OR sender is manager/team_lead → send to all group members immediately
-      receiverIds = allMemberIds.filter(isObjId).map((id) => oid(String(id)));
+    // 🔥 CRITICAL: Add all relevant managers to intended receivers
+    // This ensures they show up in their sidebar and get unread counts
+    const fullIntendedSet = new Set([
+      ...allMemberIds,
+      ...clientManagers
+    ]);
+    
+    // Remove sender from recipients
+    fullIntendedSet.delete(String(senderId));
+    
+    intendedReceiverIds = Array.from(fullIntendedSet).filter(isObjId).map(id => oid(id));
+
+    if (!needsApproval) {
+      // Send to everyone immediately
+      receiverIds = intendedReceiverIds;
       approvalStatus = null;
     }
 
@@ -406,16 +429,20 @@ exports.sendGroupMessage = async function (req, res) {
       isGroupMessage: true,
       groupId: oid(groupId),
       chatType: "group",
-      isClientEmployeeMessage: false, // 🔥 Force false for group messages to prevent leakage
+      isClientEmployeeMessage,
+      clientEmployeeId,
+      clientEmployeeData,
+      isReply: isReply === true || isReply === "true",
+      repliedTo: isReply && isObjId(repliedTo) ? oid(repliedTo) : null,
+      replyContent: isReply ? replyContent : null,
       approvalStatus,
     };
 
     if (messageClientId) msgDoc.client = messageClientId;
-    if (clientEmployeeId) {
-      msgDoc.clientEmployeeId = clientEmployeeId;
-      msgDoc.clientEmployeeData = clientEmployeeData;
-      msgDoc.parentClientId = clientEmployeeData?.parentClientId;
-    }
+    
+    // 🔥 FIXED: Ensure these values are assigned correctly
+    msgDoc.clientEmployeeData = clientEmployeeData;
+    msgDoc.parentClientId = clientEmployeeData?.parentClientId;
 
     const message = new WhatsAppMessage(msgDoc);
     await message.save();
@@ -429,33 +456,49 @@ exports.sendGroupMessage = async function (req, res) {
     const populated = await WhatsAppMessage.findById(message._id)
       .populate("sender", "_id name companyEmail role")
       .populate("receiver", "_id name companyEmail role")
+      .populate("client", "_id clientName")
       .lean();
 
     // ── Real-time socket notifications ────────────────────────────
     const io = req.app.get("io");
     if (io) {
-      // Always notify sender
-      io.to(`employee_${senderId}`).emit("new_message", {
-        message: populated,
-        type: "message_created",
-        action: "sent",
-        isGroupMessage: true,
-        approvalStatus,
-      });
+      // Identify all relevant parties: sender, all targets, group members, and client managers
+      const notifyIds = new Set([
+        String(senderId),
+        String(owner),
+        ...receiverIds.map(rid => String(rid)),
+        ...allMemberIds // All group members should get sidebar updates
+      ]);
 
-      // Notify each receiver (supervisor for pending, all members for direct)
-      receiverIds.forEach((rid) => {
-        const ridStr = String(rid);
-        if (ridStr === String(senderId)) return; // already notified
+      // 🔥 ALSO notify managers/assigned employees for this client
+      if (messageClientId) {
+        try {
+          const ClientInfo = require("../models/ClientInfo");
+          const client = await ClientInfo.findById(messageClientId).select("assignedTo supervisedBy").lean();
+          if (client) {
+            if (client.assignedTo) notifyIds.add(String(client.assignedTo));
+            if (client.supervisedBy && Array.isArray(client.supervisedBy)) {
+              client.supervisedBy.forEach(id => notifyIds.add(String(id)));
+            }
+          }
+        } catch (err) {
+          console.warn("Could not fetch client managers for notification:", err);
+        }
+      }
+
+      notifyIds.forEach((ridStr) => {
+        const isSender = ridStr === String(senderId);
         io.to(`employee_${ridStr}`).emit("new_message", {
           message: populated,
-          type:
+          type: isSender ? "message_created" : (
             approvalStatus === "pending"
               ? "reply_needs_approval"
-              : "new_group_message",
-          action: "received",
-          requiresApproval: approvalStatus === "pending",
+              : "new_group_message"
+          ),
+          action: isSender ? "sent" : "received",
+          requiresApproval: !isSender && approvalStatus === "pending",
           isGroupMessage: true,
+          approvalStatus,
         });
       });
     }
