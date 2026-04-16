@@ -2432,41 +2432,27 @@ io.on("connection", (socket) => {
         approvalStatus: message.approvalStatus,
       });
 
-      // 🔥 IMPORTANT: Filter receivers to only notify actual recipients
+      // Notify designated receivers
+      // The backend controller already ensured only correct receivers are in this array
+      // (supervisors for pending, all relevant parties for approved/null)
       if (receivers && Array.isArray(receivers)) {
         receivers.forEach((receiverId) => {
-          // Check if this receiver is the actual sender (should already be handled)
-          if (receiverId === senderId) return;
+          const rid = String(receiverId);
+          if (rid === String(senderId)) return; // sender already notified above
 
-          // Check approval status for filtering
-          let shouldNotify = false;
-
-          if (
-            message.approvalStatus === "approved" ||
-            message.approvalStatus === null
-          ) {
-            // Approved messages or Team Lead/Manager messages
-            shouldNotify = true;
-          } else if (message.approvalStatus === "pending") {
-            // Only notify Team Leads for pending approval
-            const isReceiverTeamLead = checkIfTeamLead(receiverId);
-            shouldNotify = isReceiverTeamLead;
-          }
-
-          if (shouldNotify) {
-            // 🔥 Use io.to instead of socket.to to ensure proper delivery
-            io.to(`employee_${receiverId}`).emit("new_message", {
-              message: message,
-              type:
-                message.approvalStatus === "pending"
-                  ? "reply_needs_approval"
-                  : "new_assignment",
-              action: "received",
-              requiresApproval: message.approvalStatus === "pending",
-              // 🔥 ADD: Explicitly mark as for this receiver
-              forReceiver: receiverId,
-            });
-          }
+          // For pending messages: receiver IS the designated supervisor/approver (set by backend)
+          // For approved/null: receiver is the normal recipient
+          // Either way – notify them directly
+          io.to(`employee_${rid}`).emit("new_message", {
+            message: message,
+            type:
+              message.approvalStatus === "pending"
+                ? "reply_needs_approval"
+                : "new_message",
+            action: "received",
+            requiresApproval: message.approvalStatus === "pending",
+            forReceiver: rid,
+          });
         });
       }
 
@@ -2513,11 +2499,12 @@ io.on("connection", (socket) => {
       socket.emit("message_error", { error: "Failed to send message" });
     }
   });
+  // Employee model is already imported at top of file (line 17)
   async function checkIfTeamLead(userId) {
     try {
-      const user = await User.findById(userId).select("role").lean();
-      if (user && user.role) {
-        const role = user.role.toLowerCase();
+      const emp = await Employee.findById(userId).select("role").lean();
+      if (emp && emp.role) {
+        const role = emp.role.toLowerCase();
         return role.includes("lead") || role === "team_lead";
       }
       return false;
@@ -2695,6 +2682,9 @@ io.on("connection", (socket) => {
     }
   });
 
+  /* 
+   * ⚠️ REDUNDANT: This handler is now superseded by the approveMessage API in the controller.
+   * Commenting it out to prevent leakage of group messages into individual client rooms.
   socket.on("whatsapp_approve_message", async (data) => {
     try {
       const { message, approvedBy, receivers, clientId } = data;
@@ -2775,6 +2765,7 @@ io.on("connection", (socket) => {
       socket.emit("message_error", { error: "Failed to approve message" });
     }
   });
+  */
   // 🎯 CRITICAL FIX: Handle forwarded approved messages to managers
   socket.on("whatsapp_forward_to_managers", async (data) => {
     try {
@@ -3189,6 +3180,7 @@ const emitForwardToManagers = (io, data) => {
     });
   });
 };
+
 
 // In your socket.io initialization file
 // Export the emission functions for use in controllers

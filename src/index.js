@@ -3608,8 +3608,6 @@ cron.schedule(
   },
 );
 
-// ---------- Optional root route ----------
-// ---------- Midnight Cleanup Cron ----------
 cron.schedule(
   "0 0 * * *",
   async () => {
