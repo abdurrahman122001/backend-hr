@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 require("dotenv").config();
 
-const WhatsAppMessage = require("../models/WhatsAppMessage");
+const WhatsAppMessage = require("./src/models/WhatsAppMessage");
 
 async function addChatTypeToExistingMessages() {
     try {
