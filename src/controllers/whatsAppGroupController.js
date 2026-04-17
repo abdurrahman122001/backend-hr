@@ -333,10 +333,8 @@ exports.sendGroupMessage = async function (req, res) {
         String(id)
       );
       
-      // Collect all managers for unread counts (excluding assigned employees if not in group)
-      if (clientDoc?.supervisedBy) {
-        clientDoc.supervisedBy.forEach(id => clientManagers.push(id.toString()));
-      }
+      // We no longer automatically push supervisedBy supervisors to clientManagers.
+      // Group messages should strictly stay within the group. Supervisors must be added to the group to see them.
     }
 
     // Add CRM to managers list
@@ -473,20 +471,8 @@ exports.sendGroupMessage = async function (req, res) {
         allMemberIds.forEach(id => notifyIds.add(String(id)));
       }
 
-      // 🔥 ALSO notify supervisors for this client (ONLY if NOT pending, otherwise only active approver in receiverIds gets it)
-      if (messageClientId) {
-        try {
-          const ClientInfo = require("../models/ClientInfo");
-          const client = await ClientInfo.findById(messageClientId).select("supervisedBy").lean();
-          if (client) {
-            if (approvalStatus !== "pending" && client.supervisedBy && Array.isArray(client.supervisedBy)) {
-              client.supervisedBy.forEach(id => notifyIds.add(String(id)));
-            }
-          }
-        } catch (err) {
-          console.warn("Could not fetch client managers for notification:", err);
-        }
-      }
+      // We no longer manually broadcast group messages to all client supervisors.
+      // The socket event will only go to to group members and approvers.
 
       notifyIds.forEach((ridStr) => {
         const isSender = ridStr === String(senderId);

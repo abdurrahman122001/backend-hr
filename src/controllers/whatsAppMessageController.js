@@ -3460,17 +3460,10 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // 🔥 FOR GROUPS: Always include managers/crm so they get unread counts
+    // Group messages are now strictly isolated to group members.
+    // We no longer automatically push managers/supervisors into the receivers array for group messages.
     if (isGroupMessage || chatType === 'group' || groupId) {
-      if (managers.length > 0) {
-        managers.forEach((managerId) => {
-          if (!receivers.includes(managerId) && managerId !== String(sender)) {
-            receivers.push(managerId);
-          }
-        });
-      }
-
-      // Add CRM
+      // Add CRM (Optional, keep if CRM strictly needs to monitor all groups)
       const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
       if (crmEmployeeId && !receivers.includes(crmEmployeeId) && crmEmployeeId !== String(sender)) {
         receivers.push(crmEmployeeId);
@@ -3898,8 +3891,6 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
 
-      // 🔥 ALSO emit to the group room so anyone inside the chat gets the update instantly
-      // Only emit to group room if NOT pending, otherwise it leaks to unauthorized members
       if (responseWithSupervision.approvalStatus !== "pending") {
         if (isGroupMessage || (responseWithSupervision.isGroupMessage && responseWithSupervision.groupId)) {
           const targetGroupId = groupId || responseWithSupervision.groupId;
