@@ -266,7 +266,12 @@ CommentSchema.virtual("replies", {
 
 // NEW: Middleware to update comment stats before saving
 WhatsAppMessageSchema.pre("save", function (next) {
-  if (this.comments && this.isModified("comments")) {
+  // Handle backwards compatibility: ensure comments is at least an empty array
+  if (!this.comments || !Array.isArray(this.comments)) {
+    this.comments = [];
+  }
+
+  if (this.isModified("comments")) {
     this.commentCount = this.comments.length;
 
     if (this.comments.length > 0) {
@@ -362,6 +367,11 @@ WhatsAppMessageSchema.methods.editComment = async function (
   updates,
   employee,
 ) {
+  // Handle case where comments doesn't exist (for old messages before schema update)
+  if (!this.comments || !Array.isArray(this.comments)) {
+    throw new Error("Comment not found");
+  }
+
   const comment = this.comments.id(commentId);
   if (!comment) {
     throw new Error("Comment not found");
@@ -396,6 +406,11 @@ WhatsAppMessageSchema.methods.deleteComment = async function (
   commentId,
   employee,
 ) {
+  // Handle case where comments doesn't exist (for old messages before schema update)
+  if (!this.comments || !Array.isArray(this.comments)) {
+    throw new Error("Comment not found");
+  }
+
   const comment = this.comments.id(commentId);
   if (!comment) {
     throw new Error("Comment not found");
@@ -460,6 +475,11 @@ WhatsAppMessageSchema.methods.addReactionToComment = async function (
   emoji,
   employee,
 ) {
+  // Handle case where comments doesn't exist (for old messages before schema update)
+  if (!this.comments || !Array.isArray(this.comments)) {
+    throw new Error("Comment not found");
+  }
+
   const comment = this.comments.id(commentId);
   if (!comment) {
     throw new Error("Comment not found");
@@ -485,6 +505,11 @@ WhatsAppMessageSchema.methods.addReactionToComment = async function (
 WhatsAppMessageSchema.methods.getOrganizedComments = function () {
   const commentMap = new Map();
   const rootComments = [];
+
+  // Handle case where comments doesn't exist (for old messages before schema update)
+  if (!this.comments || !Array.isArray(this.comments) || this.comments.length === 0) {
+    return [];
+  }
 
   // First pass: create map
   this.comments.forEach((comment) => {

@@ -977,7 +977,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
       q.isClientEmployeeMessage = true;
       q.clientEmployeeId = clientEmployeeId;
     } else if (isClientEmployeeMessage === "false") {
-      q.isClientEmployeeMessage = false;
+      q.isClientEmployeeMessage = { $ne: true };
     }
 
     if (
@@ -3030,7 +3030,7 @@ exports.getClientMessagesSeenStatus =
           q.isClientEmployeeMessage = true;
           q.clientEmployeeId = clientEmployeeId;
         } else if (isClientEmployeeMessage === "false") {
-          q.isClientEmployeeMessage = false;
+          q.isClientEmployeeMessage = { $ne: true };
         }
       }
 
@@ -3038,7 +3038,7 @@ exports.getClientMessagesSeenStatus =
         q.isClientEmployeeMessage = true;
         q.clientEmployeeId = clientEmployeeId;
       } else if (isClientEmployeeMessage === "false") {
-        q.isClientEmployeeMessage = false;
+        q.isClientEmployeeMessage = { $ne: true };
       }
 
       // Get all messages for this client/employee where current user is a receiver
@@ -3103,7 +3103,7 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
         q.isClientEmployeeMessage = true;
         q.clientEmployeeId = clientEmployeeId;
       } else if (isClientEmployeeMessage === false) {
-        q.isClientEmployeeMessage = false;
+        q.isClientEmployeeMessage = { $ne: true };
       }
     }
 
@@ -3489,11 +3489,8 @@ exports.createMessage = async function createMessage(req, res) {
               receiverId !== String(sender) &&
               !receivers.includes(receiverId)
             ) {
-              // Only add if receiver has supervision enabled for this client
-              // OR if they're not a senior (managers, tls, peers are always allowed)
-              const isSupervisorWithEnabledSupervision = supervisedByList.includes(receiverId);
 
-              // Check if this receiver is actually a senior supervisor in hierarchy
+              const isSupervisorWithEnabledSupervision = supervisedByList.includes(receiverId);
               const isSeniorInHierarchy = async () => {
                 const hierarchyLink = await EmployeeHierarchy.findOne({
                   owner: owner,

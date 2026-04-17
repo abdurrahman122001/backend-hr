@@ -127,7 +127,20 @@ router.get('/absences-without-leave', async (req, res) => {
     });
 
     console.log('[DEBUG] Unexplained absences after filtering:', unexplainedAbsences.length);
-    res.json(unexplainedAbsences);
+
+    // Deduplicate by date to ensure the user isn't asked to justify the same date multiple times
+    const uniqueAbsences = [];
+    const seenDates = new Set();
+    
+    for (const record of unexplainedAbsences) {
+      if (!seenDates.has(record.date)) {
+        seenDates.add(record.date);
+        uniqueAbsences.push(record);
+      }
+    }
+
+    console.log('[DEBUG] Unique unexplained absences:', uniqueAbsences.length);
+    res.json(uniqueAbsences);
   } catch (err) {
     console.error("[DEBUG] Fetch unexplained absences failed:", err);
     res.status(500).json({ error: "Failed to fetch unexplained absences" });
