@@ -549,7 +549,8 @@ exports.listMessages = async function listMessages(req, res) {
     if (conversationType) {
       if (conversationType === "client") {
         // Only show direct client messages (not client employee messages)
-        q.isClientEmployeeMessage = false;
+        // Use $ne: true to include older messages that don't have this field yet
+        q.isClientEmployeeMessage = { $ne: true };
       } else if (conversationType === "client_employee") {
         // Only show client employee messages
         q.isClientEmployeeMessage = true;
@@ -3383,8 +3384,8 @@ exports.createMessage = async function createMessage(req, res) {
         });
       }
 
-      // Add assigned employees as receivers
-      if (assignedEmployeeIds.length > 0) {
+      // Add assigned employees as receivers (only for non-group messages)
+      if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (
             employeeId &&
@@ -3429,8 +3430,8 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
 
-      // Add assigned employees
-      if (assignedEmployeeIds.length > 0) {
+      // Add assigned employees (only for non-group messages)
+      if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (
             employeeId &&
@@ -3444,9 +3445,9 @@ exports.createMessage = async function createMessage(req, res) {
 
       approvalStatus = null;
     }
-    // 👷 EMPLOYEE LOGIC: Use assigned employees
+    // 👷 EMPLOYEE LOGIC: Use assigned employees (only for non-group messages)
     else if (senderRole === "employee") {
-      if (assignedEmployeeIds.length > 0) {
+      if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (
             employeeId &&
@@ -3898,17 +3899,18 @@ exports.createMessage = async function createMessage(req, res) {
       });
 
       // 🔥 ALSO emit to the group room so anyone inside the chat gets the update instantly
-      if (isGroupMessage || (responseWithSupervision.isGroupMessage && responseWithSupervision.groupId)) {
-        const targetGroupId = groupId || responseWithSupervision.groupId;
-        if (targetGroupId) {
-          io.to(`group_${targetGroupId}`).emit("new_message", {
-            message: responseWithSupervision,
-            type: responseWithSupervision.approvalStatus === "pending"
-              ? "reply_needs_approval"
-              : "new_assignment",
-            action: "created",
-            isClientEmployeeChat: isClientEmployeeChat,
-          });
+      // Only emit to group room if NOT pending, otherwise it leaks to unauthorized members
+      if (responseWithSupervision.approvalStatus !== "pending") {
+        if (isGroupMessage || (responseWithSupervision.isGroupMessage && responseWithSupervision.groupId)) {
+          const targetGroupId = groupId || responseWithSupervision.groupId;
+          if (targetGroupId) {
+            io.to(`group_${targetGroupId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "new_assignment",
+              action: "created",
+              isClientEmployeeChat: isClientEmployeeChat,
+            });
+          }
         }
       }
 

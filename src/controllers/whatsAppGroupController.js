@@ -333,8 +333,7 @@ exports.sendGroupMessage = async function (req, res) {
         String(id)
       );
       
-      // Collect all managers/assigned employees for unread counts
-      if (clientDoc?.assignedTo) clientManagers.push(String(clientDoc.assignedTo));
+      // Collect all managers for unread counts (excluding assigned employees if not in group)
       if (clientDoc?.supervisedBy) {
         clientDoc.supervisedBy.forEach(id => clientManagers.push(id.toString()));
       }
@@ -466,18 +465,21 @@ exports.sendGroupMessage = async function (req, res) {
       const notifyIds = new Set([
         String(senderId),
         String(owner),
-        ...receiverIds.map(rid => String(rid)),
-        ...allMemberIds // All group members should get sidebar updates
+        ...receiverIds.map(rid => String(rid))
       ]);
 
-      // 🔥 ALSO notify managers/assigned employees for this client
+      // Only notify all group members if the message is NOT pending
+      if (approvalStatus !== "pending") {
+        allMemberIds.forEach(id => notifyIds.add(String(id)));
+      }
+
+      // 🔥 ALSO notify supervisors for this client (ONLY if NOT pending, otherwise only active approver in receiverIds gets it)
       if (messageClientId) {
         try {
           const ClientInfo = require("../models/ClientInfo");
-          const client = await ClientInfo.findById(messageClientId).select("assignedTo supervisedBy").lean();
+          const client = await ClientInfo.findById(messageClientId).select("supervisedBy").lean();
           if (client) {
-            if (client.assignedTo) notifyIds.add(String(client.assignedTo));
-            if (client.supervisedBy && Array.isArray(client.supervisedBy)) {
+            if (approvalStatus !== "pending" && client.supervisedBy && Array.isArray(client.supervisedBy)) {
               client.supervisedBy.forEach(id => notifyIds.add(String(id)));
             }
           }
