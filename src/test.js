@@ -3182,9 +3182,6 @@ const emitForwardToManagers = (io, data) => {
   });
 };
 
-
-// In your socket.io initialization file
-// Export the emission functions for use in controllers
 module.exports = {
   emitWhatsAppMessage,
   emitForwardToManagers,
