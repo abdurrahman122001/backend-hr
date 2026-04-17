@@ -28,8 +28,11 @@ const AttendanceSchema = new Schema({
   acknowledgmentReason: { type: String },
   acknowledgmentType: { type: String, enum: ['unpaid', 'paid', null], default: null },
 
-  // Track if Half Day status came from auto-logout (page refresh) - used to prevent incorrect deduction reversals
-  halfDayFromAutoLogout: { type: Boolean, default: false },
+  // Employee challenge fields
+  challengeStatus: { type: String, enum: ['None', 'Pending', 'Approved', 'Rejected'], default: 'None' },
+  challengeReason: { type: String },
+  challengeAt: { type: Date },
+  challengeAdminNotes: { type: String },
 
 }, { timestamps: true });
 
