@@ -507,7 +507,7 @@ function buildSalarySlipHtml({
     netSalary != null && netSalary !== 0
       ? `${numberToWords
         .toWords(netSalary)
-        .replace(/,/g, "")} Rupees Only`.replace(/(^\w|\s\w)/g, (m) =>
+        .replace(/,/g, "")} Rupees Only`.replace(/\b\w/g, (m) =>
           m.toUpperCase()
         )
       : "-";

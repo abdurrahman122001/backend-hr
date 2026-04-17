@@ -197,7 +197,7 @@ function buildSalarySlipHtml({
         </tr>
         <tr>
           <td style="font-weight:500; color:#64748b; padding:12px 14px;">Amount in Words</td>
-          <td style="font-weight:500; text-align:right; color:#64748b; padding:12px 14px;">${inWords !== "-" ? inWords.replace(/(^\w|\s\w)/g, (m) => m.toUpperCase()) + " Rupees Only" : "-"}</td>
+          <td style="font-weight:500; text-align:right; color:#64748b; padding:12px 14px;">${inWords !== "-" ? inWords.replace(/\b\w/g, (m) => m.toUpperCase()) + " Rupees Only" : "-"}</td>
         </tr>
       </table>
     `;
