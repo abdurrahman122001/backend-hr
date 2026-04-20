@@ -96,7 +96,7 @@ const EmployeeSchema = new Schema(
     // (OPTIONAL) If you want to keep emergencyNo separately
     emergencyNo: { type: String }, // If used
 
-    rt: { type: String, default: "15:30" },
+    rt: { type: String, default: "15:00" },
 
     // EMPLOYMENT DETAILS
     department: { type: String },

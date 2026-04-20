@@ -53,29 +53,18 @@ async function migrateOldMessages() {
         filter: { _id: msg._id },
         update: {
           $set: {
-            // Set defaults for group chat fields
             isGroupMessage: false,
             groupId: null,
             chatType: "normal",
-
-            // Set defaults for client employee fields
             isClientEmployeeMessage: false,
             clientEmployeeId: null,
             clientEmployeeData: null,
             parentClientId: null,
-
-            // Set defaults for comments system
             comments: [],
             commentCount: 0,
             commenters: [],
-
-            // Set defaults for edit tracking
             isEdited: false,
-
-            // Set defaults for scheduling
             isScheduled: false,
-
-            // Set defaults for deletion tracking
             deletedForEveryone: false,
             deletedForUsers: [],
 
@@ -89,7 +78,7 @@ async function migrateOldMessages() {
     }));
 
     // Execute bulk update in batches of 500 to avoid memory issues
-    const BATCH_SIZE = 500;
+    const BATCH_SIZE = 500;  
     let updatedCount = 0;
 
     for (let i = 0; i < bulkOps.length; i += BATCH_SIZE) {

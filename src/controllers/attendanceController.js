@@ -14,6 +14,7 @@ const LoanDetail = require("../models/LoanDetail");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const AttendanceChangeLog = require("../models/AttendanceChangeLog");
+const SalarySlip = require("../models/SalarySlip");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 
@@ -821,6 +822,9 @@ exports.markAttendance = async (req, res) => {
       challengeAdminNotes,
     } = req.body;
 
+    // DEBUG: Log incoming request
+    console.log(`[MARK-ATTENDANCE-DEBUG] Received: employeeId=${employeeId}, date=${date}, status=${status}, checkIn=${checkIn}`);
+
     // ========= Helpers =========
     const allowanceFields = [
       "basic",
@@ -1486,7 +1490,17 @@ exports.markAttendance = async (req, res) => {
 
       const lateCountNow = lateRecordsNow.length;
       const lateDeductionDaysNow = Math.floor(lateCountNow / 3);
-      const previouslyCredited = 0; // Salary slip logic removed
+
+      // Get the salary slip to check previously credited late deductions
+      const payrollMonthNow = periodEnd.toLocaleString("en-US", { month: "long" });
+      const payrollYearNow = String(periodEnd.getFullYear());
+      const slipNow = await SalarySlip.findOne({
+        owner: ownerId,
+        employee: employeeId,
+        month: payrollMonthNow,
+        year: payrollYearNow
+      });
+      const previouslyCredited = slipNow?.lateDeductionDaysCredited || 0;
 
       if (lateDeductionDaysNow < previouslyCredited) {
         const daysToReverse = previouslyCredited - lateDeductionDaysNow;
@@ -1505,13 +1519,17 @@ exports.markAttendance = async (req, res) => {
         }
 
         console.log(
-          `[LATE - REV][${employee.name}] Reversed ${daysToReverse} late deduction(s) -> Refund=${refundAmt}, New lateDeductions = ${newLateAmt} `
+          `[LATE - REV][${employee.name}] Reversed late deduction -> Refund processed`
         );
       }
     }
 
-    // ========= LATE (3 = 1 day) =========
+    // ========= LATE (3 lates = 1 day deduction) =========
+    console.log(`[LATE-DEBUG] Checking late deduction: status=${status}, beforeJoin=${beforeJoin}, start=${start}, end=${end}`);
+    
     if (!beforeJoin && status === "Late") {
+      console.log(`[LATE-DEBUG] Entered late block for ${employee.name}`);
+      
       const lateRecords = await Attendance.find({
         employee: employeeId,
         owner: ownerId,
@@ -1520,71 +1538,68 @@ exports.markAttendance = async (req, res) => {
       }).lean();
 
       const lateCount = lateRecords.length;
-      const lateDeductionDays = Math.floor(lateCount / 3);
-      const previouslyCredited = 0; // Salary slip logic removed
-      const newLateDeductionDays = lateDeductionDays - previouslyCredited;
+      const totalDeductionDays = Math.floor(lateCount / 3);
+
+      // Get previously credited late deductions from SalarySlip
+      const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
+      const payrollYear = String(periodEnd.getFullYear());
+      let previouslyCredited = 0;
+      try {
+        const slip = await SalarySlip.findOne({
+          owner: ownerId,
+          employee: employeeId,
+          month: payrollMonth,
+          year: payrollYear
+        });
+        previouslyCredited = slip?.lateDeductionDaysCredited || 0;
+      } catch (err) {
+        console.error("[LATE] Error fetching SalarySlip:", err.message);
+      }
+      
+      const newLateDeductionDays = totalDeductionDays - previouslyCredited;
+      
       console.log(
-        `[LATE][${employee.name}]LatesInPeriod = ${lateCount}, DeductionDaysTotal = ${lateDeductionDays}, NewToApply = ${newLateDeductionDays} `
+        `[LATE][${employee.name}] Lates=${lateCount}, TotalDeductions=${totalDeductionDays}, Previous=${previouslyCredited}, New=${newLateDeductionDays}`
       );
 
       if (newLateDeductionDays > 0) {
-        if (newLateDeductionDays === 1) {
-          const balanceSnapshot = await getLeaveBalanceSnapshot(ownerId, employeeId, date);
-          const total = (balanceSnapshot.total || 0) + (balanceSnapshot.bonus || 0);
-          const usedPaid = balanceSnapshot.usedPaid || 0;
-          const balance = total - usedPaid;
+        // Deduct the new late deduction days
+        const result = await updateLeaveEntitlementForEmployee(
+          ownerId,
+          employeeId,
+          date,
+          newLateDeductionDays,
+          "late"
+        );
+        console.log(
+          `[LATE - DEDUCTION][${employee.name}] Deducted ${newLateDeductionDays} days (Paid=${result.paid || 0}, Unpaid=${result.unpaid || 0})`
+        );
 
-          if (balance > 0 && balance < 1) {
-            const result = await updateLeaveEntitlementForEmployeeProportional(
-              ownerId,
-              employeeId,
-              date,
-              1,
-              "late",
-              false
-            );
-            // Salary slip logic removed - no longer creating salary slips
-            console.log(
-              `[LATE - DEDUCTION][${employee.name}] Proportionate -> Paid=${result.paid || 0}, Unpaid = ${result.unpaid || 0}`
-            );
-          } else if (balance >= 1) {
-            await updateLeaveEntitlementForEmployee(
-              ownerId,
-              employeeId,
-              date,
-              1,
-              "late",
-              false
-            );
-            // Salary slip logic removed - no longer creating salary slips
-            console.log(
-              `[LATE][${employee.name}] Paid leave consumed(usedPaid + 1), NO deduction`
-            );
+        // Update SalarySlip to track newly credited deductions
+        try {
+          const slip = await SalarySlip.findOne({
+            owner: ownerId,
+            employee: employeeId,
+            month: payrollMonth,
+            year: payrollYear
+          });
+          if (slip) {
+            slip.lateDeductionDaysCredited = totalDeductionDays;
+            await slip.save();
+            console.log(`[LATE] Updated lateDeductionDaysCredited to ${totalDeductionDays}`);
           } else {
-            const result = await updateLeaveEntitlementForEmployee(
-              ownerId,
-              employeeId,
-              date,
-              1,
-              "late"
-            );
-            // Salary slip logic removed - no longer creating salary slips
-            console.log(
-              `[LATE - DEDUCTION][${employee.name}] Full day late deduction -> Days=${result.unpaid || 0}`
-            );
+            // Create new salary slip if doesn't exist
+            await SalarySlip.create({
+              owner: ownerId,
+              employee: employeeId,
+              month: payrollMonth,
+              year: payrollYear,
+              lateDeductionDaysCredited: totalDeductionDays
+            });
+            console.log(`[LATE] Created SalarySlip with lateDeductionDaysCredited=${totalDeductionDays}`);
           }
-        } else {
-          const result = await updateLeaveEntitlementForEmployee(
-            ownerId,
-            employeeId,
-            date,
-            newLateDeductionDays,
-            "late"
-          );
-          // Salary slip logic removed - no longer creating salary slips
-          console.log(
-            `[LATE - DEDUCTION][${employee.name}] Multi-day late deduction -> Days=${result.unpaid || 0}`
-          );
+        } catch (err) {
+          console.error("[LATE] Error updating SalarySlip:", err.message);
         }
       }
     }
@@ -1669,8 +1684,9 @@ exports.markAttendance = async (req, res) => {
 
     return res.json(rec);
   } catch (err) {
-    console.error("Error in markAttendance:", err);
-    return res.status(400).json({ error: err.message });
+    console.error("[MARK-ATTENDANCE-ERROR]", err);
+    console.error("[MARK-ATTENDANCE-STACK]", err.stack);
+    return res.status(400).json({ error: err.message, stack: err.stack });
   }
 };
 

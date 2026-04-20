@@ -158,16 +158,45 @@ async function processLateDeductionsForPeriod(
       };
     }
 
-    // Calculate leaves to deduct: 3 late = 1 day
-    const leavesToDeduct = Math.floor(lateCount / 3);
+    // Get salary slip for this period and update leave deductions
+    const periodStartStr = periodStart.toISOString().split('T')[0];
+    const periodEndStr = periodEnd.toISOString().split('T')[0];
+    const payrollMonthStr = periodEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYearStr = String(periodEnd.getFullYear());
 
-    if (leavesToDeduct === 0) {
-      console.log(`[LATE-DEDUCTION] [${employee.name}] ${lateCount} late(s) found but not enough for full day deduction`);
+    let slip = await SalarySlip.findOne({
+      owner: actualOwnerId,
+      employee: employeeId,
+      month: payrollMonthStr,
+      year: payrollYearStr
+    });
+
+    if (!slip) {
+      // Create salary slip if doesn't exist
+      slip = await SalarySlip.create({
+        owner: actualOwnerId,
+        employee: employeeId,
+        date: new Date(periodEnd),
+        month: payrollMonthStr,
+        year: payrollYearStr,
+        leaveDeductions: await encrypt("0"),
+        lateDeductionDaysCredited: 0
+      });
+    }
+
+    const previouslyCredited = slip.lateDeductionDaysCredited || 0;
+    
+    // Calculate leaves to deduct: 3 late = 1 day, minus what was already credited
+    const totalLeavesToDeduct = Math.floor(lateCount / 3);
+    const leavesToDeduct = totalLeavesToDeduct - previouslyCredited;
+
+    if (leavesToDeduct <= 0) {
+      console.log(`[LATE-DEDUCTION] [${employee.name}] ${lateCount} late(s) found but all deductions already applied in real-time.`);
       return {
         processed: true,
         lateCount,
         leavesDeducted: 0,
-        message: `${lateCount} late sessions found but need 3 for 1 day deduction`
+        message: `All deductions for ${lateCount} late sessions already applied in real-time`
       };
     }
 
@@ -224,7 +253,7 @@ async function processLateDeductionsForPeriod(
         type: "PAID_LEAVE_USED",
         value: paidDeducted,
         sourceModel: "EmployeeSession",
-        reason: `Late Deduction: ${lateCount} late sessions (${Math.floor(lateCount / 3)} days)`,
+        reason: `Late Deduction: ${lateCount} late sessions (${leavesToDeduct} new day(s))`,
         createdBy: userId,
       });
 
@@ -241,7 +270,7 @@ async function processLateDeductionsForPeriod(
         type: "UNPAID_LEAVE_USED",
         value: unpaidDeducted,
         sourceModel: "EmployeeSession",
-        reason: `Late Deduction: ${lateCount} late sessions (${Math.floor(lateCount / 3)} days)`,
+        reason: `Late Deduction: ${lateCount} late sessions (${leavesToDeduct} new day(s))`,
         createdBy: userId,
       });
 
@@ -250,41 +279,27 @@ async function processLateDeductionsForPeriod(
 
     await balance.save();
 
-    // Get salary slip for this period and update leave deductions
-    const periodStartStr = periodStart.toISOString().split('T')[0];
-    const periodEndStr = periodEnd.toISOString().split('T')[0];
-
-    let slip = await SalarySlip.findOne({
-      owner: actualOwnerId,
-      employee: employeeId,
-      date: { $gte: periodStart, $lte: periodEnd },
-    });
-
-    if (!slip) {
-      // Create salary slip if doesn't exist
-      slip = await SalarySlip.create({
-        owner: actualOwnerId,
-        employee: employeeId,
-        date: new Date(periodEnd),
-        month: periodEnd.getMonth() + 1,
-        year: periodEnd.getFullYear(),
-        leaveDeductions: await encrypt("0"),
-      });
+    // Check if salary deduction is needed
+    let perDayDeduction = 0;
+    
+    if (unpaidDeducted > 0 || paidDeducted > 0) {
+        // Calculate per-day salary for deduction (mostly for unpaid)
+        const salaries = await require("./salaryRetrieval").getSalaries(
+          actualOwnerId,
+          employeeId
+        );
+        let grossSalary = 0;
+        if (salaries && salaries.gross) {
+          const gross = await decrypt(salaries.gross);
+          grossSalary = Number(gross) || 0;
+        }
+    
+        const totalWorkingDays = 22;
+        // NOTE: we apply deduction to salary slip for `unpaidDeducted` 
+        // Previously this added both paid and unpaid, but paid leaves shouldn't deduct from salary!
+        // We will just do unpaidDeducted since paidDeducted means they had leave balance.
+        perDayDeduction = Math.round((grossSalary / totalWorkingDays) * (unpaidDeducted));
     }
-
-    // Calculate per-day salary
-    const salaries = await require("./salaryRetrieval").getSalaries(
-      actualOwnerId,
-      employeeId
-    );
-    let grossSalary = 0;
-    if (salaries && salaries.gross) {
-      const gross = await decrypt(salaries.gross);
-      grossSalary = Number(gross) || 0;
-    }
-
-    const totalWorkingDays = 22;
-    const perDayDeduction = Math.round((grossSalary / totalWorkingDays) * (paidDeducted + unpaidDeducted));
 
     // Update salary slip
     let prevDeduction = 0;
@@ -296,6 +311,7 @@ async function processLateDeductionsForPeriod(
     slip.lateDeductionApplied = true;
     slip.lateCount = lateCount;
     slip.leavesDeductedFromLate = leavesToDeduct;
+    slip.lateDeductionDaysCredited = totalLeavesToDeduct; // update the master count
     await slip.save();
 
     // Mark one attendance record in this period with lateDeductionApplied flag
@@ -524,7 +540,7 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
         await LeaveTransaction.create({
           owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
           year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: newDeductionDays,
-          reason: `Late Deduction (${lateCount} lates)`
+          reason: `Late Deduction (${lateCount} lates, ${newDeductionDays} new day(s))`
         });
         console.log(`[LATE-DEDUCT] ${employee.name}: Used ${newDeductionDays} paid leaves`);
       } else {
