@@ -133,14 +133,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
       const baseInclusive = Math.max(0, s.from - 1);
       const over = Math.max(0, A - baseInclusive);
       const tax = Math.round(s.fixed + over * s.rate);
-      if (DEBUG_TAX) {
-        console.log(
-          `[tax] slab match: A=${A.toLocaleString()} | from=${s.from.toLocaleString()} to=${s.to === Infinity ? "∞" : s.to.toLocaleString()
-          } | fixed=${s.fixed.toLocaleString()} | rate=${(s.rate * 100).toFixed(
-            2
-          )}% | over=${over.toLocaleString()} | annualTax=${tax.toLocaleString()}`
-        );
-      }
       return tax;
     }
   }
@@ -150,15 +142,6 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
     const baseInclusive = Math.max(0, last.from - 1);
     const over = Math.max(0, A - baseInclusive);
     const tax = Math.round(last.fixed + over * last.rate);
-    if (DEBUG_TAX) {
-      console.log(
-        `[tax] top band: A=${A.toLocaleString()} | from=${last.from.toLocaleString()} | fixed=${last.fixed.toLocaleString()} | rate=${(
-          last.rate * 100
-        ).toFixed(
-          2
-        )}% | over=${over.toLocaleString()} | annualTax=${tax.toLocaleString()}`
-      );
-    }
     return tax;
   }
 
@@ -175,13 +158,7 @@ async function calculateTaxableMonthlyOnly(slip, taxCfg) {
 
 /* ---------------------- slip calculation (async) ---------------------- */
 async function calculateSlipWithTaxAsync(slip, taxCfg) {
-  if (DEBUG_TAX) {
-    console.log("---------------------------------------------------");
-    console.log(`[tax] Starting tax calculation for slip: ${slip._id}`);
-    console.log(`[tax] Employee: ${slip.employee?._id}, Month: ${slip.month} ${slip.year}`);
-  }
 
-  // 1) Gross monthly
   let grossMonthly = 0;
   for (const key of ALLOWANCE_KEYS) {
     const value = await readFirstNumAsync(slip, [key]);
@@ -261,27 +238,6 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   // 7) Final totals
   const totalDeductions = baseDeductionsMonthly + monthlyTax;
   const netPayable = Math.max(0, grossMonthly - totalDeductions);
-
-  /* ----------------- DEBUG LOGS ----------------- */
-  if (DEBUG_TAX) {
-    console.log("---------------------------------------------------");
-    console.log(`[tax DEBUG] Slip ID: ${slip._id}`);
-    console.log(`[tax DEBUG] Basic Salary       = ${basic}`);
-    console.log(`[tax DEBUG] Gross = Basic+Conveyance = ${grossMonthly}`);
-    console.log(`[tax DEBUG] Base Deductions    = ${baseDeductionsMonthly}`);
-    console.log(`[tax DEBUG] Net Before Tax     = ${netBeforeTax}`);
-    console.log(`[tax DEBUG] Medical Exemptions = ${medExemptMonthly}`);
-    console.log(`[tax DEBUG] Joining Date      = ${joiningDate ? joiningDate.toDateString() : "N/A"}`);
-    console.log(`[tax DEBUG] Effective Start    = ${effectiveStart.toDateString()}`);
-    console.log(`[tax DEBUG] Months in Period   = ${monthsRemaining}`);
-    console.log(`[tax DEBUG] Taxable Monthly    = ${taxableMonthly}`);
-    console.log(`[tax DEBUG] Annual Taxable     = ${annualTaxable}`);
-    console.log(`[tax DEBUG] Annual Tax         = ${annualTax}`);
-    console.log(`[tax DEBUG] Monthly Tax        = ${monthlyTax}`);
-    console.log(`[tax DEBUG] TOTAL Deductions   = ${totalDeductions}`);
-    console.log(`[tax DEBUG] Net Payable        = ${netPayable}`);
-    console.log("---------------------------------------------------\n");
-  }
 
   return {
     grossMonthly,
@@ -407,26 +363,16 @@ exports.disableAutoTax = async (req, res) => {
 exports.getAutoTaxStatus = async (req, res) => {
   try {
     const { fiscalYear = "2025-26" } = req.query; // CHANGED from req.params to req.query
-
-    console.log(`[tax] Checking auto-tax status for fiscalYear: ${fiscalYear}, user: ${req.user._id}`);
-
     const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
 
     if (!taxCfg) {
-      console.log(`[tax] No TaxConfig found for fiscal year: ${fiscalYear}`);
       return res.json({
         autoTaxEnabled: false,
         config: null
       });
     }
-
-    console.log(`[tax] TaxConfig found - autoApplyEnabled: ${taxCfg.autoApplyEnabled}`);
-    console.log(`[tax] autoEnabledOwners:`, taxCfg.autoEnabledOwners);
-
     const isAutoEnabled = taxCfg?.autoApplyEnabled &&
       taxCfg.autoEnabledOwners?.includes(req.user._id.toString());
-
-    console.log(`[tax] Final autoTaxEnabled: ${isAutoEnabled}`);
 
     return res.json({
       autoTaxEnabled: !!isAutoEnabled,
@@ -499,27 +445,14 @@ async function applyAutoTaxToFutureSlips(ownerId, fiscalMonths, taxCfg) {
 /** Auto-apply tax to new slips if auto-tax is enabled - ENHANCED FOR ATTENDANCE FLOW */
 exports.autoApplyTaxIfEnabled = async function (slip) {
   try {
-    console.log(`[TAX-AUTO] Checking auto-tax for slip: ${slip._id}, Owner: ${slip.owner}, Month: ${slip.month} ${slip.year}`);
-
     // Check if tax is already applied
     const currentTax = slip.taxDeduction ? (Number(await decrypt(slip.taxDeduction)) || 0) : 0;
-    if (currentTax > 0) {
-      console.log(`[TAX-AUTO] Tax already applied: ${currentTax}, skipping`);
-      return;
-    }
 
     const taxCfg = await TaxConfig.findOne({
       fiscalYear: "2025-26",
       autoApplyEnabled: true,
       autoEnabledOwners: slip.owner
     }).lean();
-
-    if (!taxCfg) {
-      console.log(`[TAX-AUTO] Auto-tax not enabled for owner: ${slip.owner}`);
-      return;
-    }
-
-    console.log(`[TAX-AUTO] Auto-tax enabled for this owner. Checking date conditions...`);
 
     // Check if this slip is from the auto-apply month or later
     const monthOrder = [
@@ -539,14 +472,7 @@ exports.autoApplyTaxIfEnabled = async function (slip) {
 
       const shouldApplyTax = slipYear > autoFromYear ||
         (slipYear === autoFromYear && slipMonthIndex >= autoFromMonthIndex);
-
-      if (!shouldApplyTax) {
-        console.log(`[TAX-AUTO] Slip ${slip.month} ${slip.year} is before auto-apply date ${taxCfg.autoApplyFromMonth.month} ${taxCfg.autoApplyFromMonth.year}`);
-        return;
-      }
     }
-
-    console.log(`[TAX-AUTO] Applying auto-tax to slip ${slip._id} (${slip.month} ${slip.year})`);
 
     // Populate employee data if needed
     if (!slip.employee || typeof slip.employee === 'string') {
@@ -562,10 +488,6 @@ exports.autoApplyTaxIfEnabled = async function (slip) {
     await writeEnc(slip, "netPayable", calc.netPayable);
 
     await slip.save();
-
-    console.log(`[TAX-AUTO] ✅ Auto-applied tax for slip ${slip._id} (${slip.month} ${slip.year})`);
-    console.log(`[TAX-AUTO] Tax applied: ${calc.monthlyTax}, Net payable: ${calc.netPayable}`);
-
     return {
       success: true,
       taxApplied: calc.monthlyTax,

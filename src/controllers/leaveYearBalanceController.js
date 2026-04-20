@@ -54,7 +54,6 @@ exports.getCurrentYearLeaveBalance = async (req, res) => {
         (balance.usedPaid || 0),
       year: balance.year,
     });
-    console.log()
   } catch (e) {
     res.status(500).json({ error: "Failed to fetch leave balance" });
   }

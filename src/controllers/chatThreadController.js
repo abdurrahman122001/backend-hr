@@ -44,14 +44,7 @@ exports.createThreadReply = async (req, res) => {
     const { parentMessageId, content, messageType = "text", mentions: mentionsRaw, gifUrl } = req.body;
     const sender = req.employee?._id;
     const owner = req.employee?.owner;
-
-    console.log("📨 Send thread reply request:", {
-      parentMessageId,
-      content,
-      messageType,
-      files: req.files ? req.files.length : 0,
-    });
-
+    
     // Process uploaded files
     const uploadedAttachments = [];
     if (req.files && req.files.length > 0) {

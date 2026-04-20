@@ -51,12 +51,6 @@ const sendMentionNotifications = async (
         spaceId: conversation.space,
       });
 
-      // You can also add other notification methods here:
-      // - Push notifications
-      // - Email notifications
-      // - Database notifications
-
-      console.log(`✅ Mention notification sent to user ${mention.employee}`);
     }
   } catch (error) {
     console.error("Error sending mention notifications:", error);
@@ -204,9 +198,6 @@ exports.uploadFile = async (req, res) => {
           }`, // Full URL
         uploadedAt: new Date(),
       };
-
-      console.log("✅ File uploaded with URL:", fileData.url);
-
       res.json({
         success: true,
         message: "File uploaded successfully",
@@ -661,6 +652,7 @@ exports.getSpaces = async (req, res) => {
           name: space.name,
           description: space.description,
           avatar: space.avatar,
+          emoji: space.emoji,
           createdBy: space.createdBy,
           admins: space.admins,
           members: space.members,
@@ -701,9 +693,6 @@ exports.getMessages = async (req, res) => {
     const { conversationId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
-    console.log("🔍 Fetching messages for conversation:", conversationId);
-
-    // Validate conversation ID
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {
       return res
         .status(400)
@@ -769,8 +758,6 @@ exports.getMessages = async (req, res) => {
       lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null
     }));
 
-    console.log(`📨 Found ${messages.length} messages`);
-
     // Mark messages as read and track views for space messages
     const isSpace = conversation.isGroup || conversation.space;
     
@@ -789,8 +776,6 @@ exports.getMessages = async (req, res) => {
     });
 
     if (unreadMessages.length > 0) {
-      console.log(`📖 Marking ${unreadMessages.length} messages as read`);
-
       if (isSpace) {
         // Space/Group message - mark as read AND add view
         await Message.updateMany(
@@ -859,10 +844,6 @@ exports.getMessages = async (req, res) => {
               : undefined,
           });
         });
-
-        console.log(
-          `✅ Emitted read receipts for ${unreadMessages.length} messages to ${room}`
-        );
       }
     }
 
@@ -881,9 +862,7 @@ exports.getMessages = async (req, res) => {
         );
       });
 
-      if (alreadyReadMessages.length > 0) {
-        console.log(`👁️ Adding views for ${alreadyReadMessages.length} already-read messages`);
-        
+      if (alreadyReadMessages.length > 0) {        
         await Message.updateMany(
           {
             _id: { $in: alreadyReadMessages.map((m) => m._id) },
@@ -1008,14 +987,6 @@ exports.sendMessage = async (req, res) => {
     const { conversationId } = req.params;
     const { content, messageType = "text", replyTo } = req.body; // ✅ ADD replyTo
 
-    console.log("📨 Send message request:", {
-      conversationId,
-      content,
-      messageType,
-      replyTo, // ✅ ADD: Log replyTo
-      files: req.files ? req.files.length : 0,
-    });
-
     // ✅ Process uploaded files
     const uploadedAttachments = [];
     if (req.files && req.files.length > 0) {
@@ -1089,12 +1060,6 @@ exports.sendMessage = async (req, res) => {
           otherParticipant._id
         );
 
-        console.log("🔒 Block status check:", {
-          sender: req.employee._id,
-          receiver: otherParticipant._id,
-          blockStatus,
-        });
-
         if (!blockStatus.canCommunicate) {
           let errorMessage = "Cannot send message";
 
@@ -1157,15 +1122,6 @@ exports.sendMessage = async (req, res) => {
         finalMessageType = "file";
       }
     }
-
-    console.log("📨 Message Type Detection:", {
-      finalMessageType,
-      attachments: uploadedAttachments.map((a) => ({
-        mimetype: a.mimetype,
-        filename: a.filename,
-        url: a.url,
-      })),
-    });
     const mentions = await processMentions(content, req.employee._id);
 
     // Prepare message data
@@ -1270,8 +1226,6 @@ exports.sendMessage = async (req, res) => {
         "receive_message",
         populatedMessage
       );
-
-      console.log(`✅ Message broadcasted to conversation_${conversationId}`);
     }
 
     res.json({
@@ -1326,12 +1280,6 @@ exports.sendDirectMessage = async (req, res) => {
       req.employee._id,
       participantId
     );
-
-    console.log("🔒 Direct message block status check:", {
-      sender: req.employee._id,
-      receiver: participantId,
-      blockStatus,
-    });
 
     if (!blockStatus.canCommunicate) {
       let errorMessage = "Cannot send message";
@@ -1460,8 +1408,6 @@ exports.sendDirectMessage = async (req, res) => {
         success: true,
         message: populatedMessage,
       });
-
-      console.log(`✅ Direct message sent via socket`);
     }
 
     res.json({
@@ -1596,10 +1542,6 @@ exports.markAsRead = async (req, res) => {
             : undefined,
         });
       });
-
-      console.log(
-        `✅ Read receipts sent for ${unreadMessages.length} messages in ${room}`
-      );
     }
 
     res.json({
@@ -1749,10 +1691,6 @@ exports.spaceMarkAsUnread = async (req, res) => {
       // Set unread count to 1 for this user
       conversation.unreadCount.set(req.employee._id.toString(), 1);
       await conversation.save();
-
-      console.log(
-        `✅ Space ${spaceId} marked as unread for user ${req.employee._id}`
-      );
     } else {
       // If no messages, still set unread count to indicate unread status
       conversation.unreadCount.set(req.employee._id.toString(), 1);
@@ -2010,10 +1948,6 @@ exports.createSpace = async (req, res) => {
           createdBy: req.employee._id,
         });
       });
-
-      console.log(
-        `✅ Space creation notified to ${space.members.length} members`
-      );
     }
 
     res.json({
@@ -2187,8 +2121,6 @@ exports.addSpaceMembers = async (req, res) => {
         updatedBy: req.employee._id,
         updatedAt: new Date(),
       });
-
-      console.log(`✅ ${newMembers.length} new members notified`);
     }
 
     res.json({
@@ -2333,16 +2265,6 @@ exports.sendSpaceMessage = async (req, res) => {
       .filter((member) => member._id.toString() !== req.employee._id.toString())
       .map((member) => member._id);
 
-    console.log("📨 Space Message Details:", {
-      spaceId,
-      totalMembers: space.members.length,
-      sender: req.employee._id,
-      receiversCount: receivers.length,
-      messageType: finalMessageType,
-      replyTo, // ✅ ADD: Log replyTo
-      attachments: uploadedAttachments.length,
-    });
-
     const mentions = await processMentions(content, req.employee._id);
 
     // Create message with mentions
@@ -2409,8 +2331,6 @@ exports.sendSpaceMessage = async (req, res) => {
     if (io) {
       // Broadcast to ALL users in the space room
       io.to(`space_${spaceId}`).emit("receive_space_message", populatedMessage);
-
-      console.log(`✅ Space message broadcasted to space_${spaceId}`);
     }
 
     res.json({
@@ -2536,8 +2456,6 @@ exports.removeSpaceMember = async (req, res) => {
         updatedAt: new Date(),
         action: "member_removed",
       });
-
-      console.log(`✅ Member ${memberId} removed from space ${spaceId}`);
     }
 
     res.json({
@@ -2650,10 +2568,6 @@ exports.updateMemberRole = async (req, res) => {
         updatedAt: new Date(),
         action: "role_updated",
       });
-
-      console.log(
-        `✅ Member ${memberId} role updated to ${role} in space ${spaceId}`
-      );
     }
 
     res.json({
@@ -2720,6 +2634,7 @@ exports.getSpaceDetails = async (req, res) => {
       name: space.name,
       description: space.description || "",
       avatar: space.avatar,
+      emoji: space.emoji || "💡",
       groupName: conversation?.groupName || space.name,
       groupDescription:
         conversation?.groupDescription || space.description || "",
@@ -2750,13 +2665,7 @@ exports.getSpaceDetails = async (req, res) => {
 exports.updateSpaceDetails = async (req, res) => {
   try {
     const { spaceId } = req.params; // Make sure this is spaceId, not conversationId
-    const { groupName, groupDescription, guidelines } = req.body;
-
-    console.log("🔄 Updating space details for:", {
-      spaceId,
-      groupName,
-      groupDescription,
-    });
+    const { groupName, groupDescription, guidelines, emoji } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(spaceId)) {
       return res.status(400).json({
@@ -2784,6 +2693,11 @@ exports.updateSpaceDetails = async (req, res) => {
       description: groupDescription?.trim() || space.description,
       updatedAt: new Date(),
     };
+
+    // Add emoji if provided
+    if (emoji !== undefined) {
+      updateData.emoji = emoji;
+    }
 
     // Add guidelines to settings if provided
     if (guidelines !== undefined) {
@@ -2848,8 +2762,6 @@ exports.updateSpaceDetails = async (req, res) => {
         },
         updatedAt: new Date(),
       });
-
-      console.log(`✅ Space details updated for space: ${spaceId}`);
     }
 
     res.json({
@@ -2860,6 +2772,7 @@ exports.updateSpaceDetails = async (req, res) => {
         name: updatedSpace.name,
         description: updatedSpace.description,
         avatar: updatedSpace.avatar,
+        emoji: updatedSpace.emoji,
         groupName: updatedSpace.name, // For compatibility
         groupDescription: updatedSpace.description, // For compatibility
         groupAvatar: updatedSpace.avatar, // For compatibility
@@ -2983,8 +2896,6 @@ exports.leaveSpace = async (req, res) => {
         action: "member_left",
         remainingMembers: space.members.length,
       });
-
-      console.log(`✅ User ${req.employee._id} left space ${spaceId}`);
     }
 
     res.json({
@@ -3095,10 +3006,6 @@ exports.transferSpaceOwnership = async (req, res) => {
         },
         transferredAt: new Date(),
       });
-
-      console.log(
-        `✅ Space ${spaceId} ownership transferred from ${previousOwnerId} to ${newOwnerId}`
-      );
     }
 
     res.json({
@@ -3361,8 +3268,6 @@ exports.typing = async (req, res) => {
           isSpace,
         });
       }
-
-      console.log(`✅ Typing indicator sent to ${room}`);
     }
 
     res.json({
@@ -3465,8 +3370,6 @@ exports.serveFile = async (req, res) => {
       filename
     );
 
-    console.log("📁 Looking for file at:", filePath); // Debug log
-
     // Check if file exists
     if (!fs.existsSync(filePath)) {
       console.error("❌ File not found:", filePath);
@@ -3545,8 +3448,6 @@ exports.getSharedContent = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
-
-    console.log("🔍 Fetching shared content for:", conversationId);
 
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {
       return res.status(400).json({
@@ -3640,8 +3541,6 @@ exports.getSharedContent = async (req, res) => {
       .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(200); // Limit to prevent overload
-
-    console.log(`📦 Found ${messages.length} messages with shared content`);
 
     // Process and categorize shared content
     const sharedContent = {
@@ -3785,12 +3684,6 @@ exports.getSharedContent = async (req, res) => {
       (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
     );
 
-    console.log(`📊 Shared content summary:`, {
-      files: sharedContent.files.length,
-      links: sharedContent.links.length,
-      media: sharedContent.media.length,
-    });
-
     res.json({
       success: true,
       data: sharedContent,
@@ -3913,13 +3806,6 @@ exports.deleteSpace = async (req, res) => {
     const { spaceId } = req.params;
     const { permanent = false } = req.query;
 
-    console.log(`🔍 Delete space request:`, {
-      spaceId,
-      permanent,
-      user: req.employee._id,
-      isAdmin: req.employee.isAdmin,
-    });
-
     // Validate space ID
     if (!mongoose.Types.ObjectId.isValid(spaceId)) {
       return res
@@ -3929,9 +3815,6 @@ exports.deleteSpace = async (req, res) => {
 
     // ✅ IMPROVED: Better admin check
     const isSystemAdmin = req.employee?.isAdmin === true;
-    console.log(
-      `🔍 Admin check - User: ${req.employee._id}, isAdmin: ${isSystemAdmin}`
-    );
 
     // Find space and verify permissions
     const space = await Space.findById(spaceId)
@@ -3942,31 +3825,19 @@ exports.deleteSpace = async (req, res) => {
       return res.status(404).json({ success: false, error: "Space not found" });
     }
 
-    console.log(
-      `🔍 Space found: ${space.name}, Members: ${space.members.length}`
-    );
-
     // Find linked conversation
     const conversation = await Conversation.findOne({ space: spaceId });
-    console.log(
-      `🔍 Linked conversation: ${conversation ? conversation._id : "None"}`
-    );
 
     // ✅ Option 1: Permanent delete (everything) - ADMIN ONLY
     if (permanent === "true") {
       // ✅ CRITICAL: Enhanced admin check
       if (!isSystemAdmin) {
-        console.log(`🚫 Admin permission denied for user: ${req.employee._id}`);
         return res.status(403).json({
           success: false,
           error:
             "Only system administrators can permanently delete spaces and all content",
         });
       }
-
-      console.log(
-        `🛑 ADMIN: Permanent deletion of space ${spaceId} by admin ${req.employee._id}`
-      );
 
       // Use transaction for atomic operations
       const session = await mongoose.startSession();
@@ -3992,9 +3863,6 @@ exports.deleteSpace = async (req, res) => {
 
           // Delete the conversation itself
           await Conversation.findByIdAndDelete(conversation._id);
-          console.log(
-            `✅ Deleted conversation: ${conversation._id} with ${deletedMessagesCount} messages`
-          );
         }
 
         // ✅ FIXED: Delete the space itself with better error handling
@@ -4002,10 +3870,8 @@ exports.deleteSpace = async (req, res) => {
         if (!deleteResult) {
           throw new Error("Failed to delete space - space not found");
         }
-        console.log(`✅ Deleted space: ${spaceId}`);
 
         await session.commitTransaction();
-        console.log(`✅ Transaction committed successfully`);
 
         // Emit socket events
         const io = req.app.get("io");
@@ -4037,10 +3903,6 @@ exports.deleteSpace = async (req, res) => {
             },
             deletedAt: new Date(),
           });
-
-          console.log(
-            `✅ Notified ${space.members.length} members about space deletion`
-          );
         }
 
         return res.json({
@@ -4220,8 +4082,6 @@ exports.addReaction = async (req, res) => {
         updatedBy: req.employee._id,
         updatedAt: new Date(),
       });
-
-      console.log(`✅ Reaction updated for message: ${messageId}`);
     }
 
     res.json({
@@ -4266,10 +4126,6 @@ async function removeFromConversations(blockerId, blockedId) {
         );
       }
     }
-
-    console.log(
-      `✅ Removed conversations between ${blockerId} and ${blockedId}`
-    );
   } catch (error) {
     console.error("Error removing from conversations:", error);
   }
@@ -4414,14 +4270,6 @@ exports.updateMessage = async (req, res) => {
     const { content, messageType, removedAttachments } = req.body;
     const userId = req.employee._id;
 
-    console.log("📝 Update message request:", {
-      messageId,
-      content,
-      messageType,
-      removedAttachments,
-      newFiles: req.files?.length || 0,
-    });
-
     // ✅ CRITICAL FIX: Handle temporary IDs more gracefully
     if (messageId && messageId.toString().startsWith("temp-")) {
       console.warn(
@@ -4484,7 +4332,6 @@ exports.updateMessage = async (req, res) => {
         }
 
         if (Array.isArray(removedIds) && removedIds.length > 0) {
-          console.log("🗑️ Removing attachments:", removedIds);
 
           // Filter out attachments marked for removal
           const remainingAttachments = [];
@@ -4510,7 +4357,6 @@ exports.updateMessage = async (req, res) => {
 
                 if (fs.existsSync(filePath)) {
                   fs.unlinkSync(filePath);
-                  console.log("✅ Deleted file:", filePath);
                 }
               } catch (fileError) {
                 console.warn("Could not delete file:", fileError.message);
@@ -4527,8 +4373,6 @@ exports.updateMessage = async (req, res) => {
 
     // ✅ FIX: Handle new file uploads with multer
     if (req.files && req.files.length > 0) {
-      console.log("📎 Adding new attachments:", req.files.length);
-
       const newAttachments = req.files.map((file) => ({
         filename: file.filename,
         originalName: file.originalname,
@@ -4611,7 +4455,6 @@ exports.updateMessage = async (req, res) => {
           updatedBy: userId.toString(),
           updatedAt: new Date(),
         });
-        console.log(`✅ Message update broadcasted to room: ${room}`);
       });
     }
 
@@ -4697,7 +4540,6 @@ exports.deleteSingleMessage = async (req, res) => {
           deletedBy: userId.toString(),
           deletedAt: new Date(),
         });
-        console.log(`✅ Message deletion broadcasted to room: ${room}`);
       });
     }
 
@@ -5299,8 +5141,6 @@ exports.getSpaceSharedContent = async (req, res) => {
     const { spaceId } = req.params;
     const { type } = req.query; // Optional: 'files', 'links', 'media', or 'all'
 
-    console.log("🔍 Fetching shared content for space:", spaceId);
-
     if (!mongoose.Types.ObjectId.isValid(spaceId)) {
       return res.status(400).json({
         success: false,
@@ -5415,10 +5255,6 @@ exports.getSpaceSharedContent = async (req, res) => {
       .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(200); // Limit to prevent overload
-
-    console.log(
-      `📦 Found ${messages.length} messages with shared content in space ${spaceId}`
-    );
 
     // Process and categorize shared content
     const sharedContent = {
@@ -5562,12 +5398,6 @@ exports.getSpaceSharedContent = async (req, res) => {
       (a, b) => new Date(b.dateShared) - new Date(a.dateShared)
     );
 
-    console.log(`📊 Space shared content summary:`, {
-      files: sharedContent.files.length,
-      links: sharedContent.links.length,
-      media: sharedContent.media.length,
-    });
-
     res.json({
       success: true,
       data: sharedContent,
@@ -5615,8 +5445,6 @@ exports.searchMessages = async (req, res) => {
     }
 
     const searchTerm = query.trim();
-    console.log("🔍 Searching for:", searchTerm);
-
     // ✅ FIX: Properly escape regex special characters
     const escapedSearchTerm = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -5688,10 +5516,6 @@ exports.searchMessages = async (req, res) => {
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
       .lean();
-
-    console.log(
-      `✅ Found ${messages.length} messages matching "${searchTerm}"`
-    );
 
     // Format results
     const results = messages.map((message) => {
@@ -5823,8 +5647,6 @@ exports.starMessage = async (req, res) => {
         starredAt: new Date(),
         totalStars: updatedMessage.starredBy.length,
       });
-
-      console.log(`✅ Message starred: ${messageId}`);
     }
 
     res.json({
@@ -5913,8 +5735,6 @@ exports.unstarMessage = async (req, res) => {
         unstarredAt: new Date(),
         totalStars: updatedMessage.starredBy.length,
       });
-
-      console.log(`✅ Message unstarred: ${messageId}`);
     }
 
     res.json({
@@ -6055,12 +5875,6 @@ exports.pinMessage = async (req, res) => {
     const { messageId } = req.params;
     const { note } = req.body || {};
 
-    console.log("📌 Pin message request:", {
-      messageId,
-      note,
-      user: req.employee._id,
-    });
-
     // Validate message ID
     if (!mongoose.Types.ObjectId.isValid(messageId)) {
       return res.status(400).json({
@@ -6143,8 +5957,6 @@ exports.pinMessage = async (req, res) => {
           sender: updatedMessage.sender,
         },
       });
-
-      console.log(`✅ Message pinned: ${messageId} in room: ${room}`);
     }
 
     res.json({
@@ -6176,12 +5988,6 @@ exports.pinMessage = async (req, res) => {
 exports.unpinMessage = async (req, res) => {
   try {
     const { messageId } = req.params;
-
-    console.log("📌 Unpin message request:", {
-      messageId,
-      user: req.employee._id,
-    });
-
     // Validate message ID
     if (!mongoose.Types.ObjectId.isValid(messageId)) {
       return res.status(400).json({
@@ -6257,8 +6063,6 @@ exports.unpinMessage = async (req, res) => {
         previousPinId: pinToRemove?._id,
         totalPins: updatedMessage.pinnedBy.length,
       });
-
-      console.log(`✅ Message unpinned: ${messageId} from room: ${room}`);
     }
 
     res.json({
@@ -6283,8 +6087,6 @@ exports.getPinnedMessages = async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { page = 1, limit = 50 } = req.query;
-
-    console.log("📌 Get pinned messages request:", { conversationId });
 
     // Validate conversation ID
     if (!mongoose.Types.ObjectId.isValid(conversationId)) {

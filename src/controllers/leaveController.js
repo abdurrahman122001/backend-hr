@@ -1301,8 +1301,6 @@ exports.rejectLeave = async (req, res) => {
               ? `${attendance.notes}; Marked as Absent due to rejected leave`
               : "Marked as Absent - leave request was rejected";
             await attendance.save();
-          } else {
-            console.log(`ℹ️ Attendance for ${dateStr} already Absent/Unpaid - no change needed`);
           }
         } else {
           // Create new attendance record as Absent/Unpaid

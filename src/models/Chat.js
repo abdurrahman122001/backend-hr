@@ -384,6 +384,10 @@ const spaceSchema = new mongoose.Schema(
       trim: true,
     },
     avatar: String,
+    emoji: {
+      type: String,
+      default: "💡",
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Employee",

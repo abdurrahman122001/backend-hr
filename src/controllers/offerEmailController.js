@@ -22,15 +22,11 @@ async function getCompanyContext(ownerId) {
       { owner: ownerId },
       { name: 1, email: 1, website: 1, branches: 1 }
     ).lean();
-
-    console.log("🔍 DEBUG Company Profile Found:", companyDoc);
-
   } catch (err) {
     console.error("Error fetching company profile:", err);
   }
 
   if (!companyDoc) {
-    console.log("❌ No company profile found for owner:", ownerId);
     return FALLBACKS;
   }
 
@@ -44,7 +40,6 @@ async function getCompanyContext(ownerId) {
     );
 
     if (!selectedBranch) {
-      console.log("ℹ️ No documentation branch found — using first branch.");
       selectedBranch = companyDoc.branches[0];
     }
   }

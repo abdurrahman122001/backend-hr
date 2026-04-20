@@ -104,8 +104,6 @@ exports.getMyClients = async (req, res) => {
       .populate("assignedTo", "_id name companyEmail role")
       .populate("supervisedBy", "_id name companyEmail role");
 
-    console.log(`[getMyClients] emp=${employeeId} -> ${clients.length} clients`);
-
     res.json(clients);
   } catch (err) {
     console.error("getMyClients error:", err);

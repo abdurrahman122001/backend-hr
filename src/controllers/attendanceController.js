@@ -215,11 +215,6 @@ async function reverseOldBonus(oldRec) {
     year: year,
   });
 
-  if (!balance) {
-    console.log(`[BONUS-REVERSAL] No balance record found for reversal`);
-    return;
-  }
-
   let newAccumulated = (balance.bonusHoursAccumulated || 0) - bonusHoursToRemove;
   let newBonus = balance.bonus || 0;
 
@@ -262,10 +257,6 @@ async function reverseOldBonus(oldRec) {
   await Attendance.updateOne(
     { _id: oldRec._id },
     { $set: { bonusApplied: false, bonusType: null, bonusHoursGiven: 0 } }
-  );
-
-  console.log(
-    `[BONUS-REVERSAL] Employee=${employeeId} Bonus=${newBonus}, Accumulated=${newAccumulated}`
   );
 }
 
@@ -337,11 +328,6 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
       balance.bonusHoursAccumulated = newAccumulated;
       balance.lastRecalculatedAt = new Date();
       await balance.save();
-
-      console.log(
-        `[EARLY-DEPARTURE-REVERSAL] Employee=${employeeId} Restored=${bonusHoursDeducted || 0}h, ` +
-        `Negative Removed=${negativeHoursAdded || 0}h, New Bonus=${newBonus}, Accumulated=${newAccumulated}`
-      );
     }
 
     // Clear early departure fields from attendance record
@@ -384,7 +370,6 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
             type: "PAID_LEAVE_REVERSED",
             value: daysToReverse,
           });
-          console.log(`[REVERSAL] [${employeeId}] Reversed ${daysToReverse} Paid Leave`);
         } else {
           // Unpaid
           balance.usedUnpaid = Math.max(0, Number((balance.usedUnpaid - daysToReverse).toFixed(2)));
@@ -397,7 +382,6 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
             type: "UNPAID_LEAVE_REVERSED",
             value: daysToReverse,
           });
-          console.log(`[REVERSAL] [${employeeId}] Reversed ${daysToReverse} Unpaid Leave`);
         }
         await balance.save();
       }
@@ -483,8 +467,6 @@ async function updateBonusForNonWorkingDay(
       },
     }
   );
-
-  console.log(`[BONUS-UPDATE] NonWorkingDay -> Bonus=${newBonus}, Accumulated=${newAccumulated}`);
   return { bonus: newBonus, accumulated: newAccumulated };
 }
 
@@ -609,8 +591,6 @@ async function updateBonusForEarlyBird(
       },
     }
   );
-
-  console.log(`[BONUS-UPDATE] EarlyBird -> Bonus=${newBonus}, Accumulated=${newAccumulated}`);
   return { bonus: newBonus, accumulated: newAccumulated };
 }
 
@@ -756,10 +736,6 @@ async function deductBonusForEarlyDeparture(
       },
     }
   );
-
-  console.log(
-    `[BONUS-DEDUCTION] EarlyDeparture -> Deducted=${deductedHours}h, Negative=${negativeHours}h, Bonus=${newBonus}, Accumulated=${newAccumulated}`
-  );
   
   return { 
     deducted: deductedHours, 
@@ -777,11 +753,6 @@ async function getLeaveBalanceSnapshot(ownerId, employeeId, date) {
     year: leaveYear,
   }).lean();
 
-  console.log(`[DEBUG-BALANCE] Year=${leaveYear}, Found=${!!balance}`);
-  if (balance) {
-    console.log(`[DEBUG-BALANCE-DETAILS] Total=${balance.total}, Bonus=${balance.bonus}, UsedPaid=${balance.usedPaid}, BonusHoursAccumulated=${balance.bonusHoursAccumulated}`);
-  }
-
   if (!balance) {
     return {
       total: 0,
@@ -793,7 +764,6 @@ async function getLeaveBalanceSnapshot(ownerId, employeeId, date) {
   }
 
   const remaining = (balance.total || 0) + (balance.bonus || 0) - (balance.usedPaid || 0);
-  console.log(`[DEBUG-BALANCE-CALC] RemainingPaid = ${balance.total} + ${balance.bonus} - ${balance.usedPaid} = ${remaining}`);
 
   return {
     total: balance.total || 0,
@@ -822,9 +792,6 @@ exports.markAttendance = async (req, res) => {
       challengeAdminNotes,
     } = req.body;
 
-    // DEBUG: Log incoming request
-    console.log(`[MARK-ATTENDANCE-DEBUG] Received: employeeId=${employeeId}, date=${date}, status=${status}, checkIn=${checkIn}`);
-
     // ========= Helpers =========
     const allowanceFields = [
       "basic",
@@ -845,8 +812,6 @@ exports.markAttendance = async (req, res) => {
           breakdown[f] = 0;
         }
       }
-
-      console.log("[GROSS BREAKDOWN]", breakdown, "Total =", total);
       return total;
     };
 
@@ -910,10 +875,6 @@ exports.markAttendance = async (req, res) => {
       updateDoc,
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
-    console.log(
-      `[ATTENDANCE][${employee.name}]Upserted -> Status=${rec.status
-      }, LeaveType = ${rec.leaveType || "-"} on ${date} `
-    );
 
     // LOG THE CHANGE
     try {
@@ -963,25 +924,12 @@ exports.markAttendance = async (req, res) => {
         Array.isArray(p.shifts) &&
         p.shifts.map(String).includes(String(shiftId))
     );
-    if (!payroll) {
-      console.log(
-        `[ERROR][${employee.name}] Payroll period not found for shift = ${String(
-          shiftId
-        )
-        }`
-      );
-      return res.status(404).json({ error: "Payroll period not found." });
-    }
-
     // ========= Non-working day guard =========
     // Checks both recurring (payroll) and specific (user-marked) non-working days
     const isNonWorkingDay = await isNonWorkingDayHelper(ownerId, date, payroll);
 
     if (isNonWorkingDay) {
       if (status !== "Present") {
-        console.log(
-          `[BLOCK][${employee.name}] ${date} is non - working.Only 'Present' allowed.Requested = ${status} `
-        );
         return res.status(400).json({
           error:
             "You can only mark Present on a non-working day. No leave, late, half day, or absent allowed.",
@@ -1012,9 +960,6 @@ exports.markAttendance = async (req, res) => {
         checkOut,
         date
       );
-      console.log(
-        `[BONUS][${employee.name}]Non - working Present -> Bonus=${bonus}, CarryoverHours = ${accumulated} `
-      );
       return res.json(recNwd);
     }
 
@@ -1043,15 +988,7 @@ exports.markAttendance = async (req, res) => {
           checkOut,
           date
         );
-        console.log(
-          `[BONUS][${employee.name}]EarlyBird -> Bonus=${bonus}, CarryoverHours = ${accumulated} `
-        );
-      } else {
-        console.log(
-          `[BONUS][${employee.name}] No shiftStart found in shifts collection, skipping EarlyBird bonus.`
-        );
       }
-
       // ========= Early Departure Bonus Deduction =========
       if (status === "Present" && shiftStart && shiftEnd && checkIn && checkOut) {
         const earlyDepartureResult = await deductBonusForEarlyDeparture(
@@ -1062,14 +999,6 @@ exports.markAttendance = async (req, res) => {
           checkOut,
           date
         );
-        
-        if (earlyDepartureResult.totalEarlyHours > 0) {
-          console.log(
-            `[BONUS][${employee.name}] Early Departure -> Total Early Hours=${earlyDepartureResult.totalEarlyHours}, ` +
-            `Deducted=${earlyDepartureResult.deducted}h, Negative=${earlyDepartureResult.negativeHours}h, ` +
-            `Remaining Bonus=${earlyDepartureResult.remainingBonus}`
-          );
-        }
       }
     }
 
@@ -1125,17 +1054,9 @@ exports.markAttendance = async (req, res) => {
     const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
     const payrollYear = String(periodEnd.getFullYear());
 
-    console.log(
-      `[PERIOD][${employee.name}]Start = ${start}, End = ${end}, BeforeJoin = ${beforeJoin ? "YES" : "NO"
-      } `
-    );
-
     // ========= Skip SalarySlip creation - use fixed per-day calculation =========
     const totalWorkingDays = 22;
     const perDay = 0; // Set to 0 since we're not creating salary slips
-    console.log(
-      `[PERDAY][${employee.name}] Salary slip creation skipped. Using fixed calculation.`
-    );
 
     // ========= Auto-absent before join (skip non-working days) =========
     if (joinDate && joinDate > periodStart) {
@@ -1186,15 +1107,6 @@ exports.markAttendance = async (req, res) => {
           "absent",
           true
         );
-        if (result.unpaid > 0) {
-          console.log(
-            `[PREJOIN][${employee.name}] Auto Absent Days = ${daysToCharge}, Unpaid = ${result.unpaid}`
-          );
-        } else {
-          console.log(
-            `[PREJOIN][${employee.name}] Auto Absent Days = ${daysToCharge}, Fully covered by paid leaves.`
-          );
-        }
       }
     }
 
@@ -1224,11 +1136,6 @@ exports.markAttendance = async (req, res) => {
       const usedPaid = balanceSnapshot.usedPaid || 0;
       const usedUnpaid = balanceSnapshot.usedUnpaid || 0;
       const balance = +(totalEnt - usedPaid);
-
-      console.log(
-        `[LEAVE][${employee.name}]Absent -> Entitled=${totalEnt}, UsedPaid = ${usedPaid}, UsedUnpaid = ${usedUnpaid}, Balance = ${balance}, Requested = ${leaveType || "Unpaid"}, SandwichNextDays = ${nextNonWorkingCount}, DaysToCharge = ${effectiveDays} `
-      );
-
       // --- Sandwich handling ---
       if (nextNonWorkingCount > 0) {
         if (leaveType === "Paid") {
@@ -1248,17 +1155,11 @@ exports.markAttendance = async (req, res) => {
           );
 
           if (unpaidDays > 0) {
-            console.log(
-              `[DEDUCTION][${employee.name}] Sandwich Absent(Paid req) proportionate -> Paid=${paidDays}, Unpaid = ${unpaidDays}`
-            );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
               { $set: { leaveType: "Paid", proportionate: true } }
             );
           } else {
-            console.log(
-              `[DEDUCTION][${employee.name}] Sandwich Absent fully covered by paid -> Paid=${paidDays}, Unpaid = 0, NO deduction`
-            );
             await Attendance.findOneAndUpdate(
               { owner: ownerId, employee: employeeId, date },
               {
@@ -1279,9 +1180,6 @@ exports.markAttendance = async (req, res) => {
             "absent",
             true
           );
-          console.log(
-            `[DEDUCTION][${employee.name}] Sandwich Absent(Unpaid) -> Days=${effectiveDays}`
-          );
           await Attendance.findOneAndUpdate(
             { owner: ownerId, employee: employeeId, date },
             { $set: { leaveType: "Unpaid", proportionate: false } }
@@ -1298,9 +1196,6 @@ exports.markAttendance = async (req, res) => {
           1,
           "leave",
           false
-        );
-        console.log(
-          `[DEDUCTION][${employee.name}] Absent proportionate -> Paid=${result.paid || 0}, Unpaid = ${result.unpaid || 0}`
         );
 
         await Attendance.findOneAndUpdate(
@@ -1326,9 +1221,7 @@ exports.markAttendance = async (req, res) => {
             $set: { status: "Absent", leaveType: "Paid", proportionate: false },
           }
         );
-        console.log(
-          `[DEDUCTION][${employee.name}] Sandwich Absent fully covered by paid -> Paid=${paidDays}, Unpaid = 0, NO deduction`
-        );
+
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
           {
@@ -1369,11 +1262,6 @@ exports.markAttendance = async (req, res) => {
       const usedUnpaid = balanceSnapshot.usedUnpaid || 0;
       const balance = +(totalBal - usedPaid);
 
-      console.log(
-        `[LEAVE][${employee.name}]Leave -> Entitled=${totalBal}, UsedPaid = ${usedPaid}, UsedUnpaid = ${usedUnpaid}, ` +
-        `Balance = ${balance}, SandwichNextDays = ${nextNonWorkingCountForLeave}, DaysToCharge = ${effectiveDays} `
-      );
-
       // Proportionate case
       if (balance > 0 && balance < effectiveDays) {
         const result = await updateLeaveEntitlementForEmployeeProportional(
@@ -1383,12 +1271,6 @@ exports.markAttendance = async (req, res) => {
           effectiveDays,
           "leave",
           false
-        );
-
-        console.log(
-          `[DEDUCTION][${employee.name
-          }] Leave proportionate -> Paid=${result.paid || 0}, Unpaid = ${result.unpaid || 0
-          }`
         );
 
         await Attendance.findOneAndUpdate(
@@ -1426,17 +1308,11 @@ exports.markAttendance = async (req, res) => {
             },
           }
         );
-        console.log(
-          `[DEDUCTION][${employee.name}] Leave fully paid -> Days=${effectiveDays}, NO deduction`
-        );
         return res.json(rec);
       }
 
       // No balance left
       if (typeof req.body.forcePaid === "undefined") {
-        console.log(
-          `[LEAVE][${employee.name}] No paid leave left -> needs confirmation(Days = ${effectiveDays})`
-        );
         return res.status(200).json({
           needsConfirmation: true,
           message: `${employee.name} has no paid leaves available.Do you want to mark as Paid Leave ? `,
@@ -1454,9 +1330,6 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           { $set: { status: "Absent", leaveType: "Paid" } }
         );
-        console.log(
-          `[LEAVE][${employee.name}] Forced paid leave -> Days=${effectiveDays}, NO deduction`
-        );
         return res.json(rec);
       } else {
         await updateLeaveEntitlementForEmployee(
@@ -1466,9 +1339,6 @@ exports.markAttendance = async (req, res) => {
           effectiveDays,
           "absent",
           true
-        );
-        console.log(
-          `[DEDUCTION][${employee.name}] Leave unpaid -> Days=${effectiveDays}`
         );
 
         await Attendance.findOneAndUpdate(
@@ -1504,8 +1374,6 @@ exports.markAttendance = async (req, res) => {
 
       if (lateDeductionDaysNow < previouslyCredited) {
         const daysToReverse = previouslyCredited - lateDeductionDaysNow;
-        console.log(`[LATE] Late deduction reversed for ${daysToReverse} days`);
-
         if (daysToReverse >= 1) {
           const propRec = await Attendance.findOne({
             employee: employeeId,
@@ -1517,19 +1385,10 @@ exports.markAttendance = async (req, res) => {
             await Attendance.updateOne({ _id: propRec._id }, { $set: { proportionate: false } });
           }
         }
-
-        console.log(
-          `[LATE - REV][${employee.name}] Reversed late deduction -> Refund processed`
-        );
       }
     }
-
-    // ========= LATE (3 lates = 1 day deduction) =========
-    console.log(`[LATE-DEBUG] Checking late deduction: status=${status}, beforeJoin=${beforeJoin}, start=${start}, end=${end}`);
     
-    if (!beforeJoin && status === "Late") {
-      console.log(`[LATE-DEBUG] Entered late block for ${employee.name}`);
-      
+    if (!beforeJoin && status === "Late") {      
       const lateRecords = await Attendance.find({
         employee: employeeId,
         owner: ownerId,
@@ -1557,10 +1416,6 @@ exports.markAttendance = async (req, res) => {
       }
       
       const newLateDeductionDays = totalDeductionDays - previouslyCredited;
-      
-      console.log(
-        `[LATE][${employee.name}] Lates=${lateCount}, TotalDeductions=${totalDeductionDays}, Previous=${previouslyCredited}, New=${newLateDeductionDays}`
-      );
 
       if (newLateDeductionDays > 0) {
         // Deduct the new late deduction days
@@ -1570,9 +1425,6 @@ exports.markAttendance = async (req, res) => {
           date,
           newLateDeductionDays,
           "late"
-        );
-        console.log(
-          `[LATE - DEDUCTION][${employee.name}] Deducted ${newLateDeductionDays} days (Paid=${result.paid || 0}, Unpaid=${result.unpaid || 0})`
         );
 
         // Update SalarySlip to track newly credited deductions
@@ -1586,7 +1438,6 @@ exports.markAttendance = async (req, res) => {
           if (slip) {
             slip.lateDeductionDaysCredited = totalDeductionDays;
             await slip.save();
-            console.log(`[LATE] Updated lateDeductionDaysCredited to ${totalDeductionDays}`);
           } else {
             // Create new salary slip if doesn't exist
             await SalarySlip.create({
@@ -1596,7 +1447,6 @@ exports.markAttendance = async (req, res) => {
               year: payrollYear,
               lateDeductionDaysCredited: totalDeductionDays
             });
-            console.log(`[LATE] Created SalarySlip with lateDeductionDaysCredited=${totalDeductionDays}`);
           }
         } catch (err) {
           console.error("[LATE] Error updating SalarySlip:", err.message);
@@ -1621,7 +1471,6 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           { $set: { leaveType: "Paid", status: "Half Day" } }
         );
-        console.log(`[HALF] Paid half-day -> Balance used (0.5)`);
       } else {
         // UNPAID case: salary deduction
         await updateLeaveEntitlementForEmployee(
@@ -1632,8 +1481,6 @@ exports.markAttendance = async (req, res) => {
           "absent",
           true // forceUnpaid = true forces addUnpaid = deductionCount in utils
         );
-        
-        console.log(`[HALF] Unpaid half-day -> No salary deductions`);
       }
       return res.json(rec);
     }
@@ -1667,8 +1514,6 @@ exports.markAttendance = async (req, res) => {
       }
     }
 
-    console.log(`[LOANS] Loan calculations skipped - no salary slip updates`);
-
     // ========= Final snapshot =========
     const leaveDedVal = 0;
     const lateDedVal = 0;
@@ -1676,11 +1521,6 @@ exports.markAttendance = async (req, res) => {
     const currentBalance = await getLeaveBalanceSnapshot(ownerId, employeeId, date);
     const usedPaidNow = currentBalance.usedPaid || 0;
     const usedUnpaidNow = currentBalance.usedUnpaid || 0;
-
-    console.log(
-      `[SNAPSHOT][${employee.name}]Month = ${payrollMonth} ${payrollYear} | PerDay=${perDay} | ` +
-      `LeaveDeductions = ${leaveDedVal} | LateDeductions=${lateDedVal} | UsedPaid=${usedPaidNow} | UsedUnpaid=${usedUnpaidNow} `
-    );
 
     return res.json(rec);
   } catch (err) {

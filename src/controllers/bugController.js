@@ -1370,13 +1370,6 @@ exports.updateEmployeeBalance = async (req, res) => {
     targetEmployee.balance = newBalance;
     await targetEmployee.save();
 
-    // Log the transaction (you might want to create a separate Transaction model)
-    console.log(
-      `Balance updated for ${targetEmployee.name}: ${message}. Reason: ${
-        reason || "No reason provided"
-      }`
-    );
-
     return res.json({
       status: "success",
       message,
@@ -1480,10 +1473,6 @@ const addRewardToReporter = async (reporterId, rewardAmount = 100) => {
     // Update balance
     reporter.balance += rewardAmount;
     await reporter.save();
-
-    console.log(
-      `✅ Added ${rewardAmount} points to ${reporter.name}. New balance: ${reporter.balance}`
-    );
 
     return reporter;
   } catch (error) {

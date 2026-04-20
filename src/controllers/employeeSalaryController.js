@@ -266,17 +266,6 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const totalDeductions = monthlyTax + leaveDeductions;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
-    console.log(`[tax DEBUG] Fiscal Start      = ${fiscalStart.toDateString()}`);
-    console.log(`[tax DEBUG] Joining Date      = ${joiningDate ? joiningDate.toDateString() : "N/A"}`);
-    console.log(`[tax DEBUG] Effective Start    = ${effectiveStart.toDateString()}`);
-    console.log(`[tax DEBUG] Months in Period   = ${monthsRemaining}`);
-    console.log(`[tax DEBUG] Taxable Monthly    = ${taxableMonthly}`);
-    console.log(`[tax DEBUG] Annual Taxable     = ${annualTaxable}`);
-    console.log(`[tax DEBUG] Annual Tax         = ${annualTax}`);
-    console.log(`[tax DEBUG] Monthly Tax        = ${monthlyTax}`);
-    console.log(`[tax DEBUG] TOTAL Deductions   = ${totalDeductions}`);
-    console.log(`[tax DEBUG] Net Payable        = ${netPayable}`);
-
     return {
       grossMonthly: finalGrossMonthly,
       annualGross: finalGrossMonthly * monthsRemaining,
@@ -726,7 +715,6 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
             // Update existing revision IF salary fields actually changed (optional but cleaner)
             // Or just update anyway to keep the latest values before current transition
             await SalaryRevisionHistory.findByIdAndUpdate(existingRevision._id, { $set: revisionData });
-            console.log('Updated existing salary revision history entry:', existingRevision._id);
           } else {
             // Create new revision (new designation or first time check)
             await SalaryRevisionHistory.create(revisionData);

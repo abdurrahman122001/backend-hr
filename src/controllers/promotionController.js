@@ -320,17 +320,9 @@ exports.promoteEmployee = async (req, res) => {
                 employeeSet[`compensation.${fieldMapping[field]}`] = numericValue;
             }
         }
-
-        // Update gross salary in Salaries model
         salary.grossSalary = await encryptValue(newGrossSalary);
-
-        // Save updated salary
         await salary.save();
-
-        // Update employee (designation and compensation)
         await Employee.findByIdAndUpdate(employeeId, { $set: employeeSet });
-
-        console.log(`✅ Employee ${employee.name} promoted successfully. New Gross: ${newGrossSalary}`);
 
         res.json({
             status: "success",
