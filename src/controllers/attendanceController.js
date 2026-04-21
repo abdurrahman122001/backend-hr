@@ -1388,7 +1388,10 @@ exports.markAttendance = async (req, res) => {
       }
     }
     
-    if (!beforeJoin && status === "Late") {      
+    if (!beforeJoin && status === "Late") {
+      console.log(`[LATE-DEBUG] Checking late deductions for employee ${employeeId}, date ${date}`);
+      console.log(`[LATE-DEBUG] Period range: ${start} to ${end}`);
+      
       const lateRecords = await Attendance.find({
         employee: employeeId,
         owner: ownerId,
@@ -1398,10 +1401,6 @@ exports.markAttendance = async (req, res) => {
 
       const lateCount = lateRecords.length;
       const totalDeductionDays = Math.floor(lateCount / 3);
-
-      // Get previously credited late deductions from SalarySlip
-      const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
-      const payrollYear = String(periodEnd.getFullYear());
       let previouslyCredited = 0;
       try {
         const slip = await SalarySlip.findOne({
