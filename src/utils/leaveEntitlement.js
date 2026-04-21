@@ -161,6 +161,7 @@ async function reverseLeaveEntitlementForEmployee(
 
   try {
     if (type === "paid") {
+      const oldUsed = balance.usedPaid || 0;
       await LeaveTransaction.create(
         [
           {
@@ -177,8 +178,10 @@ async function reverseLeaveEntitlementForEmployee(
         { session }
       );
 
-      balance.usedPaid = Math.max(0, Number((balance.usedPaid - reversalCount).toFixed(2)));
+      balance.usedPaid = Math.max(0, Number((oldUsed - reversalCount).toFixed(2)));
+      console.log(`📑 [LEAVE-BAL-DEBUG] Reversed ${reversalCount} PAID days. usedPaid: ${oldUsed} -> ${balance.usedPaid}`);
     } else {
+      const oldUsed = balance.usedUnpaid || 0;
       await LeaveTransaction.create(
         [
           {
@@ -195,7 +198,8 @@ async function reverseLeaveEntitlementForEmployee(
         { session }
       );
 
-      balance.usedUnpaid = Math.max(0, Number((balance.usedUnpaid - reversalCount).toFixed(2)));
+      balance.usedUnpaid = Math.max(0, Number((oldUsed - reversalCount).toFixed(2)));
+      console.log(`📑 [LEAVE-BAL-DEBUG] Reversed ${reversalCount} UNPAID days. usedUnpaid: ${oldUsed} -> ${balance.usedUnpaid}`);
     }
 
     await balance.save({ session });
