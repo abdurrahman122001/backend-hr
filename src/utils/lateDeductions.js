@@ -480,7 +480,6 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
       if (payroll.payrollPeriodType === "weekly") length = 7;
       const diff = Math.floor((d - anchor) / (1000 * 60 * 60 * 24));
       const cycles = Math.floor(diff / length);
-      pStart = new Date(anchor.getTime() + cycles * length * 80000000); // approximate
       pStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() + cycles * length);
       pEnd = new Date(pStart);
       pEnd.setDate(pEnd.getDate() + length - 1);
@@ -529,58 +528,81 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
     const leaveYear = getLeaveYear(attendanceDate);
     let balance = await LeaveYearBalance.findOne({ owner: ownerId, employee: employeeId, year: leaveYear });
 
-    if (balance) {
-      const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
-      const usedPaid = Number(balance.usedPaid || 0);
-      const entitlementLeft = totalEntitled - usedPaid;
-
-      if (entitlementLeft >= newDeductionDays) {
-        // Use paid leaves
-        balance.usedPaid += newDeductionDays;
-        await LeaveTransaction.create({
-          owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
-          year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: newDeductionDays,
-          reason: `Late Deduction (${lateCount} lates, ${newDeductionDays} new day(s))`
-        });
-        console.log(`[LATE-DEDUCT] ${employee.name}: Used ${newDeductionDays} paid leaves`);
-      } else {
-        // Deduct Salary
-        const Salaries = require("../models/Salaries");
-        const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
-        if (salaryDoc) {
-          const gross = Number(await decrypt(salaryDoc.basic)) + Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) + Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
-          const perDay = gross / 22;
-          const amount = Math.round(perDay * newDeductionDays);
-
-          let prev = 0;
-          if (slip.lateDeductions) prev = Number(await decrypt(slip.lateDeductions)) || 0;
-          slip.lateDeductions = await encrypt(String(prev + amount));
-          console.log(`[LATE-DEDUCT] ${employee.name}: Deducted ${amount} from salary`);
-        }
-      }
-      slip.lateDeductionDaysCredited = lateDeductionDays;
-      await balance.save();
-      await slip.save();
-
-      // LOG THE LATE RULE APPLICATION
-      try {
-        await logAttendanceChange({
-          ownerId: ownerId,
-          performerId: employeeId,
-          performerType: 'System',
-          performerName: "Late Rule Processor",
-          employeeId: employeeId,
-          attendanceDate: attendanceDate,
-          oldStatus: "Late (accumulated)",
-          newStatus: "Late Deduction Applied",
-          oldLeaveType: "None",
-          newLeaveType: "Late Deduction",
-          outcome: `3-Day Late Rule Applied: ${newDeductionDays} day(s) deducted`,
-          adjustedDays: newDeductionDays,
-          details: `3-Day Late Rule Application (Total Lates: ${lateCount})`
-        });
-      } catch (logErr) { console.error("Late rule log error:", logErr); }
+    // Create balance record if it doesn't exist
+    if (!balance) {
+      balance = await LeaveYearBalance.create({
+        owner: ownerId,
+        employee: employeeId,
+        year: leaveYear,
+        total: 0,
+        bonus: 0,
+        bonusHoursAccumulated: 0,
+        usedPaid: 0,
+        usedUnpaid: 0,
+        remainingPaid: 0,
+        lastRecalculatedAt: new Date(),
+      });
     }
+
+    const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
+    const usedPaid = Number(balance.usedPaid || 0);
+    const entitlementLeft = totalEntitled - usedPaid;
+
+    if (entitlementLeft >= newDeductionDays) {
+      // Use paid leaves
+      balance.usedPaid += newDeductionDays;
+      await LeaveTransaction.create({
+        owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+        year: leaveYear, date: new Date(), type: "PAID_LEAVE_USED", value: newDeductionDays,
+        reason: `Late Deduction (${lateCount} lates, ${newDeductionDays} new day(s))`
+      });
+      console.log(`[LATE-DEDUCT] ${employee.name}: Used ${newDeductionDays} paid leaves`);
+    } else {
+      // No paid leave balance - Deduct Salary
+      const Salaries = require("../models/Salaries");
+      const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+      if (salaryDoc) {
+        const gross = Number(await decrypt(salaryDoc.basic)) + Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) + Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
+        const perDay = gross / 22;
+        const amount = Math.round(perDay * newDeductionDays);
+
+        let prev = 0;
+        if (slip.lateDeductions) prev = Number(await decrypt(slip.lateDeductions)) || 0;
+        slip.lateDeductions = await encrypt(String(prev + amount));
+        console.log(`[LATE-DEDUCT] ${employee.name}: Deducted ${amount} from salary (no leave balance)`);
+      }
+      // Track unpaid leave usage for record keeping
+      balance.usedUnpaid = (balance.usedUnpaid || 0) + newDeductionDays;
+      await LeaveTransaction.create({
+        owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+        year: leaveYear, date: new Date(), type: "UNPAID_LEAVE_USED", value: newDeductionDays,
+        reason: `Late Deduction - Salary Deducted (${lateCount} lates, ${newDeductionDays} new day(s))`
+      });
+    }
+
+    // Always update the credited count and save records
+    slip.lateDeductionDaysCredited = lateDeductionDays;
+    await balance.save();
+    await slip.save();
+
+    // LOG THE LATE RULE APPLICATION
+    try {
+      await logAttendanceChange({
+        ownerId: ownerId,
+        performerId: employeeId,
+        performerType: 'System',
+        performerName: "Late Rule Processor",
+        employeeId: employeeId,
+        attendanceDate: attendanceDate,
+        oldStatus: "Late (accumulated)",
+        newStatus: "Late Deduction Applied",
+        oldLeaveType: "None",
+        newLeaveType: "Late Deduction",
+        outcome: `3-Day Late Rule Applied: ${newDeductionDays} day(s) deducted`,
+        adjustedDays: newDeductionDays,
+        details: `3-Day Late Rule Application (Total Lates: ${lateCount})`
+      });
+    } catch (logErr) { console.error("Late rule log error:", logErr); }
   } catch (err) {
     console.error("[REALTIME-LATE-DEDUCTION] Error:", err);
   }
