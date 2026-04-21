@@ -139,7 +139,79 @@ async function updateLeaveEntitlementForEmployee(
   }
 }
 
+async function reverseLeaveEntitlementForEmployee(
+  ownerId,
+  employeeId,
+  attendanceDate,
+  reversalCount = 1,
+  type = "paid" // "paid" or "unpaid"
+) {
+  const leaveYear = getLeaveYear(attendanceDate);
+
+  let balance = await LeaveYearBalance.findOne({
+    owner: ownerId,
+    employee: employeeId,
+    year: leaveYear,
+  });
+
+  if (!balance) return { Success: false, message: "No balance record found" };
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    if (type === "paid") {
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(),
+            type: "PAID_LEAVE_REVERSED",
+            value: reversalCount,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedPaid = Math.max(0, Number((balance.usedPaid - reversalCount).toFixed(2)));
+    } else {
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(),
+            type: "UNPAID_LEAVE_REVERSED",
+            value: reversalCount,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedUnpaid = Math.max(0, Number((balance.usedUnpaid - reversalCount).toFixed(2)));
+    }
+
+    await balance.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
+    return { success: true };
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
+}
+
 module.exports = {
   updateLeaveEntitlementForEmployee,
+  reverseLeaveEntitlementForEmployee,
   getLeaveYear, // exported for reuse elsewhere
 };

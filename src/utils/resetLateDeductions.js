@@ -1,6 +1,3 @@
-// Reset script to fix inconsistent late deduction state
-// Run this to reset lateDeductionDaysCredited for affected employees
-
 const mongoose = require("mongoose");
 const SalarySlip = require("../models/SalarySlip");
 
