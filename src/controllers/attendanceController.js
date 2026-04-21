@@ -1401,6 +1401,8 @@ exports.markAttendance = async (req, res) => {
 
       const lateCount = lateRecords.length;
       const totalDeductionDays = Math.floor(lateCount / 3);
+      console.log(`[LATE-DEBUG] lateCount: ${lateCount}, totalDeductionDays: ${totalDeductionDays}`);
+      
       let previouslyCredited = 0;
       try {
         const slip = await SalarySlip.findOne({
@@ -1410,11 +1412,13 @@ exports.markAttendance = async (req, res) => {
           year: payrollYear
         });
         previouslyCredited = slip?.lateDeductionDaysCredited || 0;
+        console.log(`[LATE-DEBUG] SalarySlip found: ${!!slip}, previouslyCredited: ${previouslyCredited}`);
       } catch (err) {
         console.error("[LATE] Error fetching SalarySlip:", err.message);
       }
       
       const newLateDeductionDays = totalDeductionDays - previouslyCredited;
+      console.log(`[LATE-DEBUG] newLateDeductionDays: ${newLateDeductionDays}`);
 
       if (newLateDeductionDays > 0) {
         // Deduct the new late deduction days
