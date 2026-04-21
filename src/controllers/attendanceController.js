@@ -1427,6 +1427,44 @@ exports.markAttendance = async (req, res) => {
           "late"
         );
 
+        // If unpaid leaves were used (no leave balance), deduct from salary
+        if (result.unpaid > 0) {
+          try {
+            const Salaries = require("../models/Salaries");
+            const { decrypt, encrypt } = require("../utils/encryption");
+            const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+            if (salaryDoc) {
+              const gross = Number(await decrypt(salaryDoc.basic)) + Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) + Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
+              const perDay = gross / 22;
+              const amount = Math.round(perDay * result.unpaid);
+
+              let slip = await SalarySlip.findOne({
+                owner: ownerId,
+                employee: employeeId,
+                month: payrollMonth,
+                year: payrollYear
+              });
+              if (!slip) {
+                slip = await SalarySlip.create({
+                  owner: ownerId,
+                  employee: employeeId,
+                  month: payrollMonth,
+                  year: payrollYear,
+                  lateDeductionDaysCredited: 0
+                });
+              }
+
+              let prev = 0;
+              if (slip.lateDeductions) prev = Number(await decrypt(slip.lateDeductions)) || 0;
+              slip.lateDeductions = await encrypt(String(prev + amount));
+              await slip.save();
+              console.log(`[LATE-CTRL] Employee ${employeeId}: Deducted ${amount} from salary for ${result.unpaid} unpaid late days`);
+            }
+          } catch (salaryErr) {
+            console.error("[LATE] Error deducting salary:", salaryErr.message);
+          }
+        }
+
         // Update SalarySlip to track newly credited deductions
         try {
           const slip = await SalarySlip.findOne({

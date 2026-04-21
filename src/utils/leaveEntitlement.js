@@ -26,14 +26,26 @@ async function updateLeaveEntitlementForEmployee(
 ) {
   const leaveYear = getLeaveYear(attendanceDate);
 
-  const balance = await LeaveYearBalance.findOne({
+  let balance = await LeaveYearBalance.findOne({
     owner: ownerId,
     employee: employeeId,
     year: leaveYear,
   });
 
+  // Create balance record if it doesn't exist
   if (!balance) {
-    return { paid: 0, unpaid: 0 };
+    balance = await LeaveYearBalance.create({
+      owner: ownerId,
+      employee: employeeId,
+      year: leaveYear,
+      total: 0,
+      bonus: 0,
+      bonusHoursAccumulated: 0,
+      usedPaid: 0,
+      usedUnpaid: 0,
+      remainingPaid: 0,
+      lastRecalculatedAt: new Date(),
+    });
   }
 
   const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
