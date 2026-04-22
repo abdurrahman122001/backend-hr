@@ -1043,7 +1043,7 @@ exports.getAllMasterSalaries = async (req, res) => {
     // 1. Fetch all non-trashed employees for this company
     const allEmployees = await Employee.find({
       owner: ownerId,
-      isTrashed: false,
+      isTrashed: { $ne: true },
     }).lean();
 
     console.log(`[DEBUG-PAYROLL] Fetched ${allEmployees.length} non-trashed employees for owner ${ownerId}`);
