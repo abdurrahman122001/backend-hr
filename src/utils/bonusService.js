@@ -119,8 +119,8 @@ async function updateBonusForEarlyBird(employeeId, checkIn, shiftStart, shiftEnd
         if (outMin < startMin) outMinNorm += 1440;
     }
 
-    if (outMinNorm < endMin) return { bonus: null, accumulated: null };
-
+    // ✅ Removed checkout time restriction - bonus hours are added regardless of when employee leaves
+    // Early bird hours are calculated based on checkin time only
     const earlyHours = +(earlyMinutes / 60).toFixed(2);
     const employee = await Employee.findById(employeeId);
     if (!employee) return { bonus: null, accumulated: null };

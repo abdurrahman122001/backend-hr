@@ -12,11 +12,11 @@ const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
-const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
+const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 
-// Import early departure bonus deduction from attendance controller
-const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
+// ✅ Early departure bonus deduction removed - only early bird bonus is tracked
+// const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
 
 const router = express.Router();
 
@@ -1016,45 +1016,11 @@ router.post("/logout", requireAuth, async (req, res) => {
       }
     }
 
-    // ✅ PROCESS EARLY DEPARTURE BONUS HOURS DEDUCTION
-    // Only apply when: Employee stayed until 9 PM (stayedUntil9PM=true) BUT didn't complete shift
+    // ✅ EARLY DEPARTURE DEDUCTION DISABLED
+    // Early departure bonus hours deduction has been removed
+    // Only early bird bonus (hours before shift start) is tracked now
+    // Late sitting (hours after shift end) is completely ignored
     let earlyDepartureResult = null;
-    if (stayedUntil9PM && !isShiftComplete && shiftEndMinutes !== null && !isCrossMidnightLogout) {
-      try {
-        let minutesEarly = 0;
-
-        // Handle midnight shifts specially (shiftEndMinutes === 0 means shift ends at 00:00 next day)
-        if (shiftEndMinutes === 0) {
-          // For midnight shift: if logout before midnight, they're early
-          // Hours early = (24*60 - logoutTotalMinutes) / 60
-          minutesEarly = (24 * 60) - logoutTotalMinutes;
-        } else {
-          // For regular shifts: normal calculation
-          minutesEarly = Math.max(0, shiftEndMinutes - logoutTotalMinutes);
-        }
-
-        const hoursEarly = minutesEarly / 60;
-
-        if (hoursEarly > 0) {
-          console.log(`[EARLY-DEPARTURE] ${emp?.name} stayed until 9 PM but left ${hoursEarly.toFixed(2)} hours early (logout: ${logoutTotalMinutes}min, shift end: ${shiftEndMinutes}min)`);
-          
-          earlyDepartureResult = await applyEarlyDepartureHoursDeduction(
-            employeeId,
-            ownerId,
-            userId,
-            attendanceDate,
-            hoursEarly
-          );
-
-          if (earlyDepartureResult.success) {
-            console.log(`[EARLY-DEPARTURE] ✅ Deducted ${earlyDepartureResult.hoursDeducted.toFixed(2)} hours from bonusHoursAccumulated`);
-          }
-        }
-      } catch (edErr) {
-        console.error("[EARLY-DEPARTURE] Error processing early departure deduction:", edErr);
-        earlyDepartureResult = { success: false, message: edErr.message };
-      }
-    }
 
     return res.json({
       status: "success",
