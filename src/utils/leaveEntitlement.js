@@ -26,14 +26,26 @@ async function updateLeaveEntitlementForEmployee(
 ) {
   const leaveYear = getLeaveYear(attendanceDate);
 
-  const balance = await LeaveYearBalance.findOne({
+  let balance = await LeaveYearBalance.findOne({
     owner: ownerId,
     employee: employeeId,
     year: leaveYear,
   });
 
+  // Create balance record if it doesn't exist
   if (!balance) {
-    return { paid: 0, unpaid: 0 };
+    balance = await LeaveYearBalance.create({
+      owner: ownerId,
+      employee: employeeId,
+      year: leaveYear,
+      total: 0,
+      bonus: 0,
+      bonusHoursAccumulated: 0,
+      usedPaid: 0,
+      usedUnpaid: 0,
+      remainingPaid: 0,
+      lastRecalculatedAt: new Date(),
+    });
   }
 
   const totalEntitled = Number(balance.total || 0) + Number(balance.bonus || 0);
@@ -127,7 +139,83 @@ async function updateLeaveEntitlementForEmployee(
   }
 }
 
+async function reverseLeaveEntitlementForEmployee(
+  ownerId,
+  employeeId,
+  attendanceDate,
+  reversalCount = 1,
+  type = "paid" // "paid" or "unpaid"
+) {
+  const leaveYear = getLeaveYear(attendanceDate);
+
+  let balance = await LeaveYearBalance.findOne({
+    owner: ownerId,
+    employee: employeeId,
+    year: leaveYear,
+  });
+
+  if (!balance) return { Success: false, message: "No balance record found" };
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    if (type === "paid") {
+      const oldUsed = balance.usedPaid || 0;
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(),
+            type: "PAID_LEAVE_REVERSED",
+            value: reversalCount,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedPaid = Math.max(0, Number((oldUsed - reversalCount).toFixed(2)));
+      console.log(`📑 [LEAVE-BAL-DEBUG] Reversed ${reversalCount} PAID days. usedPaid: ${oldUsed} -> ${balance.usedPaid}`);
+    } else {
+      const oldUsed = balance.usedUnpaid || 0;
+      await LeaveTransaction.create(
+        [
+          {
+            owner: ownerId,
+            employee: employeeId,
+            leaveYearBalance: balance._id,
+            year: leaveYear,
+            date: new Date(),
+            type: "UNPAID_LEAVE_REVERSED",
+            value: reversalCount,
+            sourceId: new mongoose.Types.ObjectId(),
+          },
+        ],
+        { session }
+      );
+
+      balance.usedUnpaid = Math.max(0, Number((oldUsed - reversalCount).toFixed(2)));
+      console.log(`📑 [LEAVE-BAL-DEBUG] Reversed ${reversalCount} UNPAID days. usedUnpaid: ${oldUsed} -> ${balance.usedUnpaid}`);
+    }
+
+    await balance.save({ session });
+    await session.commitTransaction();
+    session.endSession();
+
+    return { success: true };
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
+}
+
 module.exports = {
   updateLeaveEntitlementForEmployee,
+  reverseLeaveEntitlementForEmployee,
   getLeaveYear, // exported for reuse elsewhere
 };

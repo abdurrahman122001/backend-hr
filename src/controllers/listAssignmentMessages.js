@@ -495,12 +495,12 @@ exports.listMessages = async function listMessages(req, res) {
     // User-based filtering
     const currentUserRole = normalizeRole(req.employee?.role || "");
     const isTeamLead = currentUserRole === "team_lead";
-    
+
     // Defensive check for employee authentication
     if (!req.employee?._id) {
       return res.status(401).json({ error: "Unauthorized - employee not authenticated" });
     }
-    
+
     const me = oid(String(req.employee._id));
     const between = normalizeIds(betweenRaw);
 
@@ -528,16 +528,17 @@ exports.listMessages = async function listMessages(req, res) {
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
-    // Fixed: isOutboxView should include sent, draft, and scheduled statuses to bypass the incoming-only filter
-    const isOutboxView = ["sent", "draft", "scheduled"].includes(req.query.status);
+    const isSentView = req.query.status === "sent";
+    const isDraftView = req.query.status === "draft";
+    const isScheduledView = req.query.status === "scheduled" || filter === "scheduled" || isScheduled === "true";
     const isTrashedVal = isTrashed === "true" || isTrashed === true;
     const isSpamVal = isSpam === "true" || isSpam === true;
     const isParticipantView = !!req.query.participant;
-    
-    // Unified inbox view (incoming only) applies ONLY if we aren't in Outbox, Trash, Spam, or asking for ALL mail (participant view)
-    const isInboxView = !isOutboxView && !isTrashedVal && !isSpamVal && !isParticipantView;
-    
-    // Force incoming-only for unified inbox unless explicitly in Outbox, Trash, or asking for ALL mail
+
+    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, or asking for ALL mail (participant view)
+    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView;
+
+    // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
       q.$or = [
         { isFromClient: true },
@@ -648,7 +649,7 @@ exports.listMessages = async function listMessages(req, res) {
           threadMessageCount: stats ? stats.threadMessageCount : 1,
           threadUnreadCount: stats ? stats.threadUnreadCount : 0
         };
-      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+      }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
       return res.json({
         items: finalItems,
@@ -994,7 +995,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
           threadMessageCount: stats ? stats.threadMessageCount : 1,
           threadUnreadCount: stats ? stats.threadUnreadCount : 0
         };
-      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+      }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
       return res.json({
         communicationType: "external",
@@ -1154,7 +1155,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
         { receiver: { $in: [me] } }
       ];
     }
-    
+
     // Robust threadMode check
     const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
 
@@ -1257,7 +1258,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
           threadMessageCount: stats ? stats.threadMessageCount : 1,
           threadUnreadCount: stats ? stats.threadUnreadCount : 0
         };
-      }).sort((a,b) => new Date(b.createdAt) - new Date(a.createdAt));
+      }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
       return res.json({
         communicationType: "internal",
@@ -1471,15 +1472,17 @@ exports.getClientThreads = async function getClientThreads(req, res) {
           latestMessage: { $first: "$$ROOT" },
           messageCount: { $sum: 1 },
           unreadCount: {
-            $sum: { 
+            $sum: {
               $cond: [
-                { $and: [
-                  { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
-                  { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
-                ]}, 
-                1, 
+                {
+                  $and: [
+                    { $not: { $in: [me, { $ifNull: ["$readBy.employee", []] }] } },
+                    { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                  ]
+                },
+                1,
                 0
-              ] 
+              ]
             },
           },
           lastActivity: { $max: "$createdAt" },

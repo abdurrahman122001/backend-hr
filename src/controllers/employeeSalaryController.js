@@ -1036,32 +1036,54 @@ exports.getSalaryHistory = async (req, res) => {
   }
 };
 
-/**
- * Get all template/master salaries for the company (owner)
- * This is used for payroll estimates to see current salary configurations
- */
 exports.getAllMasterSalaries = async (req, res) => {
   try {
     const ownerId = req.user.owner || req.user._id;
 
-    // Fetch all salary templates for this company
-    const salaryTemplates = await SalarySlip.find({ owner: ownerId }).populate("employee").lean();
+    // 1. Fetch all active employees for this company
+    const activeEmployees = await Employee.find({
+      owner: ownerId,
+      status: "active",
+      isTrashed: false,
+    }).lean();
 
-    // Filter out any templates where the employee has been deleted (employee is null)
-    const validTemplates = salaryTemplates.filter(sal => sal.employee != null);
-
-    // Decrypt all fields for frontend consumption
+    // 2. Map each employee to their latest salary configuration
     const decryptedSalaries = await Promise.all(
-      validTemplates.map(async (sal) => {
-        const decrypted = { ...sal };
+      activeEmployees.map(async (emp) => {
+        // Find the most recent slip for this employee to use as a master template
+        const latestSlip = await SalarySlip.findOne({
+          employee: emp._id,
+          owner: ownerId
+        })
+          .sort({ createdAt: -1 })
+          .lean();
+
+        // Use the latest slip if found, otherwise start with a clean template
+        const sal = latestSlip || {
+          employee: emp,
+          owner: ownerId,
+          month: "N/A",
+          year: "N/A",
+          isActive: true
+        };
+
+        const decrypted = { ...sal, employee: emp };
 
         // Define all fields to decrypt
         const fieldsToDecrypt = [
           ...COMP_FIELDS,
-          "leaveDeductions", "lateDeductions", "eobiDeduction",
-          "sessiDeduction", "providentFundDeduction", "gratuityFundDeduction",
-          "advanceSalaryDeductions", "medicalInsurance", "lifeInsurance",
-          "penalties", "othersDeductions", "taxDeduction"
+          "leaveDeductions",
+          "lateDeductions",
+          "eobiDeduction",
+          "sessiDeduction",
+          "providentFundDeduction",
+          "gratuityFundDeduction",
+          "advanceSalaryDeductions",
+          "medicalInsurance",
+          "lifeInsurance",
+          "penalties",
+          "othersDeductions",
+          "taxDeduction",
         ];
 
         for (const field of fieldsToDecrypt) {
@@ -1079,7 +1101,6 @@ exports.getAllMasterSalaries = async (req, res) => {
 
         // Handle nested loanDeductions
         if (sal.loanDeductions) {
-          // Flatten for frontend matching PayrollEstimate keys
           try {
             if (sal.loanDeductions.vehicleLoan) {
               const v = await decrypt(sal.loanDeductions.vehicleLoan);

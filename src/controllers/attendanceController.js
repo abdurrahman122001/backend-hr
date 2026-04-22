@@ -515,8 +515,10 @@ async function updateBonusForEarlyBird(
     if (outMin < startMin) outMinNorm += 1440;
   }
 
-  // ✅ Removed checkout time restriction - bonus hours are added regardless of when employee leaves
-  // Early bird hours are calculated based on checkin time only
+  if (outMinNorm < endMin) {
+    return { bonus: null, accumulated: null };
+  }
+
   const earlyHours = +(earlyMinutes / 60).toFixed(2);
 
   // Get employee for owner info
@@ -987,9 +989,17 @@ exports.markAttendance = async (req, res) => {
           date
         );
       }
-      // ✅ DISABLED: Early Departure Bonus Deduction
-      // Removed completely - only early bird bonus is tracked now
-      // Late sitting (hours after shift end) are completely ignored
+      // ========= Early Departure Bonus Deduction =========
+      if (status === "Present" && shiftStart && shiftEnd && checkIn && checkOut) {
+        const earlyDepartureResult = await deductBonusForEarlyDeparture(
+          employeeId,
+          checkIn,
+          shiftStart,
+          shiftEnd,
+          checkOut,
+          date
+        );
+      }
     }
 
     // ========= Payroll period dates =========
@@ -1768,8 +1778,8 @@ exports.getChangeLogs = async (req, res) => {
   }
 };
 
-// ✅ Removed: exports.deductBonusForEarlyDeparture = deductBonusForEarlyDeparture;
-// Early departure deduction has been disabled - only early bird bonus is tracked now
+// Export the early departure function for use in other modules
+exports.deductBonusForEarlyDeparture = deductBonusForEarlyDeparture;
 
 exports.updateChallengeStatus = async (req, res) => {
   try {

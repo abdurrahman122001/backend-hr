@@ -2311,12 +2311,8 @@ exports.createDraft = async function createDraft(req, res) {
       (id) => id !== String(sender)
     );
 
-    // Ensure at least one receiver
-    if (receivers.length === 0) {
-      return res.status(400).json({
-        error: "At least one receiver is required to save a draft",
-      });
-    }
+    // Note: Drafts can be saved without receivers. 
+    // The requirement for receivers should only be enforced when sending.
 
     const draftData = {
       owner,
