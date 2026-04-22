@@ -261,8 +261,8 @@ exports.sendGroupMessage = async function (req, res) {
 
     if (!isObjId(groupId))
       return res.status(400).json({ error: "Valid group ID is required" });
-    if (!note || !note.trim())
-      return res.status(400).json({ error: "Message content is required" });
+    // Message content is no longer strictly required to allow for file-only messages
+    const noteContent = (note || "").trim();
 
     const owner = req.employee?.owner || req.employee?._id;
     const senderId = req.employee?._id;
@@ -420,7 +420,7 @@ exports.sendGroupMessage = async function (req, res) {
       // Store intended final recipients so the group conv shows correctly after approval
       intendedReceivers:
         intendedReceiverIds.length > 0 ? intendedReceiverIds : receiverIds,
-      note: note.trim(),
+      note: noteContent,
       subject: subject || `Group: ${group.name}`,
       status: "sent",
       isGroupMessage: true,
@@ -445,7 +445,7 @@ exports.sendGroupMessage = async function (req, res) {
     await message.save();
 
     await WhatsAppGroup.findByIdAndUpdate(groupId, {
-      lastMessage: note.trim().substring(0, 100),
+      lastMessage: noteContent ? noteContent.substring(0, 100) : "📎 Attachment",
       lastMessageAt: new Date(),
       lastMessageBy: senderId,
     });
