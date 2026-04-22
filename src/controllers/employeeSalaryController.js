@@ -1051,7 +1051,7 @@ exports.getAllMasterSalaries = async (req, res) => {
     const decryptedSalaries = await Promise.all(
       allEmployees.map(async (emp) => {
         // Find the most recent slip for this employee to use as a master template
-        const latestSlip = await Salaries.findOne({
+        const latestSlip = await SalarySlip.findOne({
           employee: emp._id,
           owner: ownerId
         })
