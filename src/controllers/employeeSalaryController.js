@@ -1046,6 +1046,9 @@ exports.getAllMasterSalaries = async (req, res) => {
       isTrashed: false,
     }).lean();
 
+    console.log(`[DEBUG-PAYROLL] Fetched ${allEmployees.length} non-trashed employees for owner ${ownerId}`);
+    allEmployees.forEach(e => console.log(`[DEBUG-PAYROLL] Employee: ${e.name}, Status: ${e.status}`));
+
     // 2. Map each employee to their latest salary configuration
     // 2. Map each employee to their latest salary configuration
     const decryptedSalaries = await Promise.all(
