@@ -1040,18 +1040,18 @@ exports.getAllMasterSalaries = async (req, res) => {
   try {
     const ownerId = req.user.owner || req.user._id;
 
-    // 1. Fetch all active and pending employees for this company
-    const activeEmployees = await Employee.find({
+    // 1. Fetch all non-trashed employees for this company
+    const allEmployees = await Employee.find({
       owner: ownerId,
-      status: { $in: ["active", "pending"] },
       isTrashed: false,
     }).lean();
 
     // 2. Map each employee to their latest salary configuration
+    // 2. Map each employee to their latest salary configuration
     const decryptedSalaries = await Promise.all(
-      activeEmployees.map(async (emp) => {
+      allEmployees.map(async (emp) => {
         // Find the most recent slip for this employee to use as a master template
-        const latestSlip = await SalarySlip.findOne({
+        const latestSlip = await Salaries.findOne({
           employee: emp._id,
           owner: ownerId
         })
