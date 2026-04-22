@@ -1040,10 +1040,10 @@ exports.getAllMasterSalaries = async (req, res) => {
   try {
     const ownerId = req.user.owner || req.user._id;
 
-    // 1. Fetch all active employees for this company
+    // 1. Fetch all active and pending employees for this company
     const activeEmployees = await Employee.find({
       owner: ownerId,
-      status: "active",
+      status: { $in: ["active", "pending"] },
       isTrashed: false,
     }).lean();
 
