@@ -8,6 +8,7 @@ const { decrypt, encrypt } = require("../utils/encryption");
 
 const {
   updateLeaveEntitlementForEmployee,
+  reverseLeaveEntitlementForEmployee,
   getLeaveYear,
 } = require("../utils/leaveEntitlement");
 const LoanDetail = require("../models/LoanDetail");
@@ -26,6 +27,159 @@ function getHoursDiff(checkIn, checkOut) {
   // handle overnight (e.g. 22:00 to 06:00)
   if (diff < 0) diff += 24 * 60;
   return +(diff / 60).toFixed(2);
+}
+
+function getPayrollPeriod(date, payroll) {
+  const attendanceDate = new Date(date);
+  const anchor = new Date(payroll.payrollPeriodStartDay);
+  let periodStart, periodEnd;
+
+  if (payroll.payrollPeriodType === "monthly") {
+    const anchorDay = anchor.getDate();
+    const thisMonthStart = new Date(
+      attendanceDate.getFullYear(),
+      attendanceDate.getMonth(),
+      anchorDay
+    );
+    if (attendanceDate >= thisMonthStart) {
+      periodStart = thisMonthStart;
+    } else {
+      periodStart = new Date(
+        attendanceDate.getFullYear(),
+        attendanceDate.getMonth() - 1,
+        anchorDay
+      );
+    }
+    periodEnd = new Date(
+      periodStart.getFullYear(),
+      periodStart.getMonth() + 1,
+      periodStart.getDate()
+    );
+    periodEnd.setDate(periodEnd.getDate() - 1);
+  } else {
+    let length = payroll.payrollPeriodLength;
+    if (payroll.payrollPeriodType === "weekly") length = 7;
+    if (payroll.payrollPeriodType === "bimonthly") length = 15;
+    if (payroll.payrollPeriodType === "10-days") length = 10;
+    const diff = Math.floor(
+      (attendanceDate - anchor) / (1000 * 60 * 60 * 24)
+    );
+    const cycles = Math.floor(diff / length);
+    periodStart = new Date(anchor);
+    periodStart.setDate(anchor.getDate() + cycles * length);
+    periodEnd = new Date(periodStart);
+    periodEnd.setDate(periodEnd.getDate() + length - 1);
+  }
+
+  return { periodStart, periodEnd };
+}
+
+async function reconcileLateDeductions(employeeId, ownerId, date, periodStart, periodEnd, oldStatus, newStatus, beforeJoin) {
+  console.log(`🔍 [LATE-RECONCILE-ENTRY] Emp=${employeeId}, Date=${date}, Old=${oldStatus}, New=${newStatus}, BeforeJoin=${beforeJoin}`);
+  if (oldStatus === "Late" && newStatus !== "Late" && !beforeJoin) {
+    const start = periodStart.toISOString().slice(0, 10);
+    const end = periodEnd.toISOString().slice(0, 10);
+
+    console.log(`\n🔍 [LATE-DEBUG] Processing late change for ${date}: ${oldStatus} -> ${newStatus}`);
+    console.log(`📊 [LATE-DEBUG] Period: ${start} to ${end}`);
+
+    const lateRecordsNow = await Attendance.find({
+      employee: employeeId,
+      owner: ownerId,
+      date: { $gte: start, $lte: end },
+      status: "Late",
+      markedOnNonWorkingDay: { $ne: true }, // Exclude NWD records from late count
+    }).lean();
+
+    const lateCountNow = lateRecordsNow.length;
+    const lateDeductionDaysNow = Math.floor(lateCountNow / 3);
+
+    const payrollMonthNow = periodEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYearNow = String(periodEnd.getFullYear());
+
+    console.log(`📊 [LATE-DEBUG] Payroll: ${payrollMonthNow} ${payrollYearNow}`);
+
+    const slipNow = await SalarySlip.findOne({
+      owner: ownerId,
+      employee: employeeId,
+      month: payrollMonthNow,
+      year: payrollYearNow
+    });
+
+    const previouslyCredited = slipNow?.lateDeductionDaysCredited || 0;
+
+    console.log(`📊 [LATE-DEBUG] Current Lates in DB: ${lateCountNow}`);
+    console.log(`📊 [LATE-DEBUG] Calculated Deduction Days: ${lateDeductionDaysNow}`);
+    console.log(`📊 [LATE-DEBUG] Previously Credited in Slip: ${previouslyCredited}`);
+
+    if (lateDeductionDaysNow < previouslyCredited) {
+      const daysToReverse = previouslyCredited - lateDeductionDaysNow;
+      console.log(`🔄 [LATE-REVERSAL] DETECTED: Need to reverse ${daysToReverse} deduction days.`);
+
+      if (daysToReverse > 0) {
+        let reversedPaid = 0;
+        let reversedUnpaid = 0;
+
+        const lastLateTxs = await LeaveTransaction.find({
+          owner: ownerId,
+          employee: employeeId,
+          year: Number(payrollYearNow),
+          type: { $in: ["PAID_LEAVE_USED", "UNPAID_LEAVE_USED"] }
+        }).sort({ date: -1 }).limit(daysToReverse);
+
+        console.log(`📝 [LATE-REVERSAL] Found ${lastLateTxs.length} candidate transactions for reversal.`);
+
+        for (const tx of lastLateTxs) {
+          const revType = (tx.type === "PAID_LEAVE_USED") ? "paid" : "unpaid";
+          const result = await reverseLeaveEntitlementForEmployee(ownerId, employeeId, date, 1, revType);
+          if (result.success) {
+            console.log(`✅ [LATE-REVERSAL] Successfully reversed 1 ${revType} leave day from transaction date ${tx.date}`);
+            if (revType === "paid") reversedPaid++; else reversedUnpaid++;
+          } else {
+            console.log(`❌ [LATE-REVERSAL] Failed to reverse ${revType} leave: ${result.message}`);
+          }
+        }
+
+        if (reversedUnpaid > 0 && slipNow) {
+          try {
+            const Salaries = require("../models/Salaries");
+            const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+            if (salaryDoc) {
+              const gross = Number(await decrypt(salaryDoc.basic)) +
+                Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) +
+                Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
+              const perDay = gross / 22;
+              const amount = Math.round(perDay * reversedUnpaid);
+
+              let prevDed = 0;
+              if (slipNow.lateDeductions) prevDed = Number(await decrypt(slipNow.lateDeductions)) || 0;
+              const newDed = Math.max(0, prevDed - amount);
+              slipNow.lateDeductions = await encrypt(String(newDed));
+              console.log(`💰 [LATE-REVERSAL] Reversing salary deduction: Gross=${gross}, PerDay=${perDay.toFixed(2)}, Reversing=${amount}. New total late deduction in slip: ${newDed}`);
+            }
+          } catch (err) {
+            console.error("❌ [LATE-REVERSAL] Error reversing salary deduction:", err.message);
+          }
+        }
+
+        if (slipNow) {
+          slipNow.lateDeductionDaysCredited = lateDeductionDaysNow;
+          await slipNow.save();
+          console.log(`📉 [LATE-REVERSAL] Updated slip.lateDeductionDaysCredited to ${lateDeductionDaysNow}`);
+        }
+
+        const propRec = await Attendance.findOne({
+          employee: employeeId,
+          owner: ownerId,
+          date: { $gte: start, $lte: end },
+          proportionate: true,
+        }).sort({ date: -1 });
+        if (propRec) {
+          await Attendance.updateOne({ _id: propRec._id }, { $set: { proportionate: false } });
+        }
+      }
+    }
+  }
 }
 
 function resolveOwnerId(user) {
@@ -66,7 +220,7 @@ async function isNonWorkingDayHelper(ownerId, date, payroll) {
   const ymd = (d) => d.toISOString().slice(0, 10);
   const attendanceDate = new Date(date);
   const dow = attendanceDate.getDay();
-  
+
   // Check recurring non-working days from payroll
   const dateSet = new Set();
   const weekdaySet = new Set();
@@ -75,7 +229,7 @@ async function isNonWorkingDayHelper(ownerId, date, payroll) {
     wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
     fri: 5, friday: 5, sat: 6, saturday: 6,
   };
-  
+
   (payroll.nonWorkingDays || []).forEach((raw) => {
     if (!raw) return;
     const s = String(raw).trim();
@@ -86,16 +240,16 @@ async function isNonWorkingDayHelper(ownerId, date, payroll) {
     const nd = new Date(s);
     if (!isNaN(nd)) dateSet.add(ymd(nd));
   });
-  
+
   const isRecurringNonWorkingDay =
     dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
-  
+
   // Check specific non-working days
   const specificNwd = await SpecificNonWorkingDay.findOne({
     owner: oid(ownerId),
     date: ymd(attendanceDate),
   }).lean();
-  
+
   return isRecurringNonWorkingDay || !!specificNwd;
 }
 
@@ -268,10 +422,11 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
   if (!record) return;
 
   const ownerId = resolveOwnerId(record);
+  console.log(`\n📬 [MARK-ATTENDANCE] Request: Employee=${record.employee}, Date=${record.date}, NewStatus=${record.status}`);
   const employeeId = record.employee ? (record.employee._id || record.employee) : null;
   if (!employeeId) {
-     // If no employee is attached (e.g., a Holiday record), there are no leave/bonus effects to reverse on a per-person basis.
-     return;
+    // If no employee is attached (e.g., a Holiday record), there are no leave/bonus effects to reverse on a per-person basis.
+    return;
   }
   const date = record.date;
   const status = record.status;
@@ -298,7 +453,7 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
     if (balance) {
       let newAccumulated = (balance.bonusHoursAccumulated || 0) + (bonusHoursDeducted || 0);
       let newBonus = balance.bonus || 0;
-      
+
       // Reverse negative hours if any were added
       if (negativeHoursAdded && negativeHoursAdded > 0) {
         newAccumulated += negativeHoursAdded;
@@ -618,7 +773,7 @@ async function deductBonusForEarlyDeparture(
   const startMin = toMin(shiftStart);
   const outMin = toMin(checkOut);
   const endMinRaw = toMin(shiftEnd);
-  
+
   if (
     inMin == null ||
     startMin == null ||
@@ -736,10 +891,10 @@ async function deductBonusForEarlyDeparture(
       },
     }
   );
-  
-  return { 
-    deducted: deductedHours, 
-    remainingBonus: newBonus, 
+
+  return {
+    deducted: deductedHours,
+    remainingBonus: newBonus,
     negativeHours: negativeHours,
     totalEarlyHours: earlyHours
   };
@@ -791,6 +946,7 @@ exports.markAttendance = async (req, res) => {
       challengeStatus,
       challengeAdminNotes,
     } = req.body;
+    console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status}, Notes=${notes}`);
 
     // ========= Helpers =========
     const allowanceFields = [
@@ -843,7 +999,10 @@ exports.markAttendance = async (req, res) => {
     }).lean();
 
     if (oldRec) {
+      console.log(`🔍 [MARK-ATTENDANCE] Found existing record status: ${oldRec.status}`);
       await reverseAttendanceEffects(oldRec);
+    } else {
+      console.log(`🔍 [MARK-ATTENDANCE] No existing record found for this date.`);
     }
 
 
@@ -882,7 +1041,7 @@ exports.markAttendance = async (req, res) => {
       let adjustedDays = 0;
       if (rec.status === "Half Day") adjustedDays = 0.5;
       else if (rec.status === "Absent" || rec.status === "Leave") adjustedDays = 1;
-      
+
       if (rec.status === "Absent" || rec.status === "Half Day") {
         outcome = rec.leaveType === "Unpaid" ? "Salary Deduction" : "Leave Consumption";
       } else if (rec.status === "Leave") {
@@ -917,15 +1076,32 @@ exports.markAttendance = async (req, res) => {
     }
 
     // ========= Payroll period =========
-    const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+    const payrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
     const shiftId = employee.shifts?.[0];
-    const payroll = allPayrolls.find(
+    const payroll = payrolls.find(
       (p) =>
         Array.isArray(p.shifts) &&
         p.shifts.map(String).includes(String(shiftId))
     );
+
+    if (!payroll) {
+      console.log(`⚠️ [MARK-ATTENDANCE] No payroll config found for employee shift ${shiftId}`);
+    }
+
+    const { periodStart, periodEnd } = getPayrollPeriod(date, payroll || { payrollPeriodStartDay: new Date(), payrollPeriodType: 'monthly' });
+    const attendanceDate = new Date(date);
+    const joinDate = employee.joiningDate ? new Date(employee.joiningDate) : null;
+    const beforeJoin = !!(joinDate && attendanceDate < joinDate);
+
+    const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
+    const payrollYear = String(periodEnd.getFullYear());
+    const start = periodStart.toISOString().slice(0, 10);
+    const end = periodEnd.toISOString().slice(0, 10);
+
     // ========= Non-working day guard =========
     // Checks both recurring (payroll) and specific (user-marked) non-working days
+    // IMPORTANT: This must happen BEFORE reconcileLateDeductions so that marking
+    // attendance on a non-working day never touches the late deduction counter.
     const isNonWorkingDay = await isNonWorkingDayHelper(ownerId, date, payroll);
 
     if (isNonWorkingDay) {
@@ -954,6 +1130,8 @@ exports.markAttendance = async (req, res) => {
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
+      // Do NOT call reconcileLateDeductions here — non-working day attendance
+      // is forced to Present and must never affect the late counter.
       const { bonus, accumulated } = await updateBonusForNonWorkingDay(
         employeeId,
         checkIn,
@@ -962,6 +1140,10 @@ exports.markAttendance = async (req, res) => {
       );
       return res.json(recNwd);
     }
+
+    // 🔥 RECONCILE LATE DEDUCTIONS (Reversal)
+    // Only runs for normal working days. Skipped above for non-working days.
+    await reconcileLateDeductions(employeeId, ownerId, date, periodStart, periodEnd, oldRec?.status, status, beforeJoin);
 
     // ========= Early Bird Bonus =========
     if (status === "Present") {
@@ -1002,57 +1184,6 @@ exports.markAttendance = async (req, res) => {
       }
     }
 
-    // ========= Payroll period dates =========
-    const attendanceDate = new Date(date);
-    const anchor = new Date(payroll.payrollPeriodStartDay);
-    let periodStart, periodEnd;
-    if (payroll.payrollPeriodType === "monthly") {
-      const anchorDay = anchor.getDate();
-      const thisMonthStart = new Date(
-        attendanceDate.getFullYear(),
-        attendanceDate.getMonth(),
-        anchorDay
-      );
-      if (attendanceDate >= thisMonthStart) {
-        periodStart = thisMonthStart;
-      } else {
-        periodStart = new Date(
-          attendanceDate.getFullYear(),
-          attendanceDate.getMonth() - 1,
-          anchorDay
-        );
-      }
-      periodEnd = new Date(
-        periodStart.getFullYear(),
-        periodStart.getMonth() + 1,
-        periodStart.getDate()
-      );
-      periodEnd.setDate(periodEnd.getDate() - 1);
-    } else {
-      let length = payroll.payrollPeriodLength;
-      if (payroll.payrollPeriodType === "weekly") length = 7;
-      if (payroll.payrollPeriodType === "bimonthly") length = 15;
-      if (payroll.payrollPeriodType === "10-days") length = 10;
-      const diff = Math.floor(
-        (attendanceDate - anchor) / (1000 * 60 * 60 * 24)
-      );
-      const cycles = Math.floor(diff / length);
-      periodStart = new Date(anchor);
-      periodStart.setDate(anchor.getDate() + cycles * length);
-      periodEnd = new Date(periodStart);
-      periodEnd.setDate(periodEnd.getDate() + length - 1);
-    }
-
-    const joinDate = employee.joiningDate
-      ? new Date(employee.joiningDate)
-      : null;
-    const effectiveStartDate =
-      joinDate && joinDate > periodStart ? joinDate : periodStart;
-    const start = effectiveStartDate.toISOString().slice(0, 10);
-    const end = periodEnd.toISOString().slice(0, 10);
-    const beforeJoin = !!(joinDate && attendanceDate < joinDate);
-    const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
-    const payrollYear = String(periodEnd.getFullYear());
 
     // ========= Skip SalarySlip creation - use fixed per-day calculation =========
     const totalWorkingDays = 22;
@@ -1350,58 +1481,23 @@ exports.markAttendance = async (req, res) => {
     }
 
     // ========= LATE handling =========
-    if (oldRec && oldRec.status === "Late" && status !== "Late" && !beforeJoin) {
-      const lateRecordsNow = await Attendance.find({
-        employee: employeeId,
-        owner: ownerId,
-        date: { $gte: start, $lte: end },
-        status: "Late",
-      }).lean();
 
-      const lateCountNow = lateRecordsNow.length;
-      const lateDeductionDaysNow = Math.floor(lateCountNow / 3);
+    if (!beforeJoin && status === "Late") {
+      console.log(`[LATE-DEBUG] Checking late deductions for employee ${employeeId}, date ${date}`);
+      console.log(`[LATE-DEBUG] Period range: ${start} to ${end}`);
 
-      // Get the salary slip to check previously credited late deductions
-      const payrollMonthNow = periodEnd.toLocaleString("en-US", { month: "long" });
-      const payrollYearNow = String(periodEnd.getFullYear());
-      const slipNow = await SalarySlip.findOne({
-        owner: ownerId,
-        employee: employeeId,
-        month: payrollMonthNow,
-        year: payrollYearNow
-      });
-      const previouslyCredited = slipNow?.lateDeductionDaysCredited || 0;
-
-      if (lateDeductionDaysNow < previouslyCredited) {
-        const daysToReverse = previouslyCredited - lateDeductionDaysNow;
-        if (daysToReverse >= 1) {
-          const propRec = await Attendance.findOne({
-            employee: employeeId,
-            owner: ownerId,
-            date: { $gte: start, $lte: end },
-            proportionate: true,
-          }).sort({ date: -1 });
-          if (propRec) {
-            await Attendance.updateOne({ _id: propRec._id }, { $set: { proportionate: false } });
-          }
-        }
-      }
-    }
-    
-    if (!beforeJoin && status === "Late") {      
       const lateRecords = await Attendance.find({
         employee: employeeId,
         owner: ownerId,
         date: { $gte: start, $lte: end },
         status: "Late",
+        markedOnNonWorkingDay: { $ne: true }, // Exclude NWD records from late count
       }).lean();
 
       const lateCount = lateRecords.length;
       const totalDeductionDays = Math.floor(lateCount / 3);
+      console.log(`[LATE-DEBUG] lateCount: ${lateCount}, totalDeductionDays: ${totalDeductionDays}`);
 
-      // Get previously credited late deductions from SalarySlip
-      const payrollMonth = periodEnd.toLocaleString("en-US", { month: "long" });
-      const payrollYear = String(periodEnd.getFullYear());
       let previouslyCredited = 0;
       try {
         const slip = await SalarySlip.findOne({
@@ -1411,11 +1507,13 @@ exports.markAttendance = async (req, res) => {
           year: payrollYear
         });
         previouslyCredited = slip?.lateDeductionDaysCredited || 0;
+        console.log(`[LATE-DEBUG] SalarySlip found: ${!!slip}, previouslyCredited: ${previouslyCredited}`);
       } catch (err) {
         console.error("[LATE] Error fetching SalarySlip:", err.message);
       }
-      
+
       const newLateDeductionDays = totalDeductionDays - previouslyCredited;
+      console.log(`[LATE-DEBUG] newLateDeductionDays: ${newLateDeductionDays}`);
 
       if (newLateDeductionDays > 0) {
         // Deduct the new late deduction days
@@ -1426,6 +1524,44 @@ exports.markAttendance = async (req, res) => {
           newLateDeductionDays,
           "late"
         );
+
+        // If unpaid leaves were used (no leave balance), deduct from salary
+        if (result.unpaid > 0) {
+          try {
+            const Salaries = require("../models/Salaries");
+            const { decrypt, encrypt } = require("../utils/encryption");
+            const salaryDoc = await Salaries.findOne({ employee: employeeId, owner: ownerId });
+            if (salaryDoc) {
+              const gross = Number(await decrypt(salaryDoc.basic)) + Number(await decrypt(salaryDoc.conveyanceAllowance || await encrypt("0"))) + Number(await decrypt(salaryDoc.medicalAllowance || await encrypt("0")));
+              const perDay = gross / 22;
+              const amount = Math.round(perDay * result.unpaid);
+
+              let slip = await SalarySlip.findOne({
+                owner: ownerId,
+                employee: employeeId,
+                month: payrollMonth,
+                year: payrollYear
+              });
+              if (!slip) {
+                slip = await SalarySlip.create({
+                  owner: ownerId,
+                  employee: employeeId,
+                  month: payrollMonth,
+                  year: payrollYear,
+                  lateDeductionDaysCredited: 0
+                });
+              }
+
+              let prev = 0;
+              if (slip.lateDeductions) prev = Number(await decrypt(slip.lateDeductions)) || 0;
+              slip.lateDeductions = await encrypt(String(prev + amount));
+              await slip.save();
+              console.log(`[LATE-CTRL] Employee ${employeeId}: Deducted ${amount} from salary for ${result.unpaid} unpaid late days`);
+            }
+          } catch (salaryErr) {
+            console.error("[LATE] Error deducting salary:", salaryErr.message);
+          }
+        }
 
         // Update SalarySlip to track newly credited deductions
         try {
@@ -1719,7 +1855,20 @@ exports.deleteRecord = async (req, res) => {
     await Attendance.deleteOne({ _id: id });
 
     try {
-      await logAttendanceChange(req.user, record.employee, record.date, record.status, "Deleted", record.leaveType, "None", "Reversal (Deleted)");
+      await logAttendanceChange({
+        ownerId: record.owner,
+        performerId: req.user._id,
+        performerType: req.user.isEmployee ? "Employee" : "User",
+        performerName: req.user.name || (req.user.isEmployee ? "Employee" : "Admin"),
+        employeeId: record.employee,
+        attendanceDate: record.date,
+        oldStatus: record.status,
+        newStatus: "Deleted",
+        oldLeaveType: record.leaveType,
+        newLeaveType: "None",
+        outcome: "Reversal (Deleted)",
+        details: `Attendance record for ${record.date} was deleted.`
+      });
     } catch (logErr) {
       console.error("Failed to write to AttendanceChangeLog", logErr);
     }
@@ -1739,14 +1888,14 @@ exports.getChangeLogs = async (req, res) => {
 
     const query = { owner: ownerId };
     if (employeeId) query.employee = employeeId;
-    
+
     if (startDate && endDate) {
       // Create date objects for start and end of range in the log's createdAt timestamp
       const start = new Date(startDate);
       start.setHours(0, 0, 0, 0);
       const end = new Date(endDate);
       end.setHours(23, 59, 59, 999);
-      
+
       query.createdAt = {
         $gte: start,
         $lte: end
@@ -1789,18 +1938,58 @@ exports.updateChallengeStatus = async (req, res) => {
 
     const attendance = await Attendance.findOneAndUpdate(
       { _id: id, owner: ownerId },
-      { 
-        $set: { 
-          challengeStatus, 
+      {
+        $set: {
+          challengeStatus,
           challengeAdminNotes,
           challengeAt: new Date()
-        } 
+        }
       },
       { new: true }
     );
 
     if (!attendance) {
       return res.status(404).json({ error: "Attendance record not found" });
+    }
+
+    // If challenge is approved and it was for a Late record, we might need to change its status
+    // and trigger the deduction reversal logic.
+    if (challengeStatus === "Approved") {
+      if (attendance.status === "Late") {
+        const oldStatus = "Late";
+        attendance.status = "Present";
+        await attendance.save();
+
+        try {
+          console.log(`🔍 [CHALLENGE-APPROVE] Reconciling late for Emp=${attendance.employee}, Date=${attendance.date}`);
+          const employee = await Employee.findById(attendance.employee).lean();
+          const payrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
+          const shiftId = employee?.shifts?.[0];
+          const payroll = payrolls.find(
+            (p) =>
+              Array.isArray(p.shifts) &&
+              p.shifts.map(String).includes(String(shiftId))
+          );
+
+          if (payroll) {
+            const { periodStart, periodEnd } = getPayrollPeriod(attendance.date, payroll);
+            await reconcileLateDeductions(
+              attendance.employee,
+              ownerId,
+              attendance.date,
+              periodStart,
+              periodEnd,
+              oldStatus,
+              "Present",
+              false
+            );
+          } else {
+            console.log(`⚠️ [CHALLENGE-APPROVE] No payroll found for employee shift ${shiftId}`);
+          }
+        } catch (reconcileErr) {
+          console.error("Failed to reconcile late deductions during challenge approval:", reconcileErr);
+        }
+      }
     }
 
     res.json({ success: true, attendance });

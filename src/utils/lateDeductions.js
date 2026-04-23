@@ -44,6 +44,7 @@ async function countLateSessionsInPeriod(employeeId, periodStart, periodEnd) {
         $gte: startStr,
         $lte: endStr,
       },
+      markedOnNonWorkingDay: { $ne: true }, // Never count NWD records in late tally
     });
 
     return lateSessions;
@@ -489,10 +490,13 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
     const endStr = pEnd.toISOString().slice(0, 10);
 
     // 2. Count Lates in this period (including the one just created)
+    // Exclude records marked on non-working days so NWD attendance never
+    // contributes to the late counter.
     const lateCount = await Attendance.countDocuments({
       employee: employeeId,
       status: "Late",
-      date: { $gte: startStr, $lte: endStr }
+      date: { $gte: startStr, $lte: endStr },
+      markedOnNonWorkingDay: { $ne: true },
     });
 
     if (lateCount === 0 || lateCount % 3 !== 0) return; // Only process on multiples of 3

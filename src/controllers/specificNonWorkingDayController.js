@@ -93,7 +93,7 @@ exports.createSpecificNonWorkingDay = async (req, res, next) => {
 exports.deleteSpecificNonWorkingDay = async (req, res, next) => {
   try {
     const ownerId = resolveOwnerId(req.user);
-    const { date } = req.body;
+    const date = req.body.date || req.query.date;
 
     if (!date) {
       return res.status(400).json({ error: "Date is required" });
