@@ -238,7 +238,30 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     /* ------------------------------------------------------------
        5) Annual Taxable Income Using Remaining Months & Past Slips
     ------------------------------------------------------------ */
-    const annualTaxable = taxableMonthly * monthsRemaining;
+    // NEW: Sum actual gross from previous slips in the same fiscal year
+    const employeeId = salarySlip.employee?._id || salarySlip.employee;
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: salarySlip.owner
+    }).lean();
+
+    const pastFiscalSlips = allSlipsInYear.filter(s => {
+      const sMonthIndex = monthNames.indexOf(s.month);
+      const sYearNum = parseInt(s.year);
+      const sDate = new Date(sYearNum, sMonthIndex, 1);
+      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
+      return sDate >= fiscalStart && sDate < currentSlipDate;
+    });
+
+    let sumPastTaxable = 0;
+    for (const ps of pastFiscalSlips) {
+      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
+    }
+
+    const monthsAlreadyCovered = pastFiscalSlips.length;
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
+
+    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     /* ------------------------------------------------------------
        6) Slab Calculation (annual)
