@@ -131,69 +131,104 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  // Use Basic + Conveyance + Incentive + Medical - Deductions as the base for slab selection
   const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
   let grossMonthly = 0;
   for (const key of GROSS_KEYS) {
     grossMonthly += await readFirstNumAsync(salarySlip, [key]);
   }
-  const deductionKeys = [
-    "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
-    "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
-    "lifeInsurance", "penalties", "othersDeductions"
-  ];
-  let deductions = 0;
-  for (const dKey of deductionKeys) {
-    deductions += await readFirstNumAsync(salarySlip, [dKey]);
-  }
-  return Math.max(0, grossMonthly - deductions);
+  const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
+  const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
+  const lateDeductions = await readFirstNumAsync(salarySlip, ["lateDeductions"]);
+  
+  return Math.max(0, grossMonthly + loanBenefitTotal - leaveDeductions - lateDeductions);
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    const basic      = await readFirstNumAsync(salarySlip, ["basic"]);
-    const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
-    const incentive  = await readFirstNumAsync(salarySlip, ["incentive"]);
-    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
-    const fullGross  = basic + conveyance + incentive + medMonthly;
-
-    const deductionKeys = [
-      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
-      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
-      "lifeInsurance", "penalties", "othersDeductions"
-    ];
-    let baseDeductionsMonthly = 0;
-    for (const dKey of deductionKeys) {
-      baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
+    // 1) Gross Monthly Salary = Basic + Conveyance + Incentive + Medical (per policy update)
+    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
+    let grossMonthly = 0;
+    for (const key of GROSS_KEYS) {
+      grossMonthly += await readFirstNumAsync(salarySlip, [key]);
     }
 
-    // This is the "Net Salary" used in the spreadsheet formula (D30)
-    const monthlyNetBeforeTax = Math.max(0, fullGross - baseDeductionsMonthly);
+    const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
+    
+    // finalGrossMonthly includes basic + conveyance + incentive + medical + loan benefits
+    const finalGrossMonthly = grossMonthly + loanBenefitTotal;
 
-    /* --- Annual Projection to find Slab --- */
+    const basic = await readFirstNumAsync(salarySlip, ["basic"]);
+    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
+
+    // Calculate deductions that should be subtracted before tax calculation
+    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
+    const lateDeductions = await readFirstNumAsync(salarySlip, ["lateDeductions"]);
+
+    /* ------------------------------------------------------------
+       3) TAXABLE MONTHLY INCOME = Gross - Leave Deductions - Late Deductions
+    ------------------------------------------------------------ */
+    // According to user request: Include medical allowance and use formula Base/110*10
+    const taxableMonthly = Math.max(0, finalGrossMonthly - leaveDeductions - lateDeductions);
+    const medExemptMonthly = 0; // Medical exemption not applicable as per fixed gross rule
+
+    /* ------------------------------------------------------------
+       4) JOINING DATE BASED MONTH COUNT
+    ------------------------------------------------------------ */
+
+    // default fiscal year = July → June
     const fiscalStartMonth = 7; // July
     const fiscalEndMonth = 6; // June
+
     let joiningDate = null;
-    if (salarySlip?.employee?.joiningDate) joiningDate = new Date(salarySlip.employee.joiningDate);
-    
+    if (salarySlip?.employee?.joiningDate) {
+      joiningDate = new Date(salarySlip.employee.joiningDate);
+    }
+
     const slipMonth = salarySlip.month;
     const slipYearNum = parseInt(salarySlip.year || new Date().getFullYear());
+
+    // Month name to index lookup
     const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const slipMonthIndex = monthNames.indexOf(slipMonth);
+
     const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
-    if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
 
-    const effectiveStart = joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
-    const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
-    let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
-    if (monthsRemaining < 1) monthsRemaining = 1;
+    // If slip month is Jan–Jun, fiscal year started last calendar year
+    if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) {
+      fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
+    }
 
-    // Sum past slips
+    const effectiveStart =
+      joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
+
+    // Calculate remaining months including the joining month
+    const fiscalEnd = new Date(
+      fiscalStart.getFullYear() + 1,
+      fiscalEndMonth - 1,
+      1
+    );
+    fiscalEnd.setMonth(fiscalEnd.getMonth() + 1); // move to next month for full-cycle calculation
+
+    let monthsRemaining =
+      (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
+      (fiscalEnd.getMonth() - effectiveStart.getMonth());
+
+    if (monthsRemaining < 1) monthsRemaining = 1; // Safety
+
+    /* ------------------------------------------------------------
+       5) Annual Taxable Income Using Remaining Months & Past Slips
+    ------------------------------------------------------------ */
+    // NEW: Sum actual gross from previous slips in the same fiscal year
     const employeeId = salarySlip.employee?._id || salarySlip.employee;
-    const allSlipsInYear = await SalarySlip.find({ employee: employeeId, owner: salarySlip.owner }).lean();
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: salarySlip.owner
+    }).lean();
+
     const pastFiscalSlips = allSlipsInYear.filter(s => {
       const sMonthIndex = monthNames.indexOf(s.month);
-      const sDate = new Date(parseInt(s.year), sMonthIndex, 1);
+      const sYearNum = parseInt(s.year);
+      const sDate = new Date(sYearNum, sMonthIndex, 1);
       const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
       return sDate >= fiscalStart && sDate < currentSlipDate;
     });
@@ -202,44 +237,39 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     for (const ps of pastFiscalSlips) {
       sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
     }
-    const remainingProjectedMonths = Math.max(0, monthsRemaining - pastFiscalSlips.length);
-    const annualTaxable = sumPastTaxable + (monthlyNetBeforeTax * remainingProjectedMonths);
 
-    /* --- Find Slab Rate --- */
-    const slabs = (taxCfg?.slabs || [])
-      .map(s => ({ from: toNum(s.from), to: s.to == null ? Infinity : toNum(s.to), rate: toNum(s.rateOver) }))
-      .sort((a, b) => a.from - b.from);
+    const monthsAlreadyCovered = pastFiscalSlips.length;
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
 
-    let activeRate = 0;
-    for (const s of slabs) {
-      if (annualTaxable >= s.from && annualTaxable <= s.to) {
-        activeRate = s.rate;
-        break;
-      }
-    }
-    if (activeRate === 0 && slabs.length > 0 && annualTaxable > slabs[slabs.length - 1].from) {
-      activeRate = slabs[slabs.length - 1].rate;
-    }
+    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
-    // --- Final Tax Formula: Net / (100 + Rate) * Rate ---
-    // If rate is 10%, formula is Net / 110 * 10
-    const monthlyTax = Math.round((monthlyNetBeforeTax / (100 + activeRate)) * activeRate);
+    /* ------------------------------------------------------------
+       6) Tax Calculation using formula (taxable / 110 * 10)
+    ------------------------------------------------------------ */
+    // According to user request: Tax = Base / 110 * 10
+    const monthlyTax = Math.round((taxableMonthly / 110) * 10);
+    const annualTax = monthlyTax * monthsRemaining;
 
-    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
-    const netPayable = Math.max(0, fullGross - baseDeductionsMonthly - monthlyTax);
+    /* ------------------------------------------------------------
+       7) Allowances & Net Payable
+    ------------------------------------------------------------ */
+    const totalAllowances = finalGrossMonthly - basic;
+    const totalDeductions = monthlyTax + leaveDeductions + lateDeductions;
+    const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
     return {
-      grossMonthly: basic + conveyance + incentive,
-      annualGross: (basic + conveyance + incentive) * 12,
-      medExemptMonthly: medMonthly,
-      taxableMonthly: monthlyNetBeforeTax,
-      monthsRemaining,
+      grossMonthly: finalGrossMonthly,
+      annualGross: finalGrossMonthly * monthsRemaining,
+      medExemptMonthly,
+      taxableMonthly,
+      monthsRemaining, 
       annualTaxable,
-      annualTax: monthlyTax * monthsRemaining,
+      annualTax,
       monthlyTax,
       leaveDeductions,
-      totalAllowances: fullGross - basic,
-      totalDeductions: monthlyTax + leaveDeductions,
+      lateDeductions,
+      totalAllowances,
+      totalDeductions,
       netPayable,
     };
   } catch (error) {

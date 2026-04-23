@@ -89,11 +89,12 @@ const readFirstNumAsync = async (obj, keys) => {
 
 /* ----------------------------- config ----------------------------- */
 
-// Allowances → gross (Basic + Conveyance + Incentive, per policy)
+// Allowances → gross (Basic + Conveyance + Incentive + Medical, per policy)
 const ALLOWANCE_KEYS = [
   "basic",
   "conveyanceAllowance",
   "incentive",
+  "medicalAllowance",
 ];
 
 // Base deductions → included in taxable base
@@ -153,7 +154,11 @@ async function calculateTaxableMonthlyOnly(slip, taxCfg) {
   for (const key of ALLOWANCE_KEYS) {
     grossMonthly += await readFirstNumAsync(slip, [key]);
   }
-  return grossMonthly;
+  const loanBenefitTotal = await readFirstNumAsync(slip, ["loanBenefits"]);
+  const leaveDeductions = await readFirstNumAsync(slip, ["leaveDeductions"]);
+  const lateDeductions = await readFirstNumAsync(slip, ["lateDeductions"]);
+
+  return Math.max(0, grossMonthly + loanBenefitTotal - leaveDeductions - lateDeductions);
 }
 
 /* ---------------------- slip calculation (async) ---------------------- */
@@ -165,18 +170,19 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
     grossMonthly += value;
   }
 
+  const loanBenefitTotal = await readFirstNumAsync(slip, ["loanBenefits"]);
+  // Gross including loan benefits
+  const finalGrossMonthly = grossMonthly + loanBenefitTotal;
+
   const basic = await readFirstNumAsync(slip, ["basic"]);
-  const medMonthly = await readFirstNumAsync(slip, ["medicalAllowance"]);
 
-  // 2) Base deductions
-  let baseDeductionsMonthly = 0;
-  for (const key of BASE_DEDUCTION_KEYS) {
-    const value = await readFirstNumAsync(slip, [key]);
-    baseDeductionsMonthly += value;
-  }
+  // Deductions to subtract before tax
+  const leaveDeductions = await readFirstNumAsync(slip, ["leaveDeductions"]);
+  const lateDeductions = await readFirstNumAsync(slip, ["lateDeductions"]);
 
-  // 3) Taxable monthly (Basic + Conveyance + Incentive)
-  const taxableMonthly = grossMonthly;
+  // 3) Taxable monthly (Gross - Leave - Late)
+  // According to user request: Include medical allowance and use formula Base/110*10
+  const taxableMonthly = Math.max(0, finalGrossMonthly - leaveDeductions - lateDeductions);
   const medExemptMonthly = 0; // Not applicable for the fixed gross rule
 
   // 6.1) Calculate pro-rated months remaining in fiscal year (July to June)
@@ -203,7 +209,7 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
   if (monthsRemaining < 1) monthsRemaining = 1;
 
-  // 6.2) Annualize + compute band-only tax using remaining months
+  // 6.2) Annualize + compute tax using formula
   // NEW: Sum actual gross from previous slips in the same fiscal year
   const employeeId = slip.employee?._id || slip.employee;
   const allSlipsInYear = await SalarySlip.find({
@@ -229,33 +235,32 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
 
   const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
-  const annualTax = computeAnnualTaxBandOnly(
-    annualTaxable,
-    taxCfg?.slabs || []
-  );
-  const monthlyTax = Math.round(annualTax / monthsRemaining);
+  // According to user request: Tax = Base / 110 * 10
+  const monthlyTax = Math.round((taxableMonthly / 110) * 10);
+  const annualTax = monthlyTax * monthsRemaining;
 
   // 7) Final totals
-  const totalDeductions = baseDeductionsMonthly + monthlyTax;
-  const netPayable = Math.max(0, grossMonthly - totalDeductions);
+  const totalDeductions = monthlyTax + leaveDeductions + lateDeductions;
+  const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
   return {
-    grossMonthly,
-    annualGross: grossMonthly * 12,
+    grossMonthly: finalGrossMonthly,
+    annualGross: finalGrossMonthly * monthsRemaining,
     medExemptMonthly,
     annualTaxable,
     annualTax,
     monthlyTax,
-    totalAllowances: grossMonthly - basic,
+    totalAllowances: finalGrossMonthly - basic,
     totalDeductions,
     netPayable,
     _debug: {
-      baseDeductionsMonthly,
-      netBeforeTax,
+      leaveDeductions,
+      lateDeductions,
       taxableMonthly,
     },
   };
 }
+
 
 exports.enableAutoTax = async (req, res) => {
   try {
