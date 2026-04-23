@@ -179,7 +179,12 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   const taxableMonthly = grossMonthly;
   const medExemptMonthly = 0; // Not applicable for the fixed gross rule
 
-  // 6.1) Calculate pro-rated months remaining in fiscal year (July to June)
+  /* ------------------------------------------------------------
+     6.1) Calculate pro-rated months remaining in fiscal year (July to June)
+  ------------------------------------------------------------ */
+  const fiscalMonths = ["July", "August", "September", "October", "November", "December", "January", "February", "March", "April", "May", "June"];
+  const currentFiscalIndex = fiscalMonths.indexOf(slip.month);
+
   const fiscalStartMonth = 7; // July
   const fiscalEndMonth = 6;   // June
 
@@ -198,18 +203,45 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   }
 
   const effectiveStart = (joiningDate && joiningDate > fiscalStart) ? joiningDate : fiscalStart;
-  const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
 
-  let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
-  if (monthsRemaining < 1) monthsRemaining = 1;
+  // Total tenure months in this fiscal year (Joining or July to June)
+  const tenureFiscalEnd = new Date(fiscalStart.getFullYear() + 1, 5, 30);
+  const tenureMonths = (tenureFiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
+    (tenureFiscalEnd.getMonth() - effectiveStart.getMonth()) + 1;
 
-  const annualTaxable = taxableMonthly * monthsRemaining;
+  // Remaining months in fiscal year (including current)
+  const remainingProjectedMonths = 12 - currentFiscalIndex;
+
+  // Past slips taxable sum
+  let sumPastTaxable = 0;
+  if (currentFiscalIndex > 0) {
+    const pastMonthsNames = fiscalMonths.slice(0, currentFiscalIndex);
+    const pastSlips = await SalarySlip.find({
+      employee: slip.employee?._id || slip.employee,
+      owner: slip.owner,
+      $or: pastMonthsNames.map(m => {
+        const mIdx = monthOrder.indexOf(m);
+        const y = (mIdx >= 6) ? fiscalStart.getFullYear() : (fiscalStart.getFullYear() + 1);
+        return { month: m, year: String(y) };
+      })
+    });
+    for (const ps of pastSlips) {
+      // Calculate taxable from slip (Gross)
+      let psGross = 0;
+      for (const k of ALLOWANCE_KEYS) {
+        psGross += await readFirstNumAsync(ps, [k]);
+      }
+      sumPastTaxable += psGross;
+    }
+  }
+
+  const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
   const annualTax = computeAnnualTaxBandOnly(
     annualTaxable,
     taxCfg?.slabs || []
   );
-  const monthlyTax = Math.round(annualTax / monthsRemaining);
+  const monthlyTax = tenureMonths > 0 ? Math.round(annualTax / tenureMonths) : 0;
 
   // 7) Final totals
   const totalDeductions = baseDeductionsMonthly + monthlyTax;
