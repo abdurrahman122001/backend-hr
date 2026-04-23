@@ -194,8 +194,6 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT
     ------------------------------------------------------------ */
-    const fiscalMonths = ["July", "August", "September", "October", "November", "December", "January", "February", "March", "April", "May", "June"];
-    const currentFiscalIndex = fiscalMonths.indexOf(slipMonth);
 
     // default fiscal year = July → June
     const fiscalStartMonth = 7; // July
@@ -206,11 +204,15 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       joiningDate = new Date(salarySlip.employee.joiningDate);
     }
 
+    const slipMonth = salarySlip.month;
     const slipYearNum = parseInt(salarySlip.year || new Date().getFullYear());
+
+    // Month name to index lookup
     const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const slipMonthIndex = monthNames.indexOf(slipMonth);
 
     const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
+
     // If slip month is Jan–Jun, fiscal year started last calendar year
     if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) {
       fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
@@ -219,39 +221,24 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const effectiveStart =
       joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
 
-    // Total tenure months in this fiscal year (Joining or July to June)
-    const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, 5, 30);
-    const tenureMonths = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
-      (fiscalEnd.getMonth() - effectiveStart.getMonth()) + 1;
+    // Calculate remaining months including the joining month
+    const fiscalEnd = new Date(
+      fiscalStart.getFullYear() + 1,
+      fiscalEndMonth - 1,
+      1
+    );
+    fiscalEnd.setMonth(fiscalEnd.getMonth() + 1); // move to next month for full-cycle calculation
 
-    // Months remaining from current slip month to June inclusive
-    const monthsRemaining = 12 - currentFiscalIndex;
+    let monthsRemaining =
+      (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
+      (fiscalEnd.getMonth() - effectiveStart.getMonth());
+
+    if (monthsRemaining < 1) monthsRemaining = 1; // Safety
 
     /* ------------------------------------------------------------
-       5) Annual Taxable Income Using Past Slips & Remaining Months
+       5) Annual Taxable Income Using Remaining Months & Past Slips
     ------------------------------------------------------------ */
-    let sumPastTaxable = 0;
-    let pastMonthsCount = 0;
-
-    if (currentFiscalIndex > 0) {
-      const pastFiscalMonths = fiscalMonths.slice(0, currentFiscalIndex);
-      const pastSlips = await SalarySlip.find({
-        employee: salarySlip.employee?._id || salarySlip.employee,
-        owner: salarySlip.owner,
-        $or: pastFiscalMonths.map(m => {
-          const mIdx = monthNames.indexOf(m);
-          const y = (mIdx >= 6) ? fiscalStart.getFullYear() : (fiscalStart.getFullYear() + 1);
-          return { month: m, year: String(y) };
-        })
-      });
-
-      for (const ps of pastSlips) {
-        sumPastTaxable += await calculateTaxableFromSlip(ps, salarySlip.salaryKey);
-        pastMonthsCount++;
-      }
-    }
-
-    const annualTaxable = sumPastTaxable + (taxableMonthly * monthsRemaining);
+    const annualTaxable = taxableMonthly * monthsRemaining;
 
     /* ------------------------------------------------------------
        6) Slab Calculation (annual)
@@ -261,8 +248,8 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       taxCfg?.slabs || []
     );
 
-    // DIVIDE TOTAL ANNUAL TAX BY TENURE MONTHS
-    const monthlyTax = tenureMonths > 0 ? Math.round(annualTax / tenureMonths) : 0;
+    // NOW DIVIDE TAX BASED ON REMAINING MONTHS (NOT 12)
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
 
     /* ------------------------------------------------------------
        7) Allowances & Net Payable
@@ -1213,9 +1200,6 @@ exports.calculatePreviewTax = async (req, res) => {
     // Since we already have the monthly taxable, we just need to annualize it.
     // Let's reuse the logic from calculateTaxForSalarySlip but with our values.
     
-    const fiscalMonths = ["July", "August", "September", "October", "November", "December", "January", "February", "March", "April", "May", "June"];
-    const currentFiscalIndex = fiscalMonths.indexOf(month);
-
     const fiscalStartMonth = 7;
     const fiscalEndMonth = 6;
     const joiningDate = employee.joiningDate ? new Date(employee.joiningDate) : null;
@@ -1228,42 +1212,18 @@ exports.calculatePreviewTax = async (req, res) => {
       fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
     }
     const effectiveStart = joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
+    const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
 
-    // Tenure Months (Joining/July to June)
-    const tenureFiscalEnd = new Date(fiscalStart.getFullYear() + 1, 5, 30);
-    const tenureMonths = (tenureFiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 +
-      (tenureFiscalEnd.getMonth() - effectiveStart.getMonth()) + 1;
+    let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
+    if (monthsRemaining < 1) monthsRemaining = 1;
 
-    // Remaining months in fiscal year (including current)
-    const remainingProjectedMonths = 12 - currentFiscalIndex;
-
-    // Past slips taxable sum
-    let sumPastTaxable = 0;
-    let pastMonthsCount = 0;
-    if (currentFiscalIndex > 0) {
-      const pastMonthsNames = fiscalMonths.slice(0, currentFiscalIndex);
-      const pastSlips = await SalarySlip.find({
-        employee: employee._id,
-        owner: req.user._id,
-        $or: pastMonthsNames.map(m => {
-          const mIdx = monthNames.indexOf(m);
-          const y = (mIdx >= 6) ? fiscalStart.getFullYear() : (fiscalStart.getFullYear() + 1);
-          return { month: m, year: String(y) };
-        })
-      });
-      for (const ps of pastSlips) {
-        sumPastTaxable += await calculateTaxableFromSlip(ps, employee.salaryKey);
-        pastMonthsCount++;
-      }
-    }
-
-    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
+    const annualTaxable = taxableMonthly * monthsRemaining;
 
     const annualTax = computeAnnualTaxBandOnly(
       annualTaxable,
       taxCfg?.slabs || []
     );
-    const monthlyTax = tenureMonths > 0 ? Math.round(annualTax / tenureMonths) : 0;
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
 
     res.json({
       status: "success",
@@ -1275,10 +1235,7 @@ exports.calculatePreviewTax = async (req, res) => {
         annualTaxable,
         annualTax,
         monthlyTax,
-        tenureMonths,
-        sumPastTaxable,
-        pastMonthsCount,
-        remainingProjectedMonths
+        monthsRemaining,
       }
     });
 
