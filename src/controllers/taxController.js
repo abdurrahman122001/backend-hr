@@ -150,10 +150,24 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 
 async function calculateTaxableMonthlyOnly(slip, taxCfg) {
   let grossMonthly = 0;
+  const ALLOWANCE_KEYS = ["basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance", "medicalAllowance", "utilityAllowance", "autoAllowance", "fuelAllowance", "dislocationAllowance", "overtimeCompensation", "leaveEncashment", "bonus", "arrears", "incentive", "othersAllowances", "loanBenefits"];
   for (const key of ALLOWANCE_KEYS) {
     grossMonthly += await readFirstNumAsync(slip, [key]);
   }
-  return grossMonthly;
+
+  // Deduct leave/late/loan to get net salary
+  const DED_KEYS = ["leaveDeductions", "lateDeductions", "otherLoanDeductions", "vehicleLoanDeduction", "advanceSalaryDeductions"];
+  let totalDed = 0;
+  for (const key of DED_KEYS) {
+    totalDed += await readFirstNumAsync(slip, [key]);
+  }
+  const netSalary = Math.max(0, grossMonthly - totalDed);
+
+  // Dynamic Medical Allowance = Net Salary / 110 * 10
+  const calculatedMedical = Math.round(netSalary / 110 * 10);
+
+  // Taxable = Net Salary - Calculated Medical
+  return Math.max(0, netSalary - calculatedMedical);
 }
 
 /* ---------------------- slip calculation (async) ---------------------- */
