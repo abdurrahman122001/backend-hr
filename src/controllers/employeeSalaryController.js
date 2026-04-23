@@ -1156,3 +1156,141 @@ exports.getAllMasterSalaries = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * POST /api/employee-salary/calc-preview
+ * Body: {
+ *   employeeId,
+ *   month,
+ *   year,
+ *   allowances: { ... },
+ *   deductions: { ... }
+ * }
+ */
+exports.calculatePreviewTax = async (req, res) => {
+  try {
+    const { employeeId, month, year, allowances = {}, deductions = {} } = req.body;
+
+    if (!employeeId || !month || !year) {
+      return res.status(400).json({ error: "Missing required fields: employeeId, month, year" });
+    }
+
+    const employee = await Employee.findById(employeeId);
+    if (!employee) {
+      return res.status(404).json({ error: "Employee not found" });
+    }
+
+    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    if (!taxCfg) {
+      return res.status(404).json({ error: "Tax configuration not found for 2025-26" });
+    }
+
+    // Combine all allowances to get total gross (as defined by user: sum of all components)
+    // We assume the incoming allowances object contains all parts
+    let grossSalary = 0;
+    for (const key in allowances) {
+      grossSalary += toNum(allowances[key]);
+    }
+
+    // Net Salary for Tax = Gross - (Leave + Late + Loan Deductions)
+    const DED_KEYS_FOR_NET = ["leaveDeductions", "lateDeductions", "otherLoanDeductions",
+      "vehicleLoanDeduction", "advanceSalaryDeductions"];
+    
+    let taxNetDeductions = 0;
+    for (const key of DED_KEYS_FOR_NET) {
+      taxNetDeductions += toNum(deductions[key]);
+    }
+
+    const netSalary = Math.max(0, grossSalary - taxNetDeductions);
+
+    // Dynamic Medical Allowance = Net Salary / 110 * 10
+    const calculatedMedical = Math.round(netSalary / 110 * 10);
+
+    // Taxable Monthly = Net Salary - Calculated Medical
+    const taxableMonthly = Math.max(0, netSalary - calculatedMedical);
+
+    // Create a dummy slip object to pass to the existing tax logic
+    const dummySlip = {
+      employee: employee,
+      owner: req.user._id,
+      month,
+      year,
+      // We need to provide the taxableMonthly to the annualization logic
+      // But calculateTaxForSalarySlip normally reads from the slip fields.
+      // So let's mock the read functions or just perform the logic here since we have it.
+    };
+
+    // Since we already have the monthly taxable, we just need to annualize it.
+    // Let's reuse the logic from calculateTaxForSalarySlip but with our values.
+    
+    const fiscalStartMonth = 7;
+    const fiscalEndMonth = 6;
+    const joiningDate = employee.joiningDate ? new Date(employee.joiningDate) : null;
+    const slipYearNum = parseInt(year);
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const slipMonthIndex = monthNames.indexOf(month);
+
+    const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
+    if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) {
+      fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
+    }
+    const effectiveStart = joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
+    const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
+
+    let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
+    if (monthsRemaining < 1) monthsRemaining = 1;
+
+    // Sum past taxable from existing slips
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: req.user._id
+    }).lean();
+
+    const pastFiscalSlips = allSlipsInYear.filter(s => {
+      const sMonthIndex = monthNames.indexOf(s.month);
+      const sYearNum = parseInt(s.year);
+      const sDate = new Date(sYearNum, sMonthIndex, 1);
+      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
+      return sDate >= fiscalStart && sDate < currentSlipDate;
+    });
+
+    let sumPastTaxable = 0;
+    // For simplicity in the preview, we'll assume past slips are correct.
+    // In a real scenario, we might need to decrypt them.
+    for (const ps of pastFiscalSlips) {
+      // Use the helper to get taxable from past slips
+      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
+    }
+
+    const monthsAlreadyCovered = pastFiscalSlips.length;
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
+
+    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
+
+    const annualTax = computeAnnualTaxBandOnly(
+      annualTaxable,
+      taxCfg?.slabs || []
+    );
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
+
+    res.json({
+      status: "success",
+      calculation: {
+        grossSalary,
+        netSalaryForTax: netSalary,
+        medicalAllowance: calculatedMedical,
+        taxableMonthly,
+        annualTaxable,
+        annualTax,
+        monthlyTax,
+        monthsRemaining,
+        sumPastTaxable,
+        pastMonthsCount: monthsAlreadyCovered
+      }
+    });
+
+  } catch (err) {
+    console.error("Error in calculatePreviewTax:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
