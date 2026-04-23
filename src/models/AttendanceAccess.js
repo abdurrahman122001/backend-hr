@@ -1,11 +1,6 @@
 // backend/src/models/AttendanceAccess.js
 const { Schema, model } = require('mongoose');
 
-/**
- * AttendanceAccess
- * Grants an employee the ability to view or edit attendance records
- * on behalf of the admin, without needing admin credentials.
- */
 const AttendanceAccessSchema = new Schema(
     {
         owner: {

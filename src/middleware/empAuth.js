@@ -34,20 +34,30 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     // Verify token
     const payload = jwt.verify(token, JWT_SECRET);
     // Fetch employee with permissions
-    const emp = await Employee.findById(payload.id).select(
+    let emp = await Employee.findById(payload.id).select(
       "_id role companyEmail name owner department permissions joiningDate"
     );
+    let isAdminUser = false;
 
     if (!emp) {
-      console.warn("🔐 [EmpAuth] Employee not found for ID", payload.id);
-      return res
-        .status(401)
-        .json({ status: "error", message: "Unauthorized: employee not found" });
+      // Fallback: Check if it's an Admin/HR User
+      const User = require("../models/Users");
+      const user = await User.findById(payload.id).select("_id role name email companyEmail owner");
+      
+      if (user) {
+        emp = user;
+        isAdminUser = true;
+      } else {
+        console.warn("🔐 [EmpAuth] Subject not found for ID", payload.id);
+        return res
+          .status(401)
+          .json({ status: "error", message: "Unauthorized: user/employee not found" });
+      }
     }
 
-    // 🔹 Session Check: Ensure session is active for today
+    // 🔹 Session Check: Ensure session is active for today (Only for employees)
     const isExempted = req.path === "/reactivate-session" || req.path === "/logout";
-    if (!isExempted) {
+    if (!isExempted && !isAdminUser) {
       // First, try to find an active session
       let session = await EmployeeSession.findOne({
         employeeId: emp._id,
@@ -84,10 +94,11 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     req.employee = {
       _id: emp._id,
       role: emp.role,
-      companyEmail: emp.companyEmail,
+      companyEmail: emp.companyEmail || emp.email,
       name: emp.name,
-      owner: emp.owner,
+      owner: emp.owner || emp.createdBy || emp._id,
       department: emp.department,
+      designation: emp.designation,
       permissions: emp.permissions || {},
       joiningDate: emp.joiningDate,
     };

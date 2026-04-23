@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const User = require("../models/Users");
 const Employee = require("../models/Employees");
 const PayrollAccess = require("../models/PayrollAccess");
+const AttendanceAccess = require("../models/AttendanceAccess");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -52,18 +53,16 @@ module.exports = async function anyPayrollAuth(req, res, next) {
                 isEmployee: false
             };
             return next();
-        }
-
-        // 2. Check if it's an Employee
+        }        // 2. Check if it's an Employee
         const employee = await Employee.findById(userId).select(
             "_id role owner name companyEmail"
         );
 
         if (employee) {
-            // Fix: Handle owner as array if necessary
             const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
+            
+            // Allow GET for all employees (viewing basic context)
             if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
-                // GET requests are allowed for all employees - they're just viewing attendance/payroll config
                 req.user = {
                     _id: finalOwner,
                     employeeId: employee._id,
@@ -71,64 +70,51 @@ module.exports = async function anyPayrollAuth(req, res, next) {
                     role: "employee",
                     isAdmin: false,
                     isEmployee: true,
-                    isDelegated: false,
-                    isPayrollDelegated: false,
-                    accessType: "view", // Read-only for non-delegated employees
-                    payrollScope: [],
+                    accessType: "view",
                 };
                 return next();
             }
 
-            // For write operations (POST, PATCH, PUT, DELETE), check PayrollAccess
-            const grant = await PayrollAccess.findOne({
-                owner: finalOwner,
-                grantedTo: employee._id,
-                active: true,
-            });
+            // For write operations, check BOTH Payroll and Attendance access
+            const [payrollGrant, attendanceGrant] = await Promise.all([
+                PayrollAccess.findOne({ owner: finalOwner, grantedTo: employee._id, active: true }),
+                AttendanceAccess.findOne({ owner: finalOwner, grantedTo: employee._id, active: true })
+            ]);
 
-            if (!grant) {
-                console.warn(`[AnyPayrollAuth] No active PayrollAccess grant found for employee: ${employee._id}`);
-                // 🔥 CRITICAL FIX: Allow write operations if user is HR/Admin-delegated without PayrollAccess
-                // Check if employee has HR role - they might have direct permissions
-                if (employee.role && (employee.role.toLowerCase().includes("hr") || employee.role.toLowerCase().includes("admin"))) {
-                    req.user = {
-                        _id: finalOwner,
-                        employeeId: employee._id,
-                        owner: finalOwner,
-                        role: employee.role,
-                        isAdmin: true,
-                        isEmployee: true,
-                        isDelegated: false,
-                        isPayrollDelegated: false,
-                        accessType: "edit",
-                        payrollScope: [],
-                    };
-                    return next();
-                }
-                return res.status(403).json({ message: "No payroll access granted" });
+            const hasPayrollEdit = payrollGrant?.accessType === "edit";
+            const hasAttendanceEdit = attendanceGrant?.accessType === "edit";
+            
+            // If it's an attendance-related route, AttendanceAccess is sufficient
+            const isAttendanceRoute = req.originalUrl.includes("attendance") || req.originalUrl.includes("non-working-days");
+            
+            let canEdit = false;
+            if (isAttendanceRoute) {
+                canEdit = hasAttendanceEdit || hasPayrollEdit;
+            } else {
+                canEdit = hasPayrollEdit;
             }
 
-            // Check if method requires 'edit' access
-            if (
-                ["POST", "PATCH", "PUT", "DELETE"].includes(req.method) &&
-                grant.accessType === "view"
-            ) {
-                console.warn(`[AnyPayrollAuth] Insufficient permissions: ${req.method} requested but grant is view-only`);
-                return res.status(403).json({ message: "Insufficient permissions (View Only)" });
+            if (!canEdit && ["POST", "PATCH", "PUT", "DELETE"].includes(req.method)) {
+                // If they have a grant but it's view-only
+                if (payrollGrant || attendanceGrant) {
+                    console.warn(`[AnyPayrollAuth] Insufficient permissions for ${employee.companyEmail} on ${req.originalUrl}`);
+                    return res.status(403).json({ message: "Insufficient permissions (View Only)" });
+                }
+                return res.status(403).json({ message: "No delegated access granted" });
             }
 
             // Allow access as a delegated employee
             req.user = {
-                _id: finalOwner, // Crucial for controllers to use this as company ID
+                _id: finalOwner,
                 employeeId: employee._id,
                 owner: finalOwner,
                 role: "delegated-employee",
                 isAdmin: false,
                 isEmployee: true,
                 isDelegated: true,
-                isPayrollDelegated: true,
-                accessType: grant.accessType,
-                payrollScope: grant.scope || [], // [] = ALL
+                accessType: canEdit ? "edit" : "view",
+                payrollScope: payrollGrant?.scope || [],
+                attendanceScope: attendanceGrant?.scope || [],
             };
             return next();
         }
