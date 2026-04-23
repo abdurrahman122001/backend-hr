@@ -235,10 +235,38 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
 
     if (monthsRemaining < 1) monthsRemaining = 1; // Safety
 
-    /* ------------------------------------------------------------
-       5) Annual Taxable Income Using Remaining Months & Past Slips
-    ------------------------------------------------------------ */
-    const annualTaxable = taxableMonthly * monthsRemaining;
+    // NEW: Sum actual gross from previous slips in the same fiscal year
+    // If a slip is missing for a month in the tenure, use the current month's salary as fallback
+    const employeeId = salarySlip.employee?._id || salarySlip.employee;
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: salarySlip.owner
+    }).lean();
+
+    let totalTenureTaxable = 0;
+    let tempDate = new Date(effectiveStart.getFullYear(), effectiveStart.getMonth(), 1);
+    const currentDate = new Date(slipYearNum, slipMonthIndex, 1);
+
+    while (tempDate < fiscalEnd) {
+      if (tempDate < currentDate) {
+        const mName = monthNames[tempDate.getMonth()];
+        const yStr = tempDate.getFullYear().toString();
+        const existing = allSlipsInYear.find(s => s.month === mName && s.year === yStr);
+        
+        if (existing) {
+          totalTenureTaxable += await getTaxableMonthlyOnly(existing, taxCfg);
+        } else {
+          // FALLBACK: Use current month's taxable if history is missing
+          totalTenureTaxable += taxableMonthly;
+        }
+      } else {
+        // Current and Future months
+        totalTenureTaxable += taxableMonthly;
+      }
+      tempDate.setMonth(tempDate.getMonth() + 1);
+    }
+
+    const annualTaxable = totalTenureTaxable;
 
     /* ------------------------------------------------------------
        6) Slab Calculation (annual)
@@ -1217,7 +1245,50 @@ exports.calculatePreviewTax = async (req, res) => {
     let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
     if (monthsRemaining < 1) monthsRemaining = 1;
 
-    const annualTaxable = taxableMonthly * monthsRemaining;
+    // NEW: Sum actual taxable from previous slips in the same fiscal year
+    // If a slip is missing for a month in the tenure, use the current month's salary as fallback
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: req.user._id
+    }).lean();
+
+    let totalTenureTaxable = 0;
+    let tenureBreakdown = [];
+    let tempDate = new Date(effectiveStart.getFullYear(), effectiveStart.getMonth(), 1);
+    const currentDate = new Date(slipYearNum, slipMonthIndex, 1);
+
+    while (tempDate < fiscalEnd) {
+      const mName = monthNames[tempDate.getMonth()];
+      const yStr = tempDate.getFullYear().toString();
+      let taxableVal = 0;
+      let isFallback = false;
+
+      if (tempDate < currentDate) {
+        const existing = allSlipsInYear.find(s => s.month === mName && s.year === yStr);
+        if (existing) {
+          taxableVal = await getTaxableMonthlyOnly(existing, taxCfg);
+        } else {
+          // FALLBACK: Use current month's taxable if history is missing
+          taxableVal = taxableMonthly;
+          isFallback = true;
+        }
+      } else {
+        // Current and Future months
+        taxableVal = taxableMonthly;
+      }
+
+      totalTenureTaxable += taxableVal;
+      tenureBreakdown.push({
+        month: mName,
+        year: yStr,
+        taxable: taxableVal,
+        isFallback
+      });
+
+      tempDate.setMonth(tempDate.getMonth() + 1);
+    }
+
+    const annualTaxable = totalTenureTaxable;
 
     const annualTax = computeAnnualTaxBandOnly(
       annualTaxable,
@@ -1236,6 +1307,7 @@ exports.calculatePreviewTax = async (req, res) => {
         annualTax,
         monthlyTax,
         monthsRemaining,
+        tenureBreakdown
       }
     });
 
