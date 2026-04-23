@@ -131,49 +131,43 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
-  let grossMonthly = 0;
+  // Net Salary = Basic + Conveyance + Incentive + Medical Allowance (from DB)
+  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
+  let netSalary = 0;
   for (const key of GROSS_KEYS) {
-    grossMonthly += await readFirstNumAsync(salarySlip, [key]);
+    netSalary += await readFirstNumAsync(salarySlip, [key]);
   }
-  return grossMonthly;
+  // Medical Allowance = Net Salary / 110 * 10 (calculated, not from DB)
+  const calculatedMedical = Math.round(netSalary / 110 * 10);
+  // Taxable = Net Salary - Calculated Medical Allowance
+  const taxableMonthly = netSalary - calculatedMedical;
+  return taxableMonthly;
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    // 1) Gross Monthly Salary = Basic + Conveyance + Incentive (per policy)
-    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
-    let grossMonthly = 0;
-    for (const key of GROSS_KEYS) {
-      grossMonthly += await readFirstNumAsync(salarySlip, [key]);
+    // 1) Net Monthly Salary = Basic + Conveyance + Incentive + Medical Allowance (from DB)
+    const NET_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
+    let netSalary = 0;
+    for (const key of NET_KEYS) {
+      netSalary += await readFirstNumAsync(salarySlip, [key]);
     }
-
-    // finalGrossMonthly is always basic + conveyance + incentive (ignore any stored grossSalary)
-    const finalGrossMonthly = grossMonthly;
 
     const basic = await readFirstNumAsync(salarySlip, ["basic"]);
     const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
     const incentive = await readFirstNumAsync(salarySlip, ["incentive"]);
-    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
 
-    // Calculate other deductions (non-tax, non-loan repayments) to get the "net" base
-    const deductionKeys = [
-      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
-      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
-      "lifeInsurance", "penalties", "othersDeductions"
-    ];
-    let baseDeductionsMonthly = 0;
-    for (const dKey of deductionKeys) {
-      baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
-    }
+    // 2) Calculate Medical Allowance: Net Salary / 110 * 10
+    const calculatedMedical = Math.round(netSalary / 110 * 10);
 
-    const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
+    // finalGrossMonthly = Net Salary (for gross salary display purposes)
+    const finalGrossMonthly = netSalary;
 
     /* ------------------------------------------------------------
-       3) TAXABLE MONTHLY INCOME = Basic + Conveyance + Incentive
+       3) TAXABLE MONTHLY INCOME = Net Salary - Calculated Medical Allowance
     ------------------------------------------------------------ */
-    const taxableMonthly = finalGrossMonthly;
-    const medExemptMonthly = 0; // Medical exemption not applicable as per fixed gross rule
+    const taxableMonthly = netSalary - calculatedMedical;
+    const medExemptMonthly = calculatedMedical; // Calculated medical is the exemption
 
     /* ------------------------------------------------------------
        4) JOINING DATE BASED MONTH COUNT
