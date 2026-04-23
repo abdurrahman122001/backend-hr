@@ -131,13 +131,12 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  // Net salary INCLUDING medical allowance for tax base
+  // Use Basic + Conveyance + Incentive + Medical - Deductions as the base for slab selection
   const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
   let grossMonthly = 0;
   for (const key of GROSS_KEYS) {
     grossMonthly += await readFirstNumAsync(salarySlip, [key]);
   }
-  // Subtract deductions
   const deductionKeys = [
     "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
     "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
@@ -147,21 +146,17 @@ async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
   for (const dKey of deductionKeys) {
     deductions += await readFirstNumAsync(salarySlip, [dKey]);
   }
-  const netIncludingMedical = Math.max(0, grossMonthly - deductions);
-  // Tax = net / 110 * 10
-  return Math.round(netIncludingMedical / 110 * 10);
+  return Math.max(0, grossMonthly - deductions);
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    // 1) Gross = Basic + Conveyance + Incentive + Medical
     const basic      = await readFirstNumAsync(salarySlip, ["basic"]);
     const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
     const incentive  = await readFirstNumAsync(salarySlip, ["incentive"]);
     const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
     const fullGross  = basic + conveyance + incentive + medMonthly;
 
-    // 2) Deductions (leave, late, EOBI, etc.)
     const deductionKeys = [
       "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
       "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
@@ -172,31 +167,79 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
     }
 
-    // 3) Net salary INCLUDING medical allowance
-    const netIncludingMedical = Math.max(0, fullGross - baseDeductionsMonthly);
+    // This is the "Net Salary" used in the spreadsheet formula (D30)
+    const monthlyNetBeforeTax = Math.max(0, fullGross - baseDeductionsMonthly);
 
-    // 4) Tax = net / 110 * 10
-    const monthlyTax = Math.round(netIncludingMedical / 110 * 10);
+    /* --- Annual Projection to find Slab --- */
+    const fiscalStartMonth = 7; // July
+    const fiscalEndMonth = 6; // June
+    let joiningDate = null;
+    if (salarySlip?.employee?.joiningDate) joiningDate = new Date(salarySlip.employee.joiningDate);
+    
+    const slipMonth = salarySlip.month;
+    const slipYearNum = parseInt(salarySlip.year || new Date().getFullYear());
+    const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const slipMonthIndex = monthNames.indexOf(slipMonth);
+    const fiscalStart = new Date(slipYearNum, fiscalStartMonth - 1, 1);
+    if (slipMonthIndex !== -1 && slipMonthIndex + 1 <= fiscalEndMonth) fiscalStart.setFullYear(fiscalStart.getFullYear() - 1);
 
-    // 5) Net payable = full gross - all deductions - tax
-    const leaveDeductions  = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
-    const totalAllowances  = fullGross - basic;
-    const totalDeductions  = monthlyTax + leaveDeductions;
-    const netPayable       = Math.max(0, fullGross - baseDeductionsMonthly - monthlyTax);
-    const finalGrossMonthly = basic + conveyance + incentive; // without medical (for display)
+    const effectiveStart = joiningDate && joiningDate > fiscalStart ? joiningDate : fiscalStart;
+    const fiscalEnd = new Date(fiscalStart.getFullYear() + 1, fiscalEndMonth, 1);
+    let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
+    if (monthsRemaining < 1) monthsRemaining = 1;
+
+    // Sum past slips
+    const employeeId = salarySlip.employee?._id || salarySlip.employee;
+    const allSlipsInYear = await SalarySlip.find({ employee: employeeId, owner: salarySlip.owner }).lean();
+    const pastFiscalSlips = allSlipsInYear.filter(s => {
+      const sMonthIndex = monthNames.indexOf(s.month);
+      const sDate = new Date(parseInt(s.year), sMonthIndex, 1);
+      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
+      return sDate >= fiscalStart && sDate < currentSlipDate;
+    });
+
+    let sumPastTaxable = 0;
+    for (const ps of pastFiscalSlips) {
+      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
+    }
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - pastFiscalSlips.length);
+    const annualTaxable = sumPastTaxable + (monthlyNetBeforeTax * remainingProjectedMonths);
+
+    /* --- Find Slab Rate --- */
+    const slabs = (taxCfg?.slabs || [])
+      .map(s => ({ from: toNum(s.from), to: s.to == null ? Infinity : toNum(s.to), rate: toNum(s.rateOver) }))
+      .sort((a, b) => a.from - b.from);
+
+    let activeRate = 0;
+    for (const s of slabs) {
+      if (annualTaxable >= s.from && annualTaxable <= s.to) {
+        activeRate = s.rate;
+        break;
+      }
+    }
+    if (activeRate === 0 && slabs.length > 0 && annualTaxable > slabs[slabs.length - 1].from) {
+      activeRate = slabs[slabs.length - 1].rate;
+    }
+
+    // --- Final Tax Formula: Net / (100 + Rate) * Rate ---
+    // If rate is 10%, formula is Net / 110 * 10
+    const monthlyTax = Math.round((monthlyNetBeforeTax / (100 + activeRate)) * activeRate);
+
+    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
+    const netPayable = Math.max(0, fullGross - baseDeductionsMonthly - monthlyTax);
 
     return {
-      grossMonthly: finalGrossMonthly,
-      annualGross: finalGrossMonthly * 12,
+      grossMonthly: basic + conveyance + incentive,
+      annualGross: (basic + conveyance + incentive) * 12,
       medExemptMonthly: medMonthly,
-      taxableMonthly: netIncludingMedical,
-      monthsRemaining: 12,
-      annualTaxable: netIncludingMedical * 12,
-      annualTax: monthlyTax * 12,
+      taxableMonthly: monthlyNetBeforeTax,
+      monthsRemaining,
+      annualTaxable,
+      annualTax: monthlyTax * monthsRemaining,
       monthlyTax,
       leaveDeductions,
-      totalAllowances,
-      totalDeductions,
+      totalAllowances: fullGross - basic,
+      totalDeductions: monthlyTax + leaveDeductions,
       netPayable,
     };
   } catch (error) {
