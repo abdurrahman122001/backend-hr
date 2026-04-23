@@ -113,6 +113,29 @@ const BASE_DEDUCTION_KEYS = [
 ];
 
 /* -------------------------- tax math (band) -------------------------- */
+async function calculateTaxableMonthlyOnly(slip, taxCfg) {
+  // Gross = sum of all allowance fields
+  const ALL_ALLOWANCE_KEYS = [
+    "basic", "conveyanceAllowance", "incentive", "medicalAllowance",
+    "dearnessAllowance", "houseRentAllowance", "utilityAllowance", "autoAllowance",
+    "fuelAllowance", "dislocationAllowance", "bonus", "arrears", "othersAllowances"
+  ];
+  let gross = 0;
+  for (const key of ALL_ALLOWANCE_KEYS) {
+    gross += await readFirstNumAsync(slip, [key]);
+  }
+  // Deduct leave/late/loan to get net salary
+  const DED_KEYS = ["leaveDeductions", "lateDeductions", "otherLoanDeductions",
+    "vehicleLoanDeduction", "advanceSalaryDeductions"];
+  let ded = 0;
+  for (const key of DED_KEYS) {
+    ded += await readFirstNumAsync(slip, [key]);
+  }
+  const net = Math.max(0, gross - ded);
+  const med = Math.round(net / 110 * 10);
+  return net - med;
+}
+
 function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
   const A = Math.max(0, toNum(annualTaxable));
 
