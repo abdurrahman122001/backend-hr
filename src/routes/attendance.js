@@ -24,7 +24,7 @@ const attendanceAuth = require('../middleware/attendanceAuth');
 
 router.get('/challenges', async (req, res) => {
   try {
-    const query = { challengeStatus: { $ne: 'None' } };
+    const query = { challengeStatus: { $in: ['Pending', 'Approved', 'Rejected'] } };
     const ownerId = req.user.owner || req.user._id;
 
     // Apply scope if delegated
@@ -38,7 +38,8 @@ router.get('/challenges', async (req, res) => {
       .populate('employee', 'name email companyEmail designation department')
       .sort({ challengeAt: -1 });
 
-    res.json(challenges);
+    // Filter out any records whose employee was deleted (populate returns null)
+    res.json(challenges.filter(c => c.employee != null));
   } catch (err) {
     console.error('Fetch challenges failed:', err);
     res.status(500).json({ error: 'Failed to fetch challenges' });
