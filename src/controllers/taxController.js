@@ -150,24 +150,10 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 
 async function calculateTaxableMonthlyOnly(slip, taxCfg) {
   let grossMonthly = 0;
-  const ALLOWANCE_KEYS = ["basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance", "medicalAllowance", "utilityAllowance", "autoAllowance", "fuelAllowance", "dislocationAllowance", "overtimeCompensation", "leaveEncashment", "bonus", "arrears", "incentive", "othersAllowances", "loanBenefits"];
   for (const key of ALLOWANCE_KEYS) {
     grossMonthly += await readFirstNumAsync(slip, [key]);
   }
-
-  // Deduct leave/late/loan to get net salary
-  const DED_KEYS = ["leaveDeductions", "lateDeductions", "otherLoanDeductions", "vehicleLoanDeduction", "advanceSalaryDeductions"];
-  let totalDed = 0;
-  for (const key of DED_KEYS) {
-    totalDed += await readFirstNumAsync(slip, [key]);
-  }
-  const netSalary = Math.max(0, grossMonthly - totalDed);
-
-  // Dynamic Medical Allowance = Net Salary / 110 * 10
-  const calculatedMedical = Math.round(netSalary / 110 * 10);
-
-  // Taxable = Net Salary - Calculated Medical
-  return Math.max(0, netSalary - calculatedMedical);
+  return grossMonthly;
 }
 
 /* ---------------------- slip calculation (async) ---------------------- */
@@ -217,31 +203,7 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
   if (monthsRemaining < 1) monthsRemaining = 1;
 
-  // 6.2) Annualize + compute band-only tax using remaining months
-  // NEW: Sum actual gross from previous slips in the same fiscal year
-  const employeeId = slip.employee?._id || slip.employee;
-  const allSlipsInYear = await SalarySlip.find({
-    employee: employeeId,
-    owner: slip.owner
-  }).lean();
-
-  const pastFiscalSlips = allSlipsInYear.filter(s => {
-    const sMonthIndex = monthOrder.indexOf(s.month);
-    const sYearNum = parseInt(s.year);
-    const sDate = new Date(sYearNum, sMonthIndex, 1);
-    const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
-    return sDate >= fiscalStart && sDate < currentSlipDate;
-  });
-
-  let sumPastTaxable = 0;
-  for (const ps of pastFiscalSlips) {
-    sumPastTaxable += await calculateTaxableMonthlyOnly(ps, taxCfg);
-  }
-
-  const monthsAlreadyCovered = pastFiscalSlips.length;
-  const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
-
-  const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
+  const annualTaxable = taxableMonthly * monthsRemaining;
 
   const annualTax = computeAnnualTaxBandOnly(
     annualTaxable,

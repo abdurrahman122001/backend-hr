@@ -238,30 +238,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     /* ------------------------------------------------------------
        5) Annual Taxable Income Using Remaining Months & Past Slips
     ------------------------------------------------------------ */
-    // NEW: Sum actual gross from previous slips in the same fiscal year
-    const employeeId = salarySlip.employee?._id || salarySlip.employee;
-    const allSlipsInYear = await SalarySlip.find({
-      employee: employeeId,
-      owner: salarySlip.owner
-    }).lean();
-
-    const pastFiscalSlips = allSlipsInYear.filter(s => {
-      const sMonthIndex = monthNames.indexOf(s.month);
-      const sYearNum = parseInt(s.year);
-      const sDate = new Date(sYearNum, sMonthIndex, 1);
-      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
-      return sDate >= fiscalStart && sDate < currentSlipDate;
-    });
-
-    let sumPastTaxable = 0;
-    for (const ps of pastFiscalSlips) {
-      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
-    }
-
-    const monthsAlreadyCovered = pastFiscalSlips.length;
-    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
-
-    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
+    const annualTaxable = taxableMonthly * monthsRemaining;
 
     /* ------------------------------------------------------------
        6) Slab Calculation (annual)
@@ -271,7 +248,7 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       taxCfg?.slabs || []
     );
 
-    // NOW DIVIDE TAX BASED ON TOTAL TENURE MONTHS
+    // NOW DIVIDE TAX BASED ON REMAINING MONTHS (NOT 12)
     const monthlyTax = Math.round(annualTax / monthsRemaining);
 
     /* ------------------------------------------------------------
@@ -1240,32 +1217,7 @@ exports.calculatePreviewTax = async (req, res) => {
     let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
     if (monthsRemaining < 1) monthsRemaining = 1;
 
-    // NEW: Sum actual gross from previous slips in the same fiscal year
-    const allSlipsInYear = await SalarySlip.find({
-      employee: employee._id,
-      owner: req.user._id
-    }).lean();
-
-    const pastFiscalSlips = allSlipsInYear.filter(s => {
-      const sMonthIndex = monthNames.indexOf(s.month);
-      const sYearNum = parseInt(s.year);
-      const sDate = new Date(sYearNum, sMonthIndex, 1);
-      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
-      return sDate >= fiscalStart && sDate < currentSlipDate;
-    });
-
-    let sumPastTaxable = 0;
-    for (const ps of pastFiscalSlips) {
-      // For preview, we can use a simpler version of getTaxableMonthlyOnly or just re-calculate
-      // since we don't want to async-call too many things in a loop.
-      // But getTaxableMonthlyOnly is already optimized.
-      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
-    }
-
-    const monthsAlreadyCovered = pastFiscalSlips.length;
-    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
-
-    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
+    const annualTaxable = taxableMonthly * monthsRemaining;
 
     const annualTax = computeAnnualTaxBandOnly(
       annualTaxable,
