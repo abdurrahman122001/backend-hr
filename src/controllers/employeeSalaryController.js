@@ -131,44 +131,48 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
+  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
   let grossMonthly = 0;
   for (const key of GROSS_KEYS) {
     grossMonthly += await readFirstNumAsync(salarySlip, [key]);
   }
-  const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
-  const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
-  const lateDeductions = await readFirstNumAsync(salarySlip, ["lateDeductions"]);
-  
-  return Math.max(0, grossMonthly + loanBenefitTotal - leaveDeductions - lateDeductions);
+  return grossMonthly;
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    // 1) Gross Monthly Salary = Basic + Conveyance + Incentive + Medical (per policy update)
-    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
+    // 1) Gross Monthly Salary = Basic + Conveyance + Incentive (per policy)
+    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
     let grossMonthly = 0;
     for (const key of GROSS_KEYS) {
       grossMonthly += await readFirstNumAsync(salarySlip, [key]);
     }
 
-    const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
-    
-    // finalGrossMonthly includes basic + conveyance + incentive + medical + loan benefits
-    const finalGrossMonthly = grossMonthly + loanBenefitTotal;
+    // finalGrossMonthly is always basic + conveyance + incentive (ignore any stored grossSalary)
+    const finalGrossMonthly = grossMonthly;
 
     const basic = await readFirstNumAsync(salarySlip, ["basic"]);
+    const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
+    const incentive = await readFirstNumAsync(salarySlip, ["incentive"]);
     const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
 
-    // Calculate deductions that should be subtracted before tax calculation
-    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
-    const lateDeductions = await readFirstNumAsync(salarySlip, ["lateDeductions"]);
+    // Calculate other deductions (non-tax, non-loan repayments) to get the "net" base
+    const deductionKeys = [
+      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
+      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
+      "lifeInsurance", "penalties", "othersDeductions"
+    ];
+    let baseDeductionsMonthly = 0;
+    for (const dKey of deductionKeys) {
+      baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
+    }
+
+    const loanBenefitTotal = await readFirstNumAsync(salarySlip, ["loanBenefits"]);
 
     /* ------------------------------------------------------------
-       3) TAXABLE MONTHLY INCOME = Gross - Leave Deductions - Late Deductions
+       3) TAXABLE MONTHLY INCOME = Basic + Conveyance + Incentive
     ------------------------------------------------------------ */
-    // According to user request: Include medical allowance and use formula Base/110*10
-    const taxableMonthly = Math.max(0, finalGrossMonthly - leaveDeductions - lateDeductions);
+    const taxableMonthly = finalGrossMonthly;
     const medExemptMonthly = 0; // Medical exemption not applicable as per fixed gross rule
 
     /* ------------------------------------------------------------
@@ -244,30 +248,22 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     /* ------------------------------------------------------------
-       6) Tax Calculation using flat monthly formula (Base / 110 * 10)
+       6) Slab Calculation (annual)
     ------------------------------------------------------------ */
-    // According to user request: Tax = Base / 110 * 10
-    // Simplified to flat monthly as per observed dashboard values
-    const monthlyTax = Math.round((taxableMonthly / 110) * 10);
-    const annualTax = monthlyTax * monthsRemaining;
+    const annualTax = computeAnnualTaxBandOnly(
+      annualTaxable,
+      taxCfg?.slabs || []
+    );
+
+    // NOW DIVIDE TAX BASED ON REMAINING MONTHS (NOT 12)
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
 
     /* ------------------------------------------------------------
        7) Allowances & Net Payable
     ------------------------------------------------------------ */
-    // Sum ALL deductions to avoid disturbing other fields (EOBI, loan repayments, etc.)
-    const deductionKeys = [
-      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
-      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
-      "lifeInsurance", "penalties", "othersDeductions", "advanceSalaryDeduction",
-      "advanceSalaryDeductions"
-    ];
-    let otherDeductionsTotal = 0;
-    for (const dKey of deductionKeys) {
-      otherDeductionsTotal += await readFirstNumAsync(salarySlip, [dKey]);
-    }
-
+    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
     const totalAllowances = finalGrossMonthly - basic;
-    const totalDeductions = monthlyTax + otherDeductionsTotal;
+    const totalDeductions = monthlyTax + leaveDeductions;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
     return {
@@ -275,12 +271,11 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       annualGross: finalGrossMonthly * monthsRemaining,
       medExemptMonthly,
       taxableMonthly,
-      monthsRemaining, 
+      monthsRemaining, // <-- NEW FIELD (important)
       annualTaxable,
       annualTax,
       monthlyTax,
       leaveDeductions,
-      lateDeductions,
       totalAllowances,
       totalDeductions,
       netPayable,
