@@ -244,18 +244,30 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     /* ------------------------------------------------------------
-       6) Tax Calculation using formula (annualized)
+       6) Tax Calculation using flat monthly formula (Base / 110 * 10)
     ------------------------------------------------------------ */
     // According to user request: Tax = Base / 110 * 10
-    // Using current logic structure: Calculate annual tax and divide by monthsRemaining
-    const annualTax = Math.round((annualTaxable / 110) * 10);
-    const monthlyTax = Math.round(annualTax / monthsRemaining);
+    // Simplified to flat monthly as per observed dashboard values
+    const monthlyTax = Math.round((taxableMonthly / 110) * 10);
+    const annualTax = monthlyTax * monthsRemaining;
 
     /* ------------------------------------------------------------
        7) Allowances & Net Payable
     ------------------------------------------------------------ */
+    // Sum ALL deductions to avoid disturbing other fields (EOBI, loan repayments, etc.)
+    const deductionKeys = [
+      "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
+      "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
+      "lifeInsurance", "penalties", "othersDeductions", "advanceSalaryDeduction",
+      "advanceSalaryDeductions"
+    ];
+    let otherDeductionsTotal = 0;
+    for (const dKey of deductionKeys) {
+      otherDeductionsTotal += await readFirstNumAsync(salarySlip, [dKey]);
+    }
+
     const totalAllowances = finalGrossMonthly - basic;
-    const totalDeductions = monthlyTax + leaveDeductions + lateDeductions;
+    const totalDeductions = monthlyTax + otherDeductionsTotal;
     const netPayable = Math.max(0, finalGrossMonthly - totalDeductions);
 
     return {
