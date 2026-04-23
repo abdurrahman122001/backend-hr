@@ -244,11 +244,12 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
     const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     /* ------------------------------------------------------------
-       6) Tax Calculation using formula (taxable / 110 * 10)
+       6) Tax Calculation using formula (annualized)
     ------------------------------------------------------------ */
     // According to user request: Tax = Base / 110 * 10
-    const monthlyTax = Math.round((taxableMonthly / 110) * 10);
-    const annualTax = monthlyTax * monthsRemaining;
+    // Using current logic structure: Calculate annual tax and divide by monthsRemaining
+    const annualTax = Math.round((annualTaxable / 110) * 10);
+    const monthlyTax = Math.round(annualTax / monthsRemaining);
 
     /* ------------------------------------------------------------
        7) Allowances & Net Payable

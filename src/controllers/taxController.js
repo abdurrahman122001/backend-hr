@@ -236,8 +236,9 @@ async function calculateSlipWithTaxAsync(slip, taxCfg) {
   const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
   // According to user request: Tax = Base / 110 * 10
-  const monthlyTax = Math.round((taxableMonthly / 110) * 10);
-  const annualTax = monthlyTax * monthsRemaining;
+  // Using current logic structure: Calculate annual tax and divide by monthsRemaining
+  const annualTax = Math.round((annualTaxable / 110) * 10);
+  const monthlyTax = Math.round(annualTax / monthsRemaining);
 
   // 7) Final totals
   const totalDeductions = monthlyTax + leaveDeductions + lateDeductions;
