@@ -131,13 +131,13 @@ function computeAnnualTaxBandOnly(annualTaxable, rawSlabs = []) {
 }
 
 async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
-  // Net salary excluding medical allowance for tax base
-  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
+  // Net salary INCLUDING medical allowance for tax base
+  const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive", "medicalAllowance"];
   let grossMonthly = 0;
   for (const key of GROSS_KEYS) {
     grossMonthly += await readFirstNumAsync(salarySlip, [key]);
   }
-  // Subtract non-medical deductions
+  // Subtract deductions
   const deductionKeys = [
     "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
     "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
@@ -147,23 +147,21 @@ async function getTaxableMonthlyOnly(salarySlip, taxCfg) {
   for (const dKey of deductionKeys) {
     deductions += await readFirstNumAsync(salarySlip, [dKey]);
   }
-  const netExcludingMedical = Math.max(0, grossMonthly - deductions);
+  const netIncludingMedical = Math.max(0, grossMonthly - deductions);
   // Tax = net / 110 * 10
-  return Math.round(netExcludingMedical / 110 * 10);
+  return Math.round(netIncludingMedical / 110 * 10);
 }
 
 async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
   try {
-    // 1) Gross Monthly = Basic + Conveyance + Incentive (medical excluded from tax base)
-    const GROSS_KEYS = ["basic", "conveyanceAllowance", "incentive"];
-    let grossMonthly = 0;
-    for (const key of GROSS_KEYS) {
-      grossMonthly += await readFirstNumAsync(salarySlip, [key]);
-    }
-    const finalGrossMonthly = grossMonthly;
-    const basic = await readFirstNumAsync(salarySlip, ["basic"]);
+    // 1) Gross = Basic + Conveyance + Incentive + Medical
+    const basic      = await readFirstNumAsync(salarySlip, ["basic"]);
+    const conveyance = await readFirstNumAsync(salarySlip, ["conveyanceAllowance"]);
+    const incentive  = await readFirstNumAsync(salarySlip, ["incentive"]);
+    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
+    const fullGross  = basic + conveyance + incentive + medMonthly;
 
-    // 2) Other deductions (leave, late, EOBI, etc.) — medical allowance is NOT included
+    // 2) Deductions (leave, late, EOBI, etc.)
     const deductionKeys = [
       "leaveDeductions", "lateDeductions", "eobiDeduction", "sessiDeduction",
       "providentFundDeduction", "gratuityFundDeduction", "medicalInsurance",
@@ -174,28 +172,26 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
       baseDeductionsMonthly += await readFirstNumAsync(salarySlip, [dKey]);
     }
 
-    // 3) Net salary EXCLUDING medical allowance
-    const netExcludingMedical = Math.max(0, finalGrossMonthly - baseDeductionsMonthly);
+    // 3) Net salary INCLUDING medical allowance
+    const netIncludingMedical = Math.max(0, fullGross - baseDeductionsMonthly);
 
-    // 4) Tax = net / 110 * 10  (per business rule)
-    const monthlyTax = Math.round(netExcludingMedical / 110 * 10);
+    // 4) Tax = net / 110 * 10
+    const monthlyTax = Math.round(netIncludingMedical / 110 * 10);
 
-    // 5) Net payable (gross including medical, minus tax)
-    const medMonthly = await readFirstNumAsync(salarySlip, ["medicalAllowance"]);
-    const leaveDeductions = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
-    const totalAllowances = finalGrossMonthly + medMonthly - basic;
-    const totalDeductions = monthlyTax + leaveDeductions;
-    // Full net payable = gross (with medical) - all deductions - tax
-    const fullGross = finalGrossMonthly + medMonthly;
-    const netPayable = Math.max(0, fullGross - baseDeductionsMonthly - monthlyTax);
+    // 5) Net payable = full gross - all deductions - tax
+    const leaveDeductions  = await readFirstNumAsync(salarySlip, ["leaveDeductions"]);
+    const totalAllowances  = fullGross - basic;
+    const totalDeductions  = monthlyTax + leaveDeductions;
+    const netPayable       = Math.max(0, fullGross - baseDeductionsMonthly - monthlyTax);
+    const finalGrossMonthly = basic + conveyance + incentive; // without medical (for display)
 
     return {
       grossMonthly: finalGrossMonthly,
       annualGross: finalGrossMonthly * 12,
       medExemptMonthly: medMonthly,
-      taxableMonthly: netExcludingMedical,
+      taxableMonthly: netIncludingMedical,
       monthsRemaining: 12,
-      annualTaxable: netExcludingMedical * 12,
+      annualTaxable: netIncludingMedical * 12,
       annualTax: monthlyTax * 12,
       monthlyTax,
       leaveDeductions,
