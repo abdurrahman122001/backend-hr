@@ -24,7 +24,7 @@ const attendanceAuth = require('../middleware/attendanceAuth');
 
 router.get('/challenges', async (req, res) => {
   try {
-    const query = { challengeStatus: 'Pending' };
+    const query = { challengeStatus: { $ne: 'None' } };
     const ownerId = req.user.owner || req.user._id;
 
     // Apply scope if delegated

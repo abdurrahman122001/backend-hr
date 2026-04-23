@@ -8,13 +8,6 @@ const TIMEZONE = "Asia/Karachi";
 
 module.exports = async function requireEmployeeAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  // Show whether header is present and a short token snippet for debugging
-  try {
-    const tokenSnippet = authHeader && authHeader.startsWith('Bearer ') ? (authHeader.split(' ')[1] || '').slice(0, 8) + '...' : 'none';
-  } catch (e) {
-    // ignore logging errors
-  }
-
   let token = authHeader.startsWith("Bearer ")
     ? authHeader.split(" ")[1]
     : null;
@@ -24,14 +17,20 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     token = req.query.token;
   }
 
-  if (!token) {
-    console.warn("🔐 [Auth] No token provided");
+  if (!token || token === "undefined" || token === "null") {
+    console.warn("🔐 [EmpAuth] No valid token provided");
     return res
       .status(401)
       .json({ status: "error", message: "Unauthorized: no token provided" });
   }
 
   try {
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error("❌ [EmpAuth] JWT_SECRET is not defined in environment variables");
+      return res.status(500).json({ status: "error", message: "Server configuration error" });
+    }
+
     // Verify token
     const payload = jwt.verify(token, JWT_SECRET);
     // Fetch employee with permissions
@@ -40,16 +39,15 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     );
 
     if (!emp) {
-      console.warn("🔐 [Auth] Employee not found for ID", payload.id);
+      console.warn("🔐 [EmpAuth] Employee not found for ID", payload.id);
       return res
         .status(401)
         .json({ status: "error", message: "Unauthorized: employee not found" });
     }
+
     // 🔹 Session Check: Ensure session is active for today
-    // Skip this check for reactivation or logout itself
     const isExempted = req.path === "/reactivate-session" || req.path === "/logout";
     if (!isExempted) {
-
       // First, try to find an active session
       let session = await EmployeeSession.findOne({
         employeeId: emp._id,
@@ -58,11 +56,6 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
 
       // If no active session, check if there's a recently inactive session (page refresh/navigation detection)
       if (!session) {
-        // Accept ANY recent inactive session within 60 seconds - covers:
-        // 1. isAutoLogout sessions (beacon fired on close)
-        // 2. Sessions inactive for any reason within the window
-        // This handles race conditions where the beacon may not have fired yet or
-        // the session was deactivated just before the new page loaded.
         const recentInactiveSession = await EmployeeSession.findOne({
           employeeId: emp._id,
           active: false
@@ -72,14 +65,13 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
         if (recentInactiveSession) {
           const timeSinceInactive = Date.now() - new Date(recentInactiveSession.updatedAt).getTime();
           if (timeSinceInactive < 60000) {
-            // Within reactivation window - allow access silently
             session = recentInactiveSession;
           }
         }
       }
 
       if (!session) {
-        console.warn("🔐 [Auth] No active session for", emp.companyEmail);
+        console.warn("🔐 [EmpAuth] No active session for", emp.companyEmail);
         return res.status(401).json({
           status: "error",
           message: "Session inactive. Please log in again.",
@@ -102,18 +94,20 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
 
     next();
   } catch (err) {
-    console.error("🔐 [Auth] Token error:", err);
+    console.error("🔐 [EmpAuth] Error:", err.name, err.message);
 
     if (err.name === "TokenExpiredError") {
       return res.status(401).json({
         status: "error",
         message: "Session expired. Please log in again.",
+        expiredAt: err.expiredAt
       });
     }
 
     return res.status(401).json({
       status: "error",
       message: "Unauthorized: invalid or expired token",
+      error: err.name === "JsonWebTokenError" ? "malformed" : "error"
     });
   }
 };

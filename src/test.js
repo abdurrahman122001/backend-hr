@@ -109,6 +109,7 @@ const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 const specificNonWorkingDayRouter = require("./routes/specificNonWorkingDay");
 const anyPayrollAuth = require("./middleware/anyPayrollAuth");
 const unifiedAuth = require("./middleware/unifiedAuth");
+const emailSignatureRoute = require("./routes/emailSignature");
 const payrollSchedule = require("./routes/scheduledAllowances");
 const app = express();
 const payrollAccessRouter = require("./routes/payrollAccess");
@@ -304,6 +305,7 @@ app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 app.use("/api/scheduled-allowances", requireAuth, payrollSchedule);
+app.use("/api/email-signature", emailSignatureRoute);
 
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;

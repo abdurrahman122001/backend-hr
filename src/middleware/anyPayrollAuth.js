@@ -11,15 +11,21 @@ const JWT_SECRET = process.env.JWT_SECRET;
  */
 module.exports = async function anyPayrollAuth(req, res, next) {
     const authHeader = req.headers.authorization || "";
-    const token = authHeader.startsWith("Bearer ")
+    let token = authHeader.startsWith("Bearer ")
         ? authHeader.substring(7)
         : null;
 
-    if (!token) {
-        return res.status(401).json({ message: "No token provided" });
+    if (!token || token === "undefined" || token === "null") {
+        return res.status(401).json({ message: "No valid token provided" });
     }
 
     try {
+        const JWT_SECRET = process.env.JWT_SECRET;
+        if (!JWT_SECRET) {
+            console.error("❌ [AnyPayrollAuth] JWT_SECRET is not defined in environment variables");
+            return res.status(500).json({ message: "Server configuration error" });
+        }
+
         const payload = jwt.verify(token, JWT_SECRET);
         // Compatibility: handle both id and _id in payload
         const userId = payload.id || payload._id || payload.userId;
@@ -54,7 +60,6 @@ module.exports = async function anyPayrollAuth(req, res, next) {
         );
 
         if (employee) {
-
             // Fix: Handle owner as array if necessary
             const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
             if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
@@ -131,10 +136,13 @@ module.exports = async function anyPayrollAuth(req, res, next) {
         console.error(`[AnyPayrollAuth] Subject ID ${userId} not found in User or Employee collections`);
         return res.status(401).json({ message: "User not found" });
     } catch (err) {
-        console.error("🔐 [AnyPayrollAuth] Error:", err.message);
+        console.error("🔐 [AnyPayrollAuth] Error:", err.name, err.message);
         if (err.name === "TokenExpiredError") {
-            return res.status(401).json({ message: "Token expired." });
+            return res.status(401).json({ message: "Token expired.", expiredAt: err.expiredAt });
         }
-        return res.status(401).json({ message: "Invalid or expired token." });
+        return res.status(401).json({ 
+            message: "Invalid or expired token.",
+            error: err.name === "JsonWebTokenError" ? "malformed" : "error"
+        });
     }
 };

@@ -6,14 +6,24 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 module.exports = async function requireAuth(req, res, next) {
   const authHeader = req.headers.authorization || "";
-  const token =
-    authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
+  let token = authHeader.startsWith("Bearer ") ? authHeader.substring(7) : null;
 
-  if (!token) {
-    return res.status(401).json({ message: "No token provided" });
+  // Also check query for flexibility (common in redirects from attendance app)
+  if (!token && req.query.token) {
+    token = req.query.token;
+  }
+
+  if (!token || token === "undefined" || token === "null") {
+    return res.status(401).json({ message: "No valid token provided" });
   }
 
   try {
+    const JWT_SECRET = process.env.JWT_SECRET;
+    if (!JWT_SECRET) {
+      console.error("❌ [AuthMiddleware] JWT_SECRET is not defined in environment variables");
+      return res.status(500).json({ message: "Server configuration error" });
+    }
+
     const payload = jwt.verify(token, JWT_SECRET);
 
     // Find the user
@@ -71,7 +81,18 @@ module.exports = async function requireAuth(req, res, next) {
 
     return next();
   } catch (err) {
-    console.error("Auth middleware error:", err);
-    return res.status(401).json({ message: "Invalid or expired token" });
+    console.error("🔐 [AuthMiddleware] Error:", err.name, err.message);
+    
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ 
+        message: "Token expired", 
+        expiredAt: err.expiredAt 
+      });
+    }
+    
+    return res.status(401).json({ 
+      message: "Invalid token or authentication failed",
+      error: err.name === "JsonWebTokenError" ? "malformed" : "error"
+    });
   }
 };

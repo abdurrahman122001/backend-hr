@@ -112,6 +112,7 @@ const attendanceAccessRouter = require("./routes/attendanceAccess");
 const payrollAccessRouter = require("./routes/payrollAccess");
 const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 const payrollSchedule = require("./routes/scheduledAllowances");
+const emailSignatureRoute = require("./routes/emailSignature");
 const app = express();
 
 // ---------- Schedulers / Cron Jobs ----------
@@ -196,8 +197,8 @@ app.use((err, _req, res, next) => {
 });
 
 // ---------- Body parsers ----------
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
 // ---------- Public routes ----------
 app.use("/api/auth", authRouter);
@@ -277,6 +278,7 @@ app.use("/api/emp-birthdays", employeeBirthdays);
 app.use("/api/tax", anyPayrollAuth, taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
 app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
+app.use("/api/email-signature", emailSignatureRoute);
 
 app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
