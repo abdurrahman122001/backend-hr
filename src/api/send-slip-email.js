@@ -197,6 +197,7 @@ function safeAmountCell(val) {
     val === null ||
     val === "" ||
     val === "-" ||
+    val === 0 ||
     isNaN(Number(val))
   ) {
     return "-";
@@ -209,7 +210,7 @@ function safeDecimalCell(val) {
   if (val === undefined || val === null || val === "" || val === "-")
     return "-";
   const num = parseFloat(val.toString().replace(/,/g, ""));
-  if (isNaN(num)) return "-";
+  if (isNaN(num) || num === 0) return "-";
   return num.toLocaleString("en-PK");
 }
 
@@ -553,10 +554,10 @@ function buildSalarySlipHtml({
               : "-";
           html += `
             <td style="padding:4px 8px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
-              <div style="display:flex;">
+              <div style="display:flex; align-items:center;">
                 <span style="display:block; color:#0F172A; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
               }</span>
-                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px; margin-left: auto; text-align:right;">
+                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:14px; margin-left: auto; text-align:right;">
                   ${valueToShow}
                 </span>
               </div>
