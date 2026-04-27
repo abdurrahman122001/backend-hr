@@ -136,10 +136,14 @@ router.put(
   "/:id/complete",
   upload.fields([
     { name: "photograph", maxCount: 1 },
+    { name: "photographFile", maxCount: 1 },
     { name: "cv", maxCount: 1 },
+    { name: "resume", maxCount: 1 },
+    { name: "resumeFile", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
+      console.log("PUT /employee/:id/complete received files:", Object.keys(req.files || {}));
       const { id } = req.params;
       const emp = await Employee.findById(id);
       if (!emp)
@@ -148,11 +152,13 @@ router.put(
           .json({ success: false, error: "Employee not found" });
 
       // Assign uploaded files (if present)
-      if (req.files?.photograph?.[0]) {
-        emp.photographUrl = `/uploads/photos/${req.files.photograph[0].filename}`;
+      if (req.files?.photograph?.[0] || req.files?.photographFile?.[0]) {
+        const photoFile = req.files.photograph?.[0] || req.files.photographFile?.[0];
+        emp.photographUrl = `/uploads/photos/${photoFile.filename}`;
       }
-      if (req.files?.cv?.[0]) {
-        emp.cvUrl = `/uploads/cv/${req.files.cv[0].filename}`;
+      if (req.files?.cv?.[0] || req.files?.resume?.[0] || req.files?.resumeFile?.[0]) {
+        const cvFile = req.files.cv?.[0] || req.files.resume?.[0] || req.files.resumeFile?.[0];
+        emp.cvUrl = `/uploads/cv/${cvFile.filename}`;
       }
 
       // Parse and update all non-file fields (do NOT touch owner)

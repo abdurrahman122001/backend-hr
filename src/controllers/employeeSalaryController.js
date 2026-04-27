@@ -170,9 +170,9 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
 
     const basic = await readFirstNumAsync(salarySlip, ["basic"]);
 
-    // 2) Net Salary for Tax = Gross minus leave/late/loan deductions
-    const DED_KEYS_FOR_NET = ["leaveDeductions", "lateDeductions", "otherLoanDeductions",
-      "vehicleLoanDeduction", "advanceSalaryDeductions"];
+    // 2) Net Salary for Tax = Gross minus leave/late deductions
+    // Note: Loan repayments and advance salary are NOT tax-deductible.
+    const DED_KEYS_FOR_NET = ["leaveDeductions", "lateDeductions"];
     let taxNetDeductions = 0;
     for (const key of DED_KEYS_FOR_NET) {
       taxNetDeductions += await readFirstNumAsync(salarySlip, [key]);
@@ -1062,11 +1062,6 @@ exports.getAllMasterSalaries = async (req, res) => {
       isTrashed: { $ne: true },
     }).lean();
 
-    console.log(`[DEBUG-PAYROLL] Fetched ${allEmployees.length} non-trashed employees for owner ${ownerId}`);
-    allEmployees.forEach(e => console.log(`[DEBUG-PAYROLL] Employee: ${e.name}, Status: ${e.status}`));
-
-    // 2. Map each employee to their latest salary configuration
-    // 2. Map each employee to their latest salary configuration
     const decryptedSalaries = await Promise.all(
       allEmployees.map(async (emp) => {
         // Find the most recent slip for this employee to use as a master template
@@ -1167,7 +1162,7 @@ exports.getAllMasterSalaries = async (req, res) => {
  *   deductions: { ... }
  * }
  */
-exports.calculatePreviewTax = async (req, res) => {
+exports.calculatePayrollPreviewTax = async (req, res) => {
   try {
     const { employeeId, month, year, allowances = {}, deductions = {} } = req.body;
 
@@ -1189,13 +1184,15 @@ exports.calculatePreviewTax = async (req, res) => {
     // We assume the incoming allowances object contains all parts
     let grossSalary = 0;
     for (const key in allowances) {
-      grossSalary += toNum(allowances[key]);
+      if (key !== "loanBenefits") {
+        grossSalary += toNum(allowances[key]);
+      }
     }
 
-    // Net Salary for Tax = Gross - (Leave + Late + Loan Deductions)
-    const DED_KEYS_FOR_NET = ["leaveDeductions", "lateDeductions", "otherLoanDeductions",
-      "vehicleLoanDeduction", "advanceSalaryDeductions"];
-    
+    // Net Salary for Tax = Gross - (Leave + Late Deductions)
+    // Note: Loan repayments and advance salary are NOT tax-deductible.
+    const DED_KEYS_FOR_NET = ["leaveDeductions", "lateDeductions"];
+
     let taxNetDeductions = 0;
     for (const key of DED_KEYS_FOR_NET) {
       taxNetDeductions += toNum(deductions[key]);
@@ -1222,7 +1219,7 @@ exports.calculatePreviewTax = async (req, res) => {
 
     // Since we already have the monthly taxable, we just need to annualize it.
     // Let's reuse the logic from calculateTaxForSalarySlip but with our values.
-    
+
     const fiscalStartMonth = 7;
     const fiscalEndMonth = 6;
     const joiningDate = employee.joiningDate ? new Date(employee.joiningDate) : null;

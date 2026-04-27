@@ -11,4 +11,5 @@ router.put('/:id', controller.updateEmployeeAndSalarySlip);
 router.post("/:id/send-complete-profile", controller.resendCompleteProfileLink);
 router.put('/:id/photo', uploadPhotos.single('photo'), controller.updateEmployeePhoto); // ✅ Corrected
 router.post("/calc-preview", controller.calculatePreviewTax);
+router.post("/payroll-calc-preview", controller.calculatePayrollPreviewTax);
 module.exports = router;
