@@ -520,7 +520,7 @@ function buildSalarySlipHtml({
         : Object.keys(empObj);
     const colCount = 2;
     const rows = Math.ceil(fields.length / colCount);
-    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto; padding: 8px 0; padding-top:0;">`;
+    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto; padding: 8px 0; padding-top:0; table-layout:fixed">`;
     for (let i = 0; i < rows; i++) {
       html += "<tr>";
       for (let j = 0; j < colCount; j++) {
@@ -553,10 +553,10 @@ function buildSalarySlipHtml({
                     : val
               : "-";
           html += `
-            <td style="padding:4px 8px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
+            <td style="padding:4px 5px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
               <div style="display:flex; align-items:center;">
                 <span style="display:block; color:#0F172A; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
-              }</span>
+              }:</span>
                 <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:14px; margin-left: auto; text-align:right;">
                   ${valueToShow}
                 </span>
