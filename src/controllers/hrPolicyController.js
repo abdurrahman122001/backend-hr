@@ -47,7 +47,7 @@ exports.getMyPolicy = async (req, res) => {
     const policy = await HrPolicy.findOne({ owner });
 
     if (!policy) {
-      return res.status(404).json({ message: "No HR policy found for this user" });
+      return res.status(200).json(null);
     }
 
     res.status(200).json(policy);
