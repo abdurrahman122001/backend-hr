@@ -5,7 +5,10 @@ const nodemailer = require("nodemailer");
 const numberToWords = require("number-to-words");
 const SalarySlip = require("../models/SalarySlip");
 const LeaveRecord = require("../models/LeaveRecord");
-const leaveSummary = require("./leaveSummary"); // adjust the path if needed
+const attendanceRouter = require("../routes/attendance");
+const { calculateMonthlyBalances } = attendanceRouter;
+const Employee = require("../models/Employees");
+const LeaveYearBalance = require("../models/LeaveYearBalance");
 
 const { decrypt } = require("../utils/encryption");
 const monthsList = [
@@ -1134,23 +1137,37 @@ module.exports = async function sendSlipEmail(req, res) {
         }
 
         const emp = slip.employee;
-        const total = emp.leaveEntitlement?.total || 0;
-        const bonus = emp.leaveEntitlement?.bonus || 0;
-        const entitled = total + bonus;
+        const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
+        
+        // Fetch from LeaveYearBalance to get the correct total/bonus for this year
+        const leaveBalance = await LeaveYearBalance.findOne({
+          owner: ownerId,
+          employee: emp._id,
+          year: slipYear
+        });
 
-        const leaveSummaryResult =
-          await leaveSummary.calculateYTDLeaveWithRunningBalance(
-            emp._id,
-            entitled,
-            slipYear,
-            slipMonth
-          );
+        const total = leaveBalance?.total || emp.leaveEntitlement?.total || 0;
+        const bonus = leaveBalance?.bonus || emp.leaveEntitlement?.bonus || 0;
+
+        // Use the same calculation as PDF API (/leave-summary endpoint)
+        const balanceData = await calculateMonthlyBalances(
+          ownerId,
+          emp._id,
+          slipYear
+        );
+
+        // Extract month-specific data
+        const monthBalance = balanceData.monthlyBalances[slipMonth] || {
+          balance: balanceData.initialBalance,
+          paidUsed: 0,
+          unpaidUsed: 0
+        };
 
         leaves.annualEntitled = total;
-        leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
-        leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
-        leaves.annualBalance = leaveSummaryResult.balance;
         leaves.annualBonus = bonus;
+        leaves.annualAvailedYTD = balanceData.totalUsedPaid; // Paid leaves used YTD
+        leaves.annualAvailedMTH = (typeof monthBalance.paidUsed === 'number' ? monthBalance.paidUsed : 0); // Paid leaves used this month
+        leaves.annualBalance = typeof monthBalance.balance === 'number' ? monthBalance.balance : balanceData.initialBalance;
       }
 
       const decryptField = async (encryptedValue) => {

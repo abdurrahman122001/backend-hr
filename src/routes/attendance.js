@@ -361,4 +361,6 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
   }
 });
 
+// Export calculateMonthlyBalances for use in email and other services
 module.exports = router;
+module.exports.calculateMonthlyBalances = calculateMonthlyBalances;
