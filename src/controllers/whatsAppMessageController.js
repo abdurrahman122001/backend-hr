@@ -1073,23 +1073,13 @@ exports.listMessagesForManager = async function listMessagesForManager(
     // 🎯 Set cursor for next/prev pagination
     if (messages.length > 0) {
       if (direction === "before") {
-        // For loading older messages:
-        // nextCursor = oldest message in this batch (for loading even older)
         nextCursor = messages[messages.length - 1]?._id || null;
-        // prevCursor = newest message in this batch (for loading newer)
         prevCursor = messages[0]?._id || null;
       } else {
-        // For loading newer messages (initial load):
-        // nextCursor = newest message in this batch (for loading even newer)
         nextCursor = messages[0]?._id || null;
-        // prevCursor = oldest message in this batch (for loading older)
         prevCursor = messages[messages.length - 1]?._id || null;
       }
     }
-
-    // 🎯 FIXED: Only reverse for frontend display, not for cursor logic
-    // The frontend needs messages in chronological order (oldest to newest)
-    // But our query gets them in reverse chronological order (newest to oldest)
     const displayMessages = [...messages].reverse();
 
     // 🔥 Get client supervision info for each message
@@ -1102,7 +1092,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
             .lean();
           return {
             ...message,
-            parentClientId: message.client?._id || message.client, // Ensure parentClientId is present
+            parentClientId: message.client?._id || message.client,
             clientSupervision: clientDoc?.supervision || "direct",
             clientName: clientDoc?.clientName || "Unknown",
             requiresApproval: clientDoc?.supervision === "needs_approval",

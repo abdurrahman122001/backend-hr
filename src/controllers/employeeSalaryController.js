@@ -1240,7 +1240,32 @@ exports.calculatePreviewTax = async (req, res) => {
     let monthsRemaining = (fiscalEnd.getFullYear() - effectiveStart.getFullYear()) * 12 + (fiscalEnd.getMonth() - effectiveStart.getMonth());
     if (monthsRemaining < 1) monthsRemaining = 1;
 
-    const annualTaxable = taxableMonthly * monthsRemaining;
+    // Sum past taxable from existing slips
+    const allSlipsInYear = await SalarySlip.find({
+      employee: employeeId,
+      owner: req.user._id
+    }).lean();
+
+    const pastFiscalSlips = allSlipsInYear.filter(s => {
+      const sMonthIndex = monthNames.indexOf(s.month);
+      const sYearNum = parseInt(s.year);
+      const sDate = new Date(sYearNum, sMonthIndex, 1);
+      const currentSlipDate = new Date(slipYearNum, slipMonthIndex, 1);
+      return sDate >= fiscalStart && sDate < currentSlipDate;
+    });
+
+    let sumPastTaxable = 0;
+    // For simplicity in the preview, we'll assume past slips are correct.
+    // In a real scenario, we might need to decrypt them.
+    for (const ps of pastFiscalSlips) {
+      // Use the helper to get taxable from past slips
+      sumPastTaxable += await getTaxableMonthlyOnly(ps, taxCfg);
+    }
+
+    const monthsAlreadyCovered = pastFiscalSlips.length;
+    const remainingProjectedMonths = Math.max(0, monthsRemaining - monthsAlreadyCovered);
+
+    const annualTaxable = sumPastTaxable + (taxableMonthly * remainingProjectedMonths);
 
     const annualTax = computeAnnualTaxBandOnly(
       annualTaxable,
@@ -1259,6 +1284,8 @@ exports.calculatePreviewTax = async (req, res) => {
         annualTax,
         monthlyTax,
         monthsRemaining,
+        sumPastTaxable,
+        pastMonthsCount: monthsAlreadyCovered
       }
     });
 

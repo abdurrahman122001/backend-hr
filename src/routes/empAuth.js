@@ -16,6 +16,8 @@ const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
 const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
+const { isNonWorkingDayHelper } = require("../controllers/attendanceController");
+const PayrollPeriod = require("../models/PayrollPeriod");
 
 // Import early departure bonus deduction from attendance controller
 const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
@@ -267,6 +269,18 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
 
   // CREATE NEW ATTENDANCE
   if (!existingAttendance) {
+    // Check if today is a non-working day
+    const payroll = await PayrollPeriod.findOne({
+      owner: emp.owner,
+      shifts: { $in: [emp.shifts?.[0]] }
+    }).lean() || await PayrollPeriod.findOne({ owner: emp.owner }).lean();
+    
+    const isNonWorkingDay = await isNonWorkingDayHelper(emp.owner, todayKarachi, payroll);
+    if (isNonWorkingDay) {
+      console.log(`[LOGIN] Employee ${emp.name} logged in on non-working day ${todayKarachi}. Skipping attendance creation.`);
+      return { attendance: null, sessionStatus: null, attendanceExists: false, isNonWorkingDay: true };
+    }
+
     const empShift = await getEmployeeShift(emp._id);
     const reportingTimeMinutes = emp.rt
       ? timeToMinutes(emp.rt)
@@ -647,10 +661,32 @@ router.post("/login", async (req, res) => {
     
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
     
+    // Handle non-working day login
+    if (attendanceResult.isNonWorkingDay) {
+      const token = jwt.sign(
+        { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
+        JWT_SECRET,
+        { expiresIn: TOKEN_EXPIRY_SECONDS }
+      );
+      
+      return res.json({
+        message: "Login successful (non-working day - attendance not marked).",
+        token,
+        user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
+        attendanceId: null,
+        sessionStatus: "Non-Working Day",
+        attendanceExists: false,
+        isNonWorkingDay: true,
+        trusted: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+        localLoginTime: formatTimeForDisplay(nowKarachi),
+      });
+    }
+    
     // ✅ RE-FETCH attendance to get updated status after restoration
-    const freshAttendance = await Attendance.findById(attendanceResult.attendance._id).lean();
+    const freshAttendance = attendanceResult.attendance ? await Attendance.findById(attendanceResult.attendance._id).lean() : null;
     const attendance = freshAttendance || attendanceResult.attendance;
-    sessionStatus = attendance.status || attendanceResult.sessionStatus;
+    sessionStatus = attendance?.status || attendanceResult.sessionStatus;
 
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
@@ -787,10 +823,31 @@ router.post("/confirm-code", async (req, res) => {
     // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation (Not restricted)
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
     
+    // Handle non-working day login
+    if (attendanceResult.isNonWorkingDay) {
+      return res.json({
+        message: "Device verified and trusted. Login successful (non-working day - attendance not marked).",
+        token,
+        deviceToken: deviceId,
+        user: {
+          id: emp._id,
+          companyEmail: emp.companyEmail,
+          role: emp.role,
+          owner: emp.owner,
+          name: emp.name || "",
+        },
+        attendanceId: null,
+        sessionStatus: "Non-Working Day",
+        isNonWorkingDay: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+        localLoginTime: formatTimeForDisplay(nowKarachi),
+      });
+    }
+    
     // ✅ RE-FETCH attendance to get updated status after restoration
-    const freshAttendance = await Attendance.findById(attendanceResult.attendance._id).lean();
+    const freshAttendance = attendanceResult.attendance ? await Attendance.findById(attendanceResult.attendance._id).lean() : null;
     const attendance = freshAttendance || attendanceResult.attendance;
-    const sessionStatus = attendance.status || attendanceResult.sessionStatus;
+    const sessionStatus = attendance?.status || attendanceResult.sessionStatus;
 
     // ✅ Enterprise Cleanup: Deactivate any orphaned sessions before starting fresh
     await EmployeeSession.updateMany(
