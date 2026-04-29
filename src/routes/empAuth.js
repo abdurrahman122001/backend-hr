@@ -19,7 +19,6 @@ const moment = require("moment-timezone"); // Add this package: npm install mome
 const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 const { isNonWorkingDayHelper } = require("../controllers/attendanceController");
-const PayrollPeriod = require("../models/PayrollPeriod");
 
 // Import early departure bonus deduction from attendance controller
 const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
