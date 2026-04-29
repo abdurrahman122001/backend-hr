@@ -268,7 +268,7 @@ app.use("/api/extra-fields", anyPayrollAuth, ExtraFields);
 app.use("/api/pf", anyPayrollAuth, pfRoute);
 app.use("/api/gratuity", anyPayrollAuth, gratuityRoute);
 app.use("/api/role", anyPayrollAuth, roleRoutes);
-app.use("/api/scheduled-allowances", requireAuth, payrollSchedule);
+app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);
 app.use("/api/pages", anyPayrollAuth, pageRoute);
 app.use("/api/users", anyPayrollAuth, usersRoute);
 app.use("/api/setDate", anyPayrollAuth, setDateRoute);
@@ -279,7 +279,6 @@ app.use("/api/tax", anyPayrollAuth, taxRoutes);
 app.use("/api/employee-docs", employeeDocsRouter);
 app.use("/api/emp-leaves", requireEmployeeAuth, employeeLeavesRouter);
 app.use("/api/email-signature", emailSignatureRoute);
-
 app.use("/api/manager", managerRoutes);
 app.use("/api/tasks", taskRoutes);
 app.use("/api/client-info", clientInfoRoutes);
@@ -379,14 +378,6 @@ function addDays(date, days) {
   return d;
 }
 
-/**
- * Month-based prorating with partial current month
- * yearlyLeaves = 22 by your business rule
- * If probation ends mid-month, include remaining days fraction of current month.
- *
- * Round off:
- * 9.6 => 10, 9.4 => 9  (Math.round)
- */
 function calculateProratedLeavesFrom(probationEndDate, yearlyLeaves = 22) {
   const end = new Date(probationEndDate);
   end.setHours(0, 0, 0, 0);

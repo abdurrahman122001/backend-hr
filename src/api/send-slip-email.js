@@ -5,7 +5,10 @@ const nodemailer = require("nodemailer");
 const numberToWords = require("number-to-words");
 const SalarySlip = require("../models/SalarySlip");
 const LeaveRecord = require("../models/LeaveRecord");
-const leaveSummary = require("./leaveSummary"); // adjust the path if needed
+const attendanceRouter = require("../routes/attendance");
+const { calculateMonthlyBalances } = attendanceRouter;
+const Employee = require("../models/Employees");
+const LeaveYearBalance = require("../models/LeaveYearBalance");
 
 const { decrypt } = require("../utils/encryption");
 const monthsList = [
@@ -197,6 +200,7 @@ function safeAmountCell(val) {
     val === null ||
     val === "" ||
     val === "-" ||
+    val === 0 ||
     isNaN(Number(val))
   ) {
     return "-";
@@ -209,7 +213,7 @@ function safeDecimalCell(val) {
   if (val === undefined || val === null || val === "" || val === "-")
     return "-";
   const num = parseFloat(val.toString().replace(/,/g, ""));
-  if (isNaN(num)) return "-";
+  if (isNaN(num) || num === 0) return "-";
   return num.toLocaleString("en-PK");
 }
 
@@ -519,7 +523,7 @@ function buildSalarySlipHtml({
         : Object.keys(empObj);
     const colCount = 2;
     const rows = Math.ceil(fields.length / colCount);
-    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto; padding: 8px 0; padding-top:0;">`;
+    let html = `<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff; border:1px solid #dbeafe; border-radius:12px; margin:0 auto 0 auto; padding: 8px 0; padding-top:0; table-layout:fixed">`;
     for (let i = 0; i < rows; i++) {
       html += "<tr>";
       for (let j = 0; j < colCount; j++) {
@@ -552,11 +556,11 @@ function buildSalarySlipHtml({
                     : val
               : "-";
           html += `
-            <td style="padding:4px 8px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
-              <div style="display:flex;">
+            <td style="padding:4px 5px; padding-bottom:0; font-size:14px; vertical-align:top; width:33.33%;">
+              <div style="display:flex; align-items:center;">
                 <span style="display:block; color:#0F172A; font-weight:600;">${labelObj?.[key] || PROFILE_LABELS[key] || key
-              }</span>
-                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:12px; margin-left: auto; text-align:right;">
+              }:</span>
+                <span style="color:#111827; font-weight:400; display:block; margin-top:0; font-size:14px; margin-left: auto; text-align:right;">
                   ${valueToShow}
                 </span>
               </div>
@@ -1133,23 +1137,37 @@ module.exports = async function sendSlipEmail(req, res) {
         }
 
         const emp = slip.employee;
-        const total = emp.leaveEntitlement?.total || 0;
-        const bonus = emp.leaveEntitlement?.bonus || 0;
-        const entitled = total + bonus;
+        const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
+        
+        // Fetch from LeaveYearBalance to get the correct total/bonus for this year
+        const leaveBalance = await LeaveYearBalance.findOne({
+          owner: ownerId,
+          employee: emp._id,
+          year: slipYear
+        });
 
-        const leaveSummaryResult =
-          await leaveSummary.calculateYTDLeaveWithRunningBalance(
-            emp._id,
-            entitled,
-            slipYear,
-            slipMonth
-          );
+        const total = leaveBalance?.total || emp.leaveEntitlement?.total || 0;
+        const bonus = leaveBalance?.bonus || emp.leaveEntitlement?.bonus || 0;
+
+        // Use the same calculation as PDF API (/leave-summary endpoint)
+        const balanceData = await calculateMonthlyBalances(
+          ownerId,
+          emp._id,
+          slipYear
+        );
+
+        // Extract month-specific data
+        const monthBalance = balanceData.monthlyBalances[slipMonth] || {
+          balance: balanceData.initialBalance,
+          paidUsed: 0,
+          unpaidUsed: 0
+        };
 
         leaves.annualEntitled = total;
-        leaves.annualAvailedYTD = leaveSummaryResult.ytdUsed;
-        leaves.annualAvailedMTH = leaveSummaryResult.monthUsed;
-        leaves.annualBalance = leaveSummaryResult.balance;
         leaves.annualBonus = bonus;
+        leaves.annualAvailedYTD = balanceData.totalUsedPaid; // Paid leaves used YTD
+        leaves.annualAvailedMTH = (typeof monthBalance.paidUsed === 'number' ? monthBalance.paidUsed : 0); // Paid leaves used this month
+        leaves.annualBalance = typeof monthBalance.balance === 'number' ? monthBalance.balance : balanceData.initialBalance;
       }
 
       const decryptField = async (encryptedValue) => {

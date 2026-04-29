@@ -14,7 +14,7 @@ const ensureDir = (dir) => {
 };
 const uploadsRoot = path.join(__dirname, "../uploads");
 const cnicDir = path.join(uploadsRoot, "cnic");
-const cvDir   = path.join(uploadsRoot, "cv");
+const cvDir = path.join(uploadsRoot, "cv");
 ensureDir(uploadsRoot);
 ensureDir(cnicDir);
 ensureDir(cvDir);
@@ -51,7 +51,7 @@ const relPath = (abs) =>
 const removeFileIfExists = (absolutePath) => {
   try {
     if (absolutePath && fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
-  } catch (_) {}
+  } catch (_) { }
 };
 
 /* 
@@ -83,43 +83,51 @@ router.post(
   "/:employeeId",
   upload.fields([
     { name: "cnicFront", maxCount: 1 },
-    { name: "cnicBack",  maxCount: 1 },
-    { name: "resume",    maxCount: 1 },
+    { name: "cnicBack", maxCount: 1 },
+    { name: "resume", maxCount: 1 },
+    { name: "cnic", maxCount: 1 },
+    { name: "cnicFrontFile", maxCount: 1 },
+    { name: "cnicBackFile", maxCount: 1 },
+    { name: "resumeFile", maxCount: 1 },
+    { name: "file", maxCount: 1 },
   ]),
   async (req, res) => {
     try {
+      console.log("POST /employee-docs received files:", Object.keys(req.files || {}));
       const { employeeId } = req.params;
 
       const emp = await Employee.findById(employeeId).select("_id");
       if (!emp) return res.status(404).json({ success: false, error: "Employee not found" });
 
       const existing = await EmployeeDocument.findOne({ employee: emp._id });
+      let setObj = {};
 
-      let cnicFrontUrl = existing?.cnicFrontUrl || "";
-      let cnicBackUrl  = existing?.cnicBackUrl  || "";
-      let resumeUrl    = existing?.resumeUrl     || "";
-
-      if (req.files?.cnicFront?.[0]) {
-        const file = req.files.cnicFront[0];
-        if (cnicFrontUrl) removeFileIfExists(path.join(__dirname, "..", cnicFrontUrl));
-        cnicFrontUrl = relPath(file.path);
+      if (req.files?.cnicFront?.[0] || req.files?.cnicFrontFile?.[0] || req.files?.cnic?.[0] || req.files?.file?.[0]) {
+        const file = req.files.cnicFront?.[0] || req.files.cnicFrontFile?.[0] || req.files.cnic?.[0] || req.files.file?.[0];
+        if (existing?.cnicFrontUrl) removeFileIfExists(path.join(__dirname, "..", existing.cnicFrontUrl));
+        setObj.cnicFrontUrl = relPath(file.path);
       }
 
-      if (req.files?.cnicBack?.[0]) {
-        const file = req.files.cnicBack[0];
-        if (cnicBackUrl) removeFileIfExists(path.join(__dirname, "..", cnicBackUrl));
-        cnicBackUrl = relPath(file.path);
+      if (req.files?.cnicBack?.[0] || req.files?.cnicBackFile?.[0]) {
+        const file = req.files.cnicBack?.[0] || req.files.cnicBackFile?.[0];
+        if (existing?.cnicBackUrl) removeFileIfExists(path.join(__dirname, "..", existing.cnicBackUrl));
+        setObj.cnicBackUrl = relPath(file.path);
       }
 
-      if (req.files?.resume?.[0]) {
-        const file = req.files.resume[0];
-        if (resumeUrl) removeFileIfExists(path.join(__dirname, "..", resumeUrl));
-        resumeUrl = relPath(file.path);
+      if (req.files?.resume?.[0] || req.files?.resumeFile?.[0]) {
+        const file = req.files.resume?.[0] || req.files.resumeFile?.[0];
+        if (existing?.resumeUrl) removeFileIfExists(path.join(__dirname, "..", existing.resumeUrl));
+        setObj.resumeUrl = relPath(file.path);
+      }
+
+      // If no files were processed, just return the existing record
+      if (Object.keys(setObj).length === 0) {
+        return res.json({ success: true, data: existing || null });
       }
 
       const updated = await EmployeeDocument.findOneAndUpdate(
         { employee: emp._id },
-        { $set: { cnicFrontUrl, cnicBackUrl, resumeUrl } },
+        { $set: setObj },
         { upsert: true, new: true }
       );
 

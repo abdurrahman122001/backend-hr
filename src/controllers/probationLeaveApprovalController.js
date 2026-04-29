@@ -240,9 +240,10 @@ exports.rejectLeaveCredit = async (req, res) => {
 // ────────────────────────────────────────────
 exports.extendProbation = async (req, res) => {
     try {
-        const { extensionDays, reason } = req.body;
+        const { days, extensionDays, reason } = req.body;
+        const finalDays = days || extensionDays;
 
-        if (!extensionDays || extensionDays < 1) {
+        if (!finalDays || finalDays < 1) {
             return res.status(400).json({
                 status: "error",
                 message: "Extension days must be at least 1",
@@ -268,7 +269,7 @@ exports.extendProbation = async (req, res) => {
         // Calculate new effective end date
         const currentEnd = new Date(approval.effectiveProbationEndDate);
         const newEnd = new Date(currentEnd);
-        newEnd.setDate(newEnd.getDate() + Number(extensionDays));
+        newEnd.setDate(newEnd.getDate() + Number(finalDays));
         newEnd.setHours(0, 0, 0, 0);
 
         // Recalculate leaves for the new end date
@@ -277,16 +278,16 @@ exports.extendProbation = async (req, res) => {
 
         // Add extension record
         approval.extensions.push({
-            extensionDays: Number(extensionDays),
+            extensionDays: Number(finalDays),
             extendedBy: req.user._id,
             extendedByName: req.user.employeeName || "Admin",
             extendedAt: new Date(),
-            reason: reason || `Extended by ${extensionDays} days`,
+            reason: reason || `Extended by ${finalDays} days`,
             newProbationEndDate: newEnd,
             recalculatedLeaves,
         });
 
-        approval.totalExtensionDays += Number(extensionDays);
+        approval.totalExtensionDays += Number(finalDays);
         approval.effectiveProbationEndDate = newEnd;
         approval.calculatedLeaves = recalculatedLeaves;
         approval.leaveYear = newLeaveYear;

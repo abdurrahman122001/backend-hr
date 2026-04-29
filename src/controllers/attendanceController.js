@@ -1748,9 +1748,11 @@ exports.getStats = async (req, res) => {
   }
 };
 
-// GET /api/attendance/employee/:id
+// GET /api/attendance/employee/:id?from=YYYY-MM-DD&to=YYYY-MM-DD
 exports.getRecordsByEmployee = async (req, res) => {
   const { id } = req.params;
+  const { from, to } = req.query;
+  
   if (!mongoose.isValidObjectId(id)) {
     return res.status(400).json({ error: "Invalid employee ID" });
   }
@@ -1771,8 +1773,13 @@ exports.getRecordsByEmployee = async (req, res) => {
       employee: oid(id),
     };
 
+    // Add date range filtering if both from and to are provided
+    if (from && to) {
+      query.date = { $gte: from, $lte: to };
+    }
+
     const records = await Attendance.find(query)
-      .sort({ date: 1 })
+      .sort({ date: -1 })
       .populate("employee", "name position department email status _id photographUrl imageUrl")
       .lean();
 

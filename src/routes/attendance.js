@@ -35,7 +35,7 @@ router.get('/challenges', async (req, res) => {
     }
 
     const challenges = await Attendance.find(query)
-      .populate('employee', 'name email companyEmail designation department')
+      .populate('employee', 'name email companyEmail designation department profilePicture photographUrl')
       .sort({ challengeAt: -1 });
 
     // Filter out any records whose employee was deleted (populate returns null)
@@ -361,4 +361,6 @@ router.get("/leave-summary/:employeeId", async (req, res) => {
   }
 });
 
+// Export calculateMonthlyBalances for use in email and other services
 module.exports = router;
+module.exports.calculateMonthlyBalances = calculateMonthlyBalances;

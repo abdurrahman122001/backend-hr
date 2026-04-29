@@ -304,7 +304,7 @@ app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
-app.use("/api/scheduled-allowances", requireAuth, payrollSchedule);
+app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);
 app.use("/api/email-signature", emailSignatureRoute);
 
 // ---------- MongoDB ----------

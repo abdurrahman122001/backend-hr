@@ -13,6 +13,8 @@ const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const PayrollPeriod = require("../models/PayrollPeriod");
+const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
 const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
@@ -151,11 +153,64 @@ function secondsUntilMidnight() {
 }
 
 /**
+ * Check if a date is a non-working day by checking:
+ * 1. Recurring non-working days from PayrollPeriod
+ * 2. Specific non-working days from SpecificNonWorkingDay collection
+ */
+async function isNonWorkingDay(ownerId, date) {
+  const ymd = (d) => d.toISOString().slice(0, 10);
+  const attendanceDate = new Date(date);
+  const dow = attendanceDate.getDay();
+
+  // Get payroll period for recurring non-working days
+  const payroll = await PayrollPeriod.findOne({ owner: ownerId }).lean();
+
+  // Check recurring non-working days from payroll
+  const dateSet = new Set();
+  const weekdaySet = new Set();
+  const nameToDay = {
+    sun: 0, sunday: 0, mon: 1, monday: 1, tue: 2, tues: 2, tuesday: 2,
+    wed: 3, weds: 3, wednesday: 3, thu: 4, thur: 4, thurs: 4, thursday: 4,
+    fri: 5, friday: 5, sat: 6, saturday: 6,
+  };
+
+  (payroll?.nonWorkingDays || []).forEach((raw) => {
+    if (!raw) return;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateSet.add(s);
+    if (/^[0-6]$/.test(s)) return weekdaySet.add(Number(s));
+    const key = s.toLowerCase();
+    if (key in nameToDay) return weekdaySet.add(nameToDay[key]);
+    const nd = new Date(s);
+    if (!isNaN(nd)) dateSet.add(ymd(nd));
+  });
+
+  const isRecurringNonWorkingDay =
+    dateSet.has(ymd(attendanceDate)) || weekdaySet.has(dow);
+
+  // Check specific non-working days
+  const specificNwd = await SpecificNonWorkingDay.findOne({
+    owner: new mongoose.Types.ObjectId(ownerId),
+    date: ymd(attendanceDate),
+  }).lean();
+
+  return isRecurringNonWorkingDay || !!specificNwd;
+}
+
+/**
  * Helper to handle attendance creation or session restoration.
  * Used in both /login (for trusted devices) and /confirm-code.
  */
 async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
   const todayKarachi = getDateOnly(nowKarachi);
+
+  // Check if today is a non-working day
+  const isNWD = await isNonWorkingDay(emp.owner, todayKarachi);
+  if (isNWD) {
+    console.log(`[NON-WORKING DAY] ${emp.name} login on ${todayKarachi} - skipping attendance creation`);
+    return { attendance: null, sessionStatus: "Non-Working Day", attendanceExists: false, isNonWorkingDay: true };
+  }
+
   const currentTime = nowKarachi.hours() * 60 + nowKarachi.minutes();
 
   let existingAttendance = await Attendance.findOne({
