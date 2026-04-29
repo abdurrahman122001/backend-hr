@@ -1937,6 +1937,9 @@ exports.getChangeLogs = async (req, res) => {
 // Export the early departure function for use in other modules
 exports.deductBonusForEarlyDeparture = deductBonusForEarlyDeparture;
 
+// Export isNonWorkingDayHelper for use in empAuth.js
+exports.isNonWorkingDayHelper = isNonWorkingDayHelper;
+
 exports.updateChallengeStatus = async (req, res) => {
   try {
     const { id } = req.params;
