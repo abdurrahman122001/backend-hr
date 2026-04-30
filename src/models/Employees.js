@@ -47,53 +47,53 @@ const EmployeeSchema = new Schema(
     },
 
     // PERSONAL DETAILS
-    name: { type: String, required: true }, // Full Name
-    fatherOrHusbandName: { type: String },
+    name: { type: String, required: true, maxlength: 50 }, // Full Name - 50 chars like Gmail
+    fatherOrHusbandName: { type: String, maxlength: 50 },
     dateOfBirth: { type: String },
     gender: { type: String },
-    nationality: { type: String },
+    nationality: { type: String, maxlength: 50 },
     maritalStatus: { type: String, enum: ["Single", "Married"] },
-    religion: { type: String },
-    cnic: { type: String, trim: true, default: "" }, // CNIC Number
+    religion: { type: String, maxlength: 50 },
+    cnic: { type: String, trim: true, default: "", maxlength: 15 }, // CNIC Number - 15 chars formatted
     cnicIssueDate: { type: String },
     cnicExpiryDate: { type: String },
     photographUrl: { type: String }, // Upload Photograph
     cvUrl: { type: String }, // Upload CV
-    latestQualification: { type: String },
-    fieldOfQualification: { type: String },
-    phone: { type: String }, // Mobile Number
+    latestQualification: { type: String, maxlength: 50 },
+    fieldOfQualification: { type: String, maxlength: 50 },
+    phone: { type: String, maxlength: 20 }, // Mobile Number - 20 chars
     email: {
       type: String,
       required: [true, "Email is required"],
       trim: true,
+      maxlength: 254, // RFC standard 254 chars
       validate: {
         validator: (v) => typeof v === "string" && v.trim() !== "",
         message: "Email cannot be empty",
       },
     }, // Personal Email Address
-    companyEmail: { type: String, default: "" }, // Office Email Address
-    permanentAddress: { type: String },
-    presentAddress: { type: String },
-    role: { type: String }, // e.g. "Employee", "Manager", "HR", "Admin"
+    companyEmail: { type: String, default: "", maxlength: 254 }, // Office Email Address - 254 chars
+    permanentAddress: { type: String, maxlength: 200 }, // 200 chars for address
+    presentAddress: { type: String, maxlength: 200 }, // 200 chars for address
+    role: { type: String, maxlength: 50 }, // e.g. "Employee", "Manager", "HR", "Admin"
 
     // BANK DETAILS
-    bankName: { type: String },
-    bankAccountNumber: { type: String },
+    bankName: { type: String, maxlength: 50 },
+    bankAccountNumber: { type: String, maxlength: 34 }, // IBAN standard max 34 chars
 
     // NOMINEE DETAILS
-    nomineeName: { type: String },
-    nomineeCnic: { type: String },
-    nomineeRelation: { type: String }, // Relationship with Nominee
-    nomineeNo: { type: String }, // Nominee Number
+    nomineeName: { type: String, maxlength: 50 },
+    nomineeCnic: { type: String, maxlength: 15 },
+    nomineeRelation: { type: String, maxlength: 50 }, // Relationship with Nominee
+    nomineeNo: { type: String, maxlength: 20 }, // Nominee Number
 
     // EMERGENCY CONTACT DETAILS
-    emergencyContactName: { type: String },
-    emergencyContactRelation: { type: String },
-    emergencyContactNumber: { type: String },
+    emergencyContactName: { type: String, maxlength: 50 },
+    emergencyContactRelation: { type: String, maxlength: 50 },
+    emergencyContactNumber: { type: String, maxlength: 20 },
     setPasswordToken: { type: String },
     setPasswordTokenExpires: { type: Date },
-    password: { type: String }, // Hash, can be null until set
-    // (OPTIONAL) If you want to keep emergencyNo separately
+    password: { type: String },
     emergencyNo: { type: String }, // If used
 
     rt: { type: String, default: "15:00" },
