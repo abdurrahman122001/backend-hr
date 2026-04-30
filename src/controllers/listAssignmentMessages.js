@@ -925,7 +925,17 @@ exports.getExternalCommunications = async function getExternalCommunications(
             // Solitary sent messages remain in "Sent".
             hasClientInteraction: {
               $max: {
-                $cond: [{ $eq: ["$isFromClient", true] }, true, false]
+                $cond: [
+                  { $or: [
+                    { $eq: ["$isFromClient", true] },
+                    { $and: [
+                      { $ifNull: ["$client", false] },
+                      { $ne: ["$senderType", "client"] }
+                    ]}
+                  ]},
+                  true,
+                  false
+                ]
               }
             },
             hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } },

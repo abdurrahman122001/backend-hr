@@ -1823,6 +1823,39 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     await msg.save();
 
+    // 🔥 NEW: Auto-approve client employee messages in the same thread
+    let approvedClientEmployeeMessages = [];
+    if (approvalFinalized && msg.threadId) {
+      try {
+        // Find all messages in the same thread from client employees that are pending
+        const clientEmployeeMessages = await AssignmentMessage.find({
+          threadId: msg.threadId,
+          approvalStatus: "pending",
+          $or: [
+            { isFromClient: true },
+            { isFromCompanyEmployee: true },
+            { senderType: "client" }
+          ],
+          _id: { $ne: msg._id } // Exclude the current message being approved
+        });
+
+        if (clientEmployeeMessages.length > 0) {
+          // Update all client employee messages to approved
+          for (const clientMsg of clientEmployeeMessages) {
+            clientMsg.approvalStatus = "approved";
+            clientMsg.approvedAt = new Date();
+            clientMsg.approvedBy = req.employee._id;
+            await clientMsg.save();
+            approvedClientEmployeeMessages.push(clientMsg._id);
+          }
+          console.log(`✅ Auto-approved ${clientEmployeeMessages.length} client employee message(s) in thread ${msg.threadId}`);
+        }
+      } catch (err) {
+        console.error("❌ Error auto-approving client employee messages:", err);
+        // Don't fail the main approval if this fails
+      }
+    }
+
     // Populate updated message
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
