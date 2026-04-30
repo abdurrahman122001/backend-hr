@@ -21,7 +21,7 @@ exports.getForLoggedInUser = async (req, res) => {
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
       .select(
-        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate"
+        "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate tableOrder"
       );
     return res.json({
       enabledPersonalFields: doc?.enabledPersonalFields || [],
@@ -36,6 +36,7 @@ exports.getForLoggedInUser = async (req, res) => {
       headerOption: doc?.headerOption || "both",
       showHeaderAddress: typeof doc?.showHeaderAddress === "boolean" ? doc.showHeaderAddress : true,
       showHeaderGeneratedDate: typeof doc?.showHeaderGeneratedDate === "boolean" ? doc.showHeaderGeneratedDate : true,
+      tableOrder: doc?.tableOrder?.length ? doc.tableOrder : ["loan", "pf", "gf", "leaves"],
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });
@@ -53,12 +54,13 @@ exports.updateForLoggedInUser = async (req, res) => {
       enabledDeductionFields,
       enabledNetSalaryFields,
       enabledLeaveRecords,
-      showProvidentFund, // add these two
+      showProvidentFund,
       showGratuityFund,
       showLoanDetails,
       headerOption,
       showHeaderAddress,
       showHeaderGeneratedDate,
+      tableOrder,
     } = req.body;
 
     if (
@@ -81,12 +83,13 @@ exports.updateForLoggedInUser = async (req, res) => {
           enabledDeductionFields,
           enabledNetSalaryFields,
           enabledLeaveRecords,
-          showProvidentFund, 
-          showGratuityFund, 
-          showLoanDetails, 
+          showProvidentFund,
+          showGratuityFund,
+          showLoanDetails,
           headerOption,
           showHeaderAddress,
           showHeaderGeneratedDate,
+          ...(Array.isArray(tableOrder) && tableOrder.length ? { tableOrder } : {}),
           updatedAt: new Date(),
         },
       },
@@ -95,7 +98,7 @@ exports.updateForLoggedInUser = async (req, res) => {
         new: true,
         lean: true,
         select:
-          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate",
+          "enabledPersonalFields enabledEmploymentFields enabledSalaryFields enabledDeductionFields enabledNetSalaryFields enabledLeaveRecords showProvidentFund showGratuityFund showLoanDetails headerOption showHeaderAddress showHeaderGeneratedDate tableOrder",
       }
     );
 
@@ -112,6 +115,7 @@ exports.updateForLoggedInUser = async (req, res) => {
       headerOption: doc.headerOption,
       showHeaderAddress: doc.showHeaderAddress,
       showHeaderGeneratedDate: doc.showHeaderGeneratedDate,
+      tableOrder: doc?.tableOrder?.length ? doc.tableOrder : ["loan", "pf", "gf", "leaves"],
     });
   } catch (error) {
     return res.status(500).json({ error: "Server error" });

@@ -946,7 +946,8 @@ exports.markAttendance = async (req, res) => {
       challengeStatus,
       challengeAdminNotes,
     } = req.body;
-    console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status}, Notes=${notes}`);
+    const normalizedStatus = status === "On time" ? "Present" : status;
+    console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status} -> ${normalizedStatus}, Notes=${notes}`);
 
     // ========= Helpers =========
     const allowanceFields = [
@@ -1013,7 +1014,7 @@ exports.markAttendance = async (req, res) => {
         createdBy: userId,
         employee: employeeId,
         date,
-        status,
+        status: normalizedStatus,
         checkIn,
         checkOut,
         notes,
@@ -1023,8 +1024,16 @@ exports.markAttendance = async (req, res) => {
 
     if (challengeStatus) updateDoc.$set.challengeStatus = challengeStatus;
     if (challengeAdminNotes) updateDoc.$set.challengeAdminNotes = challengeAdminNotes;
-    if (status === "Absent" || status === "Half Day" || status === "Unpaid Half Day") {
-      updateDoc.$set.leaveType = (status === "Unpaid Half Day" ? "Unpaid" : (leaveType || "Unpaid"));
+    if (
+      normalizedStatus === "Absent" ||
+      normalizedStatus === "Leave" ||
+      normalizedStatus === "Half Day" ||
+      normalizedStatus === "Unpaid Half Day"
+    ) {
+      updateDoc.$set.leaveType =
+        normalizedStatus === "Unpaid Half Day"
+          ? "Unpaid"
+          : leaveType || (normalizedStatus === "Leave" ? "Paid" : "Unpaid");
     } else {
       updateDoc.$unset = { leaveType: "" };
     }

@@ -36,6 +36,10 @@ const SalarySlipFields = new mongoose.Schema(
     },
     showHeaderAddress: { type: Boolean, default: true },
     showHeaderGeneratedDate: { type: Boolean, default: true },
+    tableOrder: {
+      type: [String],
+      default: ["loan", "pf", "gf", "leaves"],
+    },
   },
   { timestamps: true }
 );

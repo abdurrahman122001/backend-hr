@@ -506,6 +506,7 @@ function buildSalarySlipHtml({
   headerOption = "both",
   showHeaderAddress = true,
   showHeaderGeneratedDate = true,
+  tableOrder = ["loan", "pf", "gf", "leaves"],
 }) {
   const amountInWords =
     netSalary != null && netSalary !== 0
@@ -710,6 +711,15 @@ function buildSalarySlipHtml({
     ? renderGratuityFundTable(gratuityFund)
     : "";
   const leavesHtml = renderLeaveTable(leaves, enabledLeaveRecords);
+
+  const tableHtmlMap = {
+    loan: loansHtml,
+    pf: providentFundHtml,
+    gf: gratuityFundHtml,
+    leaves: leavesHtml,
+  };
+  const bottomTablesHtml = tableOrder.map(key => tableHtmlMap[key] || "").join("");
+
   const netSalaryTable = buildNetSalaryTable({
     netSalary,
     amountInWords,
@@ -781,7 +791,7 @@ function buildSalarySlipHtml({
 
               <!-- ── LOANS / PF / GRATUITY / LEAVES ── -->
               <tr>
-                <td style="padding:10px 32px 24px 32px; background:#fff;">${loansHtml}${providentFundHtml}${gratuityFundHtml}${leavesHtml}</td>
+                <td style="padding:10px 32px 24px 32px; background:#fff;">${bottomTablesHtml}</td>
               </tr>
 
               <!-- ── FOOTER ── -->
@@ -1074,6 +1084,7 @@ module.exports = async function sendSlipEmail(req, res) {
       deductions,
       netSalary,
       loans: manualLoans,
+      tableOrder: tableOrderFromBody,
     } = req.body;
 
     let slip,
@@ -1485,6 +1496,7 @@ module.exports = async function sendSlipEmail(req, res) {
       headerOption,
       showHeaderAddress,
       showHeaderGeneratedDate,
+      tableOrder: (Array.isArray(tableOrderFromBody) && tableOrderFromBody.length > 0) ? tableOrderFromBody : (salaryFieldsDoc?.tableOrder || ["loan", "pf", "gf", "leaves"]),
     });
 
     // Send email
