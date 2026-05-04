@@ -9,6 +9,7 @@ const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
 const AttendanceLog = require("../models/AttendanceLog");
 const EmployeeSession = require("../models/EmployeeSession");
+const PayrollPeriod = require("../models/PayrollPeriod");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
