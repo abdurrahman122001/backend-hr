@@ -5,6 +5,7 @@ const DEFAULT = {
   markAbsentManually: false,
   allowDeleteRecords: false,
   allowEditRecords: false,
+  attendanceMode: "auth_login",
   editRecordsScope: "current",
   editPreviousDaysLimit: 7,
   deleteRecordsScope: "current", // NEW
@@ -36,6 +37,7 @@ exports.updateConfig = async (req, res, next) => {
       markAbsentManually,
       allowDeleteRecords,
       allowEditRecords,
+      attendanceMode,
       editRecordsScope,
       editPreviousDaysLimit, // NEW
       deleteRecordsScope, // NEW
@@ -73,6 +75,7 @@ exports.updateConfig = async (req, res, next) => {
         markAbsentManually,
         allowDeleteRecords,
         allowEditRecords,
+        attendanceMode,
         editRecordsScope,
         deleteRecordsScope,
         ...(editLimit !== undefined

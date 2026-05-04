@@ -10,6 +10,7 @@ const Attendance = require("../models/Attendance");
 const AttendanceLog = require("../models/AttendanceLog");
 const EmployeeSession = require("../models/EmployeeSession");
 const PayrollPeriod = require("../models/PayrollPeriod");
+const AttendanceConfig = require("../models/AttendanceConfig");
 const requireAuth = require("../middleware/empAuth");
 const authCtrl = require("../controllers/empAuthController");
 const ClientInfo = require("../models/ClientInfo");
@@ -203,10 +204,22 @@ async function isNonWorkingDay(ownerId, date) {
 async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
   const todayKarachi = getDateOnly(nowKarachi);
 
+  const config = await AttendanceConfig.findOne({ owner: emp.owner }).lean();
+
+  if (config && config.attendanceMode === 'manual') {
+    // Return existing attendance if any, but don't create or restore it
+    const existing = await Attendance.findOne({ employee: emp._id, date: todayKarachi }).lean();
+    return {
+      attendance: existing || null,
+      sessionStatus: existing ? existing.status : "Manual Mode",
+      attendanceExists: !!existing,
+      isManualMode: true
+    };
+  }
+
   // Check if today is a non-working day
   const isNWD = await isNonWorkingDay(emp.owner, todayKarachi);
   if (isNWD) {
-    console.log(`[NON-WORKING DAY] ${emp.name} login on ${todayKarachi} - skipping attendance creation`);
     return { attendance: null, sessionStatus: "Non-Working Day", attendanceExists: false, isNonWorkingDay: true };
   }
 
@@ -217,19 +230,10 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     date: todayKarachi
   });
 
-  // RESTORE SESSION (RE-LOGIN / RECONNECT)
-  // If user has an existing checkout OR a logoutTime for today, they are re-entering an active session
   if (existingAttendance && (existingAttendance.checkOut || existingAttendance.logoutTime)) {
-    console.log(`🔄 [RESTORE] ${emp.name} re-connecting, restoring session...`);
-
     let statusToRestore = existingAttendance.originalStatus;
-    
-    // If no originalStatus was saved during logout, calculate it from check-in time
     if (!statusToRestore) {
-      // Check if session was already restored (no checkOut but status is not "Half Day" from logout)
-      // This handles the case where /reactivate-session was already called
       if (!existingAttendance.checkOut && existingAttendance.status !== "Half Day") {
-        console.log(`🔄 [RESTORE] Session already restored for ${emp.name}, keeping status: ${existingAttendance.status}`);
         statusToRestore = existingAttendance.status;
       } else {
         const checkInMinutes = timeToMinutes(existingAttendance.checkIn);
@@ -248,17 +252,12 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       $set: { status: statusToRestore, totalHours: 0 }
     });
 
-    console.log(`✅ [RESTORE-SUCCESS] ${emp.name} status restored to ${statusToRestore}. Logout time removed.`);
-
     const previousStatusLower = (existingAttendance.status || "").toLowerCase().replace(/\s+/g, '-');
     const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
-    // Reverse half-day deduction if status is being restored from Half Day to something else
-    // This applies to both auto-logout (page refresh) and manual logout scenarios
     if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
       try {
         await reverseHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-        console.log(`🔄 [RESTORE] Half-day deduction reversed for ${emp.name} (relogin after ${existingAttendance.halfDayFromAutoLogout ? 'auto' : 'manual'}-logout)`);
       } catch (err) {
         console.error(`[RESTORE] Error reversing half-day deduction:`, err);
       }
@@ -299,7 +298,7 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     }
 
     const freshAttendance = await Attendance.findById(existingAttendance._id).lean();
-    
+
     // LOG SESSION RESTORE
     try {
       await logAttendanceChange({
@@ -328,10 +327,9 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       owner: emp.owner,
       shifts: { $in: [emp.shifts?.[0]] }
     }).lean() || await PayrollPeriod.findOne({ owner: emp.owner }).lean();
-    
+
     const isNonWorkingDay = await isNonWorkingDayHelper(emp.owner, todayKarachi, payroll);
     if (isNonWorkingDay) {
-      console.log(`[LOGIN] Employee ${emp.name} logged in on non-working day ${todayKarachi}. Skipping attendance creation.`);
       return { attendance: null, sessionStatus: null, attendanceExists: false, isNonWorkingDay: true };
     }
 
@@ -462,7 +460,6 @@ async function syncSupervision(employeeId, ownerId) {
           $set: { supervision: "needs_approval" }
         }
       );
-      console.log(`[Supervision Sync] ${meId} is manager/teamlead; supervising all clients`);
       return;
     }
 
@@ -508,15 +505,8 @@ async function syncSupervision(employeeId, ownerId) {
           $set: { supervision: "needs_approval" }
         }
       );
-      console.log(
-        `[Supervision Sync] Added me (${meId}) as supervisor for clients of juniors: ${juniorIds}`
-      );
     }
 
-    // Part B: My seniors (possibly multiple levels up) should supervise any
-    // clients assigned to me.  We use a similar regex to grab all ancestor
-    // links -- their senior field yields the supervisor ids.
-    // only include ancestors for which supervisionEnabled flag is set
     const mySeniorLinks = await EmployeeHierarchy.find({
       owner: ownerId,
       path: pathRegex,
@@ -532,9 +522,6 @@ async function syncSupervision(employeeId, ownerId) {
             $addToSet: { supervisedBy: { $each: seniorIds } },
             $set: { supervision: "needs_approval" }
           }
-        );
-        console.log(
-          `[Supervision Sync] Added seniors (${seniorIds}) for my (${meId}) clients`
         );
       }
     }
@@ -622,7 +609,7 @@ router.post("/login", async (req, res) => {
     // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
     // ✅ DEV MODE: Auto-trust devices if NODE_ENV=development (skip 2FA for testing)
     const devModeAutoTrust = NODE_ENV === "development";
-    
+
     const isTrusted = devModeAutoTrust || emp.trustedDevices?.some(
       (d) =>
         (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
@@ -675,8 +662,6 @@ router.post("/login", async (req, res) => {
 
     // 4. AUTHORIZED: HANDLING RESTRICTED HOURS (Trusted Device Path)
     if (isRestrictedTime) {
-      console.log(`[RESTRICTED TIME LOGIN] ${emp.companyEmail} logged in during 12 AM - 8 AM Karachi time.`);
-
       const token = jwt.sign(
         { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
         JWT_SECRET,
@@ -695,13 +680,13 @@ router.post("/login", async (req, res) => {
     }
 
     // 5. AUTHORIZED: NORMAL LOGIN (Create or Restore Attendance)
-    
+
     // ✅ DEV MODE: Auto-register device as trusted on first login
     if (devModeAutoTrust && !isTrusted) {
       const deviceId = crypto.randomBytes(32).toString("hex");
       const userAgent = req.headers["user-agent"] || "unknown";
       const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
-      
+
       emp.trustedDevices.push({
         deviceId,
         deviceFingerprint,
@@ -710,11 +695,32 @@ router.post("/login", async (req, res) => {
         addedAt: new Date(),
       });
       await emp.save();
-      console.log(`✅ [DEV MODE] Auto-registered device for ${emp.companyEmail}`);
     }
-    
+
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
-    
+
+    // Handle manual mode login
+    if (attendanceResult.isManualMode) {
+      const token = jwt.sign(
+        { id: emp._id, role: emp.role, owner: emp.owner, name: emp.name, companyEmail: emp.companyEmail, department: emp.department },
+        JWT_SECRET,
+        { expiresIn: TOKEN_EXPIRY_SECONDS }
+      );
+
+      return res.json({
+        message: "Login successful (Manual Marking mode - no auto-attendance).",
+        token,
+        user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
+        attendanceId: attendanceResult.attendance?._id || null,
+        sessionStatus: attendanceResult.sessionStatus,
+        attendanceExists: attendanceResult.attendanceExists,
+        isManualMode: true,
+        trusted: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+        localLoginTime: formatTimeForDisplay(nowKarachi),
+      });
+    }
+
     // Handle non-working day login
     if (attendanceResult.isNonWorkingDay) {
       const token = jwt.sign(
@@ -722,7 +728,7 @@ router.post("/login", async (req, res) => {
         JWT_SECRET,
         { expiresIn: TOKEN_EXPIRY_SECONDS }
       );
-      
+
       return res.json({
         message: "Login successful (non-working day - attendance not marked).",
         token,
@@ -736,7 +742,7 @@ router.post("/login", async (req, res) => {
         localLoginTime: formatTimeForDisplay(nowKarachi),
       });
     }
-    
+
     // ✅ RE-FETCH attendance to get updated status after restoration
     const freshAttendance = attendanceResult.attendance ? await Attendance.findById(attendanceResult.attendance._id).lean() : null;
     const attendance = freshAttendance || attendanceResult.attendance;
@@ -857,10 +863,7 @@ router.post("/confirm-code", async (req, res) => {
     const currentTime = nowKarachi.hours() * 60 + nowKarachi.minutes();
     const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
-    // If it's restricted time, we verify use but do NOT call performAttendanceLogic
     if (isRestrictedTime) {
-      console.log(`[RESTRICTED TIME CODE-CONFIRM] ${emp.companyEmail} verified but skipping attendance (12AM-8AM).`);
-      
       return res.json({
         message: "Device verified and trusted. Login successful (Restricted hours: No attendance recorded).",
         token,
@@ -876,7 +879,23 @@ router.post("/confirm-code", async (req, res) => {
 
     // PERFORM ATTENDANCE LOGIC (Create or Restore) on confirmation (Not restricted)
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
-    
+
+    // Handle manual mode login
+    if (attendanceResult.isManualMode) {
+      return res.json({
+        message: "Device verified. Login successful (Manual Marking mode - no auto-attendance).",
+        token,
+        deviceToken: deviceId,
+        user: { id: emp._id, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, name: emp.name || "" },
+        attendanceId: attendanceResult.attendance?._id || null,
+        sessionStatus: attendanceResult.sessionStatus,
+        attendanceExists: attendanceResult.attendanceExists,
+        isManualMode: true,
+        expiresIn: TOKEN_EXPIRY_SECONDS,
+        localLoginTime: formatTimeForDisplay(nowKarachi),
+      });
+    }
+
     // Handle non-working day login
     if (attendanceResult.isNonWorkingDay) {
       return res.json({
@@ -897,7 +916,7 @@ router.post("/confirm-code", async (req, res) => {
         localLoginTime: formatTimeForDisplay(nowKarachi),
       });
     }
-    
+
     // ✅ RE-FETCH attendance to get updated status after restoration
     const freshAttendance = attendanceResult.attendance ? await Attendance.findById(attendanceResult.attendance._id).lean() : null;
     const attendance = freshAttendance || attendanceResult.attendance;
@@ -989,9 +1008,7 @@ router.post("/logout", requireAuth, async (req, res) => {
 
     let finalStatus = attendance.status;
     const originalStatusBeforeLogout = attendance.status;
-    
-    console.log(`[LOGOUT-DEBUG] Initial status: ${attendance.status}, finalStatus: ${finalStatus}, originalStatusBeforeLogout: ${originalStatusBeforeLogout}`);
-    
+
     let shiftEndMinutes = null;
     try {
       const empForShift = await Employee.findById(employeeId).select("shifts").lean();
@@ -1016,20 +1033,9 @@ router.post("/logout", requireAuth, async (req, res) => {
       // No shift configured — use the 9:00 PM threshold
       isShiftComplete = stayedUntil9PM;
     } else if (shiftEndMinutes === 0) {
-      // For midnight shift: only complete if cross-midnight logout or actually reached midnight
-      // staying until 9 PM does NOT complete a midnight shift
       isShiftComplete = isCrossMidnightLogout;
     } else {
       isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
-    }
-
-    if (isCrossMidnightLogout) {
-      console.log(`[LOGOUT] Cross-midnight logout detected (attendance: ${attendanceDate}, logout date: ${todayKarachi}). Keeping original status: ${finalStatus}`);
-    } else if (isShiftComplete || stayedUntil9PM) {
-      console.log(`[LOGOUT] Shift completed or stayed until 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Keeping status: ${finalStatus}`);
-    } else {
-      finalStatus = "Half Day";
-      console.log(`[LOGOUT] Early logout before 9 PM (logoutTime=${logoutTotalMinutes}min, shiftEnd=${shiftEndMinutes ?? halfDayLogoutThreshold}min). Status → Half Day`);
     }
 
     // Calculate total hours worked
@@ -1039,11 +1045,6 @@ router.post("/logout", requireAuth, async (req, res) => {
     // Log attendance info
     const emp = await Employee.findById(employeeId).select("name").lean();
     const autoLogoutIndicator = isAutoLogout ? "🔴 [AUTO-LOGOUT] " : "[MANUAL-LOGOUT] ";
-    console.log(
-      `${autoLogoutIndicator}[${emp?.name || 'Unknown'}] Status=${finalStatus}, CheckIn=${attendance.checkIn}, CheckOut=${formatTimeOnly(nowKarachi)}, TotalHours=${parseFloat(totalHours.toFixed(2))}`
-    );
-
-    // Update attendance with check-out time
     const logoutTimeUTC = nowKarachi.utc().toDate();
     const actualLogoutTime = formatTimeOnly(nowKarachi);
 
@@ -1071,25 +1072,6 @@ router.post("/logout", requireAuth, async (req, res) => {
           `[ERROR-LOGOUT] Failed to update attendance record for ${employeeId}. Record not found after update.`
         );
         return res.status(500).json({ error: "Failed to save checkout time" });
-      }
-
-      console.log(
-        `✅ [LOGOUT-SUCCESS] Attendance updated - ID: ${updated._id}, CheckOut: ${updated.checkOut}`
-      );
-
-      console.log(`[LOGOUT-DEBUG] Checking deduction condition: finalStatus=${finalStatus}, originalStatusBeforeLogout=${originalStatusBeforeLogout}, isAutoLogout=${isAutoLogout}`);
-      console.log(`[LOGOUT-DEBUG] isAutoLogoutHalfDay=${isAutoLogoutHalfDay}`);
-
-      // Apply half-day deduction for BOTH auto-logout and manual logout
-      // This deduction will be reversed when session is reactivated (via reverseHalfDayDeduction)
-      if (finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day") {
-        console.log(`[LOGOUT-DEDUCTION] Triggering Real-time Half-Day deduction for ${employeeId} (AutoLogout: ${isAutoLogout})`);
-        try {
-          await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, updated._id);
-          console.log(`✅ [LOGOUT-DEDUCTION] Half-day deduction applied for ${employeeId} on ${attendanceDate}`);
-        } catch (derr) {
-          console.error("[LOGOUT-DEDUCTION] Error applying half-day deduction:", derr);
-        }
       }
 
       // isAutoLogout is set only if the request signaled it (beacon from refresh/close).
@@ -1149,8 +1131,7 @@ router.post("/logout", requireAuth, async (req, res) => {
         const hoursEarly = minutesEarly / 60;
 
         if (hoursEarly > 0) {
-          console.log(`[EARLY-DEPARTURE] ${emp?.name} stayed until 9 PM but left ${hoursEarly.toFixed(2)} hours early (logout: ${logoutTotalMinutes}min, shift end: ${shiftEndMinutes}min)`);
-          
+
           earlyDepartureResult = await applyEarlyDepartureHoursDeduction(
             employeeId,
             ownerId,
@@ -1158,10 +1139,6 @@ router.post("/logout", requireAuth, async (req, res) => {
             attendanceDate,
             hoursEarly
           );
-
-          if (earlyDepartureResult.success) {
-            console.log(`[EARLY-DEPARTURE] ✅ Deducted ${earlyDepartureResult.hoursDeducted.toFixed(2)} hours from bonusHoursAccumulated`);
-          }
         }
       } catch (edErr) {
         console.error("[EARLY-DEPARTURE] Error processing early departure deduction:", edErr);

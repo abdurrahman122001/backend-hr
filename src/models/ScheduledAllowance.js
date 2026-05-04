@@ -8,7 +8,8 @@ const ScheduledAllowanceSchema = new Schema(
     allowanceType: { type: String, required: true }, // e.g., 'incentive'
     amount: { type: Number, required: true },
     startMonth: { type: String, required: true }, // format: "YYYY-MM"
-    endMonth: { type: String, required: true }, // format: "YYYY-MM"
+    endMonth: { type: String, required: false }, // format: "YYYY-MM"
+    type: { type: String, enum: ["one-off", "recurring"], default: "recurring" },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

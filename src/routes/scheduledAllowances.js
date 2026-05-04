@@ -7,14 +7,16 @@ const ScheduledAllowance = require("../models/ScheduledAllowance");
 // Create a Scheduled Allowance
 router.post("/", async (req, res) => {
   try {
-    const { employee, allowanceType, amount, startMonth, endMonth } = req.body;
+    const { employee, allowanceType, amount, startMonth, endMonth, isActive, type } = req.body;
     const newAllowance = new ScheduledAllowance({
       owner: req.user.owner,
       employee,
       allowanceType,
       amount,
       startMonth,
-      endMonth,
+      endMonth: type === "one-off" ? startMonth : (endMonth || null),
+      isActive: isActive !== undefined ? isActive : true,
+      type: type || "recurring",
     });
     await newAllowance.save();
     res.status(201).json(newAllowance);

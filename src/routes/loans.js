@@ -1106,6 +1106,9 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
           allowanceLoans.push({
             field: loan.loanAllowanceField,
             installmentAmount: currentMonthPayment,
+            markupAmount: currentMarkup,
+            // Balance before this month's scheduled payment
+            remainingBalance: Math.round(principalBalance + markupBalance + currentMonthPayment),
             loanId: loan._id.toString(),
           });
         } else {
