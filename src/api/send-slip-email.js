@@ -383,7 +383,7 @@ function renderLeaveTable(leaves = {}, enabledLeaveRecords = []) {
   };
 
   return `
-    <div style="margin: 8px 0;">
+    <div style="margin-bottom: 14px;">
       <div style="font-weight:bold; color:#1d4ed8; background:#dbeafe; border-radius:8px 8px 0 0; padding:8px 18px;">Leave Records</div>
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse; background:#f8fafc;">
         <thead>
@@ -503,6 +503,7 @@ function buildSalarySlipHtml({
   enabledCompFields,
   enabledDedFields,
   hasActiveLoans,
+  isDraft,
   headerOption = "both",
   showHeaderAddress = true,
   showHeaderGeneratedDate = true,
@@ -772,26 +773,33 @@ function buildSalarySlipHtml({
                   </table>
                 </td>
               </tr>
-
+              ${isDraft ? `
+                <tr>
+                  <td style="text-align:center; padding:0; line-height:1;">
+                    <span style="font-size:100px; font-weight:900; color:rgba(239, 68, 68, 0.12); letter-spacing:10px; text-transform:uppercase; display:block;">
+                      DRAFT
+                    </span>
+                  </td>
+                </tr>` : ''}
 
               <!-- ── EMPLOYEE PROFILE ── -->
               <tr>
-                <td style="padding:8px 32px 8px 32px; background:#fff;">${employeeTable}</td>
+                <td style="padding:8px 32px 6px 32px; background:#fff;">${employeeTable}</td>
               </tr>
 
               <!-- ── SALARY & DEDUCTIONS ── -->
               <tr>
-                <td style="padding:8px 32px 8px 32px; background:#fff;">${salaryDeductionTable}</td>
+                <td style="padding:6px 32px; background:#fff;">${salaryDeductionTable}</td>
               </tr>
 
               <!-- ── NET SALARY ── -->
               <tr>
-                <td style="padding:7px 32px; background:#fff;">${netSalaryTable}</td>
+                <td style="padding:6px 32px; background:#fff;">${netSalaryTable}</td>
               </tr>
 
               <!-- ── LOANS / PF / GRATUITY / LEAVES ── -->
               <tr>
-                <td style="padding:10px 32px 24px 32px; background:#fff;">${bottomTablesHtml}</td>
+                <td style="padding:6px 32px 24px 32px; background:#fff;">${bottomTablesHtml}</td>
               </tr>
 
               <!-- ── FOOTER ── -->
@@ -1085,6 +1093,7 @@ module.exports = async function sendSlipEmail(req, res) {
       netSalary,
       loans: manualLoans,
       tableOrder: tableOrderFromBody,
+      isDraft, 
     } = req.body;
 
     let slip,
@@ -1495,6 +1504,7 @@ module.exports = async function sendSlipEmail(req, res) {
       hasActiveLoans,
       headerOption,
       showHeaderAddress,
+      isDraft: isDraft === true,
       showHeaderGeneratedDate,
       tableOrder: (Array.isArray(tableOrderFromBody) && tableOrderFromBody.length > 0) ? tableOrderFromBody : (salaryFieldsDoc?.tableOrder || ["loan", "pf", "gf", "leaves"]),
     });
