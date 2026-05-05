@@ -96,32 +96,34 @@ async function applyVisibility(q, req) {
     .select("junior")
     .lean();
   const juniorIds = juniorLinks.map((link) => oid(link.junior));
+  const roleHierarchyFilters = [];
+  if (currentUserRole === "manager" || currentUserRole === "owner") {
+    roleHierarchyFilters.push({ owner: ownerId });
+  }
 
-  // 👁️ ROLE/HIERARCHY VISIBILITY
-  const isManagerOwner = ["manager", "owner"].includes(currentUserRole);
-
-  const hierarchySegments = [];
+  const nonManagerFilters = [];
   if (currentUserRole === "team_lead") {
-    hierarchySegments.push({ owner: ownerId });
+    nonManagerFilters.push({ owner: ownerId });
   }
   if (juniorIds.length > 0) {
-    hierarchySegments.push({ sender: { $in: juniorIds } });
-    hierarchySegments.push({ receiver: { $in: juniorIds } });
+    nonManagerFilters.push({ sender: { $in: juniorIds } });
+    nonManagerFilters.push({ receiver: { $in: juniorIds } });
   }
 
-  const roleSegments = [];
-  if (isManagerOwner) {
-    roleSegments.push({ owner: ownerId, approvalStatus: { $ne: "pending" } });
-  }
-
-  if (hierarchySegments.length > 0) {
-    roleSegments.push({
-      approvalStatus: { $ne: "pending" },
-      $or: hierarchySegments
+  if (nonManagerFilters.length > 0) {
+    roleHierarchyFilters.push({
+      $or: nonManagerFilters
     });
   }
 
-  const roleHierarchyFilter = roleSegments.length > 0 ? { $or: roleSegments } : { _id: null };
+  if (roleHierarchyFilters.length === 0) {
+    roleHierarchyFilters.push({ _id: null });
+  }
+
+  const roleHierarchyFilter = {
+    $or: roleHierarchyFilters
+  };
+
   const organizationSentVisibility = {
     owner: ownerId,
     status: { $in: ["sent", "scheduled"] },
@@ -133,7 +135,7 @@ async function applyVisibility(q, req) {
       isParticipant,
       roleHierarchyFilter,
       organizationSentVisibility,
-      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds }, approvalStatus: { $ne: "pending" } }] : [])
+      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
     ]
   };
 
@@ -320,10 +322,15 @@ exports.getMessage = async function getMessage(req, res) {
     let hasAccess = userId === senderId || receiverIds.includes(userId);
 
     // Check Manager/Owner/Team Lead access
-    // 🔥 APPROVAL FIX: Role-based access does NOT apply to pending messages
     if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
-      if (String(msg.owner?._id || msg.owner) === String(ownerId) && msg.approvalStatus !== "pending") {
-        hasAccess = true;
+      if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
+        // Managers and Owners see EVERYTHING (including pending)
+        if (["manager", "owner"].includes(currentUserRole)) {
+          hasAccess = true;
+        } else if (msg.approvalStatus !== "pending") {
+          // Team leads see all organization mail ONLY if it's not pending
+          hasAccess = true;
+        }
       }
     }
 
@@ -881,7 +888,8 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.$or = [
         { isFromClient: true },
         { receiver: me },
-        { receiver: { $in: [me] } }
+        { receiver: { $in: [me] } },
+        { approvalStatus: "pending" } // 🔥 CRM/Manager Fix: Show pending messages in external inbox for review
       ];
     }
 
@@ -966,8 +974,22 @@ exports.getExternalCommunications = async function getExternalCommunications(
               _id: "$threadId",
               hasClientInteraction: {
                 $max: {
-                  $cond: [{ $eq: ["$isFromClient", true] }, true, false]
-                }
+                  $cond: [
+                    {
+                      $or: [
+                        { $eq: ["$isFromClient", true] },
+                        {
+                          $and: [
+                            { $ifNull: ["$client", false] },
+                            { $ne: ["$senderType", "client"] },
+                          ],
+                        },
+                      ],
+                    },
+                    true,
+                    false,
+                  ],
+                },
               },
               hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } }
             }
@@ -1420,7 +1442,8 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
       isTrashed: false,
       isSpam: false,
       status: "sent",
-      approvalStatus: { $ne: "pending" }, // 🔥 FIX: Don't count pending messages as unread emails
+      // 🔥 FIX: Include pending messages in unread count for supervisors
+      // approvalStatus: { $ne: "pending" }, 
     });
 
     res.json({
@@ -2272,11 +2295,14 @@ exports.getTeamLeadPendingApprovals =
         showThread = "true",
       } = req.query;
 
-      // Verify team lead
+      // Verify team lead or manager
       const currentUserRole = normalizeRole(req.employee?.role || "");
-      if (currentUserRole !== "team_lead") {
+      const isManager = currentUserRole === "manager" || currentUserRole === "owner";
+      const isTeamLead = currentUserRole === "team_lead";
+
+      if (!isTeamLead && !isManager) {
         return res.status(403).json({
-          error: "Access denied. Only team leads can view pending approvals.",
+          error: "Access denied. Only team leads and managers can view pending approvals.",
         });
       }
 
@@ -2295,18 +2321,23 @@ exports.getTeamLeadPendingApprovals =
 
       const supervisedEmployeeIds = juniorLinks.map(link => link.junior);
 
-      // Base query: Get pending messages where this user is receiver OR sender is a junior
+      // Base query: Get pending messages
+      // Managers see everything for their owner
+      // Team leads see where they are receiver OR sender is a junior
       const query = {
         owner: ownerId,
         approvalStatus: "pending",
-        $or: [
-          { receiver: currentUserId },
-          { receiver: { $in: [currentUserId] } },
-          { sender: { $in: supervisedEmployeeIds } }
-        ],
         isTrashed: false,
         isSpam: false,
       };
+
+      if (!isManager) {
+        query.$or = [
+          { receiver: currentUserId },
+          { receiver: { $in: [currentUserId] } },
+          { sender: { $in: supervisedEmployeeIds } }
+        ];
+      }
 
       // Apply client filter
       if (isObjId(client)) {
