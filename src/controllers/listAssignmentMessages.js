@@ -5,21 +5,10 @@ const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
-/** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
-
-/**
- * Find the supervisor(s) of an employee using the EmployeeHierarchy model.
- * This is used when supervision is enabled for a client to properly route
- * approval messages up the hierarchy chain.
- * @param {string} ownerId - The owner ID (organization)
- * @param {string} employeeId - The employee whose supervisor(s) we're looking for
- * @returns {Promise<string[]>} - Array of supervisor (senior) employee IDs
- */
 async function findSupervisorsFromHierarchy(ownerId, employeeId) {
   if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
 
   try {
-    // Find all hierarchy links where the employee is the junior
     const hierarchyLinks = await EmployeeHierarchy.find({
       owner: ownerId,
       junior: employeeId,
@@ -35,13 +24,6 @@ async function findSupervisorsFromHierarchy(ownerId, employeeId) {
   }
 }
 
-/**
- * Get the full management chain for an employee (all seniors up to root).
- * This traverses the hierarchy tree upward.
- * @param {string} ownerId - The owner ID (organization)
- * @param {string} employeeId - The starting employee
- * @returns {Promise<string[]>} - Array of all supervisor IDs in the chain
- */
 async function getManagementChainFromHierarchy(ownerId, employeeId) {
   if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
 
@@ -129,7 +111,7 @@ async function applyVisibility(q, req) {
 
   const roleSegments = [];
   if (isManagerOwner) {
-    roleSegments.push({ owner: ownerId });
+    roleSegments.push({ owner: ownerId, approvalStatus: { $ne: "pending" } });
   }
 
   if (hierarchySegments.length > 0) {
@@ -139,14 +121,7 @@ async function applyVisibility(q, req) {
     });
   }
 
-  // If no role/hierarchy access applies, use a filter that matches nothing
   const roleHierarchyFilter = roleSegments.length > 0 ? { $or: roleSegments } : { _id: null };
-
-  // Base visibility rules:
-  // 1. You are a participant (sender/receiver)
-  // 2. You have role-based visibility (Manager/Lead/Senior)
-  // 3. You are assigned to the client (Team visibility)
-  // 4. Organization-wide: Anyone in the organization can see "Sent" or "Scheduled" messages (once they aren't pending)
   const organizationSentVisibility = {
     owner: ownerId,
     status: { $in: ["sent", "scheduled"] },
@@ -158,7 +133,7 @@ async function applyVisibility(q, req) {
       isParticipant,
       roleHierarchyFilter,
       organizationSentVisibility,
-      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
+      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds }, approvalStatus: { $ne: "pending" } }] : [])
     ]
   };
 
@@ -345,26 +320,29 @@ exports.getMessage = async function getMessage(req, res) {
     let hasAccess = userId === senderId || receiverIds.includes(userId);
 
     // Check Manager/Owner/Team Lead access
+    // 🔥 APPROVAL FIX: Role-based access does NOT apply to pending messages
     if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
-      if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
+      if (String(msg.owner?._id || msg.owner) === String(ownerId) && msg.approvalStatus !== "pending") {
         hasAccess = true;
       }
     }
 
     // Check client assignment access (team visibility)
+    // 🔥 APPROVAL FIX: Assigned-client access does NOT apply to pending messages
     if (!hasAccess && msg.client) {
       const clientId = msg.client?._id || msg.client;
       const client = await ClientInfo.findOne({
         _id: clientId,
         assignedTo: me
       }).select("_id").lean();
-      if (client) hasAccess = true;
+      if (client && msg.approvalStatus !== "pending") hasAccess = true;
     }
 
     // Check hierarchy access (senior viewing junior)
+    // 🔥 APPROVAL FIX: Hierarchy access does NOT apply to pending messages
     if (!hasAccess && senderId) {
       const seniorsOfSender = await getManagementChainFromHierarchy(ownerId, senderId);
-      if (seniorsOfSender.includes(userId)) hasAccess = true;
+      if (seniorsOfSender.includes(userId) && msg.approvalStatus !== "pending") hasAccess = true;
     }
 
     // Check organization-wide sent visibility (all users can see non-pending sent/scheduled emails in the company)
@@ -926,13 +904,17 @@ exports.getExternalCommunications = async function getExternalCommunications(
             hasClientInteraction: {
               $max: {
                 $cond: [
-                  { $or: [
-                    { $eq: ["$isFromClient", true] },
-                    { $and: [
-                      { $ifNull: ["$client", false] },
-                      { $ne: ["$senderType", "client"] }
-                    ]}
-                  ]},
+                  {
+                    $or: [
+                      { $eq: ["$isFromClient", true] },
+                      {
+                        $and: [
+                          { $ifNull: ["$client", false] },
+                          { $ne: ["$senderType", "client"] }
+                        ]
+                      }
+                    ]
+                  },
                   true,
                   false
                 ]

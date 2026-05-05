@@ -257,4 +257,29 @@ router.post('/challenge', async (req, res) => {
   }
 });
 
+// GET /api/emp-attendance/config
+router.get('/config', async (req, res) => {
+  try {
+    const ownerId = req.employee.owner;
+    
+    // Find payroll period for non-working days
+    const PayrollPeriod = require('../models/PayrollPeriod');
+    const period = await PayrollPeriod.findOne({ owner: ownerId })
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Find specific non-working days
+    const SpecificNonWorkingDay = require('../models/SpecificNonWorkingDay');
+    const specificNwds = await SpecificNonWorkingDay.find({ owner: ownerId }).lean();
+    
+    res.json({
+      nonWorkingDays: period?.nonWorkingDays || [],
+      specificNonWorkingDays: specificNwds.map(d => d.date)
+    });
+  } catch (err) {
+    console.error("Fetch attendance config failed:", err);
+    res.status(500).json({ error: "Failed to fetch attendance configuration" });
+  }
+});
+
 module.exports = router;

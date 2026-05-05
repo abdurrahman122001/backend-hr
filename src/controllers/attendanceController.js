@@ -1417,7 +1417,7 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           {
             $set: {
-              status: "Absent",
+              status: "Leave",
               leaveType: "Paid",
               effectivePaidDays: result.paid || 0,
               proportionate: true,
@@ -1441,7 +1441,7 @@ exports.markAttendance = async (req, res) => {
           { owner: ownerId, employee: employeeId, date },
           {
             $set: {
-              status: "Absent",
+              status: "Leave",
               leaveType: "Paid",
               effectivePaidDays: effectiveDays,
               proportionate: false,
@@ -1468,7 +1468,7 @@ exports.markAttendance = async (req, res) => {
         );
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Paid" } }
+          { $set: { status: "Leave", leaveType: "Paid" } }
         );
         return res.json(rec);
       } else {
@@ -1483,7 +1483,7 @@ exports.markAttendance = async (req, res) => {
 
         await Attendance.findOneAndUpdate(
           { owner: ownerId, employee: employeeId, date },
-          { $set: { status: "Absent", leaveType: "Unpaid" } }
+          { $set: { status: "Leave", leaveType: "Unpaid" } }
         );
         return res.json(rec);
       }

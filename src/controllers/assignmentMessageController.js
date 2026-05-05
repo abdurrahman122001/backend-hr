@@ -259,8 +259,8 @@ function parseCCEmails(ccBody) {
   return ccEmails;
 }
 
-async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId) {
-  if (!ccEmails || ccEmails.length === 0) return receivers;
+async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId, approvalStatus) {
+  if (!ccEmails || ccEmails.length === 0 || approvalStatus === "pending") return receivers;
 
   const ccEmailAddresses = ccEmails.map((cc) => cc.email);
   const matchingEmployees = await findEmployeesByEmails(ownerId, ccEmailAddresses);
@@ -1380,7 +1380,7 @@ exports.createMessage = async function createMessage(req, res) {
     let ccEmails = parseCCEmails(ccBody);
 
     // 🔥 NEW: Check CC emails against employee database and add matching employees as receivers
-    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender);
+    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, approvalStatus);
 
     const msgData = {
       owner,
@@ -2353,7 +2353,7 @@ exports.createDraft = async function createDraft(req, res) {
     );
 
     let ccEmails = parseCCEmails(ccBody);
-    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender);
+    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, null);
 
     // Note: Drafts can be saved without receivers. 
     // The requirement for receivers should only be enforced when sending.
@@ -2480,7 +2480,8 @@ exports.updateMessage = async function updateMessage(req, res) {
         msg.receiver.map(String),
         ccEmails,
         msg.owner,
-        msg.sender
+        msg.sender,
+        msg.approvalStatus
       );
       msg.receiver = updatedReceivers;
     }
@@ -2578,7 +2579,8 @@ exports.sendDraft = async function sendDraft(req, res) {
         msg.receiver.map(String),
         ccEmails,
         msg.owner,
-        msg.sender
+        msg.sender,
+        msg.approvalStatus
       );
       msg.receiver = updatedReceivers;
     } else if (msg.cc && msg.cc.length > 0) {
@@ -2587,7 +2589,8 @@ exports.sendDraft = async function sendDraft(req, res) {
         msg.receiver.map(String),
         msg.cc,
         msg.owner,
-        msg.sender
+        msg.sender,
+        msg.approvalStatus
       );
       msg.receiver = updatedReceivers;
     }
