@@ -26,7 +26,7 @@ function getTransporter() {
   return transporter;
 }
 
-async function sendEmail({ from, to, subject, text, html, attachments, isSystem = false }) {
+async function sendEmail({ from, to, cc, subject, text, html, attachments, isSystem = false }) {
   if (!to) {
     throw new Error("No recipients defined");
   }
@@ -40,6 +40,7 @@ async function sendEmail({ from, to, subject, text, html, attachments, isSystem 
   const mailOptions = {
     from: fromAddress,
     to,
+    cc: Array.isArray(cc) ? cc.join(",") : cc,
     subject,
     text,
     html,

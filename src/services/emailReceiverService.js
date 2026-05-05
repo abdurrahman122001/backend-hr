@@ -675,6 +675,32 @@ class EmailReceiverService {
         console.log(`👥 [EmailReceiver] Added ${teamLeads.length} team lead(s) to receivers`);
       }
 
+      // Add internal employees from CC to receivers
+      if (emailDetails.cc && emailDetails.cc.length > 0) {
+        try {
+          const ccEmails = emailDetails.cc.map(email => email.toLowerCase().trim());
+          const matchingEmployees = await Employee.find({
+            owner: client.owner,
+            $or: [
+              { email: { $in: ccEmails } },
+              { companyEmail: { $in: ccEmails } }
+            ],
+            status: { $ne: "offboarded" }
+          }).select("_id");
+
+          if (matchingEmployees.length > 0) {
+            matchingEmployees.forEach(emp => {
+              const empId = emp._id.toString();
+              if (!receivers.includes(empId)) {
+                receivers.push(empId);
+              }
+            });
+          }
+        } catch (err) {
+          console.error("❌ [EmailReceiver] Error matching CC employees:", err);
+        }
+      }
+
       // Remove duplicates and convert to ObjectId
       receivers = [...new Set(receivers.map(id => id.toString()))]
         .map(id => new mongoose.Types.ObjectId(id));

@@ -218,6 +218,67 @@ function normalizeIds(val) {
   }
   return [];
 }
+
+/** ---------- CC HELPER FUNCTIONS ---------- **/
+function parseCCEmails(ccBody) {
+  let ccEmails = [];
+  if (ccBody) {
+    if (Array.isArray(ccBody)) {
+      ccEmails = ccBody
+        .filter((item) => {
+          if (typeof item === "string" && item.includes("@")) return true;
+          if (item && item.email && item.email.includes("@")) return true;
+          if (item && typeof item === "object" && item.email) return true;
+          return false;
+        })
+        .map((item) => {
+          if (typeof item === "string") {
+            return {
+              email: item.trim().toLowerCase(),
+              name: item.split("@")[0],
+            };
+          }
+          if (item && item.email) {
+            return {
+              email: item.email.trim().toLowerCase(),
+              name: item.name || item.email.split("@")[0],
+            };
+          }
+          return null;
+        })
+        .filter((item) => item !== null);
+    } else if (typeof ccBody === "string" && ccBody.includes("@")) {
+      ccEmails = [
+        {
+          email: ccBody.trim().toLowerCase(),
+          name: ccBody.split("@")[0],
+        },
+      ];
+    }
+  }
+  return ccEmails;
+}
+
+async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId) {
+  if (!ccEmails || ccEmails.length === 0) return receivers;
+
+  const ccEmailAddresses = ccEmails.map((cc) => cc.email);
+  const matchingEmployees = await findEmployeesByEmails(ownerId, ccEmailAddresses);
+
+  const updatedReceivers = [...receivers];
+  if (matchingEmployees.length > 0) {
+    matchingEmployees.forEach((employee) => {
+      const employeeId = String(employee._id);
+      if (
+        !updatedReceivers.includes(employeeId) &&
+        employeeId !== String(senderId)
+      ) {
+        updatedReceivers.push(employeeId);
+      }
+    });
+  }
+  return updatedReceivers;
+}
 // 🔥 FIXED: Thread ID generation based on subject only
 function generateThreadId(clientId, subject) {
   // Only require clientId if subject is completely missing
@@ -1316,64 +1377,10 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt = null;
     }
 
-    let ccEmails = [];
-
-    if (ccBody) {
-      if (Array.isArray(ccBody)) {
-        ccEmails = ccBody
-          .filter((item) => {
-            if (typeof item === "string" && item.includes("@")) {
-              return true;
-            }
-            if (item && item.email && item.email.includes("@")) {
-              return true;
-            }
-            if (item && typeof item === "object" && item.email) {
-              return true;
-            }
-            return false;
-          })
-          .map((item) => {
-            if (typeof item === "string") {
-              return {
-                email: item.trim().toLowerCase(),
-                name: item.split("@")[0],
-              };
-            }
-            if (item && item.email) {
-              return {
-                email: item.email.trim().toLowerCase(),
-                name: item.name || item.email.split("@")[0],
-              };
-            }
-            return null;
-          })
-          .filter((item) => item !== null);
-      } else if (typeof ccBody === "string" && ccBody.includes("@")) {
-        ccEmails = [
-          {
-            email: ccBody.trim().toLowerCase(),
-            name: ccBody.split("@")[0],
-          },
-        ];
-      }
-    }
+    let ccEmails = parseCCEmails(ccBody);
 
     // 🔥 NEW: Check CC emails against employee database and add matching employees as receivers
-    if (ccEmails.length > 0) {
-      const ccEmailAddresses = ccEmails.map(cc => cc.email);
-      const matchingEmployees = await findEmployeesByEmails(owner, ccEmailAddresses);
-
-      if (matchingEmployees.length > 0) {
-        // Add matching employee IDs to receivers array
-        matchingEmployees.forEach(employee => {
-          const employeeId = String(employee._id);
-          if (!receivers.includes(employeeId) && employeeId !== String(sender)) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-    }
+    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender);
 
     const msgData = {
       owner,
@@ -2322,6 +2329,7 @@ exports.createDraft = async function createDraft(req, res) {
       receivers: receiversBody,
       subject,
       note,
+      cc: ccBody,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -2344,6 +2352,9 @@ exports.createDraft = async function createDraft(req, res) {
       (id) => id !== String(sender)
     );
 
+    let ccEmails = parseCCEmails(ccBody);
+    receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender);
+
     // Note: Drafts can be saved without receivers. 
     // The requirement for receivers should only be enforced when sending.
 
@@ -2355,6 +2366,7 @@ exports.createDraft = async function createDraft(req, res) {
       note: note || "",
       status: "draft",
       isScheduled: false,
+      cc: ccEmails,
       // Only include client if provided and valid
       ...(client && isObjId(client) && { client }),
     };
@@ -2420,6 +2432,7 @@ exports.updateMessage = async function updateMessage(req, res) {
       note,
       receiver: receiverBody,
       receivers: receiversBody,
+      cc: ccBody,
     } = req.body;
     const msg = await AssignmentMessage.findById(req.params.id);
 
@@ -2456,6 +2469,20 @@ exports.updateMessage = async function updateMessage(req, res) {
       }
 
       msg.receiver = receivers;
+    }
+
+    if (ccBody) {
+      const ccEmails = parseCCEmails(ccBody);
+      msg.cc = ccEmails;
+
+      // Sync updated CC with receivers
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        ccEmails,
+        msg.owner,
+        msg.sender
+      );
+      msg.receiver = updatedReceivers;
     }
 
     await msg.save();
@@ -2502,6 +2529,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       receivers: receiversBody,
       isScheduled: isScheduledBody,
       scheduledFor,
+      cc: ccBody,
     } = req.body;
 
     const msg = await AssignmentMessage.findById(id);
@@ -2539,6 +2567,29 @@ exports.sendDraft = async function sendDraft(req, res) {
 
     if (receivers.length > 0) {
       msg.receiver = receivers;
+    }
+
+    // Process CC and sync with receivers if CC is provided during send
+    if (ccBody) {
+      const ccEmails = parseCCEmails(ccBody);
+      msg.cc = ccEmails;
+
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        ccEmails,
+        msg.owner,
+        msg.sender
+      );
+      msg.receiver = updatedReceivers;
+    } else if (msg.cc && msg.cc.length > 0) {
+      // Even if no new CC is provided, ensure existing CC is synced with receivers
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        msg.cc,
+        msg.owner,
+        msg.sender
+      );
+      msg.receiver = updatedReceivers;
     }
 
     // Handle scheduling
