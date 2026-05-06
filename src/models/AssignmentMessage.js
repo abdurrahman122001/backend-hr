@@ -29,7 +29,7 @@ const AssignmentMessageSchema = new Schema(
     },
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     receiver: [
-      { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+      { type: Schema.Types.ObjectId, ref: "Employee" },
     ],
     subject: { type: String },
     note: { type: String },
