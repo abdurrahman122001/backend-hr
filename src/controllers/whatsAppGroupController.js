@@ -498,6 +498,142 @@ exports.sendGroupMessage = async function (req, res) {
   }
 };
 
+/** ── ADD MEMBERS TO GROUP ──────────────────────────────────── */
+exports.addMembers = async function (req, res) {
+  try {
+    const { groupId } = req.params;
+    const { members } = req.body;
+
+    if (!isObjId(groupId))
+      return res.status(400).json({ error: "Invalid group ID" });
+
+    if (!members || !Array.isArray(members) || members.length === 0)
+      return res.status(400).json({ error: "At least one member is required" });
+
+    const owner = req.employee?.owner || req.employee?._id;
+    const addedBy = req.employee?._id;
+
+    if (!owner || !addedBy)
+      return res.status(401).json({ error: "Unauthorized" });
+
+    const group = await WhatsAppGroup.findOne({
+      _id: groupId,
+      owner,
+      isActive: true,
+    });
+
+    if (!group) return res.status(404).json({ error: "Group not found" });
+
+    // Filter out existing members
+    const existingMemberIds = new Set(
+      group.members.map((m) => `${m.memberType}_${m.memberId}`)
+    );
+    const newMembers = members.filter(
+      (m) => !existingMemberIds.has(`${m.memberType}_${m.memberId}`)
+    );
+
+    if (newMembers.length === 0) {
+      return res.status(400).json({ error: "All members already in group" });
+    }
+
+    // Add new members with addedBy field
+    newMembers.forEach((m) => {
+      group.members.push({ ...m, addedBy });
+    });
+
+    // Update group type based on member types
+    const memberTypes = [...new Set(group.members.map((m) => m.memberType))];
+    let groupType = "mixed";
+    if (memberTypes.length === 1) {
+      if (memberTypes[0] === "employee") groupType = "employees_only";
+      else if (memberTypes[0] === "client") groupType = "clients_only";
+      else if (memberTypes[0] === "client_employee")
+        groupType = "client_employees_only";
+    }
+    group.groupType = groupType;
+
+    await group.save();
+
+    const populated = await WhatsAppGroup.findById(group._id)
+      .populate("createdBy", "name companyEmail role")
+      .lean();
+
+    // Notify new members via socket
+    const io = req.app.get("io");
+    if (io) {
+      newMembers.forEach((m) => {
+        if (m.memberType === "employee" && isObjId(m.memberId)) {
+          io.to(`employee_${m.memberId}`).emit("group_member_added", {
+            group: populated,
+            addedBy,
+          });
+        }
+      });
+    }
+
+    res.json({
+      message: `${newMembers.length} member(s) added successfully`,
+      group: populated,
+    });
+  } catch (error) {
+    console.error("Error adding members to group:", error);
+    res.status(500).json({ error: "Failed to add members to group" });
+  }
+};
+
+/** ── REMOVE MEMBER FROM GROUP ──────────────────────────────────── */
+exports.removeMember = async function (req, res) {
+  try {
+    const { groupId, memberId } = req.params;
+    const { memberType } = req.body;
+
+    if (!isObjId(groupId))
+      return res.status(400).json({ error: "Invalid group ID" });
+
+    const owner = req.employee?.owner || req.employee?._id;
+
+    if (!owner) return res.status(401).json({ error: "Unauthorized" });
+
+    const group = await WhatsAppGroup.findOne({
+      _id: groupId,
+      owner,
+      isActive: true,
+    });
+
+    if (!group) return res.status(404).json({ error: "Group not found" });
+
+    // Remove member
+    group.members = group.members.filter(
+      (m) => !(m.memberId === memberId && m.memberType === memberType)
+    );
+
+    // Update group type based on remaining members
+    const memberTypes = [...new Set(group.members.map((m) => m.memberType))];
+    let groupType = "mixed";
+    if (memberTypes.length === 1) {
+      if (memberTypes[0] === "employee") groupType = "employees_only";
+      else if (memberTypes[0] === "client") groupType = "clients_only";
+      else if (memberTypes[0] === "client_employee")
+        groupType = "client_employees_only";
+    }
+    group.groupType = groupType;
+
+    await group.save();
+
+    const populated = await WhatsAppGroup.findById(group._id)
+      .populate("createdBy", "name companyEmail role")
+      .lean();
+
+    res.json({
+      message: "Member removed successfully",
+      group: populated,
+    });
+  } catch (error) {
+    console.error("Error removing member from group:", error);
+    res.status(500).json({ error: "Failed to remove member from group" });
+  }
+};
+
 /** ── DELETE / ARCHIVE GROUP ──────────────────────────────────── */
 exports.deleteGroup = async function (req, res) {
   try {

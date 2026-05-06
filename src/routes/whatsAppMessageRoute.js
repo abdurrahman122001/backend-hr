@@ -15,6 +15,8 @@ router.get("/groups", groupCtrl.getGroups);
 router.post("/groups", groupCtrl.createGroup);
 router.get("/groups/:groupId", groupCtrl.getGroup);
 router.delete("/groups/:groupId", groupCtrl.deleteGroup);
+router.post("/groups/:groupId/members", groupCtrl.addMembers);
+router.delete("/groups/:groupId/members/:memberId", groupCtrl.removeMember);
 router.get("/groups/:groupId/messages", groupCtrl.getGroupMessages);
 router.post("/groups/:groupId/messages", groupCtrl.sendGroupMessage);
 
@@ -68,4 +70,4 @@ router.post(
 );
 router.get("/:messageId/comments/stats", commentController.getCommentStats);
 
-module.exports = router;
+module.exports = router;

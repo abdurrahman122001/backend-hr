@@ -230,7 +230,7 @@ async function isNonWorkingDayHelper(ownerId, date, payroll) {
     fri: 5, friday: 5, sat: 6, saturday: 6,
   };
 
-  (payroll.nonWorkingDays || []).forEach((raw) => {
+  ((payroll && payroll.nonWorkingDays) || []).forEach((raw) => {
     if (!raw) return;
     const s = String(raw).trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return dateSet.add(s);
@@ -254,7 +254,6 @@ async function isNonWorkingDayHelper(ownerId, date, payroll) {
 }
 
 async function ensureEmployeeAccessible(employeeId, ownerId, userId, attendanceScope = null) {
-  // 1. Mandatory scope check for delegated employees
   if (attendanceScope && Array.isArray(attendanceScope) && attendanceScope.length > 0) {
     const inScope = attendanceScope.some(id => String(id) === String(employeeId));
     if (!inScope) return null;
