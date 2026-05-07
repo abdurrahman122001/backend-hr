@@ -672,6 +672,23 @@ exports.applyLeave = async (req, res) => {
 
     await leave.save();
 
+    // 🔥 NEW: Real-time notification for supervisor
+    if (req.app.get("io") && supervisor) {
+      const io = req.app.get("io");
+      const populatedLeave = await Leave.findById(leave._id)
+        .populate("employee", "name email department photographUrl")
+        .lean();
+
+      io.to(`employee_${supervisor}`).emit("new_leave_request", {
+        leave: {
+          ...populatedLeave,
+          employee: processEmployeeWithPhoto(populatedLeave.employee, req),
+        },
+        message: `${employee.name} has applied for leave`,
+      });
+      console.log(`📡 [SOCKET] Emitted new_leave_request to employee_${supervisor}`);
+    }
+
     // Prepare response message based on analysis
     let message = "Leave request submitted for approval";
     let warning = null;

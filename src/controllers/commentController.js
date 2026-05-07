@@ -77,16 +77,41 @@ exports.addComment = async (req, res) => {
 
     const io = getIo(req);
     if (io) {
-      // 1) Realtime update to everyone in the message room
-      io.to(`message:${messageId}`).emit("comment:added", {
+      const payload = {
         comment: newComment,
         messageId,
         commentCount: message.commentCount,
         lastCommentAt: message.lastCommentAt,
         commenters: message.commenters,
+      };
+
+      // 1) Realtime update to everyone in the message room (side panel)
+      io.to(`message:${messageId}`).emit("comment:added", payload);
+
+      // 2) Broadcast to Client room (for list updates)
+      if (message.client) {
+        io.to(`client_${message.client}`).emit("comment:added", payload);
+      }
+
+      // 3) Broadcast to Group room (for group chat updates)
+      if (message.groupId) {
+        io.to(`conversation_${message.groupId}`).emit("comment:added", payload);
+      }
+
+      // 4) Notify all participants in their user rooms
+      const participants = new Set([
+        String(message.sender),
+        ...(Array.isArray(message.receiver)
+          ? message.receiver.map((r) => String(r))
+          : [String(message.receiver)]),
+      ]);
+
+      participants.forEach((userId) => {
+        io.to(`employee_${userId}`).emit("comment:added", payload);
+        io.to(`user:${userId}`).emit("comment:added", payload);
       });
 
-      // 2) Mention notifications
+      // 5) Mention notifications
       if (mentions && mentions.length > 0) {
         mentions.forEach((mention) => {
           io.to(`user:${mention.userId}`).emit("notification", {
@@ -98,34 +123,6 @@ exports.addComment = async (req, res) => {
           });
         });
       }
-
-      // 3) Other participants (sender, receivers, previous commenters)
-      const participants = [
-        message.sender,
-        ...(message.receiver || []),
-        ...(message.commenters || []),
-      ].filter(
-        (id) =>
-          id &&
-          id.toString() !== employeeFromDb._id.toString() &&
-          !(mentions || []).some(
-            (m) => m.userId === id.toString()
-          )
-      );
-
-      const uniqueParticipants = [
-        ...new Set(participants.map((id) => id.toString())),
-      ];
-
-      uniqueParticipants.forEach((participantId) => {
-        io.to(`user:${participantId}`).emit("notification", {
-          type: "new_comment",
-          message: `${employeeFromDb.name} commented on a message`,
-          commentId: newComment._id,
-          messageId,
-          timestamp: new Date(),
-        });
-      });
     }
 
     res.status(201).json({
@@ -281,10 +278,23 @@ exports.editComment = async (req, res) => {
 
     const io = getIo(req);
     if (io) {
-      io.to(`message:${messageId}`).emit("comment:updated", {
+      const payload = {
         comment: updatedComment,
         messageId,
-      });
+      };
+
+      io.to(`message:${messageId}`).emit("comment:updated", payload);
+
+      if (message.client) {
+        io.to(`client_${message.client}`).emit("comment:updated", payload);
+      }
+
+      if (message.groupId) {
+        io.to(`conversation_${message.groupId}`).emit(
+          "comment:updated",
+          payload
+        );
+      }
     }
 
     res.json({
@@ -328,13 +338,23 @@ exports.deleteComment = async (req, res) => {
 
     const io = getIo(req);
     if (io) {
-      io.to(`message:${messageId}`).emit("comment:deleted", {
+      const payload = {
         commentId,
         messageId,
         commentCount: message.commentCount,
         lastCommentAt: message.lastCommentAt,
         commenters: message.commenters,
-      });
+      };
+
+      io.to(`message:${messageId}`).emit("comment:deleted", payload);
+
+      if (message.client) {
+        io.to(`client_${message.client}`).emit("comment:deleted", payload);
+      }
+
+      if (message.groupId) {
+        io.to(`conversation_${message.groupId}`).emit("comment:deleted", payload);
+      }
     }
 
     res.json({
