@@ -531,9 +531,12 @@ async function emitToSpecificReceivers(
     }
 
     // 🔥 NEW: Add anyone assigned to the client so it shows in their external inbox
-    if (populatedMessage.client) {
+    // ONLY if the message is fully approved
+    if (populatedMessage.client && populatedMessage.approvalStatus === "approved") {
       const clientId = populatedMessage.client._id || populatedMessage.client;
-      const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+      const clientDoc = await ClientInfo.findById(clientId)
+        .select("assignedTo")
+        .lean();
       if (clientDoc && clientDoc.assignedTo) {
         clientDoc.assignedTo.forEach((userId) => {
           if (userId) actualRecipients.add(String(userId));
@@ -606,15 +609,19 @@ async function emitMessageUpdate(io, message, action) {
       });
     }
 
-    if (populatedMessage.client) {
+    // 🔥 NEW: Add users assigned to this client
+    // ONLY if the message is fully approved
+    if (populatedMessage.client && populatedMessage.approvalStatus === "approved") {
       const clientId = populatedMessage.client._id || populatedMessage.client;
-      const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+      const clientDoc = await ClientInfo.findById(clientId)
+        .select("assignedTo")
+        .lean();
       if (clientDoc && clientDoc.assignedTo) {
         clientDoc.assignedTo.forEach((userId) => {
           if (userId) actualParticipants.add(String(userId));
         });
       }
-
+      // Also emit to the client room
       io.to(`assignment_client_${clientId}`).emit("assignment_message_updated", {
         message: populatedMessage,
         action: action,
@@ -1885,6 +1892,13 @@ exports.approveMessage = async function approveMessage(req, res) {
       // This supervisor has supervision ON, so they need to approve
       msg.approvalStatus = "pending";
       msg.receiver = [targetSupervisor]; // Replace receivers with next supervisor
+
+      // 🔥 NEW: Reset read status for the next supervisor so it appears as new (bold) for them
+      if (msg.readBy && msg.readBy.length > 0) {
+        msg.readBy = msg.readBy.filter(
+          (r) => String(r.employee?._id || r.employee) !== String(targetSupervisor)
+        );
+      }
       responseStatusMessage = "Message approved and moved to next level supervisor";
     } else {
       // At top of hierarchy or no active supervisors found up-chain -> Finalize
@@ -1935,23 +1949,17 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.approvedBy = req.employee._id;
 
       // Reset read status for everyone else so it appears as a new unread message
-      // when it becomes finalized/sent. Keep the approver and sender as having read it.
-      const readByList = [{ employee: req.employee._id, at: new Date() }];
-      const senderId = String(msg.sender?._id || msg.sender);
-      if (senderId !== String(req.employee._id)) {
-        readByList.push({
-          employee: msg.sender?._id || msg.sender,
-          at: new Date(),
-        });
-      }
-      msg.readBy = readByList;
+      // when it becomes finalized/sent. Keep ONLY the approver as having read it.
+      msg.readBy = [{
+        employee: req.employee._id,
+        readAt: new Date()
+      }];
 
       approvalFinalized = true;
     }
 
     await msg.save();
 
-    // 🔥 NEW: Auto-approve client employee messages in the same thread
     let approvedClientEmployeeMessages = [];
     if (approvalFinalized && msg.threadId) {
       try {
@@ -2004,7 +2012,8 @@ exports.approveMessage = async function approveMessage(req, res) {
       }
 
       // 🔥 NEW: Add users assigned to this client for real-time visibility in external inbox
-      if (populated.client) {
+      // ONLY if the message is fully approved
+      if (populated.client && populated.approvalStatus === "approved") {
         const clientId = populated.client._id || populated.client;
         const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
         if (clientDoc && clientDoc.assignedTo) {
@@ -2111,6 +2120,12 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     // ✅ ONLY update the existing message - NO new message creation
     msg.approvalStatus = "disapproved";
 
+    // 🔥 NEW: Reset read status so participants see the disapproval as a new unread (bold) message
+    msg.readBy = [{
+      employee: req.employee._id,
+      readAt: new Date()
+    }];
+
     // Store disapproval note if provided
     if (disapprovalNote && disapprovalNote.trim() !== "") {
       msg.disapprovalNote = disapprovalNote.trim();
@@ -2147,19 +2162,6 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       }
 
       allParticipants.add(String(req.employee._id));
-
-      // 🔥 NEW: Add users assigned to this client for real-time visibility in external inbox
-      if (populated.client) {
-        const clientId = populated.client._id || populated.client;
-        const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
-        if (clientDoc && clientDoc.assignedTo) {
-          clientDoc.assignedTo.forEach((userId) => {
-            if (userId) allParticipants.add(String(userId));
-          });
-        }
-        // Also emit to the client room
-        io.to(`assignment_client_${clientId}`).emit("new_assignment_message", populated);
-      }
 
       // Emit to all participants
       allParticipants.forEach((participantId) => {
@@ -3072,6 +3074,10 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     }
 
     // Save the updated message with attachments
+    updatedMsg.readBy = [{
+      employee: currentUserId,
+      readAt: new Date()
+    }];
     await updatedMsg.save();
     // Populate the updated message
     const populated = await AssignmentMessage.findById(updatedMsg._id)
