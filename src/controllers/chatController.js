@@ -3813,7 +3813,7 @@ exports.deleteSpace = async (req, res) => {
         .json({ success: false, error: "Invalid space ID" });
     }
 
-    // ✅ IMPROVED: Better admin check
+    // ✅ IMPROVED: Better admin check - allow space admins too
     const isSystemAdmin = req.employee?.isAdmin === true;
 
     // Find space and verify permissions
@@ -3825,17 +3825,23 @@ exports.deleteSpace = async (req, res) => {
       return res.status(404).json({ success: false, error: "Space not found" });
     }
 
+    // Check if user is space admin or system admin
+    const isSpaceAdmin = space.admins?.some(
+      (admin) => admin._id.toString() === req.employee._id.toString()
+    );
+    const canDelete = isSystemAdmin || isSpaceAdmin;
+
     // Find linked conversation
     const conversation = await Conversation.findOne({ space: spaceId });
 
     // ✅ Option 1: Permanent delete (everything) - ADMIN ONLY
     if (permanent === "true") {
-      // ✅ CRITICAL: Enhanced admin check
-      if (!isSystemAdmin) {
+      // ✅ CRITICAL: Enhanced admin check - space admins can delete too
+      if (!canDelete) {
         return res.status(403).json({
           success: false,
           error:
-            "Only system administrators can permanently delete spaces and all content",
+            "Only space administrators or system admins can delete spaces",
         });
       }
 

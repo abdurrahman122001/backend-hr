@@ -1671,6 +1671,22 @@ exports.approveMessage = async function approveMessage(req, res) {
       }
     }
 
+    // 🔥 NEW: Add Managers to receivers if finalized (instead of creating a separate message)
+    if (approvalFinalized && !msg.isGroupMessage && !msg.groupId && msg.chatType !== 'group') {
+      const { managers } = await findTLsAndManagersByOwner(msg.owner);
+      const senderRole = normalizeRole(msg.sender?.role || "");
+
+      if (senderRole === "employee" && managers.length > 0) {
+        // Add managers who are not already receivers
+        const currentReceivers = msg.receiver.map(r => String(r._id || r));
+        managers.forEach(mId => {
+          if (!currentReceivers.includes(String(mId))) {
+            msg.receiver.push(mId);
+          }
+        });
+      }
+    }
+
     await msg.save();
 
     const populatedMsg = await WhatsAppMessage.findById(id).populate([
@@ -1763,75 +1779,6 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // ✅ Forward to Managers ONLY if approval is finalized AND this is NOT a group message
-      // AND only to managers who weren't already part of the conversation
-      if (approvalFinalized && !msg.isGroupMessage && !msg.groupId && msg.chatType !== 'group') {
-        const senderRole = normalizeRole(msg.sender?.role || "");
-        if (senderRole === "employee" && managersToForward.length > 0) {
-          // 🔥 Forward to Managers
-          const forwardMsgData = {
-            owner: msg.owner,
-            client: msg.client,
-            sender: msg.sender,
-            receiver: managersToForward,
-            subject: `Approved: ${msg.subject || "No Subject"}`,
-            note: msg.note || "",
-            attachments: msg.attachments,
-            approvalStatus: "approved",
-            isReply: msg.isReply,
-            repliedTo: msg.repliedTo,
-            replyContent: msg.replyContent,
-            isClientEmployeeMessage: msg.isClientEmployeeMessage,
-            clientEmployeeId: msg.clientEmployeeId,
-            clientEmployeeData: msg.clientEmployeeData,
-            isForwarded: true,
-            originalMessage: msg._id,
-            forwardedBy: req.employee._id,
-            clientSupervision: clientSupervision,
-          };
-
-          const forwardMsg = await WhatsAppMessage.create(forwardMsgData);
-
-          const populatedForward = await forwardMsg.populate([
-            { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role" },
-            { path: "receiver", select: "_id name companyEmail role" },
-            { path: "client", select: "_id clientName" },
-            { path: "forwardedBy", select: "_id name companyEmail" },
-            {
-              path: "replyContent.originalSender",
-              select: "_id name companyEmail",
-            },
-            { path: "repliedTo", select: "_id note message sender attachments" },
-          ]);
-
-          const populatedForwardWithEmployeeInfo = {
-            ...populatedForward.toObject(),
-            isClientEmployeeMessage: msg.isClientEmployeeMessage,
-            clientEmployeeId: msg.clientEmployeeId,
-            clientEmployeeData: msg.clientEmployeeData,
-          };
-
-          managersToForward.forEach((managerId) => {
-            io.to(`employee_${managerId}`).emit("new_message", {
-              message: populatedForwardWithEmployeeInfo,
-              type: "new_message",
-              action: "forwarded_approved",
-              forwardedBy: req.employee._id,
-              originalMessageId: msg._id,
-              clientSupervision: clientSupervision,
-            });
-          });
-
-          return res.json({
-            ...updatedMessage,
-            forwardedToManagers: true,
-            forwardedMessage: populatedForwardWithEmployeeInfo,
-            message: "Message fully approved and forwarded to managers",
-            clientSupervision: clientSupervision,
-          });
-        }
-      }
     }
 
     return res.json({

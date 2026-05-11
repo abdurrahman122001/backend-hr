@@ -8,7 +8,7 @@ exports.setNoticePeriod = async (req, res) => {
     const ownerId = req.user._id;   // From your requireAuth middleware
     const { noticePeriodInDays } = req.body;
 
-    if (!noticePeriodInDays) {
+    if (noticePeriodInDays === undefined || noticePeriodInDays === null) {
       return res.status(400).json({
         status: "error",
         message: "noticePeriodInDays is required",
