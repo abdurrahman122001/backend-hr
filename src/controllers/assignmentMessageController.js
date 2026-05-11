@@ -1948,8 +1948,6 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.approvedAt = new Date();
       msg.approvedBy = req.employee._id;
 
-      // Reset read status for everyone else so it appears as a new unread message
-      // when it becomes finalized/sent. Keep ONLY the approver as having read it.
       msg.readBy = [{
         employee: req.employee._id,
         readAt: new Date()
