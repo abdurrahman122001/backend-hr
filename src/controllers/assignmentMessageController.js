@@ -530,6 +530,20 @@ async function emitToSpecificReceivers(
       });
     }
 
+    // 🔥 NEW: Add anyone assigned to the client so it shows in their external inbox
+    if (populatedMessage.client) {
+      const clientId = populatedMessage.client._id || populatedMessage.client;
+      const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+      if (clientDoc && clientDoc.assignedTo) {
+        clientDoc.assignedTo.forEach((userId) => {
+          if (userId) actualRecipients.add(String(userId));
+        });
+      }
+
+      // Also emit to the client-specific room if anyone is joined
+      io.to(`assignment_client_${clientId}`).emit(eventName, populatedMessage);
+    }
+
     // 🔥 Emit ONLY to actual recipients
     actualRecipients.forEach((recipientId) => {
       if (recipientId) {
@@ -591,6 +605,23 @@ async function emitMessageUpdate(io, message, action) {
         actualParticipants.add(receiverId);
       });
     }
+
+    if (populatedMessage.client) {
+      const clientId = populatedMessage.client._id || populatedMessage.client;
+      const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+      if (clientDoc && clientDoc.assignedTo) {
+        clientDoc.assignedTo.forEach((userId) => {
+          if (userId) actualParticipants.add(String(userId));
+        });
+      }
+
+      io.to(`assignment_client_${clientId}`).emit("assignment_message_updated", {
+        message: populatedMessage,
+        action: action,
+        timestamp: new Date(),
+      });
+    }
+
     // Emit to actual participants only
     actualParticipants.forEach((participantId) => {
       io.to(`employee_${participantId}`).emit("assignment_message_updated", {
@@ -622,7 +653,7 @@ async function calculateHierarchyReceiver(owner, sender, clientDoc) {
   const managementChain = await getManagementChainFromHierarchy(owner, sender);
 
   let targetSupervisor = null;
-  
+
   // 1. Try to find the first supervisor in the chain who is ALSO explicitly active for this client
   for (const supervisorId of managementChain) {
     if (activeSupervisors.includes(String(supervisorId))) {
@@ -1715,11 +1746,55 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
         message.status = "sent";
         message.sentAt = new Date();
 
+        // 🔥 HIERARCHY-BASED: Determine approval status and hierarchy routing
+        let targetSupervisor = null;
+        if (message.client) {
+          const clientDoc = await ClientInfo.findById(message.client._id || message.client).lean();
+          const senderId = String(message.sender?._id || message.sender);
+          const assignedToIds = (clientDoc?.assignedTo || []).map((id) => String(id));
+          const isSenderAssigned = assignedToIds.includes(senderId);
+          const clientSupervisionMode = clientDoc?.supervision || "direct";
+
+          if (clientSupervisionMode === "needs_approval" && isSenderAssigned) {
+            const hierarchyResult = await calculateHierarchyReceiver(
+              message.owner,
+              senderId,
+              clientDoc
+            );
+
+            // Store original intended receivers if not already stored
+            if (!message.intendedRecipients || message.intendedRecipients.length === 0) {
+              message.intendedRecipients = message.receiver.map(r => r._id || r);
+            }
+
+            message.receiver = hierarchyResult.receivers;
+            message.approvalStatus = hierarchyResult.approvalStatus;
+            targetSupervisor = hierarchyResult.targetSupervisor;
+          } else {
+            message.approvalStatus = "approved";
+          }
+        } else {
+          message.approvalStatus = "approved";
+        }
+
         await message.save();
 
         // 🔥 FIXED: Use targeted emission instead of broadcast
         if (io) {
           await emitToAssignmentClients(io, message, "new_assignment_message");
+
+          // 🔥 HIERARCHY-BASED: Notify THE specific supervisor(s) about the thread update
+          if (message.approvalStatus === "pending" && targetSupervisor) {
+            io.to(`employee_${targetSupervisor}`).emit(
+              "thread_updated_for_supervision",
+              {
+                threadId: message.threadId,
+                clientId: message.client?._id || message.client,
+                updatedAt: new Date(),
+                message: "Scheduled thread requires your supervision",
+              }
+            );
+          }
         }
         results.sent++;
       } catch (error) {
@@ -1831,12 +1906,12 @@ exports.approveMessage = async function approveMessage(req, res) {
       ).filter((rid) => rid !== String(msg.sender?._id || msg.sender));
 
       msg.receiver = finalReceivers;
-      
+
       // Filter CCs on approval to ensure Managers/CRM are not in the CC header
       if (msg.cc && msg.cc.length > 0) {
         const ccEmailAddresses = msg.cc.map((c) => c.email);
         const matchingEmployees = await findEmployeesByEmails(msg.owner, ccEmailAddresses);
-        
+
         matchingEmployees.forEach((employee) => {
           const role = (employee.role || "").toLowerCase();
           if (role.includes("manager") || role.includes("crm")) {
@@ -1858,14 +1933,19 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.approvalStatus = "approved";
       msg.approvedAt = new Date();
       msg.approvedBy = req.employee._id;
-      
+
       // Reset read status for everyone else so it appears as a new unread message
-      // when it becomes finalized/sent. Keep the approver as having read it.
-      msg.readBy = [{
-        employee: req.employee._id,
-        at: new Date()
-      }];
-      
+      // when it becomes finalized/sent. Keep the approver and sender as having read it.
+      const readByList = [{ employee: req.employee._id, at: new Date() }];
+      const senderId = String(msg.sender?._id || msg.sender);
+      if (senderId !== String(req.employee._id)) {
+        readByList.push({
+          employee: msg.sender?._id || msg.sender,
+          at: new Date(),
+        });
+      }
+      msg.readBy = readByList;
+
       approvalFinalized = true;
     }
 
@@ -1921,6 +2001,19 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Add sender
       if (populated.sender && populated.sender._id) {
         allInvolvedUsers.add(String(populated.sender._id));
+      }
+
+      // 🔥 NEW: Add users assigned to this client for real-time visibility in external inbox
+      if (populated.client) {
+        const clientId = populated.client._id || populated.client;
+        const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+        if (clientDoc && clientDoc.assignedTo) {
+          clientDoc.assignedTo.forEach((userId) => {
+            if (userId) allInvolvedUsers.add(String(userId));
+          });
+        }
+        // Also emit to the client-specific room if anyone is joined
+        io.to(`assignment_client_${clientId}`).emit("new_assignment_message", populated);
       }
 
       // Add all current receivers (could be next level supervisors)
@@ -2054,6 +2147,19 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       }
 
       allParticipants.add(String(req.employee._id));
+
+      // 🔥 NEW: Add users assigned to this client for real-time visibility in external inbox
+      if (populated.client) {
+        const clientId = populated.client._id || populated.client;
+        const clientDoc = await ClientInfo.findById(clientId).select("assignedTo").lean();
+        if (clientDoc && clientDoc.assignedTo) {
+          clientDoc.assignedTo.forEach((userId) => {
+            if (userId) allParticipants.add(String(userId));
+          });
+        }
+        // Also emit to the client room
+        io.to(`assignment_client_${clientId}`).emit("new_assignment_message", populated);
+      }
 
       // Emit to all participants
       allParticipants.forEach((participantId) => {
@@ -2587,9 +2693,12 @@ exports.sendDraft = async function sendDraft(req, res) {
         .json({ error: "You can only send your own drafts" });
     }
 
-    // Check if draft is already sent
-    if (msg.status !== "draft") {
-      return res.status(400).json({ error: "Message is not a draft" });
+    // Check if draft is already sent or in an invalid state
+    if (msg.status === "sent") {
+      return res.status(400).json({ error: "Message has already been sent" });
+    }
+    if (msg.status !== "draft" && msg.status !== "scheduled") {
+      return res.status(400).json({ error: "Message is not a draft or scheduled" });
     }
 
     // Update fields
@@ -2639,6 +2748,7 @@ exports.sendDraft = async function sendDraft(req, res) {
 
     // Handle scheduling
     const isScheduled = isScheduledBody === true || isScheduledBody === "true";
+    let targetSupervisor = null;
 
     if (isScheduled) {
       const validation = validateScheduleTime(scheduledFor);
@@ -2661,7 +2771,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       msg.scheduledBy = undefined;
 
       // 🔥 HIERARCHY-BASED: Determine approval status and hierarchy routing
-      let targetSupervisor = null;
+      targetSupervisor = null;
       if (msg.client) {
         const clientDoc = await ClientInfo.findById(msg.client).lean();
         const senderId = String(msg.sender);
