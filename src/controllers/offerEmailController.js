@@ -3,6 +3,7 @@ const OfferEmailTemplate = require("../models/OfferEmailTemplate");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
 const CompanyProfile = require("../models/CompanyProfile");
 const Signature = require("../models/Signature");
+const { removeSignatureParagraphMargins, applyEmailBodyStyles } = require("../utils/removeSignatureParagraphMargins");
 
 /* ----------------------------- Env Fallbacks ------------------------------ */
 const FALLBACKS = {
@@ -58,6 +59,28 @@ async function getCompanyContext(ownerId) {
   };
 }
 
+/* --------------------------- Helper: Signature ---------------------------- */
+function buildSignatureBlock(signature) {
+  if (!signature) return "";
+
+  const img = signature.signatureImage
+    ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}"
+          alt="Signature"
+          style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+    : "";
+
+  // Make sure this matches the import name exactly
+  const signatureText = removeSignatureParagraphMargins(signature.signatureText || "");
+
+  return `
+    <div>
+      <br>
+      ${img}
+      <div style="text-align:left;">${signatureText}</div>
+    </div>
+  `;
+}
+
 /* --------------------------- Helper: Formatting --------------------------- */
 function formatDateDMY(dateInput) {
   if (!dateInput) return "";
@@ -106,21 +129,7 @@ exports.getTemplate = async (req, res) => {
     const companyCtx = await getCompanyContext(owner);
 
     const signature = await Signature.findOne({ owner });
-    const signatureBlock = signature
-      ? `
-      <div>
-        <br>
-        ${
-          signature.signatureImage
-            ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}"
-                  alt="Signature"
-                  style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-            : ""
-        }
-        <div style="text-align:left;">${signature.signatureText || ""}</div>
-      </div>
-    `
-      : "";
+    const signatureBlock = buildSignatureBlock(signature);
 
     if (!tpl) {
       return res.json({
@@ -130,27 +139,27 @@ exports.getTemplate = async (req, res) => {
         html: `
           <div style="font-family: Arial, sans-serif; line-height:1.7;">
 
-            <p>Dear <b>{{candidateName}}</b>,</p>
+            <p style="font-size: 15px;line-height: 18px;">Dear <b>{{candidateName}}</b>,</p>
 
-            <p>We are pleased to offer you the position of <b>{{position}}</b> in our <b>{{department}}</b> department at <b>{{companyName}}</b>.</p>
+            <p style="font-size: 15px;line-height: 18px;">We are pleased to offer you the position of <b>{{position}}</b> in our <b>{{department}}</b> department at <b>{{companyName}}</b>.</p>
 
-            <p><strong>Company:</strong> {{companyName}}</p>
-            <p><strong>Address:</strong> {{companyAddress}}</p>
-            <p><strong>Email:</strong> {{companyEmail}}</p>
-            <p><strong>Phone:</strong> {{companyPhone}}</p>
-            <p><strong>Website:</strong> {{companyWebsite}}</p>
-
-            <br>
-
-            <p><strong>Department:</strong> {{department}}</p>
-            <p><strong>Start Date:</strong> {{formattedStartDate}}</p>
-            <p><strong>Reporting Time:</strong> {{formattedTime}}</p>
-            <p><strong>Gross Salary:</strong> Rs. {{grossSalary}}</p>
-            <p><strong>Probation Period:</strong> {{probationDays}} days</p>
-            <p><strong>Confirmation Deadline:</strong> {{formattedDeadline}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Company:</strong> {{companyName}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Address:</strong> {{companyAddress}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Email:</strong> {{companyEmail}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Phone:</strong> {{companyPhone}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Website:</strong> {{companyWebsite}}</p>
 
             <br>
-            <p>We look forward to welcoming you!</p>
+
+            <p style="font-size: 15px;line-height: 18px;"><strong>Department:</strong> {{department}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Start Date:</strong> {{formattedStartDate}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Reporting Time:</strong> {{formattedTime}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Gross Salary:</strong> Rs. {{grossSalary}}</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Probation Period:</strong> {{probationDays}} days</p>
+            <p style="font-size: 15px;line-height: 18px;"><strong>Confirmation Deadline:</strong> {{formattedDeadline}}</p>
+
+            <br>
+            <p style="font-size: 15px;line-height: 18px;">We look forward to welcoming you!</p>
 
             ${signatureBlock}
 
@@ -159,7 +168,10 @@ exports.getTemplate = async (req, res) => {
       });
     }
 
-    res.json(tpl);
+    res.json({
+      ...tpl,
+      html: applyEmailBodyStyles(tpl.html),
+    });
 
   } catch (e) {
     console.error(e);
@@ -201,26 +213,12 @@ exports.previewTemplate = async (req, res) => {
     const companyCtx = await getCompanyContext(owner);
 
     const signature = await Signature.findOne({ owner });
-    const signatureBlock = signature
-      ? `
-      <div>
-        <br>
-        ${
-          signature.signatureImage
-            ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}"
-                   alt="Signature"
-                   style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-            : ""
-        }
-        <div style="text-align:left;">${signature.signatureText || ""}</div>
-      </div>
-    `
-      : "";
+    const signatureBlock = buildSignatureBlock(signature);
 
     const previewContext = {
       candidateName: sampleData.candidateName || "John Doe",
       position: sampleData.position || "Software Engineer",
-      department: sampleData.department || "Engineering", // Added department
+      department: sampleData.department || "Engineering",
 
       // FULL COMPANY INFO
       companyName: companyCtx.name,
@@ -266,7 +264,7 @@ exports.getTemplateVariables = async (req, res) => {
     const variables = {
       candidateName: "Full name of candidate",
       position: "Job title",
-      department: "Department name", // Added department variable
+      department: "Department name",
       companyName: companyCtx.name,
       companyAddress: companyCtx.address,
       companyEmail: companyCtx.email,

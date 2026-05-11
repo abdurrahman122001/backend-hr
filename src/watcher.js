@@ -4,6 +4,7 @@ const Imap = require("imap");
 const { simpleParser } = require("mailparser");
 const mongoose = require("mongoose");
 const verifyEmail = require("./utils/verifyEmail");
+const { removeSignatureParagraphMargins } = require("./utils/removeSignatureParagraphMargins");
 
 const { sendEmail } = require("./services/mailService");
 const Employee = require("./models/Employees");
@@ -161,14 +162,13 @@ async function getSignatureBlock(ownerId) {
     if (!signature) return "";
 
     return `
-      <div style="margin-top:32px;margin-bottom:12px;">
+      <div style="margin-top:32px;margin-bottom:12px;font-size:15px !important;line-height:1.7;">
         ${signature.signatureImage
-        ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage
-        }" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+        ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
         : ""
       }
-        <div style="text-align:left;">
-          ${signature.signatureText || ""}
+        <div style="text-align:left;font-size:15px !important;line-height:1.7;">
+          ${removeSignatureParagraphMargins(signature.signatureText || "")}
         </div>
       </div>
     `;
@@ -252,26 +252,26 @@ async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerI
 
   const html = `
     <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
-      <p>Dear <strong>${employeeName || "Employee"}</strong>,</p>
-      <p>Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
-      <p>As your HR AI Agent, I've been busy building a smarter, more connected system to support you better. 
+      <p style ="font-size:15px; line-height:1.7;">Dear <strong>${employeeName || "Employee"}</strong>,</p>
+      <p style ="font-size:15px; line-height:1.7;">Thank you so much for sharing your CNIC and CV earlier your cooperation means the world to me! 💙</p>
+      <p style ="font-size:15px; line-height:1.7;">As your HR AI Agent, I've been busy building a smarter, more connected system to support you better. 
       From payroll to perks, records to recognition it all starts with having the right information in the right place.</p>
-      <p>To complete your employee profile and keep our records up to date, I kindly request you to take a moment to fill out a short form:</p>
-      <p>
+      <p style ="font-size:15px; line-height:1.7;">To complete your employee profile and keep our records up to date, I kindly request you to take a moment to fill out a short form:</p>
+      <p style ="font-size:15px; line-height:1.7;">
         📝 <strong>
           <a href="${link}" style="color: #0057b7; text-decoration: underline;">
             Click here to complete your profile
           </a>
         </strong>
       </p>
-      <p>This will help me ensure:</p>
+      <p style ="font-size:15px; line-height:1.7;">This will help me ensure:</p>
       <ul style="margin:0 0 1em 2em;padding:0;">
         <li style="margin-bottom:4px;">✅ Your salary info is processed correctly</li>
         <li style="margin-bottom:4px;">✅ Your benefits and contact details are accurate</li>
         <li style="margin-bottom:4px;">✅ You're ready for future updates, promotions, and recognitions 🎉</li>
       </ul>
-      <p>It'll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
-      <p>Let's make our workplace even more organized, connected, and ready for what's next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I'm here to make things smoother for you now and always.</p>
+      <p style ="font-size:15px; line-height:1.7;">It'll only take a few minutes and as always, your data will be handled with strict confidentiality and care.</p>
+      <p style ="font-size:15px; line-height:1.7;">Let's make our workplace even more organized, connected, and ready for what's next. Thank you again for being such an important part of the <strong>${companyName}</strong> family. I'm here to make things smoother for you now and always.</p>
       ${signatureBlock}
     </div>
   `;
