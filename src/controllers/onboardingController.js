@@ -6,6 +6,7 @@ const CompanyProfile = require("../models/CompanyProfile"); // <-- fetch company
 const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
+const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
 
 // ENV fallbacks (used only if CompanyProfile has no name)
 const COMPANY_NAME_FALLBACK = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -40,13 +41,13 @@ function normalizeTime(timeStr) {
   return `${h}:${m}`;
 }
 
-// --- Helper: Force Comic Sans + margin:0 on <p> (safe, no duplicate style attrs) ---
+// --- Helper: Force Comic Sans + margin:0 on <p style="font-size: 15px;line-height: 18px;"> (safe, no duplicate style attrs) ---
 function enforceComicSans(html) {
   const family =
     "font-family: Arial, Helvetica, sans-serif;";
   const pRequired = `margin:0 !important; ${family}`;
 
-  // 1) <p> tags — ensure margin:0 !important + Comic Sans, without duplicate style=""
+  // 1) <p style="font-size: 15px;line-height: 18px;"> tags — ensure margin:0 !important + Comic Sans, without duplicate style=""
   html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
     if (/style\s*=/.test(attrs)) {
       // rewrite existing style: remove margin* and font-family, then prepend ours
@@ -221,7 +222,7 @@ module.exports = {
                 : ""
             }
             <div style="text-align:left;">
-              ${signature.signatureText}
+              ${removeSignatureParagraphMargins(signature.signatureText || "")}
             </div>
           </div>
         `;
@@ -232,27 +233,27 @@ module.exports = {
         "Hello from Your New HR AI Agent – Let's Get You Officially Onboarded!";
 
       let html = `
-        <div style="font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #212121; text-align: left; margin:0; padding:0">
-          <p>Dear <strong>${candidateName}</strong>,</p>
+        <div style="font-family: Arial, Helvetica, sans-serif; font-size: 15px; color: #212121; text-align: left; margin:0; padding:0">
+          <p style="font-size: 15px;line-height: 18px;">Dear <strong>${candidateName}</strong>,</p>
           <br>
-          <p>Welcome to the beginning of something amazing!</p>
+          <p style="font-size: 15px;line-height: 18px;">Welcome to the beginning of something amazing!</p>
           <br>
-          <p>I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!</p>
+          <p style="font-size: 15px;line-height: 18px;">I'm your new HR AI Agent here to make your onboarding experience smooth, seamless, and just a little more exciting!</p>
           <br>
-          <p>While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.</p>
+          <p style="font-size: 15px;line-height: 18px;">While I might be powered by algorithms and data, my goal is simple: to help you feel connected, supported, and ready to thrive at <strong>${COMPANY_NAME}</strong>.</p>
           <br>
-          <p>As the first step to complete your profile, please reply with the following documents:</p>
+          <p style="font-size: 15px;line-height: 18px;">As the first step to complete your profile, please reply with the following documents:</p>
           <ul style="margin:2em 0;padding:0;">
             <li style="margin-bottom:4px;"><strong>Copy of your CNIC</strong> (front & back, JPG or PNG format)</li>
             <li style="margin-bottom:4px;"><strong>Your latest CV/Resume</strong> (PDF)</li>
           </ul>
-          <p><em>Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em></p>
+          <p style="font-size: 15px;line-height: 18px;"><em>Your data is safe with me – always encrypted, confidential, and used only to make your experience better.</em></p>
           <br>
-          <p>The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!</p>
+          <p style="font-size: 15px;line-height: 18px;">The sooner I get your info, the sooner I can start helping you settle in, track your progress, and celebrate your milestones!</p>
           <br>
-          <p>If you have any questions or feel stuck, I'm just a message away.</p>
+          <p style="font-size: 15px;line-height: 18px;">If you have any questions or feel stuck, I'm just a message away.</p>
           <br>
-          <p>Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!</p>
+          <p style="font-size: 15px;line-height: 18px;">Can't wait to be part of your journey at <strong>${COMPANY_NAME}</strong>!</p>
           ${signatureBlock}
         </div>
       `;

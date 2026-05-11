@@ -9,6 +9,7 @@ const OfferEmailTemplate = require("../models/OfferEmailTemplate");
 const probationPeriods = require("../models/ProbationPeriod");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
 const verifyEmail = require("../utils/verifyEmail");
+const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
 
 require("dotenv").config();
 
@@ -129,7 +130,7 @@ async function getSignature(req, res) {
 /* ----------------------------- Helper: Styles ----------------------------- */
 function enforceComicSans(html) {
   const family =
-    "font-family: Arial, Helvetica, sans-serif; font-size: 16px; color: #000000;";
+    "font-family: Arial, Helvetica, sans-serif; font-size: 15px; line-height: 1.7; color: #000000;";
   const pRequired = [
     "margin:0 !important",
     "margin-block-start:0",
@@ -140,7 +141,7 @@ function enforceComicSans(html) {
     family,
   ].join("; ");
 
-  // Replace all <p> tags with proper styling
+  // Replace all <p style="font-size: 15px;line-height: 18px;"> tags with proper styling
   html = html.replace(/<p\b([^>]*)>/gi, (full, attrs) => {
     if (/style\s*=/.test(attrs)) {
       const newAttrs = attrs.replace(/style\s*=\s*"([^"]*)"/i, (_m, style) => {
@@ -171,9 +172,8 @@ function enforceComicSans(html) {
           .replace(/(^|;)\s*color\s*:[^;]*;?/gi, "")
           .replace(/;;+/g, ";")
           .replace(/^\s*;|;\s*$/g, "");
-        return `<${tag}${pre}style="${family}${
-          cleaned ? " " + cleaned : ""
-        }"${post}>`;
+        return `<${tag}${pre}style="${family}${cleaned ? " " + cleaned : ""
+          }"${post}>`;
       }
     );
     html = html.replace(
@@ -191,9 +191,8 @@ function enforceComicSans(html) {
         .replace(/(^|;)\s*color\s*:[^;]*;?/gi, "")
         .replace(/;;+/g, ";")
         .replace(/^\s*;|;\s*$/g, "");
-      return `<span${pre}style="${family}${
-        cleaned ? " " + cleaned : ""
-      }"${post}>`;
+      return `<span${pre}style="${family}${cleaned ? " " + cleaned : ""
+        }"${post}>`;
     }
   );
 
@@ -330,20 +329,15 @@ async function buildContext({
   const signature = await Signature.findOne({ owner: ownerId });
   const signatureBlock = signature
     ? `
-    <div style="color: #000000;">
+    <div style="color: #000000; font-size:15px !important; line-height:1.7;">
       <br>
-      ${
-        signature.signatureImage
-          ? `<img src="${process.env.SERVER_URL || ""}${
-              signature.signatureImage
-            }" 
-                   alt="Signature" 
-                   style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
-          : ""
-      }
-      <div style="text-align:left; color: #000000;">${
-        signature.signatureText || ""
-      }</div>
+      ${signature.signatureImage
+      ? `<img src="${process.env.SERVER_URL || ""}${signature.signatureImage}" 
+                 alt="Signature" 
+                 style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
+      : ""
+    }
+      <div style="text-align:left; color: #000000; font-size:15px !important; line-height:1.7;">${removeSignatureParagraphMargins(signature.signatureText || "")}</div>
     </div>
   `
     : "";
@@ -473,9 +467,9 @@ async function sendOfferLetter(req, res) {
         ? renderWithContext(tpl.html || "", ctx)
         : `
           <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
-            <p>Dear <b>${safeCandidateName}</b>,</p>
-            <p>We're thrilled to have you on board!</p>
-            <p>It gives us great pleasure to officially offer you the position of <b>${position}</b>
+            <p style="font-size: 15px;line-height: 18px;">Dear <b>${safeCandidateName}</b>,</p>
+            <p style="font-size: 15px;line-height: 18px;">We're thrilled to have you on board!</p>
+            <p style="font-size: 15px;line-height: 18px;">It gives us great pleasure to officially offer you the position of <b>${position}</b>
             in the <b>${department || "relevant"}</b> department at <b>${companyCtx.name}</b>.</p>
             {{signatureHtml}}
           </div>
@@ -638,10 +632,9 @@ async function previewOfferLetter(req, res) {
         ? renderWithContext(tpl.html || "", ctx)
         : `
       <div style="font-family: Arial, sans-serif; line-height:1.7; color: #000000;">
-        <p>Dear <b>${sanitizeName(candidateName)}</b>,</p>
-        <p>We're thrilled to have you on board!</p>
-        <p>It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${
-            department || "relevant"
+        <p style="font-size: 15px;line-height: 18px;">Dear <b>${sanitizeName(candidateName)}</b>,</p>
+        <p style="font-size: 15px;line-height: 18px;">We're thrilled to have you on board!</p>
+        <p style="font-size: 15px;line-height: 18px;">It gives us great pleasure to officially offer you the position of <b>${position}</b> in the <b>${department || "relevant"
           }</b> department at <b>${companyCtx.name}</b>.</p>
         {{signatureHtml}}
       </div>

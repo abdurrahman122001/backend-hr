@@ -7,6 +7,7 @@ const sendEmail = require("../services/mailService").sendEmail;
 const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
+const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
 
 // --- Company Info ---
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -84,16 +85,34 @@ const allFields = [
 
 // --- Comic Sans everywhere except disclaimer block ---
 function enforceComicSans(html) {
-  const fontStyle =
-    "font-family: 'Comic Sans MS', Comic Sans, cursive, Arial, sans-serif;";
-  return html
-    .replace(/<p(\s|>)/g, `<p style="${fontStyle}"$1`)
-    .replace(/<ul(\s|>)/g, `<ul style="${fontStyle}"$1`)
-    .replace(/<ol(\s|>)/g, `<ol style="${fontStyle}"$1`)
-    .replace(/<li(\s|>)/g, `<li style="${fontStyle}"$1`)
-    .replace(/<div(\s|>)/g, `<div style="${fontStyle}"$1`);
-}
+  const fontStyle = "font-family: Arial, Helvetica, sans-serif;";
 
+  // For <p> tags — preserve existing styles, only inject font-family if not present
+  html = html.replace(/<p\b([^>]*)>/gi, (match, attrs) => {
+    if (/style\s*=/i.test(attrs)) {
+      return match.replace(
+        /style\s*=\s*["']([^"']*)["']/i,
+        (_, existing) => `style="font-family:Arial,Helvetica,sans-serif; ${existing}"`
+      );
+    }
+    return `<p style="font-family:Arial,Helvetica,sans-serif; font-size:15px; line-height:1.7;" ${attrs}>`;
+  });
+
+  // For other tags — same approach
+  ["ul", "ol", "li", "div"].forEach(tag => {
+    html = html.replace(new RegExp(`<${tag}\\b([^>]*)>`, "gi"), (match, attrs) => {
+      if (/style\s*=/i.test(attrs)) {
+        return match.replace(
+          /style\s*=\s*["']([^"']*)["']/i,
+          (_, existing) => `style="font-family:Arial,Helvetica,sans-serif; ${existing}"`
+        );
+      }
+      return `<${tag} style="${fontStyle}" ${attrs}>`;
+    });
+  });
+
+  return html;
+}
 // --- Enforce <img> CSS everywhere ---
 function enforceImgCss(html) {
   html = html.replace(/<img([^>]*?)style="[^"]*"/g, `<img$1`);
@@ -206,8 +225,8 @@ router.put(
             signatureBlock = `
               <div style="margin-top:32px;margin-bottom:12px;">
                 ${imgHtml}
-                <div style="text-align:left;">
-                  ${signatureDoc.signatureText || ""}
+                <div style="text-align:left; font-size:15px; line-height:1.7;">
+                  ${removeSignatureParagraphMargins(signatureDoc.signatureText || "")}
                 </div>
               </div>
             `;
@@ -217,10 +236,10 @@ router.put(
         // --- PIXEL-PERFECT OFFER LETTER LAYOUT ---
         let html = `
           <div style="font-family:'Comic Sans MS',Comic Sans,cursive,Arial,sans-serif;font-size:16px;color:#22223B;background:#f9fafb;line-height:2.1;text-align:left;margin:0;padding:40px 30px 38px 30px;max-width:100%;border-radius:15px;border:1.5px solid #e0e0e0;">
-            <p style="margin-bottom:20px;font-size:19px;">
+            <p style="margin-bottom:20px; font-size:15px; line-height:1.7;">
               Dear <strong>${emp.name || "Employee"}</strong>,
             </p>
-            <p style="margin-bottom:18px;">
+            <p style=" font-size:15px; line-height:1.7;">
               Thank you for completing your employee profile.<br/>
               To secure your account and access the HR portal, please set your password by clicking the link below.
             </p>
@@ -230,7 +249,7 @@ router.put(
                 Set My Password
               </a>
             </div>
-            <p style="margin-bottom:22px;">
+            <p style=" font-size:15px; line-height:1.7;">
               This link will expire in <strong>7 days</strong> for your security.<br/>
               If you did not request this, you can safely ignore this message.
             </p>
