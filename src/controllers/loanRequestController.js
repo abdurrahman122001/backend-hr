@@ -2,7 +2,7 @@ const LoanRequest = require("../models/LoanRequest");
 
 exports.applyLoan = async (req, res) => {
   try {
-    const { amount, period, reason } = req.body;
+    const { amount, period, reason, loanAllowanceField } = req.body;
     
     // Validate required fields
     if (!amount || !period || !reason) {
@@ -18,6 +18,7 @@ exports.applyLoan = async (req, res) => {
       amount,
       period,
       reason,
+      loanAllowanceField: loanAllowanceField || null,
       status: "pending"
     });
 
