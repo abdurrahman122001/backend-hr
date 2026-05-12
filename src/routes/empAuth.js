@@ -629,7 +629,7 @@ router.post("/login", async (req, res) => {
       const when = formatTimeForDisplay(nowKarachi);
 
       await sendMail({
-        to: "nashfintechnologies@gmail.com",
+        to: "abdullah.ah452001@gmail.com",
         subject: "Employee login verification requested",
         text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
         html: `<p><b>New device login verification requested</b></p>
