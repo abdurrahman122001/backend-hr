@@ -40,6 +40,10 @@ const LoanRequestSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: "Employee",
     },
+    loanAllowanceField: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

@@ -17,6 +17,7 @@ exports.applyReimbursement = async (req, res) => {
       amount,
       month,
       reason,
+      receiptUrl: req.file ? req.file.filename : undefined,
     });
 
     await newRequest.save();

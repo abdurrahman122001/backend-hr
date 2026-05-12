@@ -32,6 +32,9 @@ const reimbursementRequestSchema = new mongoose.Schema(
     adminReason: {
       type: String,
     },
+    receiptUrl: {
+      type: String,
+    },
   },
   { timestamps: true }
 );
