@@ -186,7 +186,7 @@ async function processLateDeductionsForPeriod(
     }
 
     const previouslyCredited = slip.lateDeductionDaysCredited || 0;
-    
+
     // Calculate leaves to deduct: 3 late = 1 day, minus what was already credited
     const totalLeavesToDeduct = Math.floor(lateCount / 3);
     const leavesToDeduct = totalLeavesToDeduct - previouslyCredited;
@@ -282,24 +282,24 @@ async function processLateDeductionsForPeriod(
 
     // Check if salary deduction is needed
     let perDayDeduction = 0;
-    
+
     if (unpaidDeducted > 0 || paidDeducted > 0) {
-        // Calculate per-day salary for deduction (mostly for unpaid)
-        const salaries = await require("./salaryRetrieval").getSalaries(
-          actualOwnerId,
-          employeeId
-        );
-        let grossSalary = 0;
-        if (salaries && salaries.gross) {
-          const gross = await decrypt(salaries.gross);
-          grossSalary = Number(gross) || 0;
-        }
-    
-        const totalWorkingDays = 22;
-        // NOTE: we apply deduction to salary slip for `unpaidDeducted` 
-        // Previously this added both paid and unpaid, but paid leaves shouldn't deduct from salary!
-        // We will just do unpaidDeducted since paidDeducted means they had leave balance.
-        perDayDeduction = Math.round((grossSalary / totalWorkingDays) * (unpaidDeducted));
+      // Calculate per-day salary for deduction (mostly for unpaid)
+      const salaries = await require("./salaryRetrieval").getSalaries(
+        actualOwnerId,
+        employeeId
+      );
+      let grossSalary = 0;
+      if (salaries && salaries.gross) {
+        const gross = await decrypt(salaries.gross);
+        grossSalary = Number(gross) || 0;
+      }
+
+      const totalWorkingDays = 22;
+      // NOTE: we apply deduction to salary slip for `unpaidDeducted` 
+      // Previously this added both paid and unpaid, but paid leaves shouldn't deduct from salary!
+      // We will just do unpaidDeducted since paidDeducted means they had leave balance.
+      perDayDeduction = Math.round((grossSalary / totalWorkingDays) * (unpaidDeducted));
     }
 
     // Update salary slip
@@ -789,7 +789,7 @@ async function reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDa
 
     let slip = await SalarySlip.findOne({ owner: ownerId, employee: employeeId, month: payrollMonth, year: payrollYear });
     if (!slip) return;
-    
+
     const leaveTransaction = await LeaveTransaction.findOne({
       owner: ownerId,
       employee: employeeId,
@@ -1106,7 +1106,7 @@ async function applyEarlyDepartureHoursDeduction(employeeId, ownerId, userId, at
 
     // Deduct from bonusHoursAccumulated
     const previousHours = Number(balance.bonusHoursAccumulated || 0);
-    
+
     // Always deduct, even if it goes negative (tracks deficit)
     const deductedHours = hoursEarly;
     const newHours = previousHours - hoursEarly;
