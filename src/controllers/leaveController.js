@@ -1382,7 +1382,7 @@ exports.getLeaves = async (req, res) => {
     const skip = (page - 1) * limit;
 
     // Build filter
-    let filter = {};
+    let filter = { isTrashed: { $ne: true } };
 
     // Get employees for this company
     const tenantId = req.user.owner;
@@ -1453,7 +1453,6 @@ exports.getLeaves = async (req, res) => {
       if (endDate) filter.startDate.$lte = new Date(endDate);
     }
 
-    filter.isTrashed = { $ne: true };
     const total = await Leave.countDocuments(filter);
 
     // Get leaves with pagination and population
@@ -1516,7 +1515,7 @@ exports.getPendingLeaves = async (req, res) => {
     const user = req.user;
 
 
-    const query = { status: "pending" };
+    const query = { status: "pending", isTrashed: { $ne: true } };
     const tenantId = user.owner;
 
     // Use a simpler approach to get all employees of the company if needed
@@ -1718,22 +1717,24 @@ exports.getLeaveStats = async (req, res) => {
       ? { employee: { $in: ownedEmployeeIds } }
       : { employee: userId };
 
+    const baseFilter = { ...employeeFilter, isTrashed: { $ne: true } };
+
     // Get leave statistics
-    const totalLeaves = await Leave.countDocuments(employeeFilter);
+    const totalLeaves = await Leave.countDocuments(baseFilter);
     const pendingLeaves = await Leave.countDocuments({
-      ...employeeFilter,
+      ...baseFilter,
       status: "pending",
     });
     const approvedLeaves = await Leave.countDocuments({
-      ...employeeFilter,
+      ...baseFilter,
       status: "approved",
     });
     const rejectedLeaves = await Leave.countDocuments({
-      ...employeeFilter,
+      ...baseFilter,
       status: "rejected",
     });
     const cancelledLeaves = await Leave.countDocuments({
-      ...employeeFilter,
+      ...baseFilter,
       status: "cancelled",
     });
 
@@ -1743,11 +1744,13 @@ exports.getLeaveStats = async (req, res) => {
 
     if (isAdmin) {
       leavesWithViolations = await Leave.countDocuments({
+        ...baseFilter,
         "policyAnalysis.violations.0": { $exists: true },
         status: "pending",
       });
 
       leavesRequiringAttention = await Leave.countDocuments({
+        ...baseFilter,
         "policyAnalysis.severity": { $in: ["HIGH", "MEDIUM"] },
         status: "pending",
       });
@@ -1759,6 +1762,7 @@ exports.getLeaveStats = async (req, res) => {
 
     if (isAdmin) {
       departmentStats = await Leave.aggregate([
+        { $match: baseFilter },
         {
           $lookup: {
             from: "employees",
@@ -1789,7 +1793,7 @@ exports.getLeaveStats = async (req, res) => {
         { $sort: { total: -1 } },
       ]);
 
-      recentLeaves = await Leave.find({})
+      recentLeaves = await Leave.find(baseFilter)
         .sort({ createdAt: -1 })
         .limit(10)
         .populate("employee", "name email department photographUrl status")
