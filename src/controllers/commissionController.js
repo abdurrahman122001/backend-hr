@@ -1,7 +1,6 @@
-const ReimbursementRequest = require("../models/ReimbursementRequest");
-const Employee = require("../models/Employees");
+const CommissionRequest = require("../models/CommissionRequest");
 
-exports.applyReimbursement = async (req, res) => {
+exports.applyCommission = async (req, res) => {
   try {
     const { amount, month, reason } = req.body;
     const employeeId = req.user.employeeId || req.user.id || req.user._id;
@@ -11,22 +10,21 @@ exports.applyReimbursement = async (req, res) => {
       return res.status(400).json({ message: "All fields are required" });
     }
 
-    const newRequest = new ReimbursementRequest({
+    const newRequest = new CommissionRequest({
       employee: employeeId,
       owner: ownerId,
       amount,
       month,
       reason,
-      receiptUrl: req.file ? req.file.filename : undefined,
     });
 
     await newRequest.save();
     res.status(201).json({
-      message: "Reimbursement request submitted successfully",
+      message: "Commission request submitted successfully",
       data: newRequest,
     });
   } catch (error) {
-    console.error("Reimbursement Apply Error:", error);
+    console.error("Commission Apply Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -34,12 +32,12 @@ exports.applyReimbursement = async (req, res) => {
 exports.getMyRequests = async (req, res) => {
   try {
     const employeeId = req.user.employeeId || req.user.id || req.user._id;
-    const requests = await ReimbursementRequest.find({ employee: employeeId })
+    const requests = await CommissionRequest.find({ employee: employeeId })
       .populate("employee", "name designation department photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
-    console.error("Reimbursement Get My Error:", error);
+    console.error("Commission Get My Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -47,12 +45,16 @@ exports.getMyRequests = async (req, res) => {
 exports.getAllRequests = async (req, res) => {
   try {
     const ownerId = req.user.owner;
-  const requests = await ReimbursementRequest.find({ owner: ownerId })
-    .populate("employee", "name designation department photographUrl")
-    .sort({ createdAt: -1 });
+    const { status, month } = req.query;
+    const filter = { owner: ownerId };
+    if (status) filter.status = status;
+    if (month) filter.month = month;
+    const requests = await CommissionRequest.find(filter)
+      .populate("employee", "name designation department photographUrl")
+      .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
-    console.error("Reimbursement Get All Error:", error);
+    console.error("Commission Get All Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -66,9 +68,15 @@ exports.updateStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
-    const request = await ReimbursementRequest.findByIdAndUpdate(
+    const updateData = { status, adminReason };
+    if (status === "approved") {
+      updateData.approvedBy = req.user.employeeId || req.user.id || req.user._id;
+      updateData.approvedAt = new Date();
+    }
+
+    const request = await CommissionRequest.findByIdAndUpdate(
       id,
-      { status, adminReason },
+      updateData,
       { new: true }
     );
 
@@ -77,10 +85,27 @@ exports.updateStatus = async (req, res) => {
     }
 
     res.status(200).json({
-      message: `Reimbursement request ${status}`,
+      message: `Commission request ${status}`,
       data: request,
     });
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.deleteRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ownerId = req.user.owner;
+
+    const deleted = await CommissionRequest.findOneAndDelete({ _id: id, owner: ownerId });
+    if (!deleted) {
+      return res.status(404).json({ message: "Request not found" });
+    }
+
+    res.status(200).json({ message: "Commission request deleted" });
+  } catch (error) {
+    console.error("Commission Delete Error:", error);
     res.status(500).json({ message: error.message });
   }
 };

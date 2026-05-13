@@ -15,4 +15,7 @@ router.get("/all", UnifiedAuth, loanRequestController.getAllLoanRequests);
 // Update status (approve/reject)
 router.put("/:id/status", UnifiedAuth, loanRequestController.updateLoanRequestStatus);
 
+// Delete loan request
+router.delete("/:id", UnifiedAuth, loanRequestController.deleteLoanRequest);
+
 module.exports = router;

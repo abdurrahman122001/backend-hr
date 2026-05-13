@@ -54,7 +54,19 @@ module.exports = async function requireAuth(req, res, next) {
     const normalizedRole = rawRole.toLowerCase().replace("_", "-");
 
     // Build user object with employee data
-    const effectiveOwner = employee?.owner || user.createdBy || user._id;
+    let effectiveOwner = user.owner || employee?.owner;
+    
+    // If no explicit owner, handle by role
+    if (!effectiveOwner) {
+      if (normalizedRole === "admin") {
+        // Admins are their own owners (company roots)
+        effectiveOwner = user._id;
+      } else {
+        // HR/Employees follow their creator
+        effectiveOwner = user.createdBy || user._id;
+      }
+    }
+
     const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;
 
     req.user = {

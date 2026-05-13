@@ -1378,6 +1378,9 @@ exports.getLeaves = async (req, res) => {
       startDate,
       endDate,
       getAll = "false",
+      search,
+      leaveType,
+      decisionType,
     } = req.query;
     const skip = (page - 1) * limit;
 
@@ -1386,41 +1389,24 @@ exports.getLeaves = async (req, res) => {
 
     // Get employees for this company
     const tenantId = req.user.owner;
-    const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
-    const ownedEmployeeIds = ownedEmployees.map(e => e._id);
-
-    // RESTRICT TO COMPANY
-    filter.employee = { $in: ownedEmployeeIds };
-
+    
     // ADMIN LOGIC
     const isAdmin =
       req.user.isAdmin || req.user.role === "admin" || req.user.role === "hr";
 
     if (isAdmin) {
-      if (getAll === "true") {
-        const allLeaves = await Leave.find(filter)
-          .sort({ createdAt: -1 })
-          .populate(
-            "employee",
-            "name email department position employeeId photographUrl status",
-          )
-          .lean();
-
-        const processedLeaves = allLeaves.map((leave) => ({
-          ...leave,
-          employee: processEmployeeWithPhoto(leave.employee, req),
-        }));
-
-        return res.json({
-          success: true,
-          data: processedLeaves,
-          total: processedLeaves.length,
-          isAdmin: true,
-        });
-      }
-
-      if (employeeId) {
+      if (search) {
+        const searchedEmployees = await Employee.find({
+          owner: tenantId,
+          name: { $regex: search, $options: "i" }
+        }).select("_id");
+        filter.employee = { $in: searchedEmployees.map(e => e._id) };
+      } else if (employeeId) {
         filter.employee = employeeId;
+      } else {
+        const ownedEmployees = await Employee.find({ owner: tenantId }).select("_id");
+        const ownedEmployeeIds = ownedEmployees.map(e => e._id);
+        filter.employee = { $in: ownedEmployeeIds };
       }
     } else {
       if (!req.user._id && !req.user.id) {
@@ -1442,8 +1428,25 @@ exports.getLeaves = async (req, res) => {
     }
 
     // Add status filter if provided
-    if (status) {
+    if (status && status !== "all") {
       filter.status = status;
+    }
+
+    // Add leave type filter
+    if (leaveType && leaveType !== "all") {
+      filter.leaveType = leaveType;
+    }
+
+    // Add decision type filter
+    if (decisionType && decisionType !== "all") {
+      if (decisionType === "auto" || decisionType === "system") {
+        filter["policyAnalysis.isAutoDecision"] = true;
+      } else if (decisionType === "manual") {
+        filter["policyAnalysis.isAutoDecision"] = false;
+      } else if (decisionType === "supervisor") {
+        filter["policyAnalysis.isAutoDecision"] = false;
+        filter.status = { $in: ["approved", "rejected"] };
+      }
     }
 
     // Add date range filter if provided
@@ -1451,6 +1454,28 @@ exports.getLeaves = async (req, res) => {
       filter.startDate = {};
       if (startDate) filter.startDate.$gte = new Date(startDate);
       if (endDate) filter.startDate.$lte = new Date(endDate);
+    }
+
+    if (isAdmin && getAll === "true") {
+      const allLeaves = await Leave.find(filter)
+        .sort({ createdAt: -1 })
+        .populate(
+          "employee",
+          "name email department position employeeId photographUrl status",
+        )
+        .lean();
+
+      const processedLeaves = allLeaves.map((leave) => ({
+        ...leave,
+        employee: processEmployeeWithPhoto(leave.employee, req),
+      }));
+
+      return res.json({
+        success: true,
+        data: processedLeaves,
+        total: processedLeaves.length,
+        isAdmin: true,
+      });
     }
 
     const total = await Leave.countDocuments(filter);
@@ -1495,6 +1520,9 @@ exports.getLeaves = async (req, res) => {
       filtersApplied: {
         status: status || "all",
         employeeId: employeeId || "all",
+        leaveType: leaveType || "all",
+        decisionType: decisionType || "all",
+        search: search || "",
         dateRange: startDate || endDate ? { startDate, endDate } : "all",
       },
     });
@@ -1515,8 +1543,15 @@ exports.getPendingLeaves = async (req, res) => {
     const user = req.user;
 
 
-    const query = { status: "pending", isTrashed: { $ne: true } };
+    const { status = "pending" } = req.query;
+    const query = { isTrashed: { $ne: true } };
+    
+    if (status !== "all") {
+      query.status = status;
+    }
+
     const tenantId = user.owner;
+    const userId = user.employeeId || user._id;
 
     // Use a simpler approach to get all employees of the company if needed
     if (user.isAdmin || user.role === "hr" || user.role === "admin") {
@@ -1524,8 +1559,15 @@ exports.getPendingLeaves = async (req, res) => {
       const ownedEmployeeIds = ownedEmployees.map(e => e._id);
       query.employee = { $in: ownedEmployeeIds };
     } else {
-      // For managers/supervisors: only show leaves where they are the current supervisor
-      query.supervisor = user.employeeId || user._id;
+      // For managers/supervisors: show leaves where they are currently assigned
+      // OR where they are part of the approval chain
+      // OR where they were the ones who took the action (approvedBy/rejectedBy)
+      query.$or = [
+        { supervisor: userId },
+        { approvalChain: userId },
+        { approvedBy: userId },
+        { rejectedBy: userId }
+      ];
     }
 
     const pendingLeaves = await Leave.find(query)

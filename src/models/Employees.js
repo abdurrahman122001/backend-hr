@@ -149,6 +149,8 @@ const EmployeeSchema = new Schema(
       ref: "User",
       required: false,
     },
+    // Monetary bonus/cash awarded via admin approvals
+    bonusCash: { type: Number, default: 0 },
     providentFund: {
       pfRate: { type: Number }, // If null, use global
       years: { type: Number },

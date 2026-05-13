@@ -12,6 +12,7 @@ const userSchema = new mongoose.Schema(
       default: "employee",
     },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    owner: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // For tenant isolation
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
   },
