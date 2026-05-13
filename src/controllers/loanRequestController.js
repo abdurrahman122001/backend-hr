@@ -106,3 +106,39 @@ exports.updateLoanRequestStatus = async (req, res) => {
     res.status(500).json({ message: "Internal server error", error: error.message });
   }
 };
+
+exports.deleteLoanRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Find the loan request
+    const request = await LoanRequest.findById(id);
+    if (!request) {
+      return res.status(404).json({ message: "Loan request not found" });
+    }
+
+    // Check authorization: must be the owner of the request or an admin/manager
+    const employeeId = req.user.employeeId || req.user._id;
+    const isOwner = request.employee.toString() === employeeId.toString();
+    const isAdminOrManager = ["admin", "manager", "owner"].includes(req.user.role);
+
+    if (!isOwner && !isAdminOrManager) {
+      return res.status(403).json({ message: "Not authorized to delete this request" });
+    }
+
+    // Cannot delete approved or rejected requests as a regular employee
+    if (!isAdminOrManager && request.status !== "pending") {
+      return res.status(400).json({ message: "Cannot delete a processed loan request" });
+    }
+
+    await LoanRequest.findByIdAndDelete(id);
+
+    res.json({
+      success: true,
+      message: "Loan request deleted successfully"
+    });
+  } catch (error) {
+    console.error("Error deleting loan request:", error);
+    res.status(500).json({ message: "Internal server error", error: error.message });
+  }
+};

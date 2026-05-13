@@ -64,18 +64,20 @@ router.get("/", requireAuth, async (req, res) => {
     skip = parseInt(skip);
 
     const currentUserRole = req.user.role?.toLowerCase();
+    const originalUserRole = req.user.userRole?.toLowerCase();
     const baseMatch = {};
 
     // 🔒 SECURITY SCOPE: Role-based filtering
+    const isSuperAdmin = currentUserRole === "super-admin" || originalUserRole === "super-admin";
     const isAdminOrHR =
+      isSuperAdmin ||
       (currentUserRole && (currentUserRole.includes("admin") || currentUserRole.includes("hr"))) ||
       (req.user.userRole && (req.user.userRole.includes("admin") || req.user.userRole.includes("hr")));
 
-    if (isAdminOrHR) {
-      // Admins and HR see all slips for their owner (company)
+    if (isSuperAdmin) {
+    } else if (isAdminOrHR) {
       baseMatch.owner = new ObjectId(req.user.owner);
     } else {
-      // Regular employee sees only their own slips
       const targetEmpId = req.user.employeeId || req.user._id;
       baseMatch.employee = new ObjectId(targetEmpId);
     }
@@ -264,7 +266,7 @@ router.patch("/:id", requireAuth, async (req, res) => {
           editedFields["loanDeductions.otherLoans"] = true;
           continue;
         }
-        
+
         // Regular fields
         let value = req.body[key];
         if (typeof value === "string" && value.includes(":")) {
@@ -523,15 +525,15 @@ router.delete("/:id", requireAuth, async (req, res) => {
 
     const currentUserRole = req.user.role?.toLowerCase().replace("_", "-");
     const originalRole = req.user.userRole?.toLowerCase().replace("_", "-");
-    
+
     // Check permission to delete
     let allowed = false;
     if (currentUserRole === "super-admin" || originalRole === "super-admin") {
       allowed = true;
     } else if (
-      currentUserRole === "admin" || 
-      currentUserRole === "hr" || 
-      originalRole === "admin" || 
+      currentUserRole === "admin" ||
+      currentUserRole === "hr" ||
+      originalRole === "admin" ||
       originalRole === "hr"
     ) {
       // Must belong to the same company owner
