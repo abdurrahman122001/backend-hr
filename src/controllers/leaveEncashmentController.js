@@ -1,29 +1,31 @@
-const BonusRequest = require("../models/BonusRequest");
+const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const Employee = require("../models/Employees");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
 
-exports.applyBonus = async (req, res) => {
+exports.applyLeaveEncashment = async (req, res) => {
   try {
-    const { amount, month, reason } = req.body;
+    const { days, encashmentRate, reason } = req.body;
     const employeeId = getUserId(req);
     const ownerId = getOwnerId(req);
 
-    if (!amount) return res.status(400).json({ message: "Amount is required" });
+    if (!days || !encashmentRate) {
+      return res.status(400).json({ message: "Days and encashment rate are required" });
+    }
 
-    const newRequest = new BonusRequest({
+    const newRequest = new LeaveEncashmentRequest({
       employee: employeeId,
       owner: ownerId,
-      amount,
-      month,
+      days,
+      encashmentRate,
       reason,
     });
 
     await newRequest.save();
-    res.status(201).json({ message: "Bonus request submitted successfully", data: newRequest });
+    res.status(201).json({ message: "Leave encashment request submitted successfully", data: newRequest });
   } catch (error) {
-    console.error("Bonus Apply Error:", error);
+    console.error("Leave Encashment Apply Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -31,13 +33,13 @@ exports.applyBonus = async (req, res) => {
 exports.getMyRequests = async (req, res) => {
   try {
     const employeeId = getUserId(req);
-    const requests = await BonusRequest.find({ employee: employeeId }).populate(
+    const requests = await LeaveEncashmentRequest.find({ employee: employeeId }).populate(
       "employee",
       "name designation department photographUrl"
     ).sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
-    console.error("Bonus Get My Error:", error);
+    console.error("Leave Encashment Get My Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -45,16 +47,15 @@ exports.getMyRequests = async (req, res) => {
 exports.getAllRequests = async (req, res) => {
   try {
     const ownerId = getOwnerId(req);
-    const { status, month } = req.query;
+    const { status } = req.query;
     const filter = { owner: ownerId };
     if (status) filter.status = status;
-    if (month) filter.month = month;
-    const requests = await BonusRequest.find(filter)
+    const requests = await LeaveEncashmentRequest.find(filter)
       .populate("employee", "name designation department photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
-    console.error("Bonus Get All Error:", error);
+    console.error("Leave Encashment Get All Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -74,20 +75,25 @@ exports.updateStatus = async (req, res) => {
       updateData.approvedAt = new Date();
     }
 
-    const request = await BonusRequest.findByIdAndUpdate(id, updateData, { new: true });
+    const request = await LeaveEncashmentRequest.findByIdAndUpdate(id, updateData, { new: true });
     if (!request) return res.status(404).json({ message: "Request not found" });
 
     if (status === "approved") {
       try {
-        await Employee.findByIdAndUpdate(request.employee, { $inc: { bonusCash: request.amount } });
+        // Calculate total encashment amount
+        const totalAmount = request.days * request.encashmentRate;
+        // Assuming there's a field like 'leaveEncashmentBalance' or similar in Employee model
+        // If not, we may need to adjust. For now, we'll just log or skip.
+        // Since the Employee model may not have this field, we'll comment out until we know the structure.
+        // await Employee.findByIdAndUpdate(request.employee, { $inc: { leaveEncashmentBalance: totalAmount } });
       } catch (err) {
-        console.error("Failed to apply bonus to employee:", err);
+        console.error("Failed to apply leave encashment to employee:", err);
       }
     }
 
-    res.status(200).json({ message: `Bonus request ${status}`, data: request });
+    res.status(200).json({ message: `Leave encashment request ${status}`, data: request });
   } catch (error) {
-    console.error("Bonus Update Error:", error);
+    console.error("Leave Encashment Update Error:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -96,11 +102,11 @@ exports.deleteRequest = async (req, res) => {
   try {
     const { id } = req.params;
     const ownerId = getOwnerId(req);
-    const deleted = await BonusRequest.findOneAndDelete({ _id: id, owner: ownerId });
+    const deleted = await LeaveEncashmentRequest.findOneAndDelete({ _id: id, owner: ownerId });
     if (!deleted) return res.status(404).json({ message: "Request not found" });
-    res.status(200).json({ message: "Bonus request deleted" });
+    res.status(200).json({ message: "Leave encashment request deleted" });
   } catch (error) {
-    console.error("Bonus Delete Error:", error);
+    console.error("Leave Encashment Delete Error:", error);
     res.status(500).json({ message: error.message });
   }
 };

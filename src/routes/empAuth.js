@@ -1052,6 +1052,18 @@ router.post("/logout", requireAuth, async (req, res) => {
     // Determine if this is an auto-logout half-day (page refresh) vs actual early logout
     const isAutoLogoutHalfDay = isAutoLogout && finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day";
 
+    // If this is a MANUAL logout before shift completion and before 9:00 PM,
+    // mark the attendance as Half Day and apply real-time half-day deduction.
+    // Mark half-day when employee logs out early (including beacon/auto logouts).
+    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+    if (shouldMarkHalfDay) {
+      finalStatus = "Half Day";
+      try {
+        await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
+      } catch (hdErr) {
+        console.error("[HALF-DAY] Error applying half-day deduction:", hdErr);
+      }
+    }
     try {
       updated = await Attendance.findByIdAndUpdate(
         attendance._id,

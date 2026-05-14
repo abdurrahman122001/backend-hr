@@ -17,6 +17,11 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     token = req.query.token;
   }
 
+  // ✅ Also allow token in POST body (useful for navigator.sendBeacon payloads)
+  if (!token && req.body && req.body.token) {
+    token = req.body.token;
+  }
+
   if (!token || token === "undefined" || token === "null") {
     console.warn("🔐 [EmpAuth] No valid token provided");
     return res

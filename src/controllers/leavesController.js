@@ -24,9 +24,54 @@ exports.listLeaves = async (req, res) => {
     const { status } = req.query;
     const filter = status ? { status } : {};
     const leaves = await LeaveRequest.find(filter)
-      .populate('employee', 'name email leaveEntitlement')
+      .populate({
+        path: 'employee',
+        select: 'name email leaveEntitlement supervisor role',
+        populate: { path: 'supervisor', select: 'name role' }
+      })
       .lean();
-    res.json(leaves);
+
+    // Compute server-side action permission for the requesting user
+    const user = req.user || {};
+    const isAdmin = !!user.isAdmin;
+    const isEmployee = !!user.isEmployee;
+    const employeeId = user.employeeId ? String(user.employeeId) : null;
+
+    const enhanced = leaves.map(l => {
+      const out = { ...l };
+      out.canAct = false;
+      out.waitingFor = null;
+
+      // Only pending leaves can be acted upon
+      if (out.status && out.status.toLowerCase() === 'pending') {
+        if (isAdmin) {
+          out.canAct = true;
+        } else if (isEmployee && employeeId) {
+          // If the requester is the supervisor of the employee, allow action
+          if (out.employee && out.employee.supervisor) {
+            const supp = out.employee.supervisor;
+            const supId = supp._id ? String(supp._id) : String(supp);
+            if (supId === employeeId) {
+              out.canAct = true;
+            } else {
+              out.canAct = false;
+              out.waitingFor = {
+                id: supId,
+                name: supp.name || null,
+                role: supp.role || null,
+              };
+            }
+          } else {
+            // No explicit supervisor: default to disallow non-admins
+            out.canAct = false;
+          }
+        }
+      }
+
+      return out;
+    });
+
+    res.json(enhanced);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

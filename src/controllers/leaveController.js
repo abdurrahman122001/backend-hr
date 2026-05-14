@@ -955,6 +955,27 @@ exports.approveLeave = async (req, res) => {
         .populate("supervisor", "name email role")
         .populate("approvalChain", "name email role")
         .lean();
+      // Emit socket events: notify the next supervisor and notify the approver that it moved on
+      if (req.app.get("io")) {
+        const io = req.app.get("io");
+        try {
+          if (nextSupervisorId) {
+            io.to(`employee_${nextSupervisorId}`).emit("leave_changed", {
+              action: "assigned",
+              leave: updatedLeave,
+              message: `A leave has been assigned to you for approval: ${updatedLeave.employee?.name}`,
+            });
+          }
+          // Notify the approver that the leave moved to next stage (so they can remove it from their list)
+          io.to(`employee_${approverId}`).emit("leave_changed", {
+            action: "moved",
+            leave: updatedLeave,
+            message: `You approved and moved the leave request for ${updatedLeave.employee?.name}`,
+          });
+        } catch (emitErr) {
+          console.error("Error emitting leave_changed (moved):", emitErr);
+        }
+      }
 
       return res.json({
         success: true,
@@ -1199,6 +1220,27 @@ exports.approveLeave = async (req, res) => {
         }
         : null,
     });
+    // Emit socket events for final approval
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      try {
+        // Notify the employee that their leave was approved
+        io.to(`employee_${processedLeave.employee._id}`).emit("leave_changed", {
+          action: "approved",
+          leave: processedLeave,
+          message: `Your leave has been approved by ${approver.name || user.name}`,
+        });
+
+        // Notify approver that finalization happened (so UI can refresh)
+        io.to(`employee_${approverId}`).emit("leave_changed", {
+          action: "finalized",
+          leave: processedLeave,
+          message: `You finalized approval for ${processedLeave.employee?.name}`,
+        });
+      } catch (emitErr) {
+        console.error("Error emitting leave_changed (approved):", emitErr);
+      }
+    }
   } catch (error) {
     console.error("❌ [approveLeave] Error:", error);
     res.status(500).json({
@@ -1463,6 +1505,7 @@ exports.getLeaves = async (req, res) => {
           "employee",
           "name email department position employeeId photographUrl status",
         )
+        .populate("approvalChain", "name email role")
         .lean();
 
       const processedLeaves = allLeaves.map((leave) => ({
@@ -1584,10 +1627,43 @@ exports.getPendingLeaves = async (req, res) => {
         leave.supervisor.role !== "admin" &&
         leave.supervisor.role !== "hr";
 
+      // Compute canAct and waitingFor based on approvalChain and currentApprovalIndex
+      let canAct = false;
+      let waitingFor = null;
+      try {
+        if (user && (user.isAdmin || user.role === 'hr' || user.role === 'admin')) {
+          canAct = true;
+        } else {
+          const userIdStr = String(user.employeeId || user._id);
+          const idx = leave.currentApprovalIndex || 0;
+          const approver = Array.isArray(leave.approvalChain) ? leave.approvalChain[idx] : null;
+          if (approver) {
+            const approverId = String(approver._id || approver);
+            if (approverId === userIdStr) {
+              canAct = true;
+            } else {
+              canAct = false;
+              waitingFor = {
+                id: approverId,
+                name: approver.name || null,
+                role: approver.role || null,
+              };
+            }
+          } else {
+            // If no approvalChain defined, default to false for non-admins
+            canAct = false;
+          }
+        }
+      } catch (e) {
+        canAct = false;
+      }
+
       return {
         ...leave,
         employee: processEmployeeWithPhoto(leave.employee, req),
         awaitingSenior: isAwaitingSenior, // Flag to show "Awaiting Manager" vs "Your Turn"
+        canAct,
+        waitingFor,
       };
     });
 
@@ -1615,6 +1691,7 @@ exports.getLeaveById = async (req, res) => {
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
       .populate("cancelledBy", "name email")
+      .populate("approvalChain", "name email role")
       .lean();
 
     if (!leave) {
