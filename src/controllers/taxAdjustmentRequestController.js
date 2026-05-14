@@ -2,7 +2,7 @@ const TaxAdjustmentRequest = require("../models/TaxAdjustmentRequest");
 
 exports.submitTaxAdjustmentRequest = async (req, res) => {
   try {
-    const { reason, payrollMonth, attachmentUrl } = req.body;
+    const { reason, payrollMonth } = req.body;
     const employeeId = req.user.employeeId || req.user._id;
     const ownerId = req.user.owner;
 
@@ -15,7 +15,7 @@ exports.submitTaxAdjustmentRequest = async (req, res) => {
       owner: ownerId,
       reason,
       payrollMonth,
-      attachmentUrl,
+      attachmentUrl: req.file ? req.file.filename : undefined,
       status: "pending",
     });
 

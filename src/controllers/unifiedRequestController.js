@@ -6,6 +6,9 @@ const AdvanceSalaryRequest = require("../models/AdvanceSalaryRequest");
 const ReimbursementRequest = require("../models/ReimbursementRequest");
 const CommissionRequest = require("../models/CommissionRequest");
 const TaxAdjustmentRequest = require("../models/TaxAdjustmentRequest");
+const BonusRequest = require("../models/BonusRequest");
+const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
+const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Attendance = require("../models/Attendance");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Employee = require("../models/Employees");
@@ -73,6 +76,9 @@ exports.getUnifiedToDoList = async (req, res) => {
          ReimbursementRequest.countDocuments(baseMatch),
          CommissionRequest.countDocuments(baseMatch),
          TaxAdjustmentRequest.countDocuments(baseMatch),
+         BonusRequest.countDocuments(baseMatch),
+         LeaveEncashmentRequest.countDocuments(baseMatch),
+         LeaveCarryForwardRequest.countDocuments(baseMatch),
          Attendance.countDocuments(attendanceMatch),
          status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ owner: new mongoose.Types.ObjectId(ownerId) })
      ]);
@@ -85,6 +91,8 @@ exports.getUnifiedToDoList = async (req, res) => {
     // 1. Leave Requests
     const leavePromise = LeaveRequest.find(leaveMatch)
       .populate("employee", "name department designation photographUrl")
+      .populate("approvalChain", "name designation role")
+      .populate("supervisor", "name designation role")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
@@ -124,7 +132,25 @@ exports.getUnifiedToDoList = async (req, res) => {
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
-    // 7. Attendance Challenges
+     // 8. Bonus Requests
+     const bonusPromise = BonusRequest.find(baseMatch)
+       .populate("employee", "name department designation photographUrl")
+       .sort({ createdAt: -1 })
+       .limit(fetchLimit);
+
+     // 9. Leave Encashment Requests
+     const leaveEncashmentPromise = LeaveEncashmentRequest.find(baseMatch)
+       .populate("employee", "name department designation photographUrl")
+       .sort({ createdAt: -1 })
+       .limit(fetchLimit);
+
+     // 10. Leave Carry Forward Requests
+     const leaveCarryForwardPromise = LeaveCarryForwardRequest.find(baseMatch)
+       .populate("employee", "name department designation photographUrl")
+       .sort({ createdAt: -1 })
+       .limit(fetchLimit);
+
+    // 11. Attendance Challenges
     const attendancePromise = Attendance.find(attendanceMatch)
       .populate("employee", "name department designation photographUrl")
       .sort({ challengeAt: -1 })
@@ -136,7 +162,7 @@ exports.getUnifiedToDoList = async (req, res) => {
       .sort({ revisionDate: -1 })
       .limit(fetchLimit);
 
-const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, attendances, promotions] = await Promise.all([
+const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, bonuses, leaveEncashments, leaveCarryForwards, attendances, promotions] = await Promise.all([
        leavePromise,
        loanPromise,
        salaryChangePromise,
@@ -144,6 +170,9 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
        reimbursementPromise,
        commissionPromise,
        taxAdjustmentPromise,
+       bonusPromise,
+       leaveEncashmentPromise,
+       leaveCarryForwardPromise,
        attendancePromise,
        promotionPromise
      ]);
@@ -153,6 +182,10 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
 
     // Add Leaves
     leaves.forEach(item => {
+      const isAwaitingSenior = item.supervisor &&
+        item.supervisor.role !== "admin" &&
+        item.supervisor.role !== "hr";
+
       unifiedList.push({
         _id: item._id,
         type: "leave",
@@ -163,7 +196,8 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
         amount: (item.totalDays || 0) + " day(s)",
         reason: item.reason,
         policyConcerns: item.policyAnalysis?.violations?.length || 0,
-        originalData: item
+        awaitingSenior: isAwaitingSenior,
+        originalData: { ...item.toObject(), awaitingSenior: isAwaitingSenior }
       });
     });
 
@@ -252,6 +286,51 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
          status: item.status,
          date: item.createdAt,
          amount: item.payrollMonth,
+         reason: item.reason,
+         originalData: item
+       });
+     });
+
+     // Add Bonuses
+     bonuses.forEach(item => {
+       unifiedList.push({
+         _id: item._id,
+         type: "bonus",
+         typeLabel: "Bonus Request",
+         employee: item.employee,
+         status: item.status,
+         date: item.createdAt,
+         amount: "PKR " + (item.amount?.toLocaleString() || "0"),
+         reason: item.reason,
+         originalData: item
+       });
+     });
+
+     // Add Leave Encashments
+     leaveEncashments.forEach(item => {
+       unifiedList.push({
+         _id: item._id,
+         type: "leave-encashment",
+         typeLabel: "Leave Encashment",
+         employee: item.employee,
+         status: item.status,
+         date: item.createdAt,
+         amount: (item.encashmentDays || 0) + " day(s)",
+         reason: item.reason,
+         originalData: item
+       });
+     });
+
+     // Add Leave Carry Forwards
+     leaveCarryForwards.forEach(item => {
+       unifiedList.push({
+         _id: item._id,
+         type: "leave-carry-forward",
+         typeLabel: "Leave Carry Forward",
+         employee: item.employee,
+         status: item.status,
+         date: item.createdAt,
+         amount: (item.daysToCarryForward || 0) + " day(s)",
          reason: item.reason,
          originalData: item
        });

@@ -1505,6 +1505,7 @@ exports.getLeaves = async (req, res) => {
           "employee",
           "name email department position employeeId photographUrl status",
         )
+        .populate("approvalChain", "name email role")
         .lean();
 
       const processedLeaves = allLeaves.map((leave) => ({
@@ -1690,6 +1691,7 @@ exports.getLeaveById = async (req, res) => {
       .populate("approvedBy", "name email")
       .populate("rejectedBy", "name email")
       .populate("cancelledBy", "name email")
+      .populate("approvalChain", "name email role")
       .lean();
 
     if (!leave) {
