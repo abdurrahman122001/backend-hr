@@ -117,6 +117,8 @@ const salaryChangeRequestRoutes = require("./routes/salaryChangeRequestRoutes");
 const commissionRoutes = require("./routes/commissionRoutes");
 const unifiedRequestsRoutes = require("./routes/unifiedRequests");
 const taxAdjustmentRequestRoutes = require("./routes/taxAdjustmentRequestRoutes");
+const leaveEncashmentRequestRoutes = require("./routes/leaveEncashmentRequestRoutes");
+const leaveCarryForwardRequestRoutes = require("./routes/leaveCarryForwardRequestRoutes");
 const app = express();
 const payrollAccessRouter = require("./routes/payrollAccess");
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
@@ -287,6 +289,9 @@ app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);
 app.use("/api/email", emailReceiverRoutes);
+// Leave encashment and carry forward request routes
+app.use("/api/leave-encashment-requests", leaveEncashmentRequestRoutes);
+app.use("/api/leave-carry-forward-requests", leaveCarryForwardRequestRoutes);
 // Already handled above with attendanceAuth
 app.use("/api", employeeLeaveSummary);
 app.use("/api/admin", adminWorkSpaceManagementRoute);

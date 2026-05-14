@@ -674,7 +674,8 @@ async function tokenMap(
   emp,
   defaults = {},
   docType = "experience_letter",
-  ownerId
+  ownerId,
+  options = {}
 ) {
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
 
@@ -698,8 +699,8 @@ async function tokenMap(
     (pos) => !pos.isCurrentRole
   );
 
-  const referenceNumber = await generateReferenceNumber(docType, ownerId);
-  const nextReferenceNumber = await getCurrentReferenceNumber(docType, ownerId);
+  const referenceNumber = options.referenceNumber || await generateReferenceNumber(docType, ownerId);
+  const nextReferenceNumber = options.nextReferenceNumber || await getCurrentReferenceNumber(docType, ownerId);
   const currentDate = formatDateDDMMYYYY(new Date(), timezone);
   const docTypeCode = getDocTypeCode(docType);
   const docTypeName = getDocTypeName(docType);
@@ -1094,7 +1095,8 @@ async function generateDocumentPDF(
   employeeId,
   docType,
   templateId = "",
-  ownerId
+  ownerId,
+  precomputedTokens = null
 ) {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -1119,7 +1121,7 @@ async function generateDocumentPDF(
 
   const defaults = tpl.defaultValues || {};
   const normalizedDocType = normType(docType);
-  const tokens = await tokenMap(emp, defaults, normalizedDocType, ownerId);
+  const tokens = precomputedTokens || await tokenMap(emp, defaults, normalizedDocType, ownerId);
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
@@ -1458,19 +1460,18 @@ router.post("/bulk/:docType", async (req, res) => {
           } (Reference: ${referenceNumber})`
         );
 
+        const nextReferenceNumber = `MA${String(
+          sequenceNumber + 1
+        ).padStart(2, "0")}-${docCode}-${currentDateDDMMYYYY}`;
+
         // Create custom tokens for this employee with proper reference number
         const tokens = await tokenMap(
           emp,
           defaults,
           normalizedDocType,
-          req.ownerId
+          req.ownerId,
+          { referenceNumber, nextReferenceNumber }
         );
-
-        // Override the reference number with sequential one
-        tokens["doc.referenceNo"] = referenceNumber;
-        tokens["doc.nextReferenceNo"] = `MA${String(
-          sequenceNumber + 1
-        ).padStart(2, "0")}-${docCode}-${currentDateDDMMYYYY}`;
 
         // For each page in the template, generate for this employee
         for (const page of pages) {
@@ -1508,7 +1509,8 @@ router.post("/bulk/:docType", async (req, res) => {
           emp._id,
           normalizedDocType,
           tpl._id,
-          req.ownerId
+          req.ownerId,
+          tokens
         );
 
         const saveResult = await saveDocumentToFile(
