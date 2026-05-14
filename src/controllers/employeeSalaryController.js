@@ -1138,6 +1138,12 @@ exports.getAllMasterSalaries = async (req, res) => {
           decrypted.otherLoanDeductions = 0;
         }
 
+        // ✅ Add approved bonus cash from bonus requests to the bonus field
+        // This ensures approved bonuses appear in payroll estimation
+        if (emp.bonusCash && emp.bonusCash > 0) {
+          decrypted.bonus = safeNumber(decrypted.bonus, 0) + safeNumber(emp.bonusCash, 0);
+        }
+
         return decrypted;
       })
     );
