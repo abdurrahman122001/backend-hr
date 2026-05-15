@@ -353,8 +353,19 @@ async function updateLeaveEntitlementForEmployeeProportional(
   }
 }
 
-async function reverseOldBonus(oldRec) {
+async function reverseOldBonus(oldRec, sourceModel = undefined) {
   if (!oldRec || !oldRec.bonusApplied || !oldRec.bonusHoursGiven) return;
+
+  // ✅ Guard: Skip leave transaction effects if sourceModel is explicitly null
+  if (sourceModel === null) {
+    console.log(`⚠️ [REVERSE-OLD-BONUS] SourceModel is null - skipping leave transaction creation`);
+    // Still reverse bonus in attendance record, just don't create transaction
+    await Attendance.updateOne(
+      { _id: oldRec._id },
+      { $set: { bonusApplied: false, bonusType: null, bonusHoursGiven: 0 } }
+    );
+    return;
+  }
 
   const ownerId = oldRec.owner;
   const employeeId = oldRec.employee;
@@ -417,8 +428,14 @@ async function reverseOldBonus(oldRec) {
  * Reverses any leave balance or bonus effects of an attendance record.
  * Used when updating or deleting a record.
  */
-async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
+async function reverseAttendanceEffects(record, slip = null, perDay = 0, sourceModel = undefined) {
   if (!record) return;
+
+  // ✅ Guard: Skip leave transaction effects if sourceModel is explicitly null
+  if (sourceModel === null) {
+    console.log(`⚠️ [REVERSE-ATTENDANCE-EFFECTS] SourceModel is null - skipping leave transaction effects`);
+    return;
+  }
 
   const ownerId = resolveOwnerId(record);
   console.log(`\n📬 [MARK-ATTENDANCE] Request: Employee=${record.employee}, Date=${record.date}, NewStatus=${record.status}`);
@@ -437,7 +454,7 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0) {
 
   // 1. Reverse Bonus if applied
   if (bonusApplied) {
-    await reverseOldBonus(record);
+    await reverseOldBonus(record, sourceModel);
   }
 
   // 2. Reverse Early Departure Deduction if applied
@@ -944,9 +961,16 @@ exports.markAttendance = async (req, res) => {
       isHoliday,
       challengeStatus,
       challengeAdminNotes,
+      sourceModel,
     } = req.body;
     const normalizedStatus = status === "On time" ? "Present" : status;
-    console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status} -> ${normalizedStatus}, Notes=${notes}`);
+    console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status} -> ${normalizedStatus}, Notes=${notes}, SourceModel=${sourceModel || 'NONE'}`);
+    
+    // ✅ Guard: If sourceModel is null, skip leave/bonus/late effects
+    const skipLeaveEffects = (sourceModel === null);
+    if (skipLeaveEffects) {
+      console.log(`⚠️ [MARK-ATTENDANCE] SourceModel is explicitly null - skipping leave/bonus/late effects`);
+    }
 
     // ========= Helpers =========
     const allowanceFields = [
@@ -1000,7 +1024,7 @@ exports.markAttendance = async (req, res) => {
 
     if (oldRec) {
       console.log(`🔍 [MARK-ATTENDANCE] Found existing record status: ${oldRec.status}`);
-      await reverseAttendanceEffects(oldRec);
+      await reverseAttendanceEffects(oldRec, null, 0, sourceModel);
     } else {
       console.log(`🔍 [MARK-ATTENDANCE] No existing record found for this date.`);
     }
@@ -1083,6 +1107,12 @@ exports.markAttendance = async (req, res) => {
       console.error("Failed to write to AttendanceChangeLog", logErr);
     }
 
+    // If sourceModel explicitly null, skip all further leave/bonus/late effects.
+    if (skipLeaveEffects) {
+      console.log(`⚠️ [MARK-ATTENDANCE] SourceModel null - returning early without affecting leave transactions.`);
+      return res.json(rec);
+    }
+
     // ========= Payroll period =========
     const payrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
     const shiftId = employee.shifts?.[0];
@@ -1140,12 +1170,17 @@ exports.markAttendance = async (req, res) => {
       );
       // Do NOT call reconcileLateDeductions here — non-working day attendance
       // is forced to Present and must never affect the late counter.
-      const { bonus, accumulated } = await updateBonusForNonWorkingDay(
-        employeeId,
-        checkIn,
-        checkOut,
-        date
-      );
+      let bonus = null;
+      let accumulated = null;
+      if (!skipLeaveEffects) {
+        const _res = await updateBonusForNonWorkingDay(
+          employeeId,
+          checkIn,
+          checkOut,
+          date
+        );
+        bonus = _res.bonus; accumulated = _res.accumulated;
+      }
       return res.json(recNwd);
     }
 
@@ -2008,6 +2043,16 @@ exports.updateChallengeStatus = async (req, res) => {
           console.error("Failed to reconcile late deductions during challenge approval:", reconcileErr);
         }
       }
+    }
+
+    // Notify employee via socket
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+        attendance,
+        action: challengeStatus.toLowerCase(),
+        message: `Your attendance challenge for ${attendance.date} has been ${challengeStatus.toLowerCase()}.`,
+      });
     }
 
     res.json({ success: true, attendance });

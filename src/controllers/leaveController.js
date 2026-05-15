@@ -489,6 +489,56 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
     return false;
   }
 }
+
+/**
+ * Reverts the effects of an approved leave (balance, transactions, salary)
+ */
+async function revertLeaveEffects(leave, performedBy) {
+  try {
+    if (leave.status !== "approved" && leave.status !== "auto_approved") return;
+
+    const employeeId = leave.employee._id || leave.employee;
+    const daysToRevert = leave.totalDays;
+    const leaveYear = getLeaveYear(leave.startDate);
+    
+    // 1. Revert Employee model balances
+    const balanceField = leave.isPaid ? "leaveEntitlement.usedPaid" : "leaveEntitlement.usedUnpaid";
+    await Employee.findByIdAndUpdate(employeeId, {
+      $inc: { [balanceField]: -daysToRevert },
+    });
+
+    // 2. Revert LeaveYearBalance
+    const yearBalanceField = leave.isPaid ? "usedPaid" : "usedUnpaid";
+    await LeaveYearBalance.findOneAndUpdate(
+      { employee: employeeId, year: leaveYear },
+      { $inc: { [yearBalanceField]: -daysToRevert } }
+    );
+
+    // 3. Create a reversal transaction
+    await LeaveTransaction.create({
+      owner: leave.owner,
+      employee: employeeId,
+      year: leaveYear,
+      date: new Date(),
+      type: leave.isPaid ? "PAID_LEAVE_REVERSED" : "UNPAID_LEAVE_REVERSED",
+      value: daysToRevert,
+      sourceModel: "ApplyLeave",
+      sourceId: leave._id,
+      createdBy: performedBy,
+      notes: `Reversal due to leave ${leave.status === "cancelled" ? "withdrawal" : "edit"}`
+    });
+
+    // 4. Revert salary deduction if it was an absence justification or unpaid
+    if (leave.isAbsenceJustification || !leave.isPaid) {
+      await revertLeaveSalaryDeduction(employeeId, daysToRevert, leave.startDate);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("❌ [revertLeaveEffects] Error:", error);
+    return false;
+  }
+}
  
 /**
  * Helper function to build approval chain based on hierarchy
@@ -687,21 +737,43 @@ exports.applyLeave = async (req, res) => {
 
     await leave.save();
 
-    // 🔥 NEW: Real-time notification for supervisor
-    if (req.app.get("io") && supervisor) {
+    // 🔥 NEW: Real-time notification for all seniors in the hierarchy
+    if (req.app.get("io") && approvalChain && approvalChain.length > 0) {
       const io = req.app.get("io");
       const populatedLeave = await Leave.findById(leave._id)
         .populate("employee", "name email department photographUrl")
         .lean();
 
-      io.to(`employee_${supervisor}`).emit("new_leave_request", {
-        leave: {
-          ...populatedLeave,
-          employee: processEmployeeWithPhoto(populatedLeave.employee, req),
-        },
-        message: `${employee.name} has applied for leave`,
+      const processedLeave = {
+        ...populatedLeave,
+        employee: processEmployeeWithPhoto(populatedLeave.employee, req),
+      };
+
+      // Notify the immediate supervisor with canAct: true
+      if (supervisor) {
+        io.to(`employee_${supervisor}`).emit("new_leave_request", {
+          leave: {
+            ...processedLeave,
+            canAct: true,
+          },
+          message: `${employee.name} has applied for leave (Your Action Required)`,
+        });
+        console.log(`📡 [SOCKET] Emitted new_leave_request to supervisor employee_${supervisor}`);
+      }
+
+      // Notify other seniors in the chain with canAct: false (for visibility)
+      approvalChain.forEach(seniorId => {
+        if (seniorId && String(seniorId) !== String(supervisor)) {
+          io.to(`employee_${seniorId}`).emit("new_leave_request", {
+            leave: {
+              ...processedLeave,
+              canAct: false,
+            },
+            message: `${employee.name} has applied for leave (Awaiting junior level approval)`,
+          });
+          console.log(`📡 [SOCKET] Emitted visibility notification to senior employee_${seniorId}`);
+        }
       });
-      console.log(`📡 [SOCKET] Emitted new_leave_request to employee_${supervisor}`);
     }
 
     // Prepare response message based on analysis
@@ -980,15 +1052,28 @@ exports.approveLeave = async (req, res) => {
           if (nextSupervisorId) {
             io.to(`employee_${nextSupervisorId}`).emit("leave_changed", {
               action: "assigned",
-              leave: updatedLeave,
+              leave: {
+                ...updatedLeave,
+                canAct: true,
+              },
               message: `A leave has been assigned to you for approval: ${updatedLeave.employee?.name}`,
             });
           }
           // Notify the approver that the leave moved to next stage (so they can remove it from their list)
           io.to(`employee_${approverId}`).emit("leave_changed", {
             action: "moved",
-            leave: updatedLeave,
+            leave: {
+              ...updatedLeave,
+              canAct: false,
+            },
             message: `You approved and moved the leave request for ${updatedLeave.employee?.name}`,
+          });
+
+          // Also notify the employee that their leave moved up
+          io.to(`employee_${updatedLeave.employee?._id}`).emit("leave_changed", {
+            action: "moved",
+            leave: updatedLeave,
+            message: `Your leave request has been approved by ${approver.name || "your senior"} and moved to next level.`,
           });
         } catch (emitErr) {
           console.error("Error emitting leave_changed (moved):", emitErr);
@@ -1347,6 +1432,44 @@ exports.rejectLeave = async (req, res) => {
     });
 
     await leave.save();
+
+    // 🔥 NEW: Real-time notification for rejection
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      try {
+        const populatedLeave = await Leave.findById(leave._id)
+          .populate("employee", "name email department photographUrl")
+          .populate("rejectedBy", "name email")
+          .lean();
+
+        const processedLeave = {
+          ...populatedLeave,
+          employee: processEmployeeWithPhoto(populatedLeave.employee, req),
+        };
+
+        // Notify the employee
+        io.to(`employee_${processedLeave.employee._id}`).emit("leave_changed", {
+          action: "rejected",
+          leave: processedLeave,
+          message: `Your leave request has been rejected: ${reason}`,
+        });
+
+        // Notify previous approvers in the chain so they can see the final status
+        if (leave.approvalChain && leave.approvalChain.length > 0) {
+          leave.approvalChain.forEach(seniorId => {
+            if (seniorId && String(seniorId) !== String(rejectorId)) {
+              io.to(`employee_${seniorId}`).emit("leave_changed", {
+                action: "rejected",
+                leave: { ...processedLeave, canAct: false },
+                message: `Leave request for ${processedLeave.employee.name} was rejected by ${user.name}`,
+              });
+            }
+          });
+        }
+      } catch (emitErr) {
+        console.error("Error emitting leave_changed (rejected):", emitErr);
+      }
+    }
 
     // UPDATE ATTENDANCE RECORDS WHEN LEAVE IS REJECTED
     // Mark leave dates as "Absent" and "Unpaid" unless already Absent and Unpaid
@@ -1802,10 +1925,15 @@ exports.cancelLeave = async (req, res) => {
         .json({ message: "Not authorized to cancel this leave" });
     }
 
-    if (leave.status !== "pending") {
+    if (leave.status !== "pending" && leave.status !== "approved") {
       return res.status(400).json({
-        message: `Cannot cancel a ${leave.status} leave request`,
+        message: `Cannot withdraw a ${leave.status} leave request`,
       });
+    }
+
+    // If it was approved, revert the effects before cancelling
+    if (leave.status === "approved" || leave.status === "auto_approved") {
+      await revertLeaveEffects(leave, employee._id);
     }
 
     // Update leave
@@ -1815,6 +1943,39 @@ exports.cancelLeave = async (req, res) => {
     leave.cancellationReason = reason || "Cancelled by employee";
 
     await leave.save();
+
+    // Notify approver and approval chain via socket
+    if (req.app.get("io")) {
+      try {
+        const io = req.app.get("io");
+        const populatedLeave = await Leave.findById(leave._id)
+          .populate("employee", "name employeeId department photographUrl")
+          .lean();
+
+        const payload = {
+          leave: populatedLeave,
+          action: "cancelled",
+          message: `${populatedLeave.employee?.name || "Employee"} has cancelled their leave request.`,
+          canAct: false
+        };
+
+        // Notify Current Approver
+        if (leave.approver) {
+          io.to(`employee_${leave.approver}`).emit("leave_changed", payload);
+        }
+
+        // Notify entire approval chain
+        if (Array.isArray(leave.approvalChain)) {
+          leave.approvalChain.forEach(seniorId => {
+            if (String(seniorId) !== String(leave.approver)) {
+              io.to(`employee_${seniorId}`).emit("leave_changed", payload);
+            }
+          });
+        }
+      } catch (emitErr) {
+        console.error("Error emitting leave_changed (cancelled):", emitErr);
+      }
+    }
 
     res.json({
       success: true,
@@ -1993,8 +2154,8 @@ exports.updateLeave = async (req, res) => {
       return res.status(404).json({ message: "Leave request not found" });
     }
 
-    // Only pending leaves can be updated
-    if (leave.status !== "pending") {
+    // Only pending or approved leaves can be updated
+    if (leave.status !== "pending" && leave.status !== "approved") {
       return res.status(400).json({
         message: `Cannot update a ${leave.status} leave request`,
       });
@@ -2002,6 +2163,15 @@ exports.updateLeave = async (req, res) => {
 
     // Check if user can update this leave
     const employee = await Employee.findById(user.employeeId || user.id);
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    // If it was approved, revert the effects before resetting to pending
+    if (leave.status === "approved" || leave.status === "auto_approved") {
+      await revertLeaveEffects(leave, employee._id);
+    }
+
     const isLeaveOwner = leave.employee.toString() === employee._id.toString();
 
     if (!isLeaveOwner && employee.role !== "admin" && employee.role !== "hr") {
