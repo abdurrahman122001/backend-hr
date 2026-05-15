@@ -28,10 +28,15 @@ router.get("/sent", ctrl.listMySentToClient);
 router.get("/messages", ctrl.listMessagesForManager);
 router.get("/messages/:clientId", ctrl.listMessagesForManager);
 
+router.get("/unread/counts", ctrl.getUnreadCounts);
+
 router.get("/scheduled/all", ctrl.getScheduledMessages);
 router.get("/client/:clientId/scheduled", ctrl.getScheduledMessagesForClient);
 
 router.get("/search", ctrl.searchMessages);
+
+router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
+router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
 router.get("/:id/attachments", ctrl.listAttachments);
 router.post(
@@ -53,9 +58,6 @@ router.patch("/:id", ctrl.updateMessage);
 router.patch("/:id/edit", ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 router.patch("/:id/seen", ctrl.markAsSeen);
-router.get("/unread/counts", ctrl.getUnreadCounts);
-router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
-router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
 router.post("/:messageId/comments", commentController.addComment);
 router.get("/:messageId/comments", commentController.getComments);

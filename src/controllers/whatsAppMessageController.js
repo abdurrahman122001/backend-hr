@@ -338,6 +338,21 @@ async function applyVisibility(q, req) {
     oid(link.junior)
   );
 
+  // 🔥 CLIENT ASSIGNMENT CHECK: If the query targets a specific client,
+  // check if this employee is currently assigned to that client.
+  // If so, they should see ALL messages for that client (including old ones
+  // from previously assigned employees).
+  let isAssignedToClient = false;
+  const clientId = q.client;
+  if (clientId && isObjId(clientId)) {
+    const ClientInfo = require("../models/ClientInfo");
+    const clientDoc = await ClientInfo.findOne({
+      _id: clientId,
+      assignedTo: me,
+    }).select("_id").lean();
+    isAssignedToClient = !!clientDoc;
+  }
+
   if (juniorIdsSupervisor.length > 0) {
     // This employee has subordinates
     const now = new Date();
@@ -346,6 +361,14 @@ async function applyVisibility(q, req) {
       { receiver: me },
       { receiver: { $in: [me] } },
     ];
+
+    // If assigned to client, also allow seeing all non-pending messages for that client
+    if (isAssignedToClient && clientId) {
+      visOr.push({
+        client: oid(clientId),
+        approvalStatus: { $in: [null, "approved"] },
+      });
+    }
 
     if (q.isScheduled === true && q.status === "scheduled") {
       return { $and: [q, { $or: visOr }] };
@@ -386,6 +409,14 @@ async function applyVisibility(q, req) {
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
   const now = new Date();
   const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+
+  // 🔥 If assigned to client, also allow seeing all non-pending messages for that client
+  if (isAssignedToClient && clientId) {
+    visOr.push({
+      client: oid(clientId),
+      approvalStatus: { $in: [null, "approved"] },
+    });
+  }
 
   if (q.isScheduled === true && q.status === "scheduled") {
     return { $and: [q, { $or: visOr }] };

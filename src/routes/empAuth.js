@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const Employee = require("../models/Employees");
+const User = require("../models/Users");
 const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
 const AttendanceLog = require("../models/AttendanceLog");
@@ -607,17 +608,17 @@ router.post("/login", async (req, res) => {
     }
 
     // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
-    // ✅ DEV MODE: Auto-trust devices if NODE_ENV=development (skip 2FA for testing)
-    const devModeAutoTrust = NODE_ENV === "development";
+    // ✅ DEV MODE BYPASSED: User wants to test 2FA flow
+    const devModeAutoTrust = false; 
 
-    const isTrusted = devModeAutoTrust || emp.trustedDevices?.some(
+    const isTrusted = emp.trustedDevices?.some(
       (d) =>
         (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
         (deviceToken && d.deviceId === deviceToken)
     );
 
-    // UNRECOGNIZED DEVICE (2FA flow) — SKIPPED IN DEV MODE
-    if (!isTrusted && !devModeAutoTrust) {
+    // UNRECOGNIZED DEVICE (2FA flow)
+    if (!isTrusted) {
       const code = Math.floor(100000 + Math.random() * 900000).toString();
       const expires = Date.now() + 10 * 60 * 1000;
       codes.set(emp._id.toString(), { code, expires, deviceFingerprint });
@@ -628,8 +629,12 @@ router.post("/login", async (req, res) => {
       const loginIp = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
       const when = formatTimeForDisplay(nowKarachi);
 
+      // Fetch owner email dynamically
+      const ownerUser = await User.findById(emp.owner).select("email").lean();
+      const ownerEmail = ownerUser?.email || MAIL_FROM_ADDRESS;
+
       await sendMail({
-        to: "abdullah.ah452001@gmail.com",
+        to: ownerEmail,
         subject: "Employee login verification requested",
         text: `Employee: ${emp.companyEmail}\nTime (Karachi): ${when}\nIP: ${loginIp}\nCode: ${code}\nStatus: ${sessionStatus}`,
         html: `<p><b>New device login verification requested</b></p>
@@ -1052,6 +1057,18 @@ router.post("/logout", requireAuth, async (req, res) => {
     // Determine if this is an auto-logout half-day (page refresh) vs actual early logout
     const isAutoLogoutHalfDay = isAutoLogout && finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day";
 
+    // If this is a MANUAL logout before shift completion and before 9:00 PM,
+    // mark the attendance as Half Day and apply real-time half-day deduction.
+    // Mark half-day when employee logs out early (including beacon/auto logouts).
+    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+    if (shouldMarkHalfDay) {
+      finalStatus = "Half Day";
+      try {
+        await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
+      } catch (hdErr) {
+        console.error("[HALF-DAY] Error applying half-day deduction:", hdErr);
+      }
+    }
     try {
       updated = await Attendance.findByIdAndUpdate(
         attendance._id,

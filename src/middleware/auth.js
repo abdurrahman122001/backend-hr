@@ -27,27 +27,48 @@ module.exports = async function requireAuth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
 
     // Find the user
-    const user = await User.findById(payload.id).select(
+    let user = await User.findById(payload.id).select(
       "_id role createdBy owner tokenVersion name email companyEmail"
     );
 
+    let employee = null;
+
     if (!user) {
-      return res.status(401).json({ message: "User not found" });
+      // Fallback: Check if it's an Employee ID (e.g. from Employee Dashboard)
+      employee = await Employee.findById(payload.id).select(
+        "_id role permissions name department designation owner companyEmail"
+      );
+      
+      if (employee) {
+        // Create a user-like object from employee data
+        user = {
+          _id: employee._id,
+          role: employee.role,
+          name: employee.name,
+          companyEmail: employee.companyEmail,
+          owner: employee.owner,
+          isEmployeeFallback: true
+        };
+      } else {
+        return res.status(401).json({ message: "User not found" });
+      }
     }
 
-    // Optional token version validation
-    if ((user.tokenVersion || 0) !== (payload.tv || 0)) {
+    // Optional token version validation (only for actual User models)
+    if (!user.isEmployeeFallback && (user.tokenVersion || 0) !== (payload.tv || 0)) {
       return res.status(401).json({ message: "Token invalidated" });
     }
 
-    // Find the employee record to get permissions and correct role
-    const employee = await Employee.findOne({
-      $or: [
-        { userAccount: user._id },
-        { email: user.email },
-        { companyEmail: user.companyEmail }
-      ]
-    }).select("role permissions name department designation owner");
+    // Find the employee record if not already found (for User models)
+    if (!employee) {
+      employee = await Employee.findOne({
+        $or: [
+          { userAccount: user._id },
+          { email: user.email },
+          { companyEmail: user.companyEmail }
+        ]
+      }).select("role permissions name department designation owner");
+    }
 
     // Normalize role string
     const rawRole = employee?.role || user.role || "";
