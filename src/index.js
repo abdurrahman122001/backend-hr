@@ -394,75 +394,41 @@ app.get("/api/employees/count", async (_req, res) => {
     res.status(500).json({ error: "Failed to get employee count" });
   }
 });
-// ---------- TLS (Let’s Encrypt) & Server Startup ----------
-const ENABLE_HTTPS =
-  (process.env.ENABLE_HTTPS || "true").toLowerCase() !== "false";
-const DEFAULT_DOMAIN = process.env.DOMAIN || "innand.com";
-const CERT_FULLCHAIN =
-  process.env.CERT_FULLCHAIN ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/fullchain.pem`;
-const CERT_PRIVKEY =
-  process.env.CERT_PRIVKEY ||
-  `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
-const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 4000);
-let primaryServer; // the server we attach socket.io to
-let httpsEnabled = false;
-if (
-  ENABLE_HTTPS &&
-  fs.existsSync(CERT_FULLCHAIN) &&
-  fs.existsSync(CERT_PRIVKEY)
-) {
-  // Start HTTPS server
-  const httpsServer = https.createServer(
-    {
-      cert: fs.readFileSync(CERT_FULLCHAIN),
-      key: fs.readFileSync(CERT_PRIVKEY),
-    },
-    app,
-  );
-  primaryServer = httpsServer;
-  httpsEnabled = true;
-  httpsServer.listen(HTTPS_PORT, () => {
-    console.log(
-      `🔐 HTTPS listening on https://${DEFAULT_DOMAIN}:${HTTPS_PORT}`,
-    );
-  });
-  // Lightweight HTTP → HTTPS redirect
-  http
-    .createServer((req, res) => {
-      const host = req.headers.host || DEFAULT_DOMAIN;
-      const location = `https://${host}${req.url}`;
-      res.writeHead(301, { Location: location });
-      res.end();
-    })
-    .listen(HTTP_PORT, () => {
-      console.log(
-        `➡️  Redirecting HTTP (:${HTTP_PORT}) → HTTPS (:${HTTPS_PORT})`,
-      );
-    });
-} else {
-  // Fallback to HTTP only (useful for local/dev or when cert files missing)
-  const httpServer = http.createServer(app);
-  primaryServer = httpServer;
-  httpServer.listen(HTTP_PORT, () => {
-    console.log(`🔓 HTTP listening on http://0.0.0.0:${HTTP_PORT}`);
-    if (ENABLE_HTTPS) {
-      console.warn(
-        "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-        "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
-      );
-    }
-  });
-}
-// ---------- Socket.IO on the primary server ----------
+// ---------- HTTP Server (ONLY INTERNAL) ----------
+const HTTP_PORT = Number(process.env.HTTP_PORT || 3000);
+
+let primaryServer;
+
+// Always use HTTP server (NO HTTPS in Node)
+const httpServer = http.createServer(app);
+primaryServer = httpServer;
+
+httpServer.listen(HTTP_PORT, "127.0.0.1", () => {
+  console.log(`🔓 Backend running on http://127.0.0.1:${HTTP_PORT}`);
+});
+
+// ---------- Socket.IO ----------
 const { Server } = require("socket.io");
 const io = new Server(primaryServer, {
-  // If you want to restrict, set origin: ALLOWED_ORIGINS instead of "*"
-  cors: { origin: "*", credentials: true },
+  cors: {
+    origin: "*",
+    credentials: true,
+  },
+
+  // 🔥 IMPORTANT FIX for StormFiber/PTCL stability
+  pingInterval: 25000,
+  pingTimeout: 60000,
+  transports: ["websocket", "polling"],
 });
+
+// ---------- Socket Events ----------
 app.set("io", io);
 io.on("connection", (socket) => {
+  console.log("🟢 Client connected:", socket.id);
+
+  socket.on("disconnect", (reason) => {
+    console.log("🔴 Client disconnected:", socket.id, "Reason:", reason);
+  });
   const { userId, role } = socket.handshake.query;
   if (userId) socket.join(`emp_${userId}`);
   const lowerRole = (role || "").toLowerCase();

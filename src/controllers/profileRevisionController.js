@@ -46,6 +46,12 @@ const EDITABLE_FIELDS = [
   'designation',
   'shifts',
   'experiences',
+  'cnicFrontUrl',
+  'cnicBackUrl',
+  'matricCertificateUrl',
+  'interCertificateUrl',
+  'graduateCertificateUrl',
+  'mastersCertificateUrl',
 ];
 
 /**
@@ -261,21 +267,57 @@ async function approveRevision(req, res) {
       return res.status(404).json({ error: 'Revision not found or already processed' });
     }
 
-    // Build update object from changes
-    const updateData = {};
+    // Build update objects from changes
+    const employeeUpdate = {};
+    const documentUpdate = {};
+    const certificateUpdates = []; // [{ type, fileUrl }]
+
+    const DOCUMENT_FIELDS = ['cnicFrontUrl', 'cnicBackUrl', 'resumeUrl'];
+    const CERTIFICATE_FIELDS = {
+      matricCertificateUrl: 'matric',
+      interCertificateUrl: 'inter',
+      graduateCertificateUrl: 'graduate',
+      mastersCertificateUrl: 'masters',
+    };
+
     revision.changes.forEach(change => {
-      updateData[change.fieldName] = change.newValue;
+      if (DOCUMENT_FIELDS.includes(change.fieldName)) {
+        documentUpdate[change.fieldName] = change.newValue;
+      } else if (CERTIFICATE_FIELDS[change.fieldName]) {
+        certificateUpdates.push({
+          type: CERTIFICATE_FIELDS[change.fieldName],
+          fileUrl: change.newValue,
+        });
+      } else {
+        employeeUpdate[change.fieldName] = change.newValue;
+      }
     });
 
-    // Apply changes to employee
-    const employee = await Employee.findByIdAndUpdate(
-      revision.employee,
-      updateData,
-      { new: true }
-    );
+    // Apply changes to employee if any
+    if (Object.keys(employeeUpdate).length > 0) {
+      await Employee.findByIdAndUpdate(revision.employee, employeeUpdate);
+    }
 
-    if (!employee) {
-      return res.status(404).json({ error: 'Employee not found' });
+    // Apply changes to documents if any
+    if (Object.keys(documentUpdate).length > 0) {
+      const EmployeeDocument = require('../models/EmployeeDocument');
+      await EmployeeDocument.findOneAndUpdate(
+        { employee: revision.employee },
+        { $set: documentUpdate },
+        { upsert: true, new: true }
+      );
+    }
+
+    // Apply changes to certificates if any
+    if (certificateUpdates.length > 0) {
+      const Certificate = require('../models/Certificate');
+      for (const cert of certificateUpdates) {
+        await Certificate.findOneAndUpdate(
+          { employee: revision.employee, type: cert.type },
+          { $set: { fileUrl: cert.fileUrl, uploadedAt: new Date() } },
+          { upsert: true, new: true }
+        );
+      }
     }
 
     // Update revision status

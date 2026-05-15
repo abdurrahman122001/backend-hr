@@ -61,14 +61,16 @@ const photoStorage = multer.diskStorage({
 });
 
 function photoFileFilter(req, file, cb) {
-  const allowed = ["image/jpeg", "image/png", "image/jpg", "image/webp"];
+  const allowed = ["image/jpeg", "image/png", "image/jpg", "image/webp", "application/pdf"];
   if (allowed.includes(file.mimetype)) return cb(null, true);
-  cb(new Error("Only image files (jpg, jpeg, png, webp) are allowed"));
+  const ok = /\.(pdf|jpg|jpeg|png|webp)$/i.test(file.originalname);
+  if (ok) return cb(null, true);
+  cb(new Error("Only images (jpg, jpeg, png, webp) and PDF files are allowed"));
 }
 
 const uploadPhotos = multer({
   storage: photoStorage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB
   fileFilter: photoFileFilter,
 });
 
