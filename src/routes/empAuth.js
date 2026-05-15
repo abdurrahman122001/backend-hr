@@ -1203,7 +1203,7 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       }).sort({ updatedAt: -1 });
     }
 
-    // 3. Fallback: most recent inactive session (any date) within 30s window
+    // 3. Fallback: most recent inactive auto-logout session (no time limit)
     if (!session) {
       session = await EmployeeSession.findOne({
         employeeId,
@@ -1211,8 +1211,7 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
         isAutoLogout: true
       }).sort({ updatedAt: -1 });
 
-      const diff = session ? (Date.now() - new Date(session.updatedAt).getTime()) : Infinity;
-      if (!session || diff > 30000) {
+      if (!session) {
         console.info(`🔄 [REACTIVATE-SESSION] No recent session to reactivate for ${employeeId}. Creating fresh for today.`);
 
         await EmployeeSession.findOneAndUpdate(

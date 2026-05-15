@@ -69,19 +69,16 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
         active: true
       }).sort({ loginTime: -1 });
 
-      // If no active session, check if there's a recently inactive session (page refresh/navigation detection)
+      // If no active session, accept an inactive session only if it was an auto-logout
+      // (i.e., user closed the tab). Do NOT accept arbitrary recent inactive sessions.
       if (!session) {
-        const recentInactiveSession = await EmployeeSession.findOne({
+        const inactiveAuto = await EmployeeSession.findOne({
           employeeId: emp._id,
-          active: false
+          active: false,
+          isAutoLogout: true
         }).sort({ updatedAt: -1 });
-
-        // Allow access if within a generous reactivation window (60 seconds)
-        if (recentInactiveSession) {
-          const timeSinceInactive = Date.now() - new Date(recentInactiveSession.updatedAt).getTime();
-          if (timeSinceInactive < 60000) {
-            session = recentInactiveSession;
-          }
+        if (inactiveAuto) {
+          session = inactiveAuto;
         }
       }
 
