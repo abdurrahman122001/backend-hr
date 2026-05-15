@@ -11,6 +11,7 @@ const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Attendance = require("../models/Attendance");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
+const ProfileRevision = require("../models/ProfileRevision");
 const Employee = require("../models/Employees");
 const { decrypt } = require("../utils/encryption");
 
@@ -79,6 +80,7 @@ exports.getUnifiedToDoList = async (req, res) => {
          BonusRequest.countDocuments(baseMatch),
          LeaveEncashmentRequest.countDocuments(baseMatch),
          LeaveCarryForwardRequest.countDocuments(baseMatch),
+         ProfileRevision.countDocuments(baseMatch),
          Attendance.countDocuments(attendanceMatch),
          status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ owner: new mongoose.Types.ObjectId(ownerId) })
      ]);
@@ -149,8 +151,14 @@ exports.getUnifiedToDoList = async (req, res) => {
        .populate("employee", "name department designation photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
+     
+     // 11. Profile Revision Requests
+     const profileRevisionPromise = ProfileRevision.find(baseMatch)
+       .populate("employee", "name department designation photographUrl")
+       .sort({ createdAt: -1 })
+       .limit(fetchLimit);
 
-    // 11. Attendance Challenges
+    // 12. Attendance Challenges
     const attendancePromise = Attendance.find(attendanceMatch)
       .populate("employee", "name department designation photographUrl")
       .sort({ challengeAt: -1 })
@@ -162,7 +170,7 @@ exports.getUnifiedToDoList = async (req, res) => {
       .sort({ revisionDate: -1 })
       .limit(fetchLimit);
 
-const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, bonuses, leaveEncashments, leaveCarryForwards, attendances, promotions] = await Promise.all([
+const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, bonuses, leaveEncashments, leaveCarryForwards, profileRevisions, attendances, promotions] = await Promise.all([
        leavePromise,
        loanPromise,
        salaryChangePromise,
@@ -173,6 +181,7 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
        bonusPromise,
        leaveEncashmentPromise,
        leaveCarryForwardPromise,
+       profileRevisionPromise,
        attendancePromise,
        promotionPromise
      ]);
@@ -331,6 +340,21 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
          status: item.status,
          date: item.createdAt,
          amount: (item.daysToCarryForward || 0) + " day(s)",
+         reason: item.reason,
+         originalData: item
+       });
+     });
+
+     // Add Profile Revisions
+     profileRevisions.forEach(item => {
+       unifiedList.push({
+         _id: item._id,
+         type: "profile-revision",
+         typeLabel: "Profile Update",
+         employee: item.employee,
+         status: item.status,
+         date: item.createdAt,
+         amount: (item.changes?.length || 0) + " field(s)",
          reason: item.reason,
          originalData: item
        });

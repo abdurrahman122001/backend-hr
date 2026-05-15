@@ -490,6 +490,115 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
   }
 }
 
+/**
+ * Reverts the effects of an approved leave (balance, transactions, salary)
+ */
+async function revertLeaveEffects(leave, performedBy) {
+  try {
+    if (leave.status !== "approved" && leave.status !== "auto_approved") return;
+
+    const employeeId = leave.employee._id || leave.employee;
+    const daysToRevert = leave.totalDays;
+    const leaveYear = getLeaveYear(leave.startDate);
+    
+    // 1. Revert Employee model balances
+    const balanceField = leave.isPaid ? "leaveEntitlement.usedPaid" : "leaveEntitlement.usedUnpaid";
+    await Employee.findByIdAndUpdate(employeeId, {
+      $inc: { [balanceField]: -daysToRevert },
+    });
+
+    // 2. Revert LeaveYearBalance
+    const yearBalanceField = leave.isPaid ? "usedPaid" : "usedUnpaid";
+    await LeaveYearBalance.findOneAndUpdate(
+      { employee: employeeId, year: leaveYear },
+      { $inc: { [yearBalanceField]: -daysToRevert } }
+    );
+
+    // 3. Create a reversal transaction
+    await LeaveTransaction.create({
+      owner: leave.owner,
+      employee: employeeId,
+      year: leaveYear,
+      date: new Date(),
+      type: leave.isPaid ? "PAID_LEAVE_REVERSED" : "UNPAID_LEAVE_REVERSED",
+      value: daysToRevert,
+      sourceModel: "ApplyLeave",
+      sourceId: leave._id,
+      createdBy: performedBy,
+      notes: `Reversal due to leave ${leave.status === "cancelled" ? "withdrawal" : "edit"}`
+    });
+
+    // 4. Revert salary deduction if it was an absence justification or unpaid
+    if (leave.isAbsenceJustification || !leave.isPaid) {
+      await revertLeaveSalaryDeduction(employeeId, daysToRevert, leave.startDate);
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("❌ [revertLeaveEffects] Error:", error);
+    return false;
+  }
+}
+ 
+/**
+ * Helper function to build approval chain based on hierarchy
+ */
+async function buildApprovalChain(employeeId, ownerId, supervisorId) {
+  let approvalChain = [];
+  try {
+    let currentJuniorId = employeeId;
+    const visited = new Set();
+    
+    // Traverse up the hierarchy (limit to 10 levels)
+    for (let i = 0; i < 10; i++) {
+      if (visited.has(String(currentJuniorId))) break;
+      visited.add(String(currentJuniorId));
+
+      const link = await EmployeeHierarchy.findOne({
+        owner: ownerId,
+        junior: currentJuniorId
+      }).populate("senior");
+
+      if (!link || !link.senior) break;
+      
+      approvalChain.push(link.senior._id);
+
+      // Stop if senior is Admin or HR
+      if (link.senior.role === "admin" || link.senior.role === "hr") {
+        break;
+      }
+      currentJuniorId = link.senior._id;
+    }
+
+    // Fallback to employee.supervisor if chain is empty (and it's not the employee themselves)
+    if (approvalChain.length === 0 && supervisorId && String(supervisorId) !== String(employeeId)) {
+      approvalChain.push(supervisorId);
+    }
+
+    // Final fallback: Use any admin/hr who is NOT the employee
+    if (approvalChain.length === 0) {
+      const adminUser = await Employee.findOne({ 
+        role: { $in: ["admin", "hr"] }, 
+        owner: ownerId,
+        _id: { $ne: employeeId }
+      }).sort({ createdAt: 1 });
+      
+      if (adminUser) {
+        approvalChain = [adminUser._id];
+      }
+    }
+    
+    // Final sanitization: Remove duplicates and self-approvals
+    const finalChain = [...new Set(approvalChain.map(id => id.toString()))]
+      .filter(id => id !== employeeId.toString());
+      
+    return finalChain;
+  } catch (error) {
+    console.error("❌ buildApprovalChain error:", error);
+    return supervisorId ? [supervisorId] : [];
+  }
+}
+
 // @desc    Apply for leave with AI analysis (NO AUTO-DECISION)
 // @route   POST /api/leaves
 // @access  Private
@@ -569,53 +678,9 @@ exports.applyLeave = async (req, res) => {
       employee.owner,
     );
 
-    // Build approval chain based on hierarchy (using EmployeeHierarchy model)
-    let approvalChain = [];
-
-    try {
-      let currentJuniorId = employeeId;
-      const visited = new Set();
-
-      // Traverse up the hierarchy (limit to 10 levels)
-      for (let i = 0; i < 10; i++) {
-        if (visited.has(String(currentJuniorId))) break;
-        visited.add(String(currentJuniorId));
-
-        // Find the senior for this junior
-        const link = await EmployeeHierarchy.findOne({
-          owner: employee.owner,
-          junior: currentJuniorId
-        }).populate("senior");
-
-        if (!link || !link.senior) break;
-
-        approvalChain.push(link.senior._id);
-
-        // Stop if senior is Admin or HR
-        if (link.senior.role === "admin" || link.senior.role === "hr") {
-          break;
-        }
-
-        currentJuniorId = link.senior._id;
-      }
-
-      // If no chain found from EmployeeHierarchy, fallback to employee.supervisor
-      if (approvalChain.length === 0 && employee.supervisor) {
-        approvalChain.push(employee.supervisor);
-      }
-
-      // If still no chain and direct mode, use super admin
-      if (approvalChain.length === 0) {
-        const superAdmin = await Employee.findOne({ role: "admin" }).sort({ createdAt: 1 });
-        const adminId = superAdmin ? superAdmin._id : employee.owner;
-        approvalChain = [adminId];
-      }
-    } catch (hierarchyError) {
-      console.error("❌ Error building hierarchy chain:", hierarchyError);
-      // Fallback
-      if (employee.supervisor) approvalChain = [employee.supervisor];
-    }
-
+    // Build approval chain based on hierarchy
+    const approvalChain = await buildApprovalChain(employeeId, employee.owner, employee.supervisor);
+    
     // Set first supervisor from the chain
     let supervisor = approvalChain[0];
 
@@ -821,9 +886,10 @@ exports.approveLeave = async (req, res) => {
       }
 
       // Check if this employee is the supervisor for this leave
+      const currentSupervisorId = leave.supervisor?._id || leave.supervisor;
       isSupervisor =
-        leave.supervisor &&
-        leave.supervisor._id.toString() === employeeId.toString();
+        currentSupervisorId &&
+        currentSupervisorId.toString() === employeeId.toString();
     } else if (user.isAdmin) {
       // User is an admin/HR
       approver = {
@@ -855,6 +921,8 @@ exports.approveLeave = async (req, res) => {
           isAdmin: isSuperAdmin,
           isSupervisor: isSupervisor,
           required: "Must be admin/HR or the assigned supervisor",
+          currentSupervisorId: currentSupervisorId ? currentSupervisorId.toString() : null,
+          approverId: employeeId.toString()
         },
       });
     }
@@ -1327,9 +1395,10 @@ exports.rejectLeave = async (req, res) => {
 
     if (user.isEmployee) {
       const employeeId = user.employeeId || user._id;
+      const currentSupervisorId = leave.supervisor?._id || leave.supervisor;
       isSupervisor =
-        leave.supervisor &&
-        leave.supervisor._id.toString() === employeeId.toString();
+        currentSupervisorId &&
+        currentSupervisorId.toString() === employeeId.toString();
       rejectorId = employeeId;
     } else if (user.isAdmin) {
       isSuperAdmin = true;
@@ -1504,7 +1573,7 @@ exports.getLeaves = async (req, res) => {
 
     // Get employees for this company
     const tenantId = req.user.owner;
-    
+
     // ADMIN LOGIC
     const isAdmin =
       req.user.isAdmin || req.user.role === "admin" || req.user.role === "hr";
@@ -1661,7 +1730,7 @@ exports.getPendingLeaves = async (req, res) => {
 
     const { status = "pending" } = req.query;
     const query = { isTrashed: { $ne: true } };
-    
+
     if (status !== "all") {
       query.status = status;
     }
@@ -1856,10 +1925,15 @@ exports.cancelLeave = async (req, res) => {
         .json({ message: "Not authorized to cancel this leave" });
     }
 
-    if (leave.status !== "pending") {
+    if (leave.status !== "pending" && leave.status !== "approved") {
       return res.status(400).json({
-        message: `Cannot cancel a ${leave.status} leave request`,
+        message: `Cannot withdraw a ${leave.status} leave request`,
       });
+    }
+
+    // If it was approved, revert the effects before cancelling
+    if (leave.status === "approved" || leave.status === "auto_approved") {
+      await revertLeaveEffects(leave, employee._id);
     }
 
     // Update leave
@@ -2080,8 +2154,8 @@ exports.updateLeave = async (req, res) => {
       return res.status(404).json({ message: "Leave request not found" });
     }
 
-    // Only pending leaves can be updated
-    if (leave.status !== "pending") {
+    // Only pending or approved leaves can be updated
+    if (leave.status !== "pending" && leave.status !== "approved") {
       return res.status(400).json({
         message: `Cannot update a ${leave.status} leave request`,
       });
@@ -2089,6 +2163,15 @@ exports.updateLeave = async (req, res) => {
 
     // Check if user can update this leave
     const employee = await Employee.findById(user.employeeId || user.id);
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    // If it was approved, revert the effects before resetting to pending
+    if (leave.status === "approved" || leave.status === "auto_approved") {
+      await revertLeaveEffects(leave, employee._id);
+    }
+
     const isLeaveOwner = leave.employee.toString() === employee._id.toString();
 
     if (!isLeaveOwner && employee.role !== "admin" && employee.role !== "hr") {
@@ -2124,6 +2207,10 @@ exports.updateLeave = async (req, res) => {
 
       leave.policyAnalysis = policyAnalysis;
       leave.isPaid = policyAnalysis.isPaid;
+
+      // Update absence justification flag if dates changed to past
+      const todayStr = new Date().toISOString().split('T')[0];
+      leave.isAbsenceJustification = dates.some(d => d.date < todayStr);
     }
 
     if (leaveType) leave.leaveType = leaveType;
@@ -2133,11 +2220,34 @@ exports.updateLeave = async (req, res) => {
     }
     if (reason) leave.reason = reason;
 
-    // Update workflow history
+    // Rebuild approval chain and reset status for re-approval
+    const updatedApprovalChain = await buildApprovalChain(leave.employee, employee.owner, employee.supervisor);
+    leave.approvalChain = updatedApprovalChain;
+    leave.currentApprovalIndex = 0;
+    
+    // Set current supervisor to the first person in the NEW chain
+    if (updatedApprovalChain && updatedApprovalChain.length > 0) {
+      leave.supervisor = updatedApprovalChain[0];
+    } else {
+      // Emergency fallback if chain building failed
+      const superAdmin = await Employee.findOne({ role: "admin", owner: employee.owner });
+      leave.supervisor = superAdmin ? superAdmin._id : employee.owner;
+    }
+    
+    leave.status = "pending";
+    leave.approvedBy = undefined;
+    leave.approvedDate = undefined;
+    leave.rejectionReason = undefined;
+    leave.rejectedBy = undefined;
+    leave.rejectedDate = undefined;
+    leave.approvalNotes = undefined;
+
+    // Add to workflow history  
     leave.workflowHistory.push({
       action: "updated",
       performedBy: employee._id,
-      notes: "Leave request updated",
+      performedByName: employee.name || "Employee",
+      notes: "Leave request updated and workflow restarted.",
       timestamp: new Date(),
     });
 
