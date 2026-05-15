@@ -2010,6 +2010,16 @@ exports.updateChallengeStatus = async (req, res) => {
       }
     }
 
+    // Notify employee via socket
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+        attendance,
+        action: challengeStatus.toLowerCase(),
+        message: `Your attendance challenge for ${attendance.date} has been ${challengeStatus.toLowerCase()}.`,
+      });
+    }
+
     res.json({ success: true, attendance });
   } catch (err) {
     console.error("Update challenge status failed:", err);

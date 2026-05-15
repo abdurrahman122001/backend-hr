@@ -240,6 +240,30 @@ router.post('/challenge', async (req, res) => {
     
     await attendance.save();
 
+    // Notify owner and supervisor via socket
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      const populatedAttendance = await Attendance.findById(attendance._id)
+        .populate("employee", "name employeeId department photographUrl")
+        .lean();
+
+      const notificationData = {
+        attendance: populatedAttendance,
+        message: `${req.employee.name} has challenged attendance for ${date}`,
+        type: "attendance_query"
+      };
+
+      // Notify Owner
+      if (ownerId) {
+        io.to(`employee_${ownerId}`).emit("new_attendance_query", notificationData);
+      }
+
+      // Notify Supervisor if different from owner
+      if (req.employee.supervisor && String(req.employee.supervisor) !== String(ownerId)) {
+        io.to(`employee_${req.employee.supervisor}`).emit("new_attendance_query", notificationData);
+      }
+    }
+
     console.log(`✅ Attendance on ${date} challenged by employee ${employeeId}. Reason: ${reason}`);
     
     res.json({

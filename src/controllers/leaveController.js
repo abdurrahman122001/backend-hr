@@ -672,21 +672,43 @@ exports.applyLeave = async (req, res) => {
 
     await leave.save();
 
-    // 🔥 NEW: Real-time notification for supervisor
-    if (req.app.get("io") && supervisor) {
+    // 🔥 NEW: Real-time notification for all seniors in the hierarchy
+    if (req.app.get("io") && approvalChain && approvalChain.length > 0) {
       const io = req.app.get("io");
       const populatedLeave = await Leave.findById(leave._id)
         .populate("employee", "name email department photographUrl")
         .lean();
 
-      io.to(`employee_${supervisor}`).emit("new_leave_request", {
-        leave: {
-          ...populatedLeave,
-          employee: processEmployeeWithPhoto(populatedLeave.employee, req),
-        },
-        message: `${employee.name} has applied for leave`,
+      const processedLeave = {
+        ...populatedLeave,
+        employee: processEmployeeWithPhoto(populatedLeave.employee, req),
+      };
+
+      // Notify the immediate supervisor with canAct: true
+      if (supervisor) {
+        io.to(`employee_${supervisor}`).emit("new_leave_request", {
+          leave: {
+            ...processedLeave,
+            canAct: true,
+          },
+          message: `${employee.name} has applied for leave (Your Action Required)`,
+        });
+        console.log(`📡 [SOCKET] Emitted new_leave_request to supervisor employee_${supervisor}`);
+      }
+
+      // Notify other seniors in the chain with canAct: false (for visibility)
+      approvalChain.forEach(seniorId => {
+        if (seniorId && String(seniorId) !== String(supervisor)) {
+          io.to(`employee_${seniorId}`).emit("new_leave_request", {
+            leave: {
+              ...processedLeave,
+              canAct: false,
+            },
+            message: `${employee.name} has applied for leave (Awaiting junior level approval)`,
+          });
+          console.log(`📡 [SOCKET] Emitted visibility notification to senior employee_${seniorId}`);
+        }
       });
-      console.log(`📡 [SOCKET] Emitted new_leave_request to employee_${supervisor}`);
     }
 
     // Prepare response message based on analysis
@@ -962,15 +984,28 @@ exports.approveLeave = async (req, res) => {
           if (nextSupervisorId) {
             io.to(`employee_${nextSupervisorId}`).emit("leave_changed", {
               action: "assigned",
-              leave: updatedLeave,
+              leave: {
+                ...updatedLeave,
+                canAct: true,
+              },
               message: `A leave has been assigned to you for approval: ${updatedLeave.employee?.name}`,
             });
           }
           // Notify the approver that the leave moved to next stage (so they can remove it from their list)
           io.to(`employee_${approverId}`).emit("leave_changed", {
             action: "moved",
-            leave: updatedLeave,
+            leave: {
+              ...updatedLeave,
+              canAct: false,
+            },
             message: `You approved and moved the leave request for ${updatedLeave.employee?.name}`,
+          });
+
+          // Also notify the employee that their leave moved up
+          io.to(`employee_${updatedLeave.employee?._id}`).emit("leave_changed", {
+            action: "moved",
+            leave: updatedLeave,
+            message: `Your leave request has been approved by ${approver.name || "your senior"} and moved to next level.`,
           });
         } catch (emitErr) {
           console.error("Error emitting leave_changed (moved):", emitErr);
@@ -1328,6 +1363,44 @@ exports.rejectLeave = async (req, res) => {
     });
 
     await leave.save();
+
+    // 🔥 NEW: Real-time notification for rejection
+    if (req.app.get("io")) {
+      const io = req.app.get("io");
+      try {
+        const populatedLeave = await Leave.findById(leave._id)
+          .populate("employee", "name email department photographUrl")
+          .populate("rejectedBy", "name email")
+          .lean();
+
+        const processedLeave = {
+          ...populatedLeave,
+          employee: processEmployeeWithPhoto(populatedLeave.employee, req),
+        };
+
+        // Notify the employee
+        io.to(`employee_${processedLeave.employee._id}`).emit("leave_changed", {
+          action: "rejected",
+          leave: processedLeave,
+          message: `Your leave request has been rejected: ${reason}`,
+        });
+
+        // Notify previous approvers in the chain so they can see the final status
+        if (leave.approvalChain && leave.approvalChain.length > 0) {
+          leave.approvalChain.forEach(seniorId => {
+            if (seniorId && String(seniorId) !== String(rejectorId)) {
+              io.to(`employee_${seniorId}`).emit("leave_changed", {
+                action: "rejected",
+                leave: { ...processedLeave, canAct: false },
+                message: `Leave request for ${processedLeave.employee.name} was rejected by ${user.name}`,
+              });
+            }
+          });
+        }
+      } catch (emitErr) {
+        console.error("Error emitting leave_changed (rejected):", emitErr);
+      }
+    }
 
     // UPDATE ATTENDANCE RECORDS WHEN LEAVE IS REJECTED
     // Mark leave dates as "Absent" and "Unpaid" unless already Absent and Unpaid
@@ -1796,6 +1869,39 @@ exports.cancelLeave = async (req, res) => {
     leave.cancellationReason = reason || "Cancelled by employee";
 
     await leave.save();
+
+    // Notify approver and approval chain via socket
+    if (req.app.get("io")) {
+      try {
+        const io = req.app.get("io");
+        const populatedLeave = await Leave.findById(leave._id)
+          .populate("employee", "name employeeId department photographUrl")
+          .lean();
+
+        const payload = {
+          leave: populatedLeave,
+          action: "cancelled",
+          message: `${populatedLeave.employee?.name || "Employee"} has cancelled their leave request.`,
+          canAct: false
+        };
+
+        // Notify Current Approver
+        if (leave.approver) {
+          io.to(`employee_${leave.approver}`).emit("leave_changed", payload);
+        }
+
+        // Notify entire approval chain
+        if (Array.isArray(leave.approvalChain)) {
+          leave.approvalChain.forEach(seniorId => {
+            if (String(seniorId) !== String(leave.approver)) {
+              io.to(`employee_${seniorId}`).emit("leave_changed", payload);
+            }
+          });
+        }
+      } catch (emitErr) {
+        console.error("Error emitting leave_changed (cancelled):", emitErr);
+      }
+    }
 
     res.json({
       success: true,

@@ -1187,24 +1187,21 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
     console.info(`🔄 [REACTIVATE-SESSION] Attempting to reactivate session for ${employeeId}`);
 
     // 1. First, check for an existing active session for today.
-    // If it's already active, no need to do anything.
+    // If it's already active, that's fine - we still need to restore attendance status
     let session = await EmployeeSession.findOne({
       employeeId,
       date: todayKarachi,
       active: true
     });
 
-    if (session) {
-      console.info(`🔄 [REACTIVATE-SESSION] Session already active for ${employeeId}`);
-      return res.json({ status: "success", message: "Session already active" });
+    // 2. If no active session, look for any inactive session for today that can be reactivated.
+    if (!session) {
+      session = await EmployeeSession.findOne({
+        employeeId,
+        date: todayKarachi,
+        active: false
+      }).sort({ updatedAt: -1 });
     }
-
-    // 2. Look for any inactive session for today that can be reactivated.
-    session = await EmployeeSession.findOne({
-      employeeId,
-      date: todayKarachi,
-      active: false
-    }).sort({ updatedAt: -1 });
 
     // 3. Fallback: most recent inactive session (any date) within 30s window
     if (!session) {
@@ -1227,19 +1224,19 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       }
     }
 
-    console.info(`✅ [REACTIVATE-SESSION] Reactivating session for ${employeeId}`);
-
-    // ✅ RESTORE ATTENDANCE RECORD
+    // ✅ ALWAYS RESTORE ATTENDANCE RECORD (whether session was already active or not)
+    const attendanceDate = session?.date || todayKarachi;
     const attendance = await Attendance.findOne({
       employee: employeeId,
-      date: session.date || todayKarachi
+      date: attendanceDate
     });
 
-    if (attendance && attendance.checkOut) {
+    if (attendance && (attendance.checkOut || attendance.logoutTime)) {
       const previousStatus = attendance.status;
       const statusToRestore = attendance.originalStatus || attendance.status;
-      // Check if the half-day was from auto-logout (page refresh) - only reverse deduction in this case
       const isAutoLogoutHalfDay = attendance.halfDayFromAutoLogout === true;
+
+      console.info(`🔄 [REACTIVATE-SESSION] Restoring attendance status for ${employeeId}. ${previousStatus} → ${statusToRestore}`);
 
       await Attendance.findByIdAndUpdate(attendance._id, {
         $unset: { logoutTime: 1, checkOut: 1, originalStatus: 1, halfDayFromAutoLogout: 1 },
@@ -1250,13 +1247,12 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
 
       // Only reverse half-day deduction if status is being restored from Half Day to something else
-      // This applies to both auto-logout (page refresh) and manual logout scenarios
       if (previousStatusLower === "half-day" && statusToRestoreLower !== "half-day") {
         try {
           const emp = await Employee.findById(employeeId).select("owner").lean();
           if (emp) {
-            await reverseHalfDayDeduction(employeeId, emp.owner, employeeId, session.date || todayKarachi);
-            console.info(`🔄 [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId} (relogin after ${isAutoLogoutHalfDay ? 'auto' : 'manual'}-logout)`);
+            await reverseHalfDayDeduction(employeeId, emp.owner, employeeId, attendanceDate);
+            console.info(`✅ [REACTIVATE-SESSION] Half-day deduction reversed for ${employeeId} (after ${isAutoLogoutHalfDay ? 'auto' : 'manual'}-logout)`);
           }
         } catch (derr) {
           console.error("[REACTIVATE-SESSION] Error reversing half-day deduction:", derr);
@@ -1267,22 +1263,24 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       try {
         const emp = await Employee.findById(employeeId).select("owner").lean();
         if (emp) {
-          await reverseEarlyDepartureHoursDeduction(employeeId, emp.owner, employeeId, session.date || todayKarachi);
+          await reverseEarlyDepartureHoursDeduction(employeeId, emp.owner, employeeId, attendanceDate);
         }
       } catch (err) {
         console.error("[REACTIVATE-SESSION] Error reversing early departure deduction:", err);
       }
-
-      console.info(`🔄 [REACTIVATE-SESSION] Attendance restored for ${employeeId}. Status: ${previousStatus} → ${statusToRestore}`);
     }
 
-    // Re-activate session tracker
-    session.active = true;
-    session.isAutoLogout = false;
-    await session.save();
+    // Re-activate session if it wasn't already active
+    if (session && !session.active) {
+      session.active = true;
+      session.isAutoLogout = false;
+      await session.save();
+      console.info(`✅ [REACTIVATE-SESSION] Session reactivated for ${employeeId}`);
+    } else if (session && session.active) {
+      console.info(`🔄 [REACTIVATE-SESSION] Session already active for ${employeeId} - status restored if needed`);
+    }
 
-    console.info(`✅ [REACTIVATE-SESSION] Session successfully reactivated for ${employeeId}`);
-    return res.json({ status: "success", message: "Session reactivated" });
+    return res.json({ status: "success", message: "Session reactivated, attendance restored" });
   } catch (err) {
     console.error("❌ [REACTIVATE-SESSION] Error:", err);
     return res.status(500).json({ error: "Server error during reactivation" });
