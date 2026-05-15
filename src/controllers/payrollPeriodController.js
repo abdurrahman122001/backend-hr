@@ -119,9 +119,17 @@ exports.deletePayrollPeriod = async (req, res, next) => {
 
 exports.updateNonWorkingDays = async (req, res) => {
   const ownerId = req.user._id;
-  const { nonWorkingDays } = req.body;
+  const { nonWorkingDays, payrollPeriodId } = req.body;
   if (!Array.isArray(nonWorkingDays)) {
     return res.status(400).json({ error: "nonWorkingDays must be an array" });
+  }
+
+  if (payrollPeriodId) {
+    const result = await PayrollPeriod.updateOne(
+      { _id: payrollPeriodId, owner: ownerId },
+      { $set: { nonWorkingDays } }
+    );
+    return res.json({ success: true, modifiedCount: result.modifiedCount });
   }
 
   const result = await PayrollPeriod.updateMany(
@@ -134,7 +142,14 @@ exports.updateNonWorkingDays = async (req, res) => {
 
 exports.getNonWorkingDays = async (req, res) => {
   const ownerId = req.user._id;
-  const period = await PayrollPeriod.findOne({ owner: ownerId })
+  const { payrollPeriodId } = req.query;
+
+  const query = { owner: ownerId };
+  if (payrollPeriodId) {
+    query._id = payrollPeriodId;
+  }
+
+  const period = await PayrollPeriod.findOne(query)
     .sort({ createdAt: -1 })
     .lean();
   res.json({ nonWorkingDays: period?.nonWorkingDays || [] });
