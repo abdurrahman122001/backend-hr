@@ -206,10 +206,12 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
   const todayKarachi = getDateOnly(nowKarachi);
 
   const config = await AttendanceConfig.findOne({ owner: emp.owner }).lean();
+  console.log(`⚙️ [ATTENDANCE-LOGIC] Employee: ${emp.companyEmail}, attendanceMode: ${config?.attendanceMode || 'not-set'}`);
 
   if (config && config.attendanceMode === 'manual') {
     // Return existing attendance if any, but don't create or restore it
     const existing = await Attendance.findOne({ employee: emp._id, date: todayKarachi }).lean();
+    console.log(`🔧 [ATTENDANCE-LOGIC] MANUAL MODE - returning existing: ${!!existing}`);
     return {
       attendance: existing || null,
       sessionStatus: existing ? existing.status : "Manual Mode",
@@ -221,6 +223,7 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
   // Check if today is a non-working day
   const isNWD = await isNonWorkingDay(emp.owner, todayKarachi);
   if (isNWD) {
+    console.log(`📆 [ATTENDANCE-LOGIC] Non-working day detected`);
     return { attendance: null, sessionStatus: "Non-Working Day", attendanceExists: false, isNonWorkingDay: true };
   }
 
@@ -702,7 +705,9 @@ router.post("/login", async (req, res) => {
       await emp.save();
     }
 
+    console.log(`🔐 [LOGIN] Employee: ${emp.companyEmail}, calling performAttendanceLogic...`);
     const attendanceResult = await performAttendanceLogic(emp, nowKarachi, deviceFingerprint);
+    console.log(`📋 [LOGIN-ATTENDANCE] Employee: ${emp.companyEmail}, result: mode=${attendanceResult.isManualMode}, nonWD=${attendanceResult.isNonWorkingDay}, status=${attendanceResult.sessionStatus}, exists=${attendanceResult.attendanceExists}`);
 
     // Handle manual mode login
     if (attendanceResult.isManualMode) {
@@ -972,6 +977,8 @@ router.post("/logout", requireAuth, async (req, res) => {
     const { isAutoLogout: queryAutoLogout } = req.query;
     const isAutoLogout = bodyAutoLogout || queryAutoLogout === 'true' || queryAutoLogout === true;
 
+    console.log(`\n🚪 [LOGOUT] Employee: ${employeeId}, isAutoLogout: ${isAutoLogout}, reqBody keys: ${Object.keys(req.body).join(',')}, reqQuery: ${JSON.stringify(req.query)}`);
+
     // Get current time in Karachi (allow override for testing)
     const nowKarachi = getKarachiTime(testDate);
     const logoutHour = nowKarachi.hours();
@@ -1060,7 +1067,7 @@ router.post("/logout", requireAuth, async (req, res) => {
     // If this is a MANUAL logout before shift completion and before 9:00 PM,
     // mark the attendance as Half Day and apply real-time half-day deduction.
     // Mark half-day when employee logs out early (including beacon/auto logouts).
-    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < (HALF_DAY_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
     if (shouldMarkHalfDay) {
       finalStatus = "Half Day";
       try {
@@ -1101,11 +1108,13 @@ router.post("/logout", requireAuth, async (req, res) => {
         sessionUpdate.isAutoLogout = true;
       }
 
-      await EmployeeSession.findOneAndUpdate(
+      const sessionResult = await EmployeeSession.findOneAndUpdate(
         { employeeId, date: attendanceDate },
         sessionUpdate,
         { upsert: true, new: true }
       );
+
+      console.log(`📊 [LOGOUT-SESSION] Updated session - status: ${finalStatus}, isAutoLogout: ${isAutoLogout}, sessionResult: ${JSON.stringify({ _id: sessionResult?._id, active: sessionResult?.active, isAutoLogout: sessionResult?.isAutoLogout })}`);
     } catch (uerr) {
       console.error("[LOGOUT-ERROR] Error updating attendance record:", uerr);
       return res.status(500).json({ error: "Failed to update attendance on logout" });
