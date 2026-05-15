@@ -116,6 +116,7 @@ const advanceSalaryRoutes = require("./routes/advanceSalaryRoutes");
 const salaryChangeRequestRoutes = require("./routes/salaryChangeRequestRoutes");
 const commissionRoutes = require("./routes/commissionRoutes");
 const unifiedRequestsRoutes = require("./routes/unifiedRequests");
+const hrRulesRouter = require("./routes/hrRules");
 const app = express();
 const payrollAccessRouter = require("./routes/payrollAccess");
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
@@ -301,6 +302,8 @@ app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);
 app.use("/api/email-signature", emailSignatureRoute);
+app.use("/api/hr-rules", anyPayrollAuth, hrRulesRouter);
+app.use("/api/admin/hr-rules", anyPayrollAuth, hrRulesRouter);
 // ---------- MongoDB ----------
 const MONGODB_URI = process.env.MONGODB_URI;
 if (!MONGODB_URI) {
