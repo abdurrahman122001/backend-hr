@@ -34,6 +34,7 @@ const AttendanceSchema = new Schema({
   challengeReason: { type: String },
   challengeAt: { type: Date },
   challengeAdminNotes: { type: String },
+  challengeAttachment: { type: String }, // URL of the uploaded image/screenshot for the query
 
 }, { timestamps: true });
 

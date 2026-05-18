@@ -70,22 +70,19 @@ module.exports = async function requireAuth(req, res, next) {
       }).select("role permissions name department designation owner");
     }
 
-    // Normalize role string
-    const rawRole = employee?.role || user.role || "";
+    // Check if user is a root administrator (admin or super-admin)
+    const isRootAdmin = user.role === "admin" || user.role === "super-admin";
+
+    // Normalize role string: Root administrators keep their admin role and do not downgrade to employee role
+    const rawRole = isRootAdmin ? user.role : (employee?.role || user.role || "");
     const normalizedRole = rawRole.toLowerCase().replace("_", "-");
 
-    // Build user object with employee data
-    let effectiveOwner = user.owner || employee?.owner;
-    
-    // If no explicit owner, handle by role
-    if (!effectiveOwner) {
-      if (normalizedRole === "admin") {
-        // Admins are their own owners (company roots)
-        effectiveOwner = user._id;
-      } else {
-        // HR/Employees follow their creator
-        effectiveOwner = user.createdBy || user._id;
-      }
+    // Build effective owner: Root admins are their own owners (company roots)
+    let effectiveOwner;
+    if (isRootAdmin) {
+      effectiveOwner = user.owner || user._id;
+    } else {
+      effectiveOwner = user.owner || employee?.owner || user.createdBy || user._id;
     }
 
     const finalOwnerId = Array.isArray(effectiveOwner) ? effectiveOwner[0] : effectiveOwner;

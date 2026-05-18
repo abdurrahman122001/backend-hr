@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Attendance = require('../models/Attendance');
+const { upload } = require('../utils/multer');
 
 // GET /api/emp-attendance/me
 router.get('/me', async (req, res) => {
@@ -205,11 +206,12 @@ router.post('/acknowledge-absence', async (req, res) => {
 
 // POST /api/emp-attendance/challenge
 // Employee challenges an attendance record for a specific date
-router.post('/challenge', async (req, res) => {
+router.post('/challenge', upload.single('attachment'), async (req, res) => {
   try {
     const { date, reason, requestedStatus } = req.body;
     const employeeId = req.employee._id;
     const ownerId = req.employee.owner;
+    const challengeAttachment = req.file ? req.file.filename : undefined;
 
     if (!date || !reason) {
       return res.status(400).json({ error: "Date and reason are required" });
@@ -244,6 +246,9 @@ router.post('/challenge', async (req, res) => {
       attendance.requestedStatus = requestedStatus;
     }
     attendance.challengeAt = new Date();
+    if (challengeAttachment) {
+      attendance.challengeAttachment = challengeAttachment;
+    }
     
     await attendance.save();
 
@@ -279,7 +284,8 @@ router.post('/challenge', async (req, res) => {
       attendance: {
         date: attendance.date,
         challengeStatus: attendance.challengeStatus,
-        challengeReason: attendance.challengeReason
+        challengeReason: attendance.challengeReason,
+        challengeAttachment: attendance.challengeAttachment
       }
     });
   } catch (err) {
