@@ -208,7 +208,7 @@ router.post('/acknowledge-absence', async (req, res) => {
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
   try {
-    const { date, reason } = req.body;
+    const { date, reason, requestedStatus } = req.body;
     const employeeId = req.employee._id;
     const ownerId = req.employee.owner;
     const challengeAttachment = req.file ? req.file.filename : undefined;
@@ -225,6 +225,10 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
       owner: ownerId,
     });
 
+    if (attendance && ['Pending', 'Approved', 'Rejected'].includes(attendance.challengeStatus)) {
+      return res.status(400).json({ error: "An attendance query for this date already exists." });
+    }
+
     if (!attendance) {
       attendance = new Attendance({
         employee: employeeId,
@@ -238,6 +242,9 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     // Update challenge fields
     attendance.challengeStatus = 'Pending';
     attendance.challengeReason = reason;
+    if (requestedStatus) {
+      attendance.requestedStatus = requestedStatus;
+    }
     attendance.challengeAt = new Date();
     if (challengeAttachment) {
       attendance.challengeAttachment = challengeAttachment;
@@ -284,6 +291,95 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
   } catch (err) {
     console.error("❌ Challenge attendance failed:", err);
     res.status(500).json({ error: "Failed to challenge attendance" });
+  }
+});
+
+// POST /api/emp-attendance/challenge/:id/withdraw
+// Employee withdraws a pending attendance challenge
+router.post('/challenge/:id/withdraw', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employeeId = req.employee._id;
+
+    const attendance = await Attendance.findOne({
+      _id: id,
+      employee: employeeId,
+      challengeStatus: 'Pending'
+    });
+
+    if (!attendance) {
+      return res.status(404).json({ error: "Pending attendance challenge not found" });
+    }
+
+    attendance.challengeStatus = 'Withdrawn';
+    // We keep challengeReason and challengeAt intact for history
+    
+    await attendance.save();
+
+    console.log(`✅ Attendance challenge on ${attendance.date} withdrawn by employee ${employeeId}.`);
+    
+    res.json({
+      success: true,
+      message: "Attendance challenge withdrawn successfully.",
+      attendance: {
+        _id: attendance._id,
+        date: attendance.date,
+        challengeStatus: attendance.challengeStatus,
+        challengeReason: attendance.challengeReason
+      }
+    });
+  } catch (err) {
+    console.error("❌ Withdraw attendance challenge failed:", err);
+    res.status(500).json({ error: "Failed to withdraw attendance challenge" });
+  }
+});
+
+// PUT /api/emp-attendance/challenge/:id
+// Employee edits a pending attendance challenge
+router.put('/challenge/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { reason, requestedStatus } = req.body;
+    const employeeId = req.employee._id;
+
+    if (!reason) {
+      return res.status(400).json({ error: "Reason is required" });
+    }
+
+    const attendance = await Attendance.findOne({
+      _id: id,
+      employee: employeeId,
+      challengeStatus: 'Pending'
+    });
+
+    if (!attendance) {
+      return res.status(404).json({ error: "Pending attendance challenge not found" });
+    }
+
+    attendance.challengeReason = reason;
+    if (requestedStatus) {
+      attendance.requestedStatus = requestedStatus;
+    }
+    attendance.challengeAt = new Date();
+    
+    await attendance.save();
+
+    console.log(`✅ Attendance challenge on ${attendance.date} updated by employee ${employeeId}.`);
+    
+    res.json({
+      success: true,
+      message: "Attendance challenge updated successfully.",
+      attendance: {
+        _id: attendance._id,
+        date: attendance.date,
+        challengeStatus: attendance.challengeStatus,
+        challengeReason: attendance.challengeReason,
+        requestedStatus: attendance.requestedStatus
+      }
+    });
+  } catch (err) {
+    console.error("❌ Update attendance challenge failed:", err);
+    res.status(500).json({ error: "Failed to update attendance challenge" });
   }
 });
 

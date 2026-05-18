@@ -123,6 +123,51 @@ const taxAdjustmentRequestRoutes = require("./routes/taxAdjustmentRequestRoutes"
 const leaveEncashmentRequestRoutes = require("./routes/leaveEncashmentRequestRoutes");
 const leaveCarryForwardRequestRoutes = require("./routes/leaveCarryForwardRequestRoutes");
 const app = express();
+// ---------- CORS ----------
+// Allow specific origins for cross-origin requests (including static file requests)
+const ALLOWED_ORIGINS = [
+  "http://admin.virsme.com",
+  "https://admin.virsme.com",
+  "http://admin.innand.com",
+  "https://admin.innand.com",
+  "http://apis.innand.com",
+  "https://apis.innand.com",
+  "http://employee.virsme.com",
+  "https://employee.virsme.com",
+  "http://hr.virsme.com",
+  "https://hr.virsme.com",
+  "http://innand.com",
+  "https://innand.com",
+  "http://www.innand.com",
+  "https://complete-profile.virsme.com",
+  "https://www.innand.com",
+  "https://attendance.virsme.com",
+  "http://attendance.virsme.com",
+  "http://localhost:8080",
+  "http://localhost:8081",
+  "http://localhost:8082",
+  "http://localhost:8083",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+];
+app.use(
+  cors({
+    origin(origin, cb) {
+      // Allow server-to-server, Postman, curl
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+      return cb(new Error(`CORS blocked for origin: ${origin}`));
+    },
+    credentials: true,
+  }),
+);
+// (Optional) CORS error handler to avoid generic 500s
+app.use((err, _req, res, next) => {
+  if (err && /CORS blocked/.test(String(err.message))) {
+    return res.status(403).json({ error: err.message });
+  }
+  return next(err);
+});
 const payrollAccessRouter = require("./routes/payrollAccess");
 const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 const moment = require("moment-timezone");
@@ -153,31 +198,31 @@ app.use(
 // ---------- CORS ----------
 // If you need wildcard subdomains, switch to a regex check.
 // For now, this is a strict allowlist.
-const ALLOWED_ORIGINS = [
-  "http://admin.virsme.com",
-  "https://admin.virsme.com",
-  "http://admin.innand.com",
-  "https://admin.innand.com",
-  "http://apis.innand.com",
-  "https://apis.innand.com",
-  "http://employee.virsme.com",
-  "https://employee.virsme.com",
-  "http://hr.virsme.com",
-  "https://hr.virsme.com",
-  "http://innand.com",
-  "https://innand.com",
-  "http://www.innand.com",
-  "https://complete-profile.virsme.com",
-  "https://www.innand.com",
-  "https://attendance.virsme.com",
-  "http://attendance.virsme.com",
-  "http://localhost:8080",
-  "http://localhost:8081",
-  "http://localhost:8082",
-  "http://localhost:8083",
-  "http://localhost:3000",
-  "http://127.0.0.1:3000",
-];
+// const ALLOWED_ORIGINS = [
+//   "http://admin.virsme.com",
+//   "https://admin.virsme.com",
+//   "http://admin.innand.com",
+//   "https://admin.innand.com",
+//   "http://apis.innand.com",
+//   "https://apis.innand.com",
+//   "http://employee.virsme.com",
+//   "https://employee.virsme.com",
+//   "http://hr.virsme.com",
+//   "https://hr.virsme.com",
+//   "http://innand.com",
+//   "https://innand.com",
+//   "http://www.innand.com",
+//   "https://complete-profile.virsme.com",
+//   "https://www.innand.com",
+//   "https://attendance.virsme.com",
+//   "http://attendance.virsme.com",
+//   "http://localhost:8080",
+//   "http://localhost:8081",
+//   "http://localhost:8082",
+//   "http://localhost:8083",
+//   "http://localhost:3000",
+//   "http://127.0.0.1:3000",
+// ];
 app.use(
   cors({
     origin(origin, cb) {
@@ -298,6 +343,9 @@ app.use("/api/email", emailReceiverRoutes);
 // Leave encashment and carry forward request routes
 app.use("/api/leave-encashment-requests", leaveEncashmentRequestRoutes);
 app.use("/api/leave-carry-forward-requests", leaveCarryForwardRequestRoutes);
+// Overtime hour request routes
+const overtimeRequestRoutes = require("./routes/overtimeRequestRoutes");
+app.use("/api/overtime-requests", overtimeRequestRoutes);
 // Already handled above with attendanceAuth
 app.use("/api", employeeLeaveSummary);
 app.use("/api/admin", adminWorkSpaceManagementRoute);
