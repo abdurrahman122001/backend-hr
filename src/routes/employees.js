@@ -22,7 +22,7 @@ const attendanceAuth = require("../middleware/attendanceAuth");
 function getEffectiveOwnerId(user) {
   if (!user) return null;
   if (user.owner) return user.owner;
-  if (user.role === "admin") return user._id;
+  if (user.role === "admin" || user.role === "super-admin") return user._id;
   return user.createdBy || user._id;
 }
 

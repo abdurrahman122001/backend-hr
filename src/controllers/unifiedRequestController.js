@@ -51,6 +51,15 @@ exports.getUnifiedToDoList = async (req, res) => {
     }).select("_id");
     const employeeIds = ownerEmployees.map(emp => emp._id);
 
+    // Fast-path: If there are no employees for this owner, return empty todo list immediately
+    if (!employeeIds || employeeIds.length === 0) {
+      return res.status(200).json({
+        success: true,
+        total: 0,
+        data: []
+      });
+    }
+
     // Common Match for most models (Strictly filtered by employee to ensure complete company isolation)
     const baseMatch = { employee: { $in: employeeIds } };
     if (status !== "all") {
