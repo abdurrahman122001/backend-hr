@@ -44,7 +44,7 @@ module.exports = async function anyPayrollAuth(req, res, next) {
             // Standard admin auth logic
             let effectiveOwner = user.owner;
             if (!effectiveOwner) {
-                if (user.role === "admin") {
+                if (user.role === "admin" || user.role === "super-admin") {
                     effectiveOwner = user._id;
                 } else {
                     effectiveOwner = user.createdBy || user._id;

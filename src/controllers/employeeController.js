@@ -39,7 +39,7 @@ function getEffectiveOwnerId(user) {
   if (!user) return null;
   // Prioritize .owner if it exists (set by our middleware)
   if (user.owner) return user.owner;
-  if (user.role === "admin") return user._id;
+  if (user.role === "admin" || user.role === "super-admin") return user._id;
   return user.createdBy || user._id;
 }
 // Helper: Compute next birthday as a dayjs object

@@ -79,8 +79,8 @@ module.exports = async function requireAuth(req, res, next) {
     
     // If no explicit owner, handle by role
     if (!effectiveOwner) {
-      if (normalizedRole === "admin") {
-        // Admins are their own owners (company roots)
+      if (normalizedRole === "admin" || normalizedRole === "super-admin") {
+        // Admins and Super-Admins are their own owners (company roots)
         effectiveOwner = user._id;
       } else {
         // HR/Employees follow their creator
