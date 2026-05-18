@@ -43,23 +43,28 @@ exports.getUnifiedToDoList = async (req, res) => {
     const parsedSkip = parseInt(skip);
 
     // Get all employee IDs for this owner to filter models that don't have direct owner field
-    const ownerEmployees = await Employee.find({ owner: new mongoose.Types.ObjectId(ownerId) }).select("_id");
+    const ownerEmployees = await Employee.find({
+      $or: [
+        { owner: ownerId },
+        { owner: new mongoose.Types.ObjectId(ownerId) }
+      ]
+    }).select("_id");
     const employeeIds = ownerEmployees.map(emp => emp._id);
 
-    // Common Match for most models
-    const baseMatch = { owner: new mongoose.Types.ObjectId(ownerId) };
+    // Common Match for most models (Strictly filtered by employee to ensure complete company isolation)
+    const baseMatch = { employee: { $in: employeeIds } };
     if (status !== "all") {
       baseMatch.status = status;
     }
 
-    // Leave Match (Uses employee IDs as it lacks direct owner field)
+    // Leave Match (strictly filtered by employee)
     const leaveMatch = { employee: { $in: employeeIds } };
     if (status !== "all") {
       leaveMatch.status = status;
     }
 
-    // Attendance Match
-    const attendanceMatch = { owner: new mongoose.Types.ObjectId(ownerId) };
+    // Attendance Match (strictly filtered by employee)
+    const attendanceMatch = { employee: { $in: employeeIds } };
     if (status === "pending") {
       attendanceMatch.challengeStatus = "Pending";
     } else if (status !== "all") {
@@ -82,7 +87,7 @@ exports.getUnifiedToDoList = async (req, res) => {
          LeaveCarryForwardRequest.countDocuments(baseMatch),
          ProfileRevision.countDocuments(baseMatch),
          Attendance.countDocuments(attendanceMatch),
-         status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ owner: new mongoose.Types.ObjectId(ownerId) })
+         status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ employee: { $in: employeeIds } })
      ]);
 
     const totalCount = counts.reduce((acc, curr) => acc + curr, 0);
@@ -165,7 +170,7 @@ exports.getUnifiedToDoList = async (req, res) => {
       .limit(fetchLimit);
 
     // 7. Salary Revision History
-    const promotionPromise = (status === "pending") ? Promise.resolve([]) : SalaryRevisionHistory.find({ owner: new mongoose.Types.ObjectId(ownerId) })
+    const promotionPromise = (status === "pending") ? Promise.resolve([]) : SalaryRevisionHistory.find({ employee: { $in: employeeIds } })
       .populate("employee", "name department designation photographUrl")
       .sort({ revisionDate: -1 })
       .limit(fetchLimit);
