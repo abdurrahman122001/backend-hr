@@ -111,6 +111,7 @@ module.exports = {
         candidateEmail,
         position,
         department,
+        subDepartment,
         startDate,
         reportingTime,
         salaryBreakup = {},
@@ -177,6 +178,7 @@ module.exports = {
           email: candidateEmail,
           designation: position,
           department,
+          subDepartment,
           joiningDate: startDate,
           rt: normalizedRT,               // <-- SAVE TO 'rt' FIELD HERE
           salaryBreakup: salaryBreakup,   // (if you store this ad-hoc view)

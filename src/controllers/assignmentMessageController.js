@@ -1172,9 +1172,6 @@ exports.createMessage = async function createMessage(req, res) {
         }
       });
     } else {
-      console.log(
-        `👤 ${senderRole} sending message - client employees NOT automatically added`
-      );
     }
 
     // Simplified assignedTo handling - already handled above in the consolidated clientDoc fetch
@@ -1937,7 +1934,6 @@ exports.approveMessage = async function approveMessage(req, res) {
               );
             });
             if (index > -1) {
-              console.log(`[approveMessage] Removing ${employee.email} from CC on approval.`);
               msg.cc.splice(index, 1);
             }
           }
@@ -1982,7 +1978,6 @@ exports.approveMessage = async function approveMessage(req, res) {
             await clientMsg.save();
             approvedClientEmployeeMessages.push(clientMsg._id);
           }
-          console.log(`✅ Auto-approved ${clientEmployeeMessages.length} client employee message(s) in thread ${msg.threadId}`);
         }
       } catch (err) {
         console.error("❌ Error auto-approving client employee messages:", err);
@@ -3310,32 +3305,39 @@ exports.restoreFromTrash = async function (req, res) {
 // DELETE /api/assignment-messages/thread/:clientId - Delete entire thread for a client
 exports.deleteThread = async function deleteThread(req, res) {
   try {
-    const { clientId } = req.params;
+    const threadId = req.params.threadId || req.params.clientId;
 
-    if (!isObjId(clientId)) {
-      return res.status(400).json({ error: "Valid client ID is required" });
+    if (!threadId) {
+      return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
-    // Check permissions - user must be involved in the thread
-    const userId = req.employee._id.toString();
+    const currentUser = req.employee._id;
+    const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all messages for this client where user is sender or receiver
+    // Find all messages for this thread where user is involved
     const threadMessages = await AssignmentMessage.find({
-      client: clientId,
-      $or: [
-        { sender: userId },
-        { receiver: userId },
-        { receiver: { $in: [userId] } },
+      $and: [
+        {
+          $or: isIdValidObject
+            ? [{ threadId: threadId }, { client: threadId }]
+            : [{ threadId: threadId }],
+        },
+        {
+          $or: [
+            { sender: currentUser },
+            { receiver: currentUser },
+            { receiver: { $in: [currentUser] } },
+          ],
+        },
       ],
     });
 
     if (threadMessages.length === 0) {
-      return res.status(404).json({ error: "No thread found for this client" });
+      return res.status(404).json({ error: "No thread found" });
     }
 
     // Store message IDs for socket emission
     const messageIds = threadMessages.map((msg) => msg._id);
-    const clientIdForEmission = threadMessages[0]?.client;
 
     // Delete all messages in the thread
     await AssignmentMessage.deleteMany({
@@ -3371,9 +3373,9 @@ exports.deleteThread = async function deleteThread(req, res) {
       // Emit to all participants
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_deleted", {
-          clientId: clientId,
+          threadId: threadId,
           messageIds: messageIds,
-          deletedBy: userId,
+          deletedBy: currentUser.toString(),
           timestamp: new Date(),
         });
       });
@@ -3396,29 +3398,43 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
   res
 ) {
   try {
-    const { threadId } = req.params; // Changed from clientId to threadId
+    const threadId = req.params.threadId || req.params.clientId;
 
     if (!threadId) {
       return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
-    const userId = req.employee._id.toString();
+    const currentUser = req.employee._id;
+    const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all trashed messages for this thread where user is involved
+    // Find all trashed/spam messages for this thread where user is involved
     const trashedMessages = await AssignmentMessage.find({
-      threadId: threadId, // Changed from client to threadId
-      $or: [
-        { sender: userId },
-        { receiver: userId },
-        { receiver: { $in: [userId] } },
-      ],
-      isTrashed: true,
+      $and: [
+        {
+          $or: isIdValidObject
+            ? [{ threadId: threadId }, { client: threadId }]
+            : [{ threadId: threadId }],
+        },
+        {
+          $or: [
+            { sender: currentUser },
+            { receiver: currentUser },
+            { receiver: { $in: [currentUser] } },
+          ],
+        },
+        {
+          $or: [
+            { isTrashed: true },
+            { isSpam: true }
+          ]
+        }
+      ]
     });
 
     if (trashedMessages.length === 0) {
       return res
         .status(404)
-        .json({ error: "No trashed thread found with this thread ID" });
+        .json({ error: "No trashed or spam thread found with this thread ID" });
     }
 
     const messageIds = trashedMessages.map((msg) => msg._id);
@@ -3455,9 +3471,9 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
         io.to(`employee_${participantId}`).emit(
           "assignment_thread_permanently_deleted",
           {
-            threadId: threadId, // Changed from clientId to threadId
+            threadId: threadId,
             messageIds: messageIds,
-            deletedBy: userId,
+            deletedBy: currentUser.toString(),
             timestamp: new Date(),
             permanent: true,
           }
@@ -3478,20 +3494,30 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
 // PATCH /api/assignment-messages/thread/:threadId/trash - Move entire thread to trash
 exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
   try {
-    const { threadId } = req.params; // Changed from clientId to threadId
-    const userId = req.employee._id.toString();
+    const threadId = req.params.threadId || req.params.clientId;
 
     if (!threadId) {
       return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
+    const currentUser = req.employee._id;
+    const isIdValidObject = mongoose.isValidObjectId(threadId);
+
     // Find all messages for this thread where user is involved
     const threadMessages = await AssignmentMessage.find({
-      threadId: threadId, // Changed from client to threadId
-      $or: [
-        { sender: userId },
-        { receiver: userId },
-        { receiver: { $in: [userId] } },
+      $and: [
+        {
+          $or: isIdValidObject
+            ? [{ threadId: threadId }, { client: threadId }]
+            : [{ threadId: threadId }],
+        },
+        {
+          $or: [
+            { sender: currentUser },
+            { receiver: currentUser },
+            { receiver: { $in: [currentUser] } },
+          ],
+        },
       ],
       isTrashed: false, // Only non-trashed messages
     });
@@ -3510,7 +3536,7 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
       {
         isTrashed: true,
         trashedAt: new Date(),
-        trashedBy: req.employee._id,
+        trashedBy: currentUser,
       }
     );
 
@@ -3539,9 +3565,9 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
 
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_trashed", {
-          threadId: threadId, // Changed from clientId to threadId
+          threadId: threadId,
           messageIds: threadMessages.map((msg) => msg._id),
-          trashedBy: userId,
+          trashedBy: currentUser.toString(),
           timestamp: new Date(),
         });
       });
@@ -3563,23 +3589,32 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
   res
 ) {
   try {
-    const { threadId } = req.params; // Changed from clientId to threadId
+    const threadId = req.params.threadId || req.params.clientId;
 
     if (!threadId) {
       return res.status(400).json({ error: "Valid thread ID is required" });
     }
 
-    const userId = req.employee._id.toString();
+    const currentUser = req.employee._id;
+    const isIdValidObject = mongoose.isValidObjectId(threadId);
 
     // Find all trashed messages for this thread where user is involved
     const trashedMessages = await AssignmentMessage.find({
-      threadId: threadId, // Changed from client to threadId
-      isTrashed: true,
-      $or: [
-        { sender: userId },
-        { receiver: userId },
-        { receiver: { $in: [userId] } },
+      $and: [
+        {
+          $or: isIdValidObject
+            ? [{ threadId: threadId }, { client: threadId }]
+            : [{ threadId: threadId }],
+        },
+        {
+          $or: [
+            { sender: currentUser },
+            { receiver: currentUser },
+            { receiver: { $in: [currentUser] } },
+          ],
+        },
       ],
+      isTrashed: true,
     });
 
     if (trashedMessages.length === 0) {
@@ -3625,9 +3660,9 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
 
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit("assignment_thread_restored", {
-          threadId: threadId, // Changed from clientId to threadId
+          threadId: threadId,
           messageIds: trashedMessages.map((msg) => msg._id),
-          restoredBy: userId,
+          restoredBy: currentUser.toString(),
           timestamp: new Date(),
         });
       });

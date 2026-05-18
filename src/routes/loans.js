@@ -682,10 +682,11 @@ async function recalculatePaymentSchedule(
 // Routes
 // -----------------------------------------------------------------------------
 
-// Employees list (id + name)
-router.get("/employees", async (_req, res) => {
+// Employees list (id + name) for the logged-in owner's company
+router.get("/employees", async (req, res) => {
   try {
-    const employees = await Employee.find().select("_id name");
+    const ownerId = req.user?.owner || req.user?._id;
+    const employees = await Employee.find({ owner: ownerId }).select("_id name");
     res.json({ employees });
   } catch (err) {
     console.error("Error fetching employees:", err);
@@ -703,6 +704,12 @@ router.get("/", decryptWithKey, async (req, res) => {
       return res.status(400).json({ error: "Employee ID is required" });
     if (!Types.ObjectId.isValid(employee))
       return res.status(400).json({ error: "Invalid employee ID" });
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
+    }
 
     const loans = await LoanDetail.find({ employee }).lean();
 
@@ -772,6 +779,12 @@ router.post("/loan/:employeeId", async (req, res) => {
     const { employeeId } = req.params;
     if (!Types.ObjectId.isValid(employeeId)) {
       return res.status(400).json({ error: "Invalid employee ID" });
+    }
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: employeeId, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
     }
 
     const {
@@ -848,7 +861,6 @@ router.post("/loan/:employeeId", async (req, res) => {
     }
 
     // Recompute salary slips for this employee
-    const ownerId = resolveOwnerId(req.user);
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
 
     res.status(201).json(loan);
@@ -880,6 +892,12 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
       .populate("employee", "name")
       .lean();
     if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied" });
+    }
 
     const out = { ...loan };
     const isUnlocked = !!req.decryptionKey;
@@ -946,10 +964,15 @@ router.delete("/loan/:loanId", async (req, res) => {
     const loan = await LoanDetail.findById(loanId);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
 
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
     const employeeId = loan.employee;
     await LoanDetail.deleteOne({ _id: loanId });
 
-    const ownerId = resolveOwnerId(req.user);
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
 
     res.json({ message: "Loan deleted and salary slips updated" });
@@ -965,6 +988,12 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
   try {
     const { employeeId } = req.params;
     const { monthYear } = req.query;
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: employeeId, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
+    }
 
     if (!monthYear) {
       return res
@@ -1171,6 +1200,12 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
       return res.status(404).json({ error: "Loan not found" });
     }
 
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
+    }
+
     if (
       !loan.paymentSchedule ||
       installmentIndex >= loan.paymentSchedule.length
@@ -1207,7 +1242,6 @@ router.patch("/loan/:loanId/installment/:installmentNo", async (req, res) => {
     await loan.save();
 
     // Recompute affected salary slips
-    const ownerId = resolveOwnerId(req.user);
 
     if (affectedMonths && affectedMonths.length > 0) {
       await recomputeAffectedSalarySlips(loan, ownerId, affectedMonths);
@@ -1261,6 +1295,12 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
       !loan.paymentSchedule.length
     ) {
       return res.status(404).json({ error: "Loan or schedule not found" });
+    }
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
     }
 
     if (startIdx0 >= loan.paymentSchedule.length) {
@@ -1438,7 +1478,6 @@ router.patch("/loan/:loanId/apply-tail", async (req, res) => {
     await loan.save();
 
     // Recompute affected salary slips
-    const ownerId = resolveOwnerId(req.user);
     const changedMonths = newSchedule
       .slice(startIdx0)
       .map((r) => `${r.month}-${r.year}`);
@@ -1475,7 +1514,12 @@ router.post("/recalculate-slips/:employeeId", async (req, res) => {
       return res.status(400).json({ error: "Invalid employee ID" });
     }
 
-    const ownerId = resolveOwnerId(req.user);
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: employeeId, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied: Employee not found in your company" });
+    }
+
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);
 
     res.json({
@@ -1500,6 +1544,12 @@ router.get("/affected-months/:loanId", async (req, res) => {
 
     const loan = await LoanDetail.findById(loanId);
     if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) {
+      return res.status(403).json({ error: "Access denied" });
+    }
 
     const affectedMonths = loan.paymentSchedule.map((ps) => ({
       month: ps.month,

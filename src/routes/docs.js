@@ -316,13 +316,25 @@ function getDocTypeName(docType) {
 async function generateReferenceNumber(docType = "experience_letter", ownerId) {
   try {
     const timezone = await getUserTimezone(ownerId);
+    const SHARED_DOC_TYPES = [
+      "experience_letter",
+      "salary_certificate",
+      "nda",
+      "contract",
+      "employee_cover_page",
+    ];
+
+    const counterDocType = SHARED_DOC_TYPES.includes(docType)
+      ? "employment_document"
+      : docType;
+
     const docCode = getDocTypeCode(docType);
     const yearMonth = getCurrentYearMonth(timezone);
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
 
     let counter = await ReferenceCounter.findOne({
-      docType: docType,
+      docType: counterDocType,
       yearMonth: yearMonth,
       owner: ownerId,
     });
@@ -330,9 +342,9 @@ async function generateReferenceNumber(docType = "experience_letter", ownerId) {
     let shouldReset = false;
 
     if (counter) {
-      const lastGeneratedDate = counter.lastGenerated
+      const lastGeneratedDate = counter.lastGeneratedDate || (counter.lastGenerated
         ? formatDateYYYYMMDD(counter.lastGenerated, timezone)
-        : null;
+        : null);
 
       if (lastGeneratedDate && lastGeneratedDate !== currentDate) {
         shouldReset = true;
@@ -344,7 +356,7 @@ async function generateReferenceNumber(docType = "experience_letter", ownerId) {
     if (shouldReset) {
       counter = await ReferenceCounter.findOneAndUpdate(
         {
-          docType: docType,
+          docType: counterDocType,
           yearMonth: yearMonth,
           owner: ownerId,
         },
@@ -366,7 +378,7 @@ async function generateReferenceNumber(docType = "experience_letter", ownerId) {
     } else {
       counter = await ReferenceCounter.findOneAndUpdate(
         {
-          docType: docType,
+          docType: counterDocType,
           yearMonth: yearMonth,
           owner: ownerId,
         },
@@ -403,13 +415,25 @@ async function getCurrentReferenceNumber(
 ) {
   try {
     const timezone = await getUserTimezone(ownerId);
+    const SHARED_DOC_TYPES = [
+      "experience_letter",
+      "salary_certificate",
+      "nda",
+      "contract",
+      "employee_cover_page",
+    ];
+
+    const counterDocType = SHARED_DOC_TYPES.includes(docType)
+      ? "employment_document"
+      : docType;
+
     const docCode = getDocTypeCode(docType);
     const yearMonth = getCurrentYearMonth(timezone);
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
 
     const counter = await ReferenceCounter.findOne({
-      docType: docType,
+      docType: counterDocType,
       yearMonth: yearMonth,
       owner: ownerId,
     });
@@ -417,9 +441,9 @@ async function getCurrentReferenceNumber(
     let sequence = 1;
 
     if (counter) {
-      const lastGeneratedDate = counter.lastGeneratedDate
-        ? formatDateYYYYMMDD(counter.lastGeneratedDate, timezone)
-        : null;
+      const lastGeneratedDate = counter.lastGeneratedDate || (counter.lastGenerated
+        ? formatDateYYYYMMDD(counter.lastGenerated, timezone)
+        : null);
 
       if (lastGeneratedDate && lastGeneratedDate === currentDate) {
         sequence = counter.sequence + 1;
@@ -1096,7 +1120,8 @@ async function generateDocumentPDF(
   docType,
   templateId = "",
   ownerId,
-  precomputedTokens = null
+  precomputedTokens = null,
+  referenceNumber = null
 ) {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -1121,7 +1146,11 @@ async function generateDocumentPDF(
 
   const defaults = tpl.defaultValues || {};
   const normalizedDocType = normType(docType);
-  const tokens = precomputedTokens || await tokenMap(emp, defaults, normalizedDocType, ownerId);
+  const tokens =
+    precomputedTokens ||
+    (await tokenMap(emp, defaults, normalizedDocType, ownerId, {
+      referenceNumber,
+    }));
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
@@ -1180,19 +1209,22 @@ const generateAndSaveDocument = async (req, res, docType) => {
     const templateId = String(req.query.templateId || "");
     const { key } = req.body || {};
 
-    // Generate the PDF
+    const normalizedDocType = normType(docType);
+
+    // 1. Generate reference number FIRST to avoid double increment
+    const referenceNumber = await generateReferenceNumber(
+      normalizedDocType,
+      req.ownerId
+    );
+
+    // 2. Generate the PDF using this reference number
     const pdfBuffer = await generateDocumentPDF(
       employeeId,
       docType,
       templateId,
-      req.ownerId
-    );
-
-    // Get reference number for saving
-    const normalizedDocType = normType(docType);
-    const referenceNumber = await generateReferenceNumber(
-      normalizedDocType,
-      req.ownerId
+      req.ownerId,
+      null, // precomputedTokens
+      referenceNumber // Pass the reference number here
     );
 
     // Save to file system
@@ -1365,9 +1397,21 @@ router.post("/bulk/:docType", async (req, res) => {
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
 
+    const SHARED_DOC_TYPES = [
+      "experience_letter",
+      "salary_certificate",
+      "nda",
+      "contract",
+      "employee_cover_page",
+    ];
+
+    const counterDocType = SHARED_DOC_TYPES.includes(normalizedDocType)
+      ? "employment_document"
+      : normalizedDocType;
+
     // Get or create counter for bulk generation
     let counter = await ReferenceCounter.findOne({
-      docType: normalizedDocType,
+      docType: counterDocType,
       yearMonth: yearMonth,
       owner: req.ownerId,
     });
@@ -1375,9 +1419,9 @@ router.post("/bulk/:docType", async (req, res) => {
     let shouldReset = false;
 
     if (counter) {
-      const lastGeneratedDate = counter.lastGenerated
+      const lastGeneratedDate = counter.lastGeneratedDate || (counter.lastGenerated
         ? formatDateYYYYMMDD(counter.lastGenerated, timezone)
-        : null;
+        : null);
 
       if (lastGeneratedDate && lastGeneratedDate !== currentDate) {
         shouldReset = true;
@@ -1392,7 +1436,7 @@ router.post("/bulk/:docType", async (req, res) => {
     if (shouldReset) {
       counter = await ReferenceCounter.findOneAndUpdate(
         {
-          docType: normalizedDocType,
+          docType: counterDocType,
           yearMonth: yearMonth,
           owner: req.ownerId,
         },
@@ -1419,7 +1463,7 @@ router.post("/bulk/:docType", async (req, res) => {
 
       counter = await ReferenceCounter.findOneAndUpdate(
         {
-          docType: normalizedDocType,
+          docType: counterDocType,
           yearMonth: yearMonth,
           owner: req.ownerId,
         },

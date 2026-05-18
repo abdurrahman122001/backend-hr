@@ -38,6 +38,7 @@ const attendanceConfigRouter = require("./routes/attendanceConfig");
 const attendanceFlagRoutes = require("./routes/attendanceFlagRoutes");
 const offerLetterRoutes = require("./routes/offerLetterRoutes");
 const departmentsRouter = require("./routes/departments");
+const subDepartmentsRouter = require("./routes/subDepartments");
 const designationsRouter = require("./routes/designations");
 const docsRouter = require("./routes/docs");
 const employeeSalaryRouter = require("./routes/employeeSalary");
@@ -229,6 +230,7 @@ app.use("/api/company-profile", unifiedAuth, companyProfile);
 app.use("/api/docs", anyPayrollAuth, docsRouter);
 app.use("/api/employee-salary", anyPayrollAuth, employeeSalaryRouter);
 app.use("/api/departments", anyPayrollAuth, departmentsRouter);
+app.use("/api/subdepartments", anyPayrollAuth, subDepartmentsRouter);
 app.use("/api/designations", anyPayrollAuth, designationsRouter);
 app.use("/api/salary-settings", anyPayrollAuth, salarySettingsRoutes);
 app.use("/api/salary-fields", unifiedAuth, salarySlipFields);
@@ -405,7 +407,7 @@ const CERT_PRIVKEY =
   process.env.CERT_PRIVKEY ||
   `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 3000);
+const HTTP_PORT = Number(process.env.HTTP_PORT || 4000);
 let primaryServer; // the server we attach socket.io to
 let httpsEnabled = false;
 if (

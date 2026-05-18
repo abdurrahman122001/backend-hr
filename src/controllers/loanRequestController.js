@@ -86,6 +86,11 @@ exports.updateLoanRequestStatus = async (req, res) => {
       return res.status(404).json({ message: "Loan request not found" });
     }
 
+    // Tenant boundary check: Request owner must match logged-in user's company owner
+    if (request.owner?.toString() !== req.user.owner?.toString()) {
+      return res.status(403).json({ message: "Not authorized: Request does not belong to your company" });
+    }
+
     request.status = status;
     if (status === "rejected") {
       request.rejectionReason = rejectionReason;
@@ -124,6 +129,11 @@ exports.deleteLoanRequest = async (req, res) => {
 
     if (!isOwner && !isAdminOrManager) {
       return res.status(403).json({ message: "Not authorized to delete this request" });
+    }
+
+    // Tenant boundary check: Request owner must match logged-in user's company owner
+    if (request.owner?.toString() !== req.user.owner?.toString()) {
+      return res.status(403).json({ message: "Not authorized: Request does not belong to your company" });
     }
 
     // Cannot delete approved or rejected requests as a regular employee
