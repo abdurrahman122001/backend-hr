@@ -218,6 +218,8 @@ exports.bulkCreate = async (req, res) => {
     const toInsert = [];
 
     // Validate + prepare docs (NO meta calc here; we rebuild after insert)
+    let upsertCount = 0;
+
     for (const { seniorId, juniorId, relation } of links) {
       if (!seniorId || !juniorId || String(seniorId) === String(juniorId)) {
         invalid.push({ seniorId, juniorId, reason: 'Invalid IDs' });
@@ -239,50 +241,43 @@ exports.bulkCreate = async (req, res) => {
         continue;
       }
 
-      // duplicate?
-      if (await Hierarchy.exists({ owner: ownerId, senior: seniorId, junior: juniorId })) {
-        invalid.push({ seniorId, juniorId, reason: 'Duplicate' });
-        continue;
-      }
-
       // cycle?
       if (await checkForCircularReference(ownerId, seniorId, juniorId)) {
         invalid.push({ seniorId, juniorId, reason: 'Circular' });
         continue;
       }
 
-      toInsert.push({
-        owner: ownerId,
-        senior: seniorId,
-        junior: juniorId,
-        relation: relation || 'Manager',
-
-        // TEMP but VALID values (will be recalculated)
-        hierarchyLevel: 1,
-        path: String(seniorId),
-        rootManager: seniorId
-      });
-
+      // Upsert: junior can only have ONE senior.
+      await Hierarchy.findOneAndUpdate(
+        { owner: ownerId, junior: juniorId },
+        {
+          senior: seniorId,
+          relation: relation || 'Manager',
+          hierarchyLevel: 1,
+          path: String(seniorId),
+          rootManager: seniorId
+        },
+        { upsert: true, new: true }
+      );
+      upsertCount++;
     }
 
-    if (!toInsert.length) {
+    if (upsertCount === 0 && invalid.length > 0) {
       return res.status(400).json({
         status: 'error',
-        message: 'No valid links',
+        message: 'No valid links were processed',
         invalid
       });
     }
-
-    const created = await Hierarchy.insertMany(toInsert, { ordered: true });
 
     // ✅ Enterprise: rebuild metadata after bulk insert
     await rebuildHierarchy(ownerId);
 
     res.status(201).json({
       status: 'success',
-      count: created.length,
+      count: upsertCount,
       invalid,
-      data: created
+      data: []
     });
   } catch (err) {
     console.error('Bulk hierarchy error:', err);
@@ -375,8 +370,8 @@ exports.getManagementChain = async (req, res) => {
 
 exports.deleteHierarchy = async (req, res) => {
   try {
-    const { id } = req.params;       // juniorId (frontend)
-    const senior = req.query.senior; // seniorId (query)
+    const { id } = req.params;
+    const senior = req.query.senior;
     if (!id || !senior) {
       return res.status(400).json({
         status: 'error',
