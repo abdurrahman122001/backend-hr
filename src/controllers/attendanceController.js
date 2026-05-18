@@ -965,7 +965,7 @@ exports.markAttendance = async (req, res) => {
     } = req.body;
     const normalizedStatus = status === "On time" ? "Present" : status;
     console.log(`\n📬 [MARK-ATTENDANCE-ENTRY] Employee=${employeeId}, Date=${date}, NewStatus=${status} -> ${normalizedStatus}, Notes=${notes}, SourceModel=${sourceModel || 'NONE'}`);
-    
+
     // ✅ Guard: If sourceModel is null, skip leave/bonus/late effects
     const skipLeaveEffects = (sourceModel === null);
     if (skipLeaveEffects) {
@@ -1795,7 +1795,7 @@ exports.getStats = async (req, res) => {
 exports.getRecordsByEmployee = async (req, res) => {
   const { id } = req.params;
   const { from, to } = req.query;
-  
+
   if (!mongoose.isValidObjectId(id)) {
     return res.status(400).json({ error: "Invalid employee ID" });
   }

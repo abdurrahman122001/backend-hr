@@ -298,6 +298,9 @@ app.use("/api/email", emailReceiverRoutes);
 // Leave encashment and carry forward request routes
 app.use("/api/leave-encashment-requests", leaveEncashmentRequestRoutes);
 app.use("/api/leave-carry-forward-requests", leaveCarryForwardRequestRoutes);
+// Overtime hour request routes
+const overtimeRequestRoutes = require("./routes/overtimeRequestRoutes");
+app.use("/api/overtime-requests", overtimeRequestRoutes);
 // Already handled above with attendanceAuth
 app.use("/api", employeeLeaveSummary);
 app.use("/api/admin", adminWorkSpaceManagementRoute);
