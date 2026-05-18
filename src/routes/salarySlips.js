@@ -74,8 +74,7 @@ router.get("/", requireAuth, async (req, res) => {
       (currentUserRole && (currentUserRole.includes("admin") || currentUserRole.includes("hr"))) ||
       (req.user.userRole && (req.user.userRole.includes("admin") || req.user.userRole.includes("hr")));
 
-    if (isSuperAdmin) {
-    } else if (isAdminOrHR) {
+    if (isAdminOrHR || isSuperAdmin) {
       baseMatch.owner = new ObjectId(req.user.owner);
     } else {
       const targetEmpId = req.user.employeeId || req.user._id;
@@ -142,9 +141,7 @@ router.post("/", requireAuth, async (req, res) => {
     let userFilter = { _id: employeeId };
     const currentUserRole = req.user.role?.toLowerCase();
 
-    if (currentUserRole === "super-admin") {
-      // Can create for anyone
-    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+    if (currentUserRole === "admin" || currentUserRole === "hr" || currentUserRole === "super-admin") {
       userFilter.owner = req.user.owner;
     } else {
       userFilter.owner = req.user._id;
@@ -211,10 +208,8 @@ router.patch("/:id", requireAuth, async (req, res) => {
     let ownerAllowed = false;
 
     // 🔒 RESTRICTION: Only super-admin or company-admin/hr can update salary slips
-    if (currentUserRole === "super-admin" || originalRole === "super-admin") {
-      ownerAllowed = true;
-    } else if (
-      (currentUserRole === "admin" || currentUserRole === "hr" || originalRole === "admin" || originalRole === "hr") &&
+    if (
+      (currentUserRole === "admin" || currentUserRole === "hr" || currentUserRole === "super-admin" || originalRole === "admin" || originalRole === "hr" || originalRole === "super-admin") &&
       String(slip.owner) === String(req.user.owner)
     ) {
       ownerAllowed = true;
@@ -397,9 +392,7 @@ router.get("/:id/download", requireAuth, async (req, res) => {
     let ownerAllowed = false;
     const currentUserRole = req.user.role?.toLowerCase();
 
-    if (currentUserRole === "super-admin") {
-      ownerAllowed = true;
-    } else if (currentUserRole === "admin" || currentUserRole === "hr") {
+    if (currentUserRole === "admin" || currentUserRole === "hr" || currentUserRole === "super-admin") {
       ownerAllowed = String(slip.employee.owner) === String(req.user.owner);
     } else {
       ownerAllowed = String(slip.employee._id) === String(req.user.employeeId);
@@ -528,13 +521,14 @@ router.delete("/:id", requireAuth, async (req, res) => {
 
     // Check permission to delete
     let allowed = false;
-    if (currentUserRole === "super-admin" || originalRole === "super-admin") {
-      allowed = true;
-    } else if (
+
+    if (
       currentUserRole === "admin" ||
       currentUserRole === "hr" ||
+      currentUserRole === "super-admin" ||
       originalRole === "admin" ||
-      originalRole === "hr"
+      originalRole === "hr" ||
+      originalRole === "super-admin"
     ) {
       // Must belong to the same company owner
       if (String(slip.owner) === String(req.user.owner) || String(req.user.owner || req.user._id) === String(slip.owner)) {

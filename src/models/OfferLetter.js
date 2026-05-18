@@ -5,6 +5,7 @@ const OfferLetterSchema = new Schema({
   employee:       { type: Schema.Types.ObjectId, ref: 'Employee', required: true },
   position:       { type: String, required: true },
   department:     { type: String },
+  subDepartment:  { type: String },
   salaryOffered:  { type: Number, required: true },
   leaveEntitlement: {
     total:        { type: Number, default: 22 },

@@ -31,15 +31,6 @@ function buildEmployeeScope(user, includeTrashed = false) {
 
   const tenantId = getEffectiveOwnerId(user);
   const userId = user._id;
-  const role = user.role?.toLowerCase();
-  const userRole = user.userRole?.toLowerCase();
-
-  // 🔒 SECURITY SCOPE: Super-admins see everything
-  if (role === "super-admin" || userRole === "super-admin") {
-    return includeTrashed
-      ? { isTrashed: { $ne: false } }
-      : { $or: [{ isTrashed: false }, { isTrashed: { $exists: false } }] };
-  }
 
   const ownershipScope = {
     $or: [
