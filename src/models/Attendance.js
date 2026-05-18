@@ -29,7 +29,8 @@ const AttendanceSchema = new Schema({
   acknowledgmentType: { type: String, enum: ['unpaid', 'paid', null], default: null },
 
   // Employee challenge fields
-  challengeStatus: { type: String, enum: ['None', 'Pending', 'Approved', 'Rejected'], default: 'None' },
+  requestedStatus: { type: String },
+  challengeStatus: { type: String, enum: ['None', 'Pending', 'Approved', 'Rejected', 'Withdrawn'], default: 'None' },
   challengeReason: { type: String },
   challengeAt: { type: Date },
   challengeAdminNotes: { type: String },
