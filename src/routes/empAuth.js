@@ -776,7 +776,7 @@ router.post("/login", async (req, res) => {
     // ✅ Ensure an active EmployeeSession exists
     await EmployeeSession.findOneAndUpdate(
       { employeeId: emp._id, date: todayKarachi },
-      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate(), lastSeen: nowKarachi.toDate() },
       { upsert: true, new: true }
     );
 
@@ -941,7 +941,7 @@ router.post("/confirm-code", async (req, res) => {
     // ✅ Ensure an active EmployeeSession exists
     await EmployeeSession.findOneAndUpdate(
       { employeeId: emp._id, date: todayKarachi },
-      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+      { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate(), lastSeen: nowKarachi.toDate() },
       { upsert: true, new: true }
     );
 
@@ -977,7 +977,9 @@ router.post("/logout", requireAuth, async (req, res) => {
     const { isAutoLogout: queryAutoLogout } = req.query;
     const isAutoLogout = bodyAutoLogout || queryAutoLogout === 'true' || queryAutoLogout === true;
 
-    console.log(`\n🚪 [LOGOUT] Employee: ${employeeId}, isAutoLogout: ${isAutoLogout}, reqBody keys: ${Object.keys(req.body).join(',')}, reqQuery: ${JSON.stringify(req.query)}`);
+    console.log(`\n🚪 [LOGOUT] Employee: ${employeeId}, isAutoLogout: ${isAutoLogout}`);
+    console.log(`📋 [LOGOUT-DEBUG] Body: ${JSON.stringify(req.body)}, Query: ${JSON.stringify(req.query)}`);
+    console.log(`🔑 [LOGOUT-DEBUG] Content-Type: ${req.headers['content-type']}`);
 
     // Get current time in Karachi (allow override for testing)
     const nowKarachi = getKarachiTime(testDate);
@@ -1010,11 +1012,13 @@ router.post("/logout", requireAuth, async (req, res) => {
     }
 
     if (!attendance) {
-      console.warn(`[LOGOUT] No attendance found for ${employeeId}`);
+      console.warn(`⚠️ [LOGOUT] No attendance found for ${employeeId}`);
       return res.status(400).json({
         error: "No attendance record found to log out"
       });
     }
+
+    console.log(`📊 [LOGOUT] Found attendance: ${attendance._id}, date: ${attendance.date}, status: ${attendance.status}, hasCheckout: ${!!attendance.checkOut}`);
 
     const attendanceDate = attendance.date; // The day they actually logged in (important)
 
@@ -1064,17 +1068,30 @@ router.post("/logout", requireAuth, async (req, res) => {
     // Determine if this is an auto-logout half-day (page refresh) vs actual early logout
     const isAutoLogoutHalfDay = isAutoLogout && finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day";
 
-    // If this is a MANUAL logout before shift completion and before 9:00 PM,
+    // If this is a logout before 9:00 PM and shift is not complete,
     // mark the attendance as Half Day and apply real-time half-day deduction.
-    // Mark half-day when employee logs out early (including beacon/auto logouts).
-    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < (HALF_DAY_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
+    // BUT: If already marked as Half Day from login (after 6 PM), don't apply deduction again
+    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
+    
     if (shouldMarkHalfDay) {
       finalStatus = "Half Day";
-      try {
-        await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
-      } catch (hdErr) {
-        console.error("[HALF-DAY] Error applying half-day deduction:", hdErr);
+      console.log(`📊 [LOGOUT] Marking as Half Day - logout at ${actualLogoutTime} (before 9 PM), shift not complete`);
+      
+      // Only apply deduction if this is a NEW Half Day (not from login)
+      // If originalStatus was already "Half Day", deduction was already applied at login
+      if (originalStatusBeforeLogout !== "Half Day") {
+        try {
+          await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
+          console.log(`✅ [LOGOUT] Half-day deduction applied (logout-based Half Day)`);
+        } catch (hdErr) {
+          console.error("[HALF-DAY] Error applying half-day deduction:", hdErr);
+        }
+      } else {
+        console.log(`ℹ️ [LOGOUT] Half Day status maintained (was already Half Day from login at/after 6 PM)`);
       }
+    } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
+      // Employee logged in after 6 PM (already Half Day) and is now logging out
+      console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was at/after 6 PM)`);
     }
     try {
       updated = await Attendance.findByIdAndUpdate(
@@ -1187,6 +1204,32 @@ router.post("/logout", requireAuth, async (req, res) => {
   }
 });
 
+router.post("/heartbeat", requireAuth, async (req, res) => {
+  try {
+    const employeeId = req.employee._id || req.employee.id;
+    const nowKarachi = getKarachiTime();
+    const todayKarachi = getDateOnly(nowKarachi);
+
+    // Update lastSeen timestamp for the active session
+    const result = await EmployeeSession.findOneAndUpdate(
+      { employeeId, date: todayKarachi, active: true },
+      { lastSeen: nowKarachi.toDate() },
+      { new: true }
+    );
+
+    if (!result) {
+      // No active session found - this shouldn't happen in normal flow
+      console.warn(`⚠️ [HEARTBEAT] No active session found for ${employeeId} on ${todayKarachi}`);
+      return res.status(404).json({ error: "No active session found" });
+    }
+
+    return res.json({ status: "success", lastSeen: result.lastSeen });
+  } catch (err) {
+    console.error("❌ [HEARTBEAT] Error:", err);
+    return res.status(500).json({ error: "Server error during heartbeat" });
+  }
+});
+
 router.post("/reactivate-session", requireAuth, async (req, res) => {
   try {
     const employeeId = req.employee._id || req.employee.id;
@@ -1225,7 +1268,7 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
 
         await EmployeeSession.findOneAndUpdate(
           { employeeId, date: todayKarachi },
-          { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate() },
+          { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate(), lastSeen: nowKarachi.toDate() },
           { upsert: true, new: true }
         );
         return res.json({ status: "success", message: "New session created" });
@@ -1244,12 +1287,18 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       const statusToRestore = attendance.originalStatus || attendance.status;
       const isAutoLogoutHalfDay = attendance.halfDayFromAutoLogout === true;
 
-      console.info(`🔄 [REACTIVATE-SESSION] Restoring attendance status for ${employeeId}. ${previousStatus} → ${statusToRestore}`);
+      console.info(`🔄 [REACTIVATE-SESSION] Found attendance with logout - Restoring...`);
+      console.info(`   📊 Previous Status: ${previousStatus}`);
+      console.info(`   📊 Status to Restore: ${statusToRestore}`);
+      console.info(`   🕐 CheckOut: ${attendance.checkOut}`);
+      console.info(`   🕐 LogoutTime: ${attendance.logoutTime}`);
 
       await Attendance.findByIdAndUpdate(attendance._id, {
         $unset: { logoutTime: 1, checkOut: 1, originalStatus: 1, halfDayFromAutoLogout: 1 },
         $set: { status: statusToRestore, totalHours: 0 }
       });
+
+      console.info(`✅ [REACTIVATE-SESSION] Attendance updated - logout times removed, status restored to ${statusToRestore}`);
 
       const previousStatusLower = (previousStatus || "").toLowerCase().replace(/\s+/g, '-');
       const statusToRestoreLower = (statusToRestore || "").toLowerCase().replace(/\s+/g, '-');
@@ -1282,9 +1331,13 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
     if (session && !session.active) {
       session.active = true;
       session.isAutoLogout = false;
+      session.lastSeen = nowKarachi.toDate();
       await session.save();
       console.info(`✅ [REACTIVATE-SESSION] Session reactivated for ${employeeId}`);
     } else if (session && session.active) {
+      // Update lastSeen even if already active
+      session.lastSeen = nowKarachi.toDate();
+      await session.save();
       console.info(`🔄 [REACTIVATE-SESSION] Session already active for ${employeeId} - status restored if needed`);
     }
 

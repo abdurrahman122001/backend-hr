@@ -15,15 +15,20 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
   // ✅ Also check query params (useful for sendBeacon/logout on browser close)
   if (!token && req.query.token) {
     token = req.query.token;
+    console.log("🔐 [EmpAuth] Token from query params");
   }
 
   // ✅ Also allow token in POST body (useful for navigator.sendBeacon payloads)
   if (!token && req.body && req.body.token) {
     token = req.body.token;
+    console.log("🔐 [EmpAuth] Token from request body");
   }
 
   if (!token || token === "undefined" || token === "null") {
     console.warn("🔐 [EmpAuth] No valid token provided");
+    console.warn("🔐 [EmpAuth-DEBUG] Headers:", JSON.stringify(req.headers));
+    console.warn("🔐 [EmpAuth-DEBUG] Body:", JSON.stringify(req.body));
+    console.warn("🔐 [EmpAuth-DEBUG] Query:", JSON.stringify(req.query));
     return res
       .status(401)
       .json({ status: "error", message: "Unauthorized: no token provided" });

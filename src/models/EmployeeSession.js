@@ -9,6 +9,7 @@ const EmployeeSessionSchema = new mongoose.Schema(
     },
     loginTime: { type: Date, default: Date.now },
     logoutTime: { type: Date },
+    lastSeen: { type: Date, default: Date.now }, // Track last heartbeat timestamp
     deviceFingerprint: { type: String },
     active: { type: Boolean, default: true },
     date: { type: String, required: false }, // YYYY-MM-DD format for uniqueness per day

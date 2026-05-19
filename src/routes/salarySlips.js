@@ -443,7 +443,7 @@ router.get("/:id/download", requireAuth, async (req, res) => {
       .text(`Designation: ${slip.employee.designation || "N/A"}`, 40, y0 + 15)
       .text(
         `Joining Date: ${slip.employee.joiningDate
-          ? slip.employee.joiningDate.toISOString().slice(0, 10)
+          ? new Date(slip.employee.joiningDate).toISOString().slice(0, 10)
           : "N/A"
         }`,
         320,

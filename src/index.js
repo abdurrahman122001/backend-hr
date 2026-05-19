@@ -173,6 +173,7 @@ const PROBATION_CRON_TZ = process.env.ATTENDANCE_CRON_TZ || "Asia/Karachi";
 const moment = require("moment-timezone");
 // require("./schedulers/bonusLeaveCron");
 require("./schedulers/leaveSyncCron");
+require("./schedulers/sessionTimeoutCron"); // ✅ Session timeout cron for auto-logout
 // ---------- Static ----------
 app.use(
   "/uploads",
@@ -195,34 +196,7 @@ app.use(
   "/uploads/chat-attachments",
   express.static(path.join(__dirname, "../uploads/chat-attachments")),
 );
-// ---------- CORS ----------
-// If you need wildcard subdomains, switch to a regex check.
-// For now, this is a strict allowlist.
-// const ALLOWED_ORIGINS = [
-//   "http://admin.virsme.com",
-//   "https://admin.virsme.com",
-//   "http://admin.innand.com",
-//   "https://admin.innand.com",
-//   "http://apis.innand.com",
-//   "https://apis.innand.com",
-//   "http://employee.virsme.com",
-//   "https://employee.virsme.com",
-//   "http://hr.virsme.com",
-//   "https://hr.virsme.com",
-//   "http://innand.com",
-//   "https://innand.com",
-//   "http://www.innand.com",
-//   "https://complete-profile.virsme.com",
-//   "https://www.innand.com",
-//   "https://attendance.virsme.com",
-//   "http://attendance.virsme.com",
-//   "http://localhost:8080",
-//   "http://localhost:8081",
-//   "http://localhost:8082",
-//   "http://localhost:8083",
-//   "http://localhost:3000",
-//   "http://127.0.0.1:3000",
-// ];
+
 app.use(
   cors({
     origin(origin, cb) {
@@ -246,7 +220,6 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 app.use("/api/auth", authRouter);
 app.use("/api/emp-auth", empAuthRouter);
-// ---------- Protected routes ----------
 app.use("/api/employees", employeesRouter); // leave public if intentional
 const attendanceAuth = require("./middleware/attendanceAuth");
 app.use("/api/attendance", attendanceAuth, attendanceRouter);
