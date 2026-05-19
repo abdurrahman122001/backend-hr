@@ -13,6 +13,7 @@ const Attendance = require("../models/Attendance");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const ProfileRevision = require("../models/ProfileRevision");
 const Employee = require("../models/Employees");
+const OvertimeRequest = require("../models/OvertimeRequest");
 const { decrypt } = require("../utils/encryption");
 
 // Helper to safely parse numbers
@@ -96,7 +97,8 @@ exports.getUnifiedToDoList = async (req, res) => {
          LeaveCarryForwardRequest.countDocuments(baseMatch),
          ProfileRevision.countDocuments(baseMatch),
          Attendance.countDocuments(attendanceMatch),
-         status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ employee: { $in: employeeIds } })
+         status === "pending" ? 0 : SalaryRevisionHistory.countDocuments({ employee: { $in: employeeIds } }),
+         OvertimeRequest.countDocuments(baseMatch)
      ]);
 
     const totalCount = counts.reduce((acc, curr) => acc + curr, 0);
@@ -184,7 +186,13 @@ exports.getUnifiedToDoList = async (req, res) => {
       .sort({ revisionDate: -1 })
       .limit(fetchLimit);
 
-const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, bonuses, leaveEncashments, leaveCarryForwards, profileRevisions, attendances, promotions] = await Promise.all([
+    // 13. Overtime Requests
+    const overtimePromise = OvertimeRequest.find(baseMatch)
+      .populate("employee", "name department designation photographUrl")
+      .sort({ createdAt: -1 })
+      .limit(fetchLimit);
+
+const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commissions, taxAdjustments, bonuses, leaveEncashments, leaveCarryForwards, profileRevisions, attendances, promotions, overtimes] = await Promise.all([
        leavePromise,
        loanPromise,
        salaryChangePromise,
@@ -197,7 +205,8 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
        leaveCarryForwardPromise,
        profileRevisionPromise,
        attendancePromise,
-       promotionPromise
+       promotionPromise,
+       overtimePromise
      ]);
 
     // Transform and Unified Format
@@ -390,6 +399,21 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
         });
       }
     });
+
+     // Add Overtime Requests
+     overtimes.forEach(item => {
+       unifiedList.push({
+         _id: item._id,
+         type: "overtime-requests",
+         typeLabel: "Overtime Request",
+         employee: item.employee,
+         status: item.status,
+         date: item.createdAt,
+         amount: (item.hours || 0) + " hr" + ((item.hours !== 1) ? "s" : ""),
+         reason: item.reason,
+         originalData: item
+       });
+     });
 
     // Add Promotions (from history)
     for (const item of (promotions || [])) {
