@@ -28,11 +28,18 @@ exports.getHrRules = async (req, res) => {
     if (!rules) {
       // Return default rules if none exist yet
       return res.status(200).json({
-        graceMinutes: 0,
-        halfDayLateArrivalHours: 4,
-        halfDayEarlyDepartureHours: 4,
-        applyThreeLatesDeduction: false,
+        graceMinutes: 15,
+        halfDayLateArrivalHours: 3,
+        halfDayEarlyDepartureHours: 3,
+        lateMarksForDayOff: 3,
         nonWorkingDays: ["saturday", "sunday"],
+        probationMonths: 3,
+        probationExtensionMonths: 3,
+        noticePeriodDays: 30,
+        annualPaidLeaves: 22,
+        leaveApprovalNoticeDays: 7,
+        dressCode: "Monday to Wednesday: Dress shirts in light corporate shades and dress pants in dark corporate colors are mandatory.\nThursday: Corporate casual attire is allowed but must remain professional.\nFriday: Traditional wear (shalwar kameez) is permitted, but a waistcoat must be worn.",
+        checkedPoints: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]
       });
     }
 

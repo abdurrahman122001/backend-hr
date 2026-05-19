@@ -20,13 +20,41 @@ const hrRulesSchema = new Schema(
       type: Number,
       default: 4,
     },
-    applyThreeLatesDeduction: {
-      type: Boolean,
-      default: false,
-    },
     nonWorkingDays: {
       type: [String],
       enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
+    },
+    lateMarksForDayOff: {
+      type: Number,
+      default: 3,
+    },
+    probationMonths: {
+      type: Number,
+      default: 3,
+    },
+    probationExtensionMonths: {
+      type: Number,
+      default: 3,
+    },
+    noticePeriodDays: {
+      type: Number,
+      default: 30,
+    },
+    annualPaidLeaves: {
+      type: Number,
+      default: 22,
+    },
+    leaveApprovalNoticeDays: {
+      type: Number,
+      default: 7,
+    },
+    dressCode: {
+      type: String,
+      default: "",
+    },
+    checkedPoints: {
+      type: [String],
+      default: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]
     },
   },
   {
