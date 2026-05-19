@@ -2085,6 +2085,38 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
     }
 
+    // 🔥 EMPLOYEE SEARCH FIX: Only regular employees see their own emails
+    // Team Leads, Managers, and Owners can see all search results
+    const currentEmployeeId = req.employee?._id;
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const isTeamLeadOrAbove = ["team_lead", "manager", "owner"].includes(currentUserRole);
+    
+    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isTeamLeadOrAbove) {
+      const me = oid(String(currentEmployeeId));
+      // Add participant filter: employee must be sender OR receiver
+      q.$or = q.$or || [];
+      const participantFilter = {
+        $or: [
+          { sender: me },
+          { receiver: me },
+          { receiver: { $in: [me] } },
+          { isFromClient: true, receiver: me }, // Include client emails to this employee
+          { isFromClient: true, receiver: { $in: [me] } }
+        ]
+      };
+      
+      // If there's already an $or condition, combine them
+      if (q.$or.length > 0) {
+        const existingOr = q.$or;
+        delete q.$or;
+        q.$and = q.$and || [];
+        q.$and.push({ $or: existingOr });
+        q.$and.push(participantFilter);
+      } else {
+        q.$or = participantFilter.$or;
+      }
+    }
+
     // ✅ Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 

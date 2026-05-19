@@ -681,5 +681,115 @@ async function calculateMonthlySummaryInternal(ownerId, employeeId, leaveYear) {
     return { initialBalance: leaveBalance.total || 0, monthlyBalances, totalUsedPaid, totalUsedUnpaid, finalBalance: runningBalance };
 }
 
+/**
+ * GET /api/payroll-access/locked-salary-slips
+ * Fetch locked salary slips for the current employee for the past payroll month.
+ * Employees can view their own locked slips from the previous month.
+ * Returns only display data (not encrypted fields).
+ */
+router.get('/locked-salary-slips', requireEmpAuth, async (req, res) => {
+    try {
+        const employeeId = req.employee._id;
+        const ownerId = req.employee.owner;
+
+        console.log('[PAYROLL-ACCESS] locked-salary-slips request:', {
+            employeeId: employeeId.toString(),
+            ownerId: ownerId.toString(),
+        });
+
+        const ownerObjectId = (ownerId && ObjectId.isValid(ownerId)) ? new ObjectId(ownerId) : ownerId;
+
+        // Calculate past month (fiscal month: 26th to 25th)
+        const now = new Date();
+        let pastMonth, pastYear;
+
+        // If today is between 1st-25th, use previous calendar month
+        // If today is between 26th-31st, use current calendar month
+        if (now.getDate() < 26) {
+            // Go back one month
+            const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+            pastMonth = prevDate.toLocaleString('en-US', { month: 'long' });
+            pastYear = prevDate.getFullYear().toString();
+        } else {
+            // Use current month
+            pastMonth = now.toLocaleString('en-US', { month: 'long' });
+            pastYear = now.getFullYear().toString();
+        }
+
+        console.log('[PAYROLL-ACCESS] Fetching locked slips for past month:', { pastMonth, pastYear });
+
+        // Fetch locked salary slips for this employee for the past month
+        const lockedSlips = await SalarySlip.find({
+            owner: ownerObjectId,
+            employee: employeeId,
+            month: pastMonth,
+            year: pastYear,
+            isLocked: true,
+        })
+            .populate('employee', 'name designation department companyEmail joiningDate')
+            .lean();
+
+        console.log('[PAYROLL-ACCESS] Found locked slips:', lockedSlips.length);
+
+        // Return only necessary display data (not encrypted fields)
+        const displaySlips = lockedSlips.map(slip => ({
+            _id: slip._id,
+            month: slip.month,
+            year: slip.year,
+            isLocked: true,
+            employee: slip.employee,
+            createdAt: slip.createdAt,
+            updatedAt: slip.updatedAt,
+            // Include summary fields for display (non-encrypted)
+            // These will be decrypted on frontend if needed
+            grossSalary: slip.grossSalary,
+            totalDeductions: slip.totalDeductions,
+            netPayable: slip.netPayable,
+            // Include all encrypted fields for decryption on frontend
+            basic: slip.basic,
+            dearnessAllowance: slip.dearnessAllowance,
+            houseRentAllowance: slip.houseRentAllowance,
+            conveyanceAllowance: slip.conveyanceAllowance,
+            medicalAllowance: slip.medicalAllowance,
+            utilityAllowance: slip.utilityAllowance,
+            autoAllowance: slip.autoAllowance,
+            fuelAllowance: slip.fuelAllowance,
+            dislocationAllowance: slip.dislocationAllowance,
+            overtimeCompensation: slip.overtimeCompensation,
+            leaveEncashment: slip.leaveEncashment,
+            bonus: slip.bonus,
+            arrears: slip.arrears,
+            incentive: slip.incentive,
+            othersAllowances: slip.othersAllowances,
+            loanBenefits: slip.loanBenefits,
+            eobiDeduction: slip.eobiDeduction,
+            sessiDeduction: slip.sessiDeduction,
+            providentFundDeduction: slip.providentFundDeduction,
+            gratuityFundDeduction: slip.gratuityFundDeduction,
+            taxDeduction: slip.taxDeduction,
+            leaveDeductions: slip.leaveDeductions,
+            lateDeductions: slip.lateDeductions,
+            advanceSalaryDeductions: slip.advanceSalaryDeductions,
+            vehicleLoanDeduction: slip.vehicleLoanDeduction,
+            otherLoanDeductions: slip.otherLoanDeductions,
+            medicalInsurance: slip.medicalInsurance,
+            lifeInsurance: slip.lifeInsurance,
+            penalties: slip.penalties,
+            othersDeductions: slip.othersDeductions,
+            totalAllowances: slip.totalAllowances,
+        }));
+
+        res.json({
+            lockedSlips: displaySlips,
+            pastMonth,
+            pastYear,
+            hasLockedSlips: displaySlips.length > 0,
+        });
+    } catch (err) {
+        console.error('[PAYROLL-ACCESS] locked-salary-slips error:', err);
+        res.status(500).json({ error: 'Server error' });
+    }
+});
+
 module.exports = router;
 
