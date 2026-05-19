@@ -20,10 +20,6 @@ const hrRulesSchema = new Schema(
       type: Number,
       default: 4,
     },
-    applyThreeLatesDeduction: {
-      type: Boolean,
-      default: false,
-    },
     nonWorkingDays: {
       type: [String],
       enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
@@ -52,13 +48,13 @@ const hrRulesSchema = new Schema(
       type: Number,
       default: 7,
     },
-    sandwichLeavePolicy: {
-      type: Boolean,
-      default: true,
-    },
     dressCode: {
       type: String,
       default: "",
+    },
+    checkedPoints: {
+      type: [String],
+      default: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]
     },
   },
   {
