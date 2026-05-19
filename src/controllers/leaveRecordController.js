@@ -3,7 +3,7 @@ const LeaveRecord = require("../models/LeaveRecord");
 // Database record fetch (editable, as stored)
 exports.getMyLeaveRecordFromDb = async (req, res) => {
   try {
-    const owner = req.user?._id;
+    const owner = req.user?.owner || req.user?._id;
     if (!owner) {
       return res.status(401).json({ success: false, error: 'Unauthorized: user not found' });
     }
@@ -174,7 +174,7 @@ exports.getMyLeaveRecord = async (req, res) => {
 
 exports.getMyTotalEntitled = async (req, res) => {
   try {
-    const owner = req.user._id;
+    const owner = req.user?.owner || req.user?._id;
     // Only select the totalEntitled field from the document
     const record = await LeaveRecord.findOne({ owner }).select("totalEntitled");
     if (!record) {

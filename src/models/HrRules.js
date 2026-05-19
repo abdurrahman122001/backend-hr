@@ -28,6 +28,38 @@ const hrRulesSchema = new Schema(
       type: [String],
       enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
     },
+    lateMarksForDayOff: {
+      type: Number,
+      default: 3,
+    },
+    probationMonths: {
+      type: Number,
+      default: 3,
+    },
+    probationExtensionMonths: {
+      type: Number,
+      default: 3,
+    },
+    noticePeriodDays: {
+      type: Number,
+      default: 30,
+    },
+    annualPaidLeaves: {
+      type: Number,
+      default: 22,
+    },
+    leaveApprovalNoticeDays: {
+      type: Number,
+      default: 7,
+    },
+    sandwichLeavePolicy: {
+      type: Boolean,
+      default: true,
+    },
+    dressCode: {
+      type: String,
+      default: "",
+    },
   },
   {
     timestamps: true,
