@@ -2211,6 +2211,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
     // ✅ ONLY update the existing message - NO new message creation
     msg.approvalStatus = "disapproved";
+    msg.disapprovedBy = req.employee._id;
 
     // Store disapproval note if provided
     if (disapprovalNote && disapprovalNote.trim() !== "") {
@@ -2229,6 +2230,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
+      { path: "disapprovedBy", select: "_id name companyEmail role" },
     ]);
 
     // 🔥 FIXED: Emit specific disapproval event

@@ -785,8 +785,8 @@ exports.listMessages = async function listMessages(req, res) {
           select: "_id name companyEmail",
         },
         { path: "editedBy", select: "_id name companyEmail" },
-        { path: "approvedBy", select: "_id name companyEmail" },
-        { path: "disapprovedBy", select: "_id name companyEmail" },
+        { path: "approvedBy", select: "_id name companyEmail role" },
+        { path: "disapprovedBy", select: "_id name companyEmail role" },
       ])
       .lean();
 
@@ -1086,8 +1086,8 @@ exports.listMessagesForManager = async function listMessagesForManager(
           select: "_id name companyEmail",
         },
         { path: "editedBy", select: "_id name companyEmail" },
-        { path: "approvedBy", select: "_id name companyEmail" },
-        { path: "disapprovedBy", select: "_id name companyEmail" },
+        { path: "approvedBy", select: "_id name companyEmail role" },
+        { path: "disapprovedBy", select: "_id name companyEmail role" },
       ])
       .lean();
 
@@ -1725,7 +1725,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
-      { path: "approvedBy", select: "_id name companyEmail" },
+      { path: "approvedBy", select: "_id name companyEmail role" },
       { path: "groupId", select: "_id name" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
@@ -1875,7 +1875,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-      { path: "disapprovedBy", select: "_id name companyEmail" },
+      { path: "disapprovedBy", select: "_id name companyEmail role" },
     ]);
 
     // Add client supervision info

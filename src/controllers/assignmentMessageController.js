@@ -385,23 +385,13 @@ async function applyVisibility(q, req) {
   const juniorIds = juniorLinks.map((link) => oid(link.junior));
 
   // 👁️ ROLE/HIERARCHY VISIBILITY
-  // Managers/Owners can see ALL messages (including pending)
-  // Team Leads and Seniors see "approved/sent" messages, or messages they are involved in
+  // Team Leads, Managers, Owners, and Seniors see messages based on role/hierarchy
   const roleHierarchyFilter = {
     $or: [
-      // Managers/Owners see all messages (including pending) for their organization
-      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
-
-      // For non-managers, apply approvalStatus: { $ne: "pending" } restriction for hierarchy-based viewing
-      {
-        approvalStatus: { $ne: "pending" },
-        $or: [
-          // Team leads see all "approved/sent" messages for their organization
-          ...(currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
-          // Seniors see "approved/sent" messages from their juniors
-          ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
-        ]
-      }
+      // Managers/Owners/Team Leads see all messages for their organization
+      ...(currentUserRole === "manager" || currentUserRole === "owner" || currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
+      // Seniors see messages from their juniors
+      ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
     ]
   };
 
@@ -419,9 +409,18 @@ async function applyVisibility(q, req) {
   const inboxVisibility = {
     $or: [
       isParticipant,
-      roleHierarchyFilter,
-      organizationSentVisibility,
-      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
+      {
+        $and: [
+          { approvalStatus: { $ne: "pending" } },
+          {
+            $or: [
+              roleHierarchyFilter,
+              organizationSentVisibility,
+              ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
+            ]
+          }
+        ]
+      }
     ]
   };
 
