@@ -72,6 +72,7 @@ const EmployeeSchema = new Schema(
         message: "Email cannot be empty",
       },
     }, // Personal Email Address
+    employeeId: { type: String, default: "" }, // System generated employee ID
     companyEmail: { type: String, default: "", maxlength: 254 }, // Office Email Address - 254 chars
     permanentAddress: { type: String, maxlength: 200 }, // 200 chars for address
     presentAddress: { type: String, maxlength: 200 }, // 200 chars for address
@@ -93,6 +94,8 @@ const EmployeeSchema = new Schema(
     emergencyContactNumber: { type: String, maxlength: 20 },
     setPasswordToken: { type: String },
     setPasswordTokenExpires: { type: Date },
+    resetPasswordToken: { type: String },
+    resetPasswordExpires: { type: Date },
     password: { type: String },
     emergencyNo: { type: String }, // If used
 

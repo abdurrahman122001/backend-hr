@@ -351,6 +351,38 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       return res.status(404).json({ error: "Employee not found" });
     }
 
+    // Auto-generate employeeId if missing
+    if (!employee.employeeId) {
+      const CompanyProfile = require("../models/CompanyProfile");
+      const company = await CompanyProfile.findOne({ owner: employee.owner }).lean();
+      
+      const getCompanyShortcut = (name) => {
+        if (!name) return "EMP";
+        const cleaned = name.replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "");
+        const words = cleaned.trim().split(/\s+/);
+        if (words.length >= 3) return (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
+        if (words.length === 2) return (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
+        if (words.length === 1) return words[0].substring(0, 3).toUpperCase();
+        return "EMP";
+      };
+
+      const getEmployeeInitials = (name) => {
+        if (!name) return "XX";
+        const parts = name.trim().split(/\s+/);
+        if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+        if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+        return "XX";
+      };
+
+      const companyShortcut = getCompanyShortcut(company?.name);
+      const initials = getEmployeeInitials(employee.name);
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
+
+      employee.employeeId = generatedId;
+      await Employee.updateOne({ _id: employee._id }, { $set: { employeeId: generatedId } });
+    }
+
     const salarySlip = await SalarySlip.findOne({ employee: req.params.id });
 
     // fetch shifts (by owner)
@@ -494,6 +526,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       "userAccount",
       "role",
       "status",
+      "employeeId",
       "resignationDate",
       "noticePeriodEndDate",
       "terminationDate",
