@@ -31,6 +31,7 @@ exports.getHrRules = async (req, res) => {
         graceMinutes: 15,
         halfDayLateArrivalHours: 3,
         halfDayEarlyDepartureHours: 3,
+        minimumHalfDayPresenceHours: 3,
         lateMarksForDayOff: 3,
         nonWorkingDays: ["saturday", "sunday"],
         probationMonths: 3,

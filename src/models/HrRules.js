@@ -20,6 +20,10 @@ const hrRulesSchema = new Schema(
       type: Number,
       default: 4,
     },
+    minimumHalfDayPresenceHours: {
+      type: Number,
+      default: 3,
+    },
     nonWorkingDays: {
       type: [String],
       enum: ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"],
