@@ -133,9 +133,18 @@ async function applyVisibility(q, req) {
   const inboxVisibility = {
     $or: [
       isParticipant,
-      roleHierarchyFilter,
-      organizationSentVisibility,
-      ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
+      {
+        $and: [
+          { approvalStatus: { $ne: "pending" } },
+          {
+            $or: [
+              roleHierarchyFilter,
+              organizationSentVisibility,
+              ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
+            ]
+          }
+        ]
+      }
     ]
   };
 
@@ -324,11 +333,8 @@ exports.getMessage = async function getMessage(req, res) {
     // Check Manager/Owner/Team Lead access
     if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
       if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
-        // Managers and Owners see EVERYTHING (including pending)
-        if (["manager", "owner"].includes(currentUserRole)) {
-          hasAccess = true;
-        } else if (msg.approvalStatus !== "pending") {
-          // Team leads see all organization mail ONLY if it's not pending
+        // Managers, Owners, and Team Leads can view organization mail ONLY if it is not pending
+        if (msg.approvalStatus !== "pending") {
           hasAccess = true;
         }
       }
@@ -1571,6 +1577,8 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
+          { path: "approvedBy", select: "_id name companyEmail role" },
+          { path: "disapprovedBy", select: "_id name companyEmail role" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),

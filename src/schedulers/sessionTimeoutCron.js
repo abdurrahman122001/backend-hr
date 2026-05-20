@@ -120,7 +120,7 @@ cron.schedule("*/10 * * * * *", async () => {
         }
 
         // Determine if should mark as Half Day (using halfDayLogoutThreshold from above)
-        const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+        const shouldMarkHalfDay = !isCrossMidnightLogout && !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {
           finalStatus = "Half Day";

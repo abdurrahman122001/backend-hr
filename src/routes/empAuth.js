@@ -534,6 +534,205 @@ async function syncSupervision(employeeId, ownerId) {
   }
 }
 
+// --- Forgot Password ---
+router.post("/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  try {
+    const emp = await Employee.findOne({ companyEmail: email });
+    if (!emp) {
+      return res.status(404).json({ message: "No account with that email." });
+    }
+
+    // Generate token
+    const token = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+    // Save hashed token & expiry on employee
+    emp.resetPasswordToken = tokenHash;
+    emp.resetPasswordExpires = Date.now() + 3600000; // 1 hour
+
+    await emp.save();
+
+    // Compose reset link
+    const frontendURL = process.env.FRONTEND_BASE_URL || process.env.APP_URL || "http://localhost:8080";
+    const resetURL = `${frontendURL}/reset-password/${token}`;
+    const appName = "Employee Portal";
+    const primaryColor = "#2563eb";
+    const html = `
+    <!DOCTYPE html>
+    <html lang="en" style="background: #f4f4ff;">
+      <head>
+        <meta charset="UTF-8" />
+        <title>Password Reset</title>
+        <meta name="viewport" content="width=device-width,initial-scale=1" />
+        <style>
+          @import url('https://fonts.googleapis.com/css2?family=Inter:wght@500;700;900&family=Montserrat:wght@600;800&display=swap');
+          body {
+            font-family: 'Inter', 'Montserrat', 'Segoe UI', Arial, sans-serif;
+            background: linear-gradient(130deg, #f4f4ff 60%, #f9fafc 100%, #e0e7ff 0%) fixed;
+            min-height: 100vh;
+            margin: 0;
+            padding: 0;
+          }
+          .container {
+            max-width: 480px;
+            margin: 44px auto;
+            background: #fff;
+            border-radius: 22px;
+            box-shadow: 0 8px 40px 0 #0033ff15, 0 2px 8px 0 #1e40af12;
+            padding: 34px 30px 30px 30px;
+            text-align: center;
+            position: relative;
+            border: 1px solid #eef2ff;
+            animation: pop-in 0.7s cubic-bezier(0.23,1,0.32,1);
+          }
+          @keyframes pop-in {
+            0% { transform: translateY(30px) scale(0.97); opacity: 0.1; }
+            100% { transform: none; opacity: 1; }
+          }
+          h1 {
+            font-family: 'Montserrat', 'Inter', Arial, sans-serif;
+            font-size: 2.1rem;
+            color: ${primaryColor};
+            font-weight: 800;
+            margin-bottom: 10px;
+            letter-spacing: -1px;
+          }
+          .subtitle {
+            font-size: 1.13rem;
+            color: #3d4266;
+            margin-bottom: 30px;
+            background: linear-gradient(90deg, #e0e7ff 30%, #fff 100%);
+            padding: 8px 0 10px 0;
+            border-radius: 10px;
+            box-shadow: 0 2px 8px #2563eb08;
+          }
+          .btn {
+            display: inline-block;
+            background: #2563eb;
+            color: #fff !important;
+            font-family: 'Montserrat', 'Inter', Arial, sans-serif;
+            font-size: 1.12rem;
+            font-weight: 800;
+            text-decoration: none;
+            border-radius: 10px;
+            padding: 16px 38px;
+            letter-spacing: 0.04em;
+            margin: 25px 0 14px 0;
+            box-shadow: 0 4px 18px -3px #2563eb33;
+            border: none;
+            transition: background 0.2s, transform 0.13s;
+          }
+          .btn:hover {
+            background: linear-gradient(90deg, #003ecf, #2563eb 70%);
+            color: #fff !important;
+            transform: translateY(-2px) scale(1.03);
+            box-shadow: 0 8px 24px -6px #2563eb4a;
+          }
+          .info {
+            font-size: 1.04rem;
+            color: #61677c;
+            margin: 22px 0 0 0;
+          }
+          .expire {
+            font-size: 1rem;
+            color: #d60000;
+            margin-top: 8px;
+            font-weight: 600;
+            display: block;
+          }
+          .footer {
+            color: #b4b9c6;
+            font-size: 1rem;
+            margin: 42px 0 0 0;
+            text-align: center;
+            letter-spacing: 0.01em;
+            border-top: 1px solid #f4f4ff;
+            padding-top: 17px;
+          }
+          .card-accent {
+            width: 100%;
+            height: 6px;
+            background: linear-gradient(90deg, #4f46e5, #2563eb 60%, #22d3ee 100%);
+            border-radius: 11px 11px 0 0;
+            margin: -34px 0 26px 0;
+          }
+          @media (max-width: 540px) {
+            .container { padding: 18px 4vw 22px 4vw; }
+            h1 { font-size: 1.28rem; }
+            .btn { padding: 14px 2vw; font-size: 1rem; }
+            .card-accent { margin-top: -18px; }
+          }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="card-accent"></div>
+          <h1>Reset Your Password</h1>
+          <div class="subtitle">
+            Hi ${emp.name || "there"},<br/>
+            You requested to reset your password for your <b>${appName}</b> account.
+          </div>
+          <a class="btn" href="${resetURL}" target="_blank">Reset Password</a>
+          <div class="info">
+            Didn’t request this? It’s safe to ignore this email.<br/>
+            <span class="expire">This link will expire in 1 hour.</span>
+          </div>
+          <div class="footer">
+            &copy; ${new Date().getFullYear()} ${appName} &mdash; All rights reserved.
+          </div>
+        </div>
+      </body>
+    </html>
+    `;
+
+    // Send email using local sendMail in empAuth.js
+    await sendMail({
+      to: emp.companyEmail,
+      subject: "Password Reset Request",
+      html,
+    });
+
+    res.json({ message: "Password reset link sent if email exists." });
+  } catch (err) {
+    console.error("[ForgotPassword Error]", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
+// --- Reset Password ---
+router.post("/reset-password/:token", async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+  const bcrypt = require("bcrypt");
+
+  try {
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+    const emp = await Employee.findOne({
+      resetPasswordToken: tokenHash,
+      resetPasswordExpires: { $gt: Date.now() },
+    });
+
+    if (!emp) {
+      return res.status(400).json({ message: "Invalid or expired token." });
+    }
+
+    // Hash password and update
+    const hash = await bcrypt.hash(password, 10);
+    emp.password = hash;
+    emp.resetPasswordToken = undefined;
+    emp.resetPasswordExpires = undefined;
+
+    await emp.save();
+
+    res.json({ message: "Password has been reset. Please login." });
+  } catch (err) {
+    console.error("[ResetPassword Error]", err);
+    res.status(500).json({ message: "Server error", error: err.message });
+  }
+});
+
 const codes = new Map();
 
 router.post("/login", async (req, res) => {
@@ -559,11 +758,19 @@ router.post("/login", async (req, res) => {
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 
     // 1. Core Status Checks
-    if (emp.status && (emp.status.toLowerCase() === "offboarded" || emp.status.toLowerCase() === "review")) {
+    if (emp.status && emp.status.toLowerCase() === "offboarded") {
       return res.status(403).json({
         error: "Account Disabled",
         message:
           "Your account has been offboarded. Please contact HR if you believe this is a mistake.",
+      });
+    }
+
+    if (emp.status && emp.status.toLowerCase() === "review") {
+      return res.status(403).json({
+        error: "Account Under Review",
+        message:
+          "Your account is currently under review. Please contact HR for further information.",
       });
     }
 
@@ -612,7 +819,7 @@ router.post("/login", async (req, res) => {
 
     // 3. SECURITY GATE: CHECK IF DEVICE IS TRUSTED
     // ✅ DEV MODE BYPASSED: User wants to test 2FA flow
-    const devModeAutoTrust = false; 
+    const devModeAutoTrust = false;
 
     const isTrusted = emp.trustedDevices?.some(
       (d) =>
@@ -1071,12 +1278,12 @@ router.post("/logout", requireAuth, async (req, res) => {
     // If this is a logout before 9:00 PM and shift is not complete,
     // mark the attendance as Half Day and apply real-time half-day deduction.
     // BUT: If already marked as Half Day from login (after 6 PM), don't apply deduction again
-    const shouldMarkHalfDay = !isShiftComplete && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
-    
+    const shouldMarkHalfDay = !isCrossMidnightLogout && !isShiftComplete && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
+
     if (shouldMarkHalfDay) {
       finalStatus = "Half Day";
       console.log(`📊 [LOGOUT] Marking as Half Day - logout at ${actualLogoutTime} (before 9 PM), shift not complete`);
-      
+
       // Only apply deduction if this is a NEW Half Day (not from login)
       // If originalStatus was already "Half Day", deduction was already applied at login
       if (originalStatusBeforeLogout !== "Half Day") {
@@ -1282,7 +1489,10 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       date: attendanceDate
     });
 
+    let wasRestored = false;
+
     if (attendance && (attendance.checkOut || attendance.logoutTime)) {
+      wasRestored = true;
       const previousStatus = attendance.status;
       const statusToRestore = attendance.originalStatus || attendance.status;
       const isAutoLogoutHalfDay = attendance.halfDayFromAutoLogout === true;
@@ -1329,6 +1539,7 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
 
     // Re-activate session if it wasn't already active
     if (session && !session.active) {
+      wasRestored = true;
       session.active = true;
       session.isAutoLogout = false;
       session.lastSeen = nowKarachi.toDate();
@@ -1341,7 +1552,7 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       console.info(`🔄 [REACTIVATE-SESSION] Session already active for ${employeeId} - status restored if needed`);
     }
 
-    return res.json({ status: "success", message: "Session reactivated, attendance restored" });
+    return res.json({ status: "success", message: "Session reactivated, attendance restored", wasRestored });
   } catch (err) {
     console.error("❌ [REACTIVATE-SESSION] Error:", err);
     return res.status(500).json({ error: "Server error during reactivation" });

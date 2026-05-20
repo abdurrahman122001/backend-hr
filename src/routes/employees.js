@@ -3,7 +3,7 @@ const router = express.Router();
 const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
-const requireAuth = require("../middleware/auth");
+const CompanyProfile = require("../models/CompanyProfile");
 const {
   getUpcomingBirthdays,
   updateEmployeeRole,
@@ -16,8 +16,35 @@ const {
 } = require("../controllers/employeeController");
 const upload = require("../middleware/upload");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
+const requireAuth = unifiedAuth; // Alias for backward compatibility
 const attendanceAuth = require("../middleware/attendanceAuth");
 
+
+function getCompanyShortcut(companyName) {
+  if (!companyName) return "EMP";
+  const cleaned = companyName.replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "");
+  const words = cleaned.trim().split(/\s+/);
+  if (words.length >= 3) return (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
+  if (words.length === 2) return (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
+  if (words.length === 1) return words[0].substring(0, 3).toUpperCase();
+  return "EMP";
+}
+
+function getEmployeeInitials(name) {
+  if (!name) return "XX";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return "XX";
+}
+
+function getEmployeeInitials(name) {
+  if (!name) return "XX";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return "XX";
+}
 
 function getEffectiveOwnerId(user) {
   if (!user) return null;
@@ -120,6 +147,24 @@ router.get("/", unifiedAuth, async (req, res) => {
       .populate("shifts", "name")
       .sort({ name: 1 })
       .lean();
+
+    // Auto-generate employeeId if missing
+    const missingIdEmps = list.filter((emp) => !emp.employeeId);
+    if (missingIdEmps.length > 0) {
+      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
+      const companyShortcut = getCompanyShortcut(company?.name);
+      
+      await Promise.all(
+        missingIdEmps.map(async (emp) => {
+          const initials = getEmployeeInitials(emp.name);
+          const randomNum = Math.floor(1000 + Math.random() * 9000);
+          const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
+          
+          await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
+          emp.employeeId = generatedId;
+        })
+      );
+    }
 
     res.json({
       status: "success",
@@ -269,6 +314,24 @@ router.get("/list", requireAuth, async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
+    // Auto-generate employeeId if missing
+    const missingIdEmps = emps.filter((emp) => !emp.employeeId);
+    if (missingIdEmps.length > 0) {
+      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
+      const companyShortcut = getCompanyShortcut(company?.name);
+      
+      await Promise.all(
+        missingIdEmps.map(async (emp) => {
+          const initials = getEmployeeInitials(emp.name);
+          const randomNum = Math.floor(1000 + Math.random() * 9000);
+          const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
+          
+          await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
+          emp.employeeId = generatedId;
+        })
+      );
+    }
+
     res.json({ status: "success", data: emps });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message });
@@ -294,6 +357,20 @@ router.get("/:id", requireAuth, async (req, res) => {
       .lean();
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    // Generate employeeId if missing
+    if (!emp.employeeId) {
+      // Fetch company profile to get company name
+      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
+      const companyShortcut = getCompanyShortcut(company?.name);
+      const initials = getEmployeeInitials(emp.name);
+      const randomNum = Math.floor(1000 + Math.random() * 9000);
+      const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
+      // Update employee document
+      await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
+      emp.employeeId = generatedId;
+    }
+
     res.json({ status: "success", employee: emp });
   } catch (err) {
     res.status(500).json({ error: err.message });
