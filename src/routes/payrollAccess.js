@@ -48,7 +48,16 @@ router.get('/', requireAuth, async (req, res) => {
             .populate('scope', 'name companyEmail designation department')
             .sort({ createdAt: -1 })
             .lean();
-        res.json(grants);
+
+        // Normalise each grant so the frontend always receives accessTypes[]
+        const normalised = grants.map(g => ({
+            ...g,
+            accessTypes: Array.isArray(g.accessTypes) && g.accessTypes.length > 0
+                ? g.accessTypes
+                : (g.accessType ? [g.accessType] : ['view']),
+        }));
+
+        res.json(normalised);
     } catch (err) {
         console.error('[PAYROLL-ACCESS] GET error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -57,53 +66,69 @@ router.get('/', requireAuth, async (req, res) => {
 
 /**
  * POST /api/payroll-access
- * Grant or update payroll access for an employee
- * Body: { grantedTo, accessType: 'view'|'edit', scope?: [empId, ...], notes? }
+ * Grant or update payroll access for one or more employees
+ * Body: { grantedTo: empId | empId[], accessTypes: ['view','view_slips','edit','lock'], scope?: [empId,...], notes? }
  */
 router.post('/', requireAuth, async (req, res) => {
     try {
         const ownerId = req.user.owner || req.user._id;
-        const { grantedTo, accessType, scope, notes } = req.body;
+        let { grantedTo, accessTypes, accessType, scope, notes } = req.body;
 
-        console.log('[PAYROLL-ACCESS] POST - Granting access:', {
-            ownerId: ownerId.toString(),
-            grantedTo,
-            accessType,
-            scopeCount: scope ? scope.length : 0,
-        });
-
-        if (!grantedTo || !['view', 'edit'].includes(accessType)) {
-            return res.status(400).json({ error: 'grantedTo and valid accessType (view|edit) are required.' });
+        // Legacy single value → promote to array
+        if (!accessTypes && accessType) {
+            accessTypes = [accessType];
+        }
+        if (!Array.isArray(accessTypes) || accessTypes.length === 0) {
+            accessTypes = ['view'];
         }
 
-        const grant = await PayrollAccess.findOneAndUpdate(
-            { owner: ownerId, grantedTo },
-            {
-                $set: {
-                    owner: ownerId,
-                    grantedTo,
-                    accessType,
-                    scope: scope || [],
-                    notes: notes || '',
-                    grantedBy: req.user._id,
-                    active: true,
+        // Validate
+        const validTypes = ['view', 'view_slips', 'edit', 'lock'];
+        const invalid = accessTypes.filter(t => !validTypes.includes(t));
+        if (invalid.length > 0) {
+            return res.status(400).json({ error: `Invalid access type(s): ${invalid.join(', ')}` });
+        }
+
+        if (!grantedTo) {
+            return res.status(400).json({ error: 'grantedTo (employee) is required.' });
+        }
+
+        // Support both single employee and array input
+        const grantedToList = Array.isArray(grantedTo) ? grantedTo : [grantedTo];
+
+        const results = [];
+        for (const empId of grantedToList) {
+            const grant = await PayrollAccess.findOneAndUpdate(
+                { owner: ownerId, grantedTo: empId },
+                {
+                    $set: {
+                        owner: ownerId,
+                        grantedTo: empId,
+                        accessTypes,
+                        scope: Array.isArray(scope) ? scope : [],
+                        notes: notes || '',
+                        grantedBy: req.user._id,
+                        active: true,
+                    },
                 },
-            },
-            { upsert: true, new: true, setDefaultsOnInsert: true }
-        );
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+            );
 
-        console.log('[PAYROLL-ACCESS] Grant created/updated:', {
-            grantId: grant._id.toString(),
-            active: grant.active,
-            accessType: grant.accessType,
-        });
+            console.log('[PAYROLL-ACCESS] Grant created/updated:', {
+                grantId: grant._id.toString(),
+                active: grant.active,
+                accessTypes: grant.accessTypes,
+            });
 
-        const populated = await PayrollAccess.findById(grant._id)
-            .populate('grantedTo', 'name companyEmail designation department')
-            .populate('scope', 'name companyEmail designation department')
-            .lean();
+            const populated = await PayrollAccess.findById(grant._id)
+                .populate('grantedTo', 'name companyEmail designation department')
+                .populate('scope', 'name companyEmail designation department')
+                .lean();
 
-        res.json({ message: 'Payroll access granted successfully.', grant: populated });
+            results.push(populated);
+        }
+
+        res.json({ message: `${results.length} grant(s) created/updated.`, grants: results });
     } catch (err) {
         console.error('[PAYROLL-ACCESS] POST error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -112,14 +137,23 @@ router.post('/', requireAuth, async (req, res) => {
 
 /**
  * PATCH /api/payroll-access/:id
- * Update an existing grant (e.g., change accessType or scope)
+ * Update an existing grant (e.g., change accessTypes or scope)
  */
 router.patch('/:id', requireAuth, async (req, res) => {
     try {
         const ownerId = req.user.owner || req.user._id;
-        const { accessType, scope, notes, active } = req.body;
+        let { accessTypes, accessType, scope, notes, active } = req.body;
+
+        // Legacy single value → promote to array
+        if (accessTypes === undefined && accessType) {
+            accessTypes = [accessType];
+        }
+        if (accessTypes !== undefined && !Array.isArray(accessTypes)) {
+            accessTypes = [accessTypes];
+        }
 
         const update = {};
+        if (accessTypes !== undefined) update.accessTypes = accessTypes;
         if (accessType !== undefined) update.accessType = accessType;
         if (scope !== undefined) update.scope = scope;
         if (notes !== undefined) update.notes = notes;
@@ -134,7 +168,16 @@ router.patch('/:id', requireAuth, async (req, res) => {
             .populate('scope', 'name companyEmail designation department');
 
         if (!grant) return res.status(404).json({ error: 'Grant not found.' });
-        res.json({ message: 'Payroll access updated.', grant });
+
+        res.json({
+            message: 'Payroll access updated.',
+            grant: {
+                ...grant,
+                accessTypes: Array.isArray(grant.accessTypes) && grant.accessTypes.length > 0
+                    ? grant.accessTypes
+                    : (grant.accessType ? [grant.accessType] : ['view']),
+            },
+        });
     } catch (err) {
         console.error('[PAYROLL-ACCESS] PATCH error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -203,13 +246,23 @@ router.get('/my-access', requireEmpAuth, async (req, res) => {
             return res.json({ hasAccess: false });
         }
 
+        const accessTypes = Array.isArray(grant.accessTypes) && grant.accessTypes.length > 0
+            ? grant.accessTypes
+            : (grant.accessType ? [grant.accessType] : ['view']);
+
         console.log('[PAYROLL-ACCESS] Grant matched:', {
-            accessType: grant.accessType,
+            accessTypes,
             hasScope: grant.scope && grant.scope.length > 0,
             scopeCount: grant.scope ? grant.scope.length : 0,
         });
 
-        res.json({ hasAccess: true, accessType: grant.accessType, scope: grant.scope || [], notes: grant.notes });
+        res.json({
+            hasAccess: true,
+            accessTypes,
+            accessType: accessTypes[0], // backward-compat single value
+            scope: grant.scope || [],
+            notes: grant.notes,
+        });
     } catch (err) {
         console.error('[PAYROLL-ACCESS] my-access error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -340,7 +393,8 @@ router.get('/my-salary-slips', requireEmpAuth, async (req, res) => {
 
         res.json({
             salarySlips: salaryData || [],
-            accessType: grant.accessType,  // 'view' or 'edit'
+            accessTypes: grant.accessTypes || [grant.accessType || 'view'],  // array of rights
+            accessType: grant.accessType || 'view',    // backward-compat single value
             scope: grant.scope && grant.scope.length > 0 ? 'restricted' : 'all', // Show scope type
         });
     } catch (err) {

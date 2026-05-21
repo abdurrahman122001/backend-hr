@@ -15,11 +15,17 @@ const AttendanceAccessSchema = new Schema(
             ref: 'Employee',
             required: true,
         },
-        // Access level: 'view' = read-only, 'edit' = view + mark/edit attendance
+        // Access types array – multiple rights can be selected at once
+        // e.g. ['view', 'mark', 'edit', 'approve']
+        accessTypes: [{
+            type: String,
+            enum: ['view', 'mark', 'edit', 'approve'],
+            default: undefined,
+        }],
+        // Legacy single-value field (kept for backward-compat read)
         accessType: {
             type: String,
             enum: ['view', 'edit'],
-            default: 'view',
         },
         // Optional: restrict to specific employees. Empty = access to ALL employees.
         scope: [
@@ -41,6 +47,21 @@ const AttendanceAccessSchema = new Schema(
     },
     { timestamps: true }
 );
+
+// Returns the effective access types array: prefer new accessTypes, fall back to legacy accessType
+function getEffectiveAccessTypes(doc) {
+    const at = Array.isArray(doc.accessTypes) ? doc.accessTypes : [];
+    if (at.length > 0) return at;
+    if (doc.accessType) return [doc.accessType];
+    return ['view']; // safe default
+}
+
+AttendanceAccessSchema.virtual('effectiveAccessTypes').get(function () {
+    return getEffectiveAccessTypes(this);
+});
+
+AttendanceAccessSchema.set('toJSON', { virtuals: true });
+AttendanceAccessSchema.set('toObject', { virtuals: true });
 
 // One grant per employee per owner — upsert-friendly
 AttendanceAccessSchema.index({ owner: 1, grantedTo: 1 }, { unique: true });

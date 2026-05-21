@@ -3,10 +3,20 @@ const SalarySlip = require("../models/Salaries");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
+const CompanyProfile = require("../models/CompanyProfile");
 const { encrypt, decrypt } = require("../utils/encryption");
 const { sendCompleteProfileLink } = require("../services/profileEmailService");
 const path = require("path");
 const fs = require("fs");
+
+function _getCompanyShortcut(name) {
+  if (!name) return "EMP";
+  const cleaned = name.replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "");
+  const words = cleaned.trim().split(/\s+/);
+  if (words.length >= 3) return (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
+  if (words.length === 2) return (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
+  return words[0].substring(0, 3).toUpperCase();
+}
 
 /** --- helpers --- */
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
@@ -1094,6 +1104,28 @@ exports.getAllMasterSalaries = async (req, res) => {
       owner: ownerId,
       isTrashed: { $ne: true },
     }).lean();
+
+    // Auto-generate employeeId for any employees that are missing it
+    const missingIdEmps = allEmployees.filter((e) => !e.employeeId);
+    if (missingIdEmps.length > 0) {
+      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
+      const shortcut = _getCompanyShortcut(company?.name);
+      const currentCounter = company?.employeeIdSequence ?? 0;
+      const year = new Date().getFullYear();
+      await CompanyProfile.findOneAndUpdate(
+        { owner: ownerId },
+        { $inc: { employeeIdSequence: missingIdEmps.length } },
+        { new: true, upsert: true }
+      );
+      for (let i = 0; i < missingIdEmps.length; i++) {
+        const seq = String(currentCounter + i + 1).padStart(3, "0");
+        const genId = `${shortcut}-${year}-${seq}`;
+        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: genId } });
+        missingIdEmps[i].employeeId = genId;
+        const emp = allEmployees.find((e) => String(e._id) === String(missingIdEmps[i]._id));
+        if (emp) emp.employeeId = genId;
+      }
+    }
 
     const decryptedSalaries = await Promise.all(
       allEmployees.map(async (emp) => {

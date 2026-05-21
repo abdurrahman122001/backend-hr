@@ -1723,7 +1723,7 @@ exports.getRecordsByDate = async (req, res) => {
     };
 
     const records = await Attendance.find(query)
-      .populate("employee", "name designation department email status _id photographUrl imageUrl")
+      .populate("employee", "name designation department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1750,7 +1750,7 @@ exports.getRecordsByDateRange = async (req, res) => {
       owner: { $in: [oid(ownerId), oid(userId)] },
       date: { $gte: start, $lte: end },
     })
-      .populate("employee", "name position department email status _id photographUrl imageUrl")
+      .populate("employee", "name position department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1823,7 +1823,7 @@ exports.getRecordsByEmployee = async (req, res) => {
 
     const records = await Attendance.find(query)
       .sort({ date: -1 })
-      .populate("employee", "name position department email status _id photographUrl imageUrl")
+      .populate("employee", "name position department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);

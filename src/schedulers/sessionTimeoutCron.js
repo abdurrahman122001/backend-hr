@@ -106,74 +106,28 @@ cron.schedule("*/10 * * * * *", async () => {
         const todayKarachi = now.format("YYYY-MM-DD");
         const isCrossMidnightLogout = todayKarachi !== attendanceDate;
 
-        // Determine if shift is complete
+        // ✅ Mark as Half Day on session timeout ONLY IF before 9 PM and NOT cross-midnight
         const halfDayLogoutThreshold = 21 * 60; // 9:00 PM
-        const stayedUntil9PM = logoutTotalMinutes >= halfDayLogoutThreshold;
-
-        let isShiftComplete = false;
-        if (shiftEndMinutes === null) {
-          isShiftComplete = stayedUntil9PM;
-        } else if (shiftEndMinutes === 0) {
-          isShiftComplete = isCrossMidnightLogout;
-        } else {
-          isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
-        }
-
-        // Determine if should mark as Half Day (using halfDayLogoutThreshold from above)
-        const shouldMarkHalfDay = !isCrossMidnightLogout && !isShiftComplete && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+        const shouldMarkHalfDay = !isCrossMidnightLogout && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {
           finalStatus = "Half Day";
-          console.log(`📊 [SESSION-TIMEOUT-CRON] Marking ${employeeName} as Half Day (logout at ${actualLogoutTime}, before 9 PM)`);
+          console.log(`📊 [SESSION-TIMEOUT-CRON] Marking ${employeeName} as Half Day (timeout at ${actualLogoutTime}, before 9 PM)`);
 
-          // Only apply deduction if this is a NEW Half Day (not from login)
-          // If originalStatus was already "Half Day", deduction was already applied at login
+          // Apply deduction only if this is a NEW Half Day (not from login after 6 PM)
           if (originalStatusBeforeLogout !== "Half Day") {
             try {
               const { applyRealTimeHalfDayDeduction } = require("../utils/lateDeductions");
               await applyRealTimeHalfDayDeduction(employeeId, ownerId, employeeId, attendanceDate, attendance._id);
-              console.log(`✅ [SESSION-TIMEOUT-CRON] Half-day deduction applied for ${employeeName} (logout-based Half Day)`);
+              console.log(`✅ [SESSION-TIMEOUT-CRON] Half-day deduction applied for ${employeeName} (timeout-based Half Day)`);
             } catch (hdErr) {
               console.error(`❌ [SESSION-TIMEOUT-CRON] Error applying half-day deduction for ${employeeName}:`, hdErr);
             }
           } else {
-            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} was already Half Day from login (at/after 6 PM), no additional deduction`);
+            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} was already Half Day from login (after 6 PM), no additional deduction`);
           }
         } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was at/after 6 PM)`);
-        }
-
-        // Apply early departure hours deduction if stayed until 9 PM but didn't complete shift
-        if (stayedUntil9PM && !isShiftComplete && shiftEndMinutes !== null && !isCrossMidnightLogout) {
-          try {
-            let minutesEarly = 0;
-
-            if (shiftEndMinutes === 0) {
-              // Midnight shift: if logout before midnight, they're early
-              minutesEarly = (24 * 60) - logoutTotalMinutes;
-            } else {
-              // Regular shift
-              minutesEarly = Math.max(0, shiftEndMinutes - logoutTotalMinutes);
-            }
-
-            const hoursEarly = minutesEarly / 60;
-
-            if (hoursEarly > 0) {
-              console.log(`📊 [SESSION-TIMEOUT-CRON] ${employeeName} left ${hoursEarly.toFixed(2)} hours early`);
-
-              const { applyEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
-              await applyEarlyDepartureHoursDeduction(
-                employeeId,
-                ownerId,
-                employeeId,
-                attendanceDate,
-                hoursEarly
-              );
-              console.log(`✅ [SESSION-TIMEOUT-CRON] Early departure deduction applied for ${employeeName}`);
-            }
-          } catch (edErr) {
-            console.error(`❌ [SESSION-TIMEOUT-CRON] Error applying early departure deduction for ${employeeName}:`, edErr);
-          }
+          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was after 6 PM)`);
         }
 
         // Update attendance record
@@ -184,8 +138,7 @@ cron.schedule("*/10 * * * * *", async () => {
             checkOut: actualLogoutTime,
             status: finalStatus,
             totalHours: parseFloat(totalHours.toFixed(2)),
-            originalStatus: originalStatusBeforeLogout,
-            halfDayFromAutoLogout: shouldMarkHalfDay
+            originalStatus: originalStatusBeforeLogout
           },
           { new: true }
         );
