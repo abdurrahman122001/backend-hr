@@ -41,10 +41,12 @@ router.get('/absences-without-leave', async (req, res) => {
     
     console.log('[DEBUG] Checking absences for employee:', employeeId, 'Name:', req.employee.name);
     
+    const includeToday = req.query.includeToday === 'true';
+
     // Find all absences or half days for this employee that occurred in the last 7 days
     // and ON OR AFTER their joining date
-    const query = { 
-      employee: employeeId, 
+    const query = {
+      employee: employeeId,
       status: { $in: ['Absent', 'Abscent', 'Half Day', 'halfday', 'half-day', 'Half-Day'] },
       date: { $lt: todayStr, $gte: sevenDaysAgoStr }
     };
@@ -55,8 +57,19 @@ router.get('/absences-without-leave', async (req, res) => {
     
     console.log('[DEBUG] Query:', JSON.stringify(query));
     
-    const absentRecords = await Attendance.find(query).lean();
+    let absentRecords = await Attendance.find(query).lean();
     console.log('[DEBUG] Found absent records:', absentRecords.length, absentRecords.map(r => ({ date: r.date, status: r.status })));
+
+    // After 6 PM: also check today's half-day (not absent — it's still the same day)
+    if (includeToday) {
+      const todayHalfDay = await Attendance.find({
+        employee: employeeId,
+        status: { $in: ['Half Day', 'halfday', 'half-day', 'Half-Day'] },
+        date: todayStr,
+        acknowledgedByEmployee: { $ne: true }
+      }).lean();
+      absentRecords = [...absentRecords, ...todayHalfDay];
+    }
 
     // Find holidays for this owner to exclude from absences
     const holidayRecords = await Attendance.find({
