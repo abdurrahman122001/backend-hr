@@ -475,12 +475,11 @@ async function syncSupervision(employeeId, ownerId) {
       }
     );
 
-    // Part A2: Me as senior → supervise clients of any descendant junior where
-    // the link itself has supervisionEnabled=true.  We intentionally look at all
-    // levels of the tree so senior users automatically gain control over every
-    // subordinate's clients without having to toggle each intermediate branch.
-    // grab all descendant links; seniors should supervise every client
-    // in their subtree regardless of individual link flags
+    // Part A2: Me as senior → supervise clients of any descendant junior.
+    // Supervision flag is now driven entirely by ClientInfo.supervisedBy /
+    // ClientInfo.supervision, so we no longer filter hierarchy links by a
+    // per-link supervisionEnabled flag — seniors supervise every client in
+    // their subtree by default.
     const myJuniorsLinks = await EmployeeHierarchy.find({
       owner: ownerId,
       path: pathRegex
@@ -505,19 +504,34 @@ async function syncSupervision(employeeId, ownerId) {
       );
     }
 
+    // Part A3: For every senior of mine, ensure they supervise my clients —
+    // but check the actual supervision flag from ClientInfo (not the removed
+    // EmployeeHierarchy.supervisionEnabled column).
     const mySeniorLinks = await EmployeeHierarchy.find({
       owner: ownerId,
-      path: pathRegex,
-      supervisionEnabled: true
+      path: pathRegex
     }).select("senior");
 
     if (mySeniorLinks.length > 0) {
       const seniorIds = [...new Set(mySeniorLinks.map(h => String(h.senior)))];
-      if (seniorIds.length) {
+
+      // Only carry over seniors who currently supervise at least one client in this org
+      const activeSeniorClients = await ClientInfo.find({
+        owner: ownerId,
+        supervisedBy: { $in: seniorIds.map(id => new mongoose.Types.ObjectId(id)) },
+      }).select("supervisedBy");
+
+      const activeSeniorIdSet = new Set();
+      activeSeniorClients.forEach(c =>
+        (c.supervisedBy || []).forEach(sid => activeSeniorIdSet.add(String(sid)))
+      );
+      const activeSeniorIds = seniorIds.filter(id => activeSeniorIdSet.has(String(id)));
+
+      if (activeSeniorIds.length) {
         await ClientInfo.updateMany(
           { owner: ownerId, assignedTo: meId },
           {
-            $addToSet: { supervisedBy: { $each: seniorIds } },
+            $addToSet: { supervisedBy: { $each: activeSeniorIds } },
             $set: { supervision: "needs_approval" }
           }
         );

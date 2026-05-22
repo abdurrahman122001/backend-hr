@@ -1579,6 +1579,11 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "approvedBy", select: "_id name companyEmail role" },
           { path: "disapprovedBy", select: "_id name companyEmail role" },
+          { path: "plannedApprovalChain", select: "_id name role" },
+          {
+            path: "approvalChain",
+            populate: { path: "approver", select: "_id name role", model: "Employee" },
+          },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
