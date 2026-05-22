@@ -873,11 +873,8 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
     const myIdStr = String(me._id);
     const updatedIds = [];
 
-    // 🔥 SYNC: Update the hierarchy link flag
-    await EmployeeHierarchy.findOneAndUpdate(
-      { owner: me.owner, senior: me._id, junior: employeeId },
-      { $set: { supervisionEnabled: supervision === "needs_approval" } }
-    );
+    // Supervision is now tracked solely on ClientInfo (supervisedBy / supervision).
+    // No per-link flag on EmployeeHierarchy is updated anymore.
 
     for (const client of clients) {
       if (!client.supervisedBy) client.supervisedBy = [];

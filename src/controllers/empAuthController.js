@@ -29,7 +29,10 @@ exports.getMe = async (req, res) => {
       if (cert.type === 'masters') emp.mastersCertificateUrl = cert.fileUrl;
     });
 
-    res.json(emp);
+    res.json({
+      ...emp,
+      empId: emp.employeeId || emp._id.toString(),
+    });
   } catch (err) {
     console.error('[EMP-AUTH-ME] Error:', err);
     res.status(500).json({ error: 'Server error' });

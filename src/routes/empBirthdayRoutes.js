@@ -44,7 +44,7 @@ router.get("/birthdays", requireEmployeeAuth, async (req, res) => {
         { resignationDate: null },
         { resignationDate: "" }
       ],
-    }).select("name dateOfBirth photographUrl email");
+    }).select("name dateOfBirth photographUrl email department designation");
 
     const now = dayjs();
     const upcoming = employees

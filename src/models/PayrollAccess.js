@@ -21,11 +21,17 @@ const PayrollAccessSchema = new Schema(
             ref: 'Employee',
             required: true,
         },
-        // Access level: 'view' = read-only, 'edit' = view + edit payroll
+        // Access types array – multiple rights can be selected at once
+        // e.g. ['view', 'view_slips', 'edit', 'lock']
+        accessTypes: [{
+            type: String,
+            enum: ['view', 'view_slips', 'edit', 'lock'],
+            default: undefined,
+        }],
+        // Legacy single-value field (kept for backward-compat read)
         accessType: {
             type: String,
             enum: ['view', 'edit'],
-            default: 'view',
         },
         // Optional: restrict to specific employees. Empty = access to ALL employees.
         scope: [
@@ -47,6 +53,21 @@ const PayrollAccessSchema = new Schema(
     },
     { timestamps: true }
 );
+
+// Returns the effective access types array: prefer new accessTypes, fall back to legacy accessType
+function getEffectiveAccessTypes(doc) {
+    const at = Array.isArray(doc.accessTypes) ? doc.accessTypes : [];
+    if (at.length > 0) return at;
+    if (doc.accessType) return [doc.accessType];
+    return ['view']; // safe default
+}
+
+PayrollAccessSchema.virtual('effectiveAccessTypes').get(function () {
+    return getEffectiveAccessTypes(this);
+});
+
+PayrollAccessSchema.set('toJSON', { virtuals: true });
+PayrollAccessSchema.set('toObject', { virtuals: true });
 
 // One grant per employee per owner — upsert-friendly
 PayrollAccessSchema.index(

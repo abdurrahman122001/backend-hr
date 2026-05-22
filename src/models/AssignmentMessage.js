@@ -141,6 +141,23 @@ const AssignmentMessageSchema = new Schema(
     disapprovalNote: { type: String },
     disapprovedAt: { type: Date },
     disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    // Tracks each approval step taken (one entry per approver who clicked approve)
+    approvalChain: {
+      type: [
+        {
+          approver: { type: Schema.Types.ObjectId, ref: "Employee" },
+          approvedAt: { type: Date },
+          hierarchyLevel: { type: Number },
+          _id: false,
+        },
+      ],
+      default: [],
+    },
+    // Full ordered approval chain (set at message creation): displayed in Message Info
+    plannedApprovalChain: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
+      default: [],
+    },
     resubmittedAt: { type: Date },
     lastEditedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
     lastEditedAt: { type: Date },

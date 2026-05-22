@@ -655,24 +655,12 @@ async function emitMessageUpdate(io, message, action) {
 
 /** ---------- HIERARCHY-BASED RECEIVER CALCULATION ---------- **/
 async function calculateHierarchyReceiver(owner, sender, clientDoc) {
-  const activeSupervisors = (clientDoc?.supervisedBy || []).map(id => String(id));
+  // Always route to the IMMEDIATE senior in the EmployeeHierarchy chain.
+  // Do not skip levels based on ClientInfo.supervisedBy — every level must
+  // approve explicitly (e.g. Abdur Rahman New → Ali → Abdullah Ahmed Qureshi).
   const managementChain = await getManagementChainFromHierarchy(owner, sender);
 
-  let targetSupervisor = null;
-
-  // 1. Try to find the first supervisor in the chain who is ALSO explicitly active for this client
-  for (const supervisorId of managementChain) {
-    if (activeSupervisors.includes(String(supervisorId))) {
-      targetSupervisor = supervisorId;
-      break;
-    }
-  }
-
-  // 2. If no explicit supervisor found in the chain, but a chain exists,
-  // pick the first one in the chain (the immediate senior) to ensure hierarchical approval works
-  if (!targetSupervisor && managementChain.length > 0) {
-    targetSupervisor = managementChain[0];
-  }
+  let targetSupervisor = managementChain.length > 0 ? managementChain[0] : null;
 
   if (targetSupervisor) {
     return {
@@ -681,7 +669,7 @@ async function calculateHierarchyReceiver(owner, sender, clientDoc) {
       targetSupervisor
     };
   } else {
-    // Fallback: Send to CRM/Managers and auto-approve
+    // No hierarchy senior at all — fallback to CRM/Managers and auto-approve
     const { managers, crm } = await findTLsAndManagersByOwner(owner);
     const crmIds = Array.isArray(crm) ? crm : [];
     const fallbackReceivers = Array.from(new Set([...managers, ...crmIds]));
@@ -1456,6 +1444,12 @@ exports.createMessage = async function createMessage(req, res) {
       msgData.cc = ccEmails;
     }
 
+    // Store the full ordered approval chain for display in Message Info
+    if (approvalStatus === "pending") {
+      const fullChain = await getManagementChainFromHierarchy(owner, String(sender));
+      msgData.plannedApprovalChain = fullChain;
+    }
+
     const msg = await AssignmentMessage.create(msgData);
 
     const populated = await msg.populate([
@@ -1848,54 +1842,72 @@ exports.approveMessage = async function approveMessage(req, res) {
       return res.status(400).json({ error: "Message already approved" });
     }
 
-    // 🔥 HIERARCHY-BASED: Find the next active supervisor in hierarchy
+    // 🔥 HIERARCHY-BASED 1-LEVEL ESCALATION
+    // Always escalate to the immediate next senior in the EmployeeHierarchy
+    // chain (one level up). Do NOT filter by ClientInfo.supervisedBy — that
+    // caused mid-level seniors (e.g. Ali) to be skipped when only the top
+    // manager was in supervisedBy. The full chain must approve explicitly.
 
-    // We need to check who has enabled supervision for this client.
-    // If the next supervisor in the chain has supervision OFF, we should skip them and check the next one.
+    // Fetch the approver's own hierarchy link to record the level
+    const approverLink = await EmployeeHierarchy.findOne({
+      owner: ownerId,
+      junior: currentUserId,
+    })
+      .select("senior hierarchyLevel")
+      .lean();
+    const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
 
-    // 1. Get client supervision settings
-    const clientId = String(msg.client?._id || msg.client);
-    let activeSupervisors = [];
-    if (clientId) {
-      const clientDoc = await ClientInfo.findById(clientId).select("supervisedBy").lean();
-      if (clientDoc && clientDoc.supervisedBy) {
-        activeSupervisors = clientDoc.supervisedBy.map(id => String(id));
-      }
-    }
+    // Diagnostic logging
+    console.log("════════════════════════════════════════════════");
+    console.log("📨 [assignment approveMessage] APPROVAL TRIGGERED");
+    console.log("   approver (currentUserId):", currentUserId);
+    console.log("   approver name:", req.employee?.name);
+    console.log("   ownerId:", String(ownerId));
+    console.log("   message._id:", String(msg._id));
+    console.log("   message current status:", msg.approvalStatus);
 
-    // 2. Get full up-chain from current approver
-    // We want the supervisors of the CURRENT APPROVER (who just approved)
-    const managementChain = await getManagementChainFromHierarchy(ownerId, currentUserId);
+    const allLinksAsJunior = await EmployeeHierarchy.find({
+      owner: ownerId,
+      junior: currentUserId,
+    }).lean();
+    console.log("   [DB] hierarchy records where approver is JUNIOR:", JSON.stringify(allLinksAsJunior, null, 2));
 
-    // 3. Find the first supervisor in the chain who has enabled supervision
-    let targetSupervisor = null;
-    for (const supervisorId of managementChain) {
-      if (activeSupervisors.includes(String(supervisorId))) {
-        targetSupervisor = supervisorId;
-        break; // Found the closest senior who manages supervision
-      }
-    }
+    // Find the immediate seniors (1 level up) of the current approver
+    const immediateSeniors = await findSupervisorsFromHierarchy(
+      ownerId,
+      currentUserId
+    );
+    console.log("   [DB] immediate seniors of approver:", immediateSeniors);
+    console.log("════════════════════════════════════════════════");
 
+    // Record this approval step
+    if (!msg.approvalChain) msg.approvalChain = [];
+    msg.approvalChain.push({
+      approver: req.employee._id,
+      approvedAt: new Date(),
+      hierarchyLevel: currentHierarchyLevel,
+    });
+
+    const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;
     const nextSupervisors = targetSupervisor ? [targetSupervisor] : [];
-
 
     let approvalFinalized = false;
     let responseStatusMessage = "Message approved successfully";
 
     if (targetSupervisor) {
-      // Move up to next level - keep status pending, update receivers
-      // This supervisor has supervision ON, so they need to approve
+      // Escalate to the next immediate senior in the hierarchy.
       msg.approvalStatus = "pending";
-      msg.receiver = [targetSupervisor]; // Replace receivers with next supervisor
+      msg.receiver = [targetSupervisor];
 
-      // 🔥 NEW: Reset read status for the next supervisor so it appears as new (bold) for them
+      // Reset read status for the next supervisor so it appears as new (bold) for them
       if (msg.readBy && msg.readBy.length > 0) {
         msg.readBy = msg.readBy.filter(
           (r) => String(r.employee?._id || r.employee) !== String(targetSupervisor)
         );
       }
-      responseStatusMessage = "Message approved and moved to next level supervisor";
+      responseStatusMessage = "Message approved and escalated to next-level supervisor";
+      console.log("⬆️ [assignment approveMessage] Escalating to next senior:", targetSupervisor);
     } else {
       // At top of hierarchy or no active supervisors found up-chain -> Finalize
       // Get managers and CRM for the owner
@@ -1990,7 +2002,13 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       { path: "client", select: "_id clientName" },
-      { path: "approvedBy", select: "_id name companyEmail" },
+      { path: "approvedBy", select: "_id name companyEmail role" },
+      { path: "disapprovedBy", select: "_id name companyEmail role" },
+      { path: "plannedApprovalChain", select: "_id name role" },
+      {
+        path: "approvalChain",
+        populate: { path: "approver", select: "_id name role", model: "Employee" },
+      },
     ]);
 
     // 🔥 ENHANCED REAL-TIME EMISSION - FIXED FOR HIERARCHY

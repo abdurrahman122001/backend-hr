@@ -28,13 +28,30 @@ exports.getRoster = async (req, res) => {
     const myJuniorsLinks = await EmployeeHierarchy.find({
       owner: me.owner,
       path: pathRegex
-    }).select("junior supervisionEnabled").lean();
+    }).select("junior").lean();
 
-    // gather unique junior ids and supervision flags from hierarchy
+    // gather unique junior ids from hierarchy
     const juniorIdsFromHierarchy = myJuniorsLinks.map(link => String(link.junior));
+
+    // Supervision flag now comes from ClientInfo: a junior is "supervised by me"
+    // if at least one of their assigned clients lists me in supervisedBy.
+    const supervisedClients = await ClientInfo.find({
+      owner: me.owner,
+      assignedTo: { $in: juniorIdsFromHierarchy.map(id => new mongoose.Types.ObjectId(id)) },
+      supervisedBy: me._id,
+    }).select("assignedTo").lean();
+
+    const supervisedJuniorIds = new Set();
+    supervisedClients.forEach(c => {
+      (c.assignedTo || []).forEach(aId => {
+        const idStr = String(aId);
+        if (juniorIdsFromHierarchy.includes(idStr)) supervisedJuniorIds.add(idStr);
+      });
+    });
+
     const juniorMap = new Map();
-    myJuniorsLinks.forEach(link => {
-      juniorMap.set(String(link.junior), link.supervisionEnabled);
+    juniorIdsFromHierarchy.forEach(jid => {
+      juniorMap.set(jid, supervisedJuniorIds.has(jid));
     });
 
     // also include any employees whose `supervisor` field is me (direct reports)
@@ -334,14 +351,8 @@ exports.updateEmployeeSupervision = async (req, res) => {
 
     const isApproval = supervisionMode === "needs_approval";
 
-    // 1. Update Hierarchy link
-    const hierarchyLink = await EmployeeHierarchy.findOneAndUpdate(
-      { owner: me.owner, senior: me._id, junior: id },
-      { $set: { supervisionEnabled: isApproval } },
-      { new: true }
-    );
-
-    // 2. Update all clients assigned to this junior
+    // Supervision is tracked only on ClientInfo. Update all clients assigned
+    // to this junior so they reflect the new supervision state.
     const juniorClients = await ClientInfo.find({
       owner: me.owner,
       assignedTo: id
@@ -374,7 +385,7 @@ exports.updateEmployeeSupervision = async (req, res) => {
     res.json({
       status: "success",
       employee: updated,
-      hierarchyEnabled: hierarchyLink?.supervisionEnabled
+      hierarchyEnabled: isApproval
     });
   } catch (err) {
     console.error("updateEmployeeSupervision error:", err);

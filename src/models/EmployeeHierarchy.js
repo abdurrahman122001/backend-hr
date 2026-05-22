@@ -21,10 +21,6 @@ const EmployeeHierarchySchema = new Schema({
     enum: ['Manager', 'Team Lead', 'Mentor', 'Other'],
     default: 'Manager'
   },
-  supervisionEnabled: {
-    type: Boolean,
-    default: false
-  },
   hierarchyLevel: {
 
     type: Number,

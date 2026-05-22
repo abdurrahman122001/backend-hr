@@ -18,12 +18,11 @@ const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 const moment = require("moment-timezone"); // Add this package: npm install moment-timezone
-const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction, applyEarlyDepartureHoursDeduction, reverseEarlyDepartureHoursDeduction } = require("../utils/lateDeductions");
+const { processIfLastDayOfPeriod, applyRealTimeLateDeduction, applyRealTimeHalfDayDeduction, reverseHalfDayDeduction, reverseLateDayDeduction } = require("../utils/lateDeductions");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 const { isNonWorkingDayHelper } = require("../controllers/attendanceController");
 
-// Import early departure bonus deduction from attendance controller
-const { deductBonusForEarlyDeparture } = require("../controllers/attendanceController");
+// (early-departure bonus deduction removed from logout/timeout flows)
 
 const router = express.Router();
 
@@ -267,12 +266,7 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
       }
     }
 
-    // ✅ Reverse early departure hours deduction if it was previously applied
-    try {
-      await reverseEarlyDepartureHoursDeduction(emp._id, emp.owner, emp._id, todayKarachi);
-    } catch (err) {
-      console.error(`[RESTORE] Error reversing early departure deduction:`, err);
-    }
+    // (early-departure reversal removed)
 
     try {
       const empShiftForLog = await getEmployeeShift(emp._id);
@@ -481,12 +475,11 @@ async function syncSupervision(employeeId, ownerId) {
       }
     );
 
-    // Part A2: Me as senior → supervise clients of any descendant junior where
-    // the link itself has supervisionEnabled=true.  We intentionally look at all
-    // levels of the tree so senior users automatically gain control over every
-    // subordinate's clients without having to toggle each intermediate branch.
-    // grab all descendant links; seniors should supervise every client
-    // in their subtree regardless of individual link flags
+    // Part A2: Me as senior → supervise clients of any descendant junior.
+    // Supervision flag is now driven entirely by ClientInfo.supervisedBy /
+    // ClientInfo.supervision, so we no longer filter hierarchy links by a
+    // per-link supervisionEnabled flag — seniors supervise every client in
+    // their subtree by default.
     const myJuniorsLinks = await EmployeeHierarchy.find({
       owner: ownerId,
       path: pathRegex
@@ -511,19 +504,34 @@ async function syncSupervision(employeeId, ownerId) {
       );
     }
 
+    // Part A3: For every senior of mine, ensure they supervise my clients —
+    // but check the actual supervision flag from ClientInfo (not the removed
+    // EmployeeHierarchy.supervisionEnabled column).
     const mySeniorLinks = await EmployeeHierarchy.find({
       owner: ownerId,
-      path: pathRegex,
-      supervisionEnabled: true
+      path: pathRegex
     }).select("senior");
 
     if (mySeniorLinks.length > 0) {
       const seniorIds = [...new Set(mySeniorLinks.map(h => String(h.senior)))];
-      if (seniorIds.length) {
+
+      // Only carry over seniors who currently supervise at least one client in this org
+      const activeSeniorClients = await ClientInfo.find({
+        owner: ownerId,
+        supervisedBy: { $in: seniorIds.map(id => new mongoose.Types.ObjectId(id)) },
+      }).select("supervisedBy");
+
+      const activeSeniorIdSet = new Set();
+      activeSeniorClients.forEach(c =>
+        (c.supervisedBy || []).forEach(sid => activeSeniorIdSet.add(String(sid)))
+      );
+      const activeSeniorIds = seniorIds.filter(id => activeSeniorIdSet.has(String(id)));
+
+      if (activeSeniorIds.length) {
         await ClientInfo.updateMany(
           { owner: ownerId, assignedTo: meId },
           {
-            $addToSet: { supervisedBy: { $each: seniorIds } },
+            $addToSet: { supervisedBy: { $each: activeSeniorIds } },
             $set: { supervision: "needs_approval" }
           }
         );
@@ -1245,25 +1253,12 @@ router.post("/logout", requireAuth, async (req, res) => {
       console.error("[LOGOUT] Error fetching shift end time:", shiftErr);
     }
 
-    // Case 1: Cross-midnight logout — logout date is different from check-in date
-    const isCrossMidnightLogout = todayKarachi !== attendanceDate;
-    let isShiftComplete = false;
-
-    // 🔥 Universal Rule: If employee stays until 9:00 PM, they are NOT marked as Half Day
-    const stayedUntil9PM = logoutTotalMinutes >= halfDayLogoutThreshold;
-
-    if (shiftEndMinutes === null) {
-      // No shift configured — use the 9:00 PM threshold
-      isShiftComplete = stayedUntil9PM;
-    } else if (shiftEndMinutes === 0) {
-      isShiftComplete = isCrossMidnightLogout;
-    } else {
-      isShiftComplete = (logoutTotalMinutes >= shiftEndMinutes) || stayedUntil9PM;
-    }
-
     // Calculate total hours worked
     const loginTimeKarachi = attendance.loginTime ? moment(attendance.loginTime).tz(TIMEZONE) : null;
     const totalHours = loginTimeKarachi ? nowKarachi.diff(loginTimeKarachi, 'hours', true) : 0;
+
+    // Check if today is different from attendance date (cross-midnight)
+    const isCrossMidnightLogout = todayKarachi !== attendanceDate;
 
     // Log attendance info
     const emp = await Employee.findById(employeeId).select("name").lean();
@@ -1272,20 +1267,16 @@ router.post("/logout", requireAuth, async (req, res) => {
     const actualLogoutTime = formatTimeOnly(nowKarachi);
 
     let updated = null;
-    // Determine if this is an auto-logout half-day (page refresh) vs actual early logout
-    const isAutoLogoutHalfDay = isAutoLogout && finalStatus === "Half Day" && originalStatusBeforeLogout !== "Half Day";
 
-    // If this is a logout before 9:00 PM and shift is not complete,
-    // mark the attendance as Half Day and apply real-time half-day deduction.
-    // BUT: If already marked as Half Day from login (after 6 PM), don't apply deduction again
-    const shouldMarkHalfDay = !isCrossMidnightLogout && !isShiftComplete && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
+    // ✅ Only mark as Half Day for MANUAL logout (not auto-logout) and NOT cross-midnight
+    // If they logout before 9 PM on the same day they logged in
+    const shouldMarkHalfDay = !isAutoLogout && !isCrossMidnightLogout && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
 
     if (shouldMarkHalfDay) {
       finalStatus = "Half Day";
-      console.log(`📊 [LOGOUT] Marking as Half Day - logout at ${actualLogoutTime} (before 9 PM), shift not complete`);
+      console.log(`📊 [LOGOUT] Marking as Half Day - logout at ${actualLogoutTime} (before 9 PM), manual logout`);
 
-      // Only apply deduction if this is a NEW Half Day (not from login)
-      // If originalStatus was already "Half Day", deduction was already applied at login
+      // Only apply deduction if this is a NEW Half Day (not from login after 6 PM)
       if (originalStatusBeforeLogout !== "Half Day") {
         try {
           await applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendance._id);
@@ -1294,11 +1285,10 @@ router.post("/logout", requireAuth, async (req, res) => {
           console.error("[HALF-DAY] Error applying half-day deduction:", hdErr);
         }
       } else {
-        console.log(`ℹ️ [LOGOUT] Half Day status maintained (was already Half Day from login at/after 6 PM)`);
+        console.log(`ℹ️ [LOGOUT] Half Day status maintained (was already Half Day from login after 6 PM)`);
       }
     } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-      // Employee logged in after 6 PM (already Half Day) and is now logging out
-      console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was at/after 6 PM)`);
+      console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was after 6 PM)`);
     }
     try {
       updated = await Attendance.findByIdAndUpdate(
@@ -1308,9 +1298,7 @@ router.post("/logout", requireAuth, async (req, res) => {
           checkOut: actualLogoutTime,
           status: finalStatus,
           totalHours: parseFloat(totalHours.toFixed(2)),
-          originalStatus: originalStatusBeforeLogout,
-          // Flag to track if Half Day came from auto-logout (page refresh) - used to prevent incorrect deduction reversals
-          halfDayFromAutoLogout: isAutoLogoutHalfDay
+          originalStatus: originalStatusBeforeLogout
         },
         { new: true }
       );
@@ -1361,49 +1349,13 @@ router.post("/logout", requireAuth, async (req, res) => {
       }
     }
 
-    // ✅ PROCESS EARLY DEPARTURE BONUS HOURS DEDUCTION
-    // Only apply when: Employee stayed until 9 PM (stayedUntil9PM=true) BUT didn't complete shift
-    let earlyDepartureResult = null;
-    if (stayedUntil9PM && !isShiftComplete && shiftEndMinutes !== null && !isCrossMidnightLogout) {
-      try {
-        let minutesEarly = 0;
-
-        // Handle midnight shifts specially (shiftEndMinutes === 0 means shift ends at 00:00 next day)
-        if (shiftEndMinutes === 0) {
-          // For midnight shift: if logout before midnight, they're early
-          // Hours early = (24*60 - logoutTotalMinutes) / 60
-          minutesEarly = (24 * 60) - logoutTotalMinutes;
-        } else {
-          // For regular shifts: normal calculation
-          minutesEarly = Math.max(0, shiftEndMinutes - logoutTotalMinutes);
-        }
-
-        const hoursEarly = minutesEarly / 60;
-
-        if (hoursEarly > 0) {
-
-          earlyDepartureResult = await applyEarlyDepartureHoursDeduction(
-            employeeId,
-            ownerId,
-            userId,
-            attendanceDate,
-            hoursEarly
-          );
-        }
-      } catch (edErr) {
-        console.error("[EARLY-DEPARTURE] Error processing early departure deduction:", edErr);
-        earlyDepartureResult = { success: false, message: edErr.message };
-      }
-    }
-
     return res.json({
       status: "success",
       message: "Logged out successfully",
       logoutTime: formatTimeForDisplay(nowKarachi),
       sessionStatus: updated ? updated.status : finalStatus,
       totalHours: updated ? updated.totalHours : parseFloat(totalHours.toFixed(2)),
-      lateDeductionResult: lateDeductionResult || null,
-      earlyDepartureResult: earlyDepartureResult || null
+      lateDeductionResult: lateDeductionResult || null
     });
   } catch (err) {
     console.error("Logout error:", err);
@@ -1524,16 +1476,6 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
         } catch (derr) {
           console.error("[REACTIVATE-SESSION] Error reversing half-day deduction:", derr);
         }
-      }
-
-      // ✅ Reverse early departure hours deduction if it was previously applied
-      try {
-        const emp = await Employee.findById(employeeId).select("owner").lean();
-        if (emp) {
-          await reverseEarlyDepartureHoursDeduction(employeeId, emp.owner, employeeId, attendanceDate);
-        }
-      } catch (err) {
-        console.error("[REACTIVATE-SESSION] Error reversing early departure deduction:", err);
       }
     }
 

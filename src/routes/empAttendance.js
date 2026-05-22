@@ -41,10 +41,12 @@ router.get('/absences-without-leave', async (req, res) => {
     
     console.log('[DEBUG] Checking absences for employee:', employeeId, 'Name:', req.employee.name);
     
+    const includeToday = req.query.includeToday === 'true';
+
     // Find all absences or half days for this employee that occurred in the last 7 days
     // and ON OR AFTER their joining date
-    const query = { 
-      employee: employeeId, 
+    const query = {
+      employee: employeeId,
       status: { $in: ['Absent', 'Abscent', 'Half Day', 'halfday', 'half-day', 'Half-Day'] },
       date: { $lt: todayStr, $gte: sevenDaysAgoStr }
     };
@@ -55,8 +57,19 @@ router.get('/absences-without-leave', async (req, res) => {
     
     console.log('[DEBUG] Query:', JSON.stringify(query));
     
-    const absentRecords = await Attendance.find(query).lean();
+    let absentRecords = await Attendance.find(query).lean();
     console.log('[DEBUG] Found absent records:', absentRecords.length, absentRecords.map(r => ({ date: r.date, status: r.status })));
+
+    // After 6 PM: also check today's half-day (not absent — it's still the same day)
+    if (includeToday) {
+      const todayHalfDay = await Attendance.find({
+        employee: employeeId,
+        status: { $in: ['Half Day', 'halfday', 'half-day', 'Half-Day'] },
+        date: todayStr,
+        acknowledgedByEmployee: { $ne: true }
+      }).lean();
+      absentRecords = [...absentRecords, ...todayHalfDay];
+    }
 
     // Find holidays for this owner to exclude from absences
     const holidayRecords = await Attendance.find({
@@ -208,7 +221,7 @@ router.post('/acknowledge-absence', async (req, res) => {
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
   try {
-    const { date, reason, requestedStatus } = req.body;
+    const { date, reason, requestedCheckIn, requestedCheckOut } = req.body;
     const employeeId = req.employee._id;
     const ownerId = req.employee.owner;
     const challengeAttachment = req.file ? req.file.filename : undefined;
@@ -242,9 +255,8 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     // Update challenge fields
     attendance.challengeStatus = 'Pending';
     attendance.challengeReason = reason;
-    if (requestedStatus) {
-      attendance.requestedStatus = requestedStatus;
-    }
+    if (requestedCheckIn) attendance.requestedCheckIn = requestedCheckIn;
+    if (requestedCheckOut) attendance.requestedCheckOut = requestedCheckOut;
     attendance.challengeAt = new Date();
     if (challengeAttachment) {
       attendance.challengeAttachment = challengeAttachment;
@@ -285,7 +297,9 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
         date: attendance.date,
         challengeStatus: attendance.challengeStatus,
         challengeReason: attendance.challengeReason,
-        challengeAttachment: attendance.challengeAttachment
+        challengeAttachment: attendance.challengeAttachment,
+        requestedCheckIn: attendance.requestedCheckIn,
+        requestedCheckOut: attendance.requestedCheckOut,
       }
     });
   } catch (err) {
@@ -339,7 +353,7 @@ router.post('/challenge/:id/withdraw', async (req, res) => {
 router.put('/challenge/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const { reason, requestedStatus } = req.body;
+    const { reason, requestedCheckIn, requestedCheckOut } = req.body;
     const employeeId = req.employee._id;
 
     if (!reason) {
@@ -357,15 +371,14 @@ router.put('/challenge/:id', async (req, res) => {
     }
 
     attendance.challengeReason = reason;
-    if (requestedStatus) {
-      attendance.requestedStatus = requestedStatus;
-    }
+    if (requestedCheckIn !== undefined) attendance.requestedCheckIn = requestedCheckIn;
+    if (requestedCheckOut !== undefined) attendance.requestedCheckOut = requestedCheckOut;
     attendance.challengeAt = new Date();
-    
+
     await attendance.save();
 
     console.log(`✅ Attendance challenge on ${attendance.date} updated by employee ${employeeId}.`);
-    
+
     res.json({
       success: true,
       message: "Attendance challenge updated successfully.",
@@ -374,7 +387,8 @@ router.put('/challenge/:id', async (req, res) => {
         date: attendance.date,
         challengeStatus: attendance.challengeStatus,
         challengeReason: attendance.challengeReason,
-        requestedStatus: attendance.requestedStatus
+        requestedCheckIn: attendance.requestedCheckIn,
+        requestedCheckOut: attendance.requestedCheckOut,
       }
     });
   } catch (err) {

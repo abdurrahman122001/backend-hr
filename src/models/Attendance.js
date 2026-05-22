@@ -30,6 +30,8 @@ const AttendanceSchema = new Schema({
 
   // Employee challenge fields
   requestedStatus: { type: String },
+  requestedCheckIn: { type: String },
+  requestedCheckOut: { type: String },
   challengeStatus: { type: String, enum: ['None', 'Pending', 'Approved', 'Rejected', 'Withdrawn'], default: 'None' },
   challengeReason: { type: String },
   challengeAt: { type: Date },

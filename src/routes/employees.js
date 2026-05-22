@@ -30,20 +30,21 @@ function getCompanyShortcut(companyName) {
   return "EMP";
 }
 
-function getEmployeeInitials(name) {
-  if (!name) return "XX";
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
-  return "XX";
+async function getNextEmployeeNumber(ownerId) {
+  const next = await CompanyProfile.findOneAndUpdate(
+    { owner: ownerId },
+    { $inc: { employeeIdSequence: 1 } },
+    { new: true, upsert: true, projection: { employeeIdSequence: 1 } }
+  ).lean();
+  return (next?.employeeIdSequence ?? 1).toString().padStart(3, '0');
 }
 
-function getEmployeeInitials(name) {
-  if (!name) return "XX";
-  const parts = name.trim().split(/\s+/);
-  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
-  return "XX";
+async function generateEmployeeId(employeeName, ownerId) {
+  const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
+  const companyShortcut = getCompanyShortcut(company?.name);
+  const seq = await getNextEmployeeNumber(ownerId);
+  const year = new Date().getFullYear();
+  return `${companyShortcut}-${year}-${seq}`;
 }
 
 function getEffectiveOwnerId(user) {
@@ -148,22 +149,31 @@ router.get("/", unifiedAuth, async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Auto-generate employeeId if missing
+    // Auto-generate employeeId if missing – sequential, scoped by owner
     const missingIdEmps = list.filter((emp) => !emp.employeeId);
     if (missingIdEmps.length > 0) {
-      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
+      // Pre-fetch all sequential numbers in one inc by incrementing the counter once
+      // per missing employee so each gets a unique, ordered value
+      const ownerId = getEffectiveOwnerId(req.user);
+      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
+      const currentCounter = company?.employeeIdSequence ?? 0;
       const companyShortcut = getCompanyShortcut(company?.name);
-      
-      await Promise.all(
-        missingIdEmps.map(async (emp) => {
-          const initials = getEmployeeInitials(emp.name);
-          const randomNum = Math.floor(1000 + Math.random() * 9000);
-          const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
-          
-          await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
-          emp.employeeId = generatedId;
-        })
+
+      // Atomically bump the counter up by the number of missing IDs
+      await CompanyProfile.findOneAndUpdate(
+        { owner: ownerId },
+        { $inc: { employeeIdSequence: missingIdEmps.length } },
+        { new: true, upsert: true }
       );
+
+      // Assign sequential IDs: first missing employee → counter+1, next → counter+2, etc.
+      const year = new Date().getFullYear();
+      for (let i = 0; i < missingIdEmps.length; i++) {
+        const seqNum = String(currentCounter + i + 1).padStart(3, '0');
+        const generatedId = `${companyShortcut}-${year}-${seqNum}`;
+        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: generatedId } });
+        missingIdEmps[i].employeeId = generatedId;
+      }
     }
 
     res.json({
@@ -267,6 +277,9 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
 
+    // Auto-generate a sequential employeeId on creation
+    const employeeId = await generateEmployeeId(name, ownerId);
+
     const emp = await Employee.create({
       owner: [ownerId], // tenant/HR id (array as per your schema)
       createdBy: req.user._id, // who created this employee
@@ -274,6 +287,7 @@ router.post("/", requireAuth, async (req, res) => {
       position,
       department,
       email,
+      employeeId,
       companyEmail,
       phone,
       qualification,
@@ -314,22 +328,27 @@ router.get("/list", requireAuth, async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Auto-generate employeeId if missing
+    // Auto-generate employeeId if missing – sequential, scoped by owner
     const missingIdEmps = emps.filter((emp) => !emp.employeeId);
     if (missingIdEmps.length > 0) {
-      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
+      const ownerId = getEffectiveOwnerId(req.user);
+      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
+      const currentCounter = company?.employeeIdSequence ?? 0;
       const companyShortcut = getCompanyShortcut(company?.name);
-      
-      await Promise.all(
-        missingIdEmps.map(async (emp) => {
-          const initials = getEmployeeInitials(emp.name);
-          const randomNum = Math.floor(1000 + Math.random() * 9000);
-          const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
-          
-          await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
-          emp.employeeId = generatedId;
-        })
+
+      await CompanyProfile.findOneAndUpdate(
+        { owner: ownerId },
+        { $inc: { employeeIdSequence: missingIdEmps.length } },
+        { new: true, upsert: true }
       );
+
+      const year = new Date().getFullYear();
+      for (let i = 0; i < missingIdEmps.length; i++) {
+        const seqNum = String(currentCounter + i + 1).padStart(3, '0');
+        const generatedId = `${companyShortcut}-${year}-${seqNum}`;
+        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: generatedId } });
+        missingIdEmps[i].employeeId = generatedId;
+      }
     }
 
     res.json({ status: "success", data: emps });
@@ -360,12 +379,8 @@ router.get("/:id", requireAuth, async (req, res) => {
 
     // Generate employeeId if missing
     if (!emp.employeeId) {
-      // Fetch company profile to get company name
-      const company = await CompanyProfile.findOne({ owner: getEffectiveOwnerId(req.user) }).lean();
-      const companyShortcut = getCompanyShortcut(company?.name);
-      const initials = getEmployeeInitials(emp.name);
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
+      const ownerId = getEffectiveOwnerId(req.user);
+      const generatedId = await generateEmployeeId(emp.name, ownerId);
       // Update employee document
       await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
       emp.employeeId = generatedId;

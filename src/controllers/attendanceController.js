@@ -1038,9 +1038,9 @@ exports.markAttendance = async (req, res) => {
         employee: employeeId,
         date,
         status: normalizedStatus,
-        checkIn,
-        checkOut,
-        notes,
+        checkIn: checkIn || null,
+        checkOut: checkOut || null,
+        notes: notes || null,
         markedByHR: true,
       },
     };
@@ -1723,7 +1723,7 @@ exports.getRecordsByDate = async (req, res) => {
     };
 
     const records = await Attendance.find(query)
-      .populate("employee", "name designation department email status _id photographUrl imageUrl")
+      .populate("employee", "name designation department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1750,7 +1750,7 @@ exports.getRecordsByDateRange = async (req, res) => {
       owner: { $in: [oid(ownerId), oid(userId)] },
       date: { $gte: start, $lte: end },
     })
-      .populate("employee", "name position department email status _id photographUrl imageUrl")
+      .populate("employee", "name position department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1823,7 +1823,7 @@ exports.getRecordsByEmployee = async (req, res) => {
 
     const records = await Attendance.find(query)
       .sort({ date: -1 })
-      .populate("employee", "name position department email status _id photographUrl imageUrl")
+      .populate("employee", "name position department email status _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1989,52 +1989,97 @@ exports.updateChallengeStatus = async (req, res) => {
     const { challengeStatus, challengeAdminNotes } = req.body;
     const ownerId = resolveOwnerId(req.user);
 
-    const attendance = await Attendance.findOneAndUpdate(
-      { _id: id, owner: ownerId },
-      {
-        $set: {
-          challengeStatus,
-          challengeAdminNotes,
-          challengeAt: new Date()
-        }
-      },
-      { new: true }
-    );
+    const attendance = await Attendance.findOne({ _id: id, owner: ownerId });
 
     if (!attendance) {
       return res.status(404).json({ error: "Attendance record not found" });
     }
 
-    // If challenge is approved and it was for a Late record, we might need to change its status
-    // and trigger the deduction reversal logic.
-    if (challengeStatus === "Approved") {
-      if (attendance.status === "Late") {
-        const oldStatus = "Late";
-        attendance.status = "Present";
-        await attendance.save();
+    const oldStatus = attendance.status;
 
+    if (challengeStatus === "Approved") {
+      const requestedCheckIn = attendance.requestedCheckIn;
+      const requestedCheckOut = attendance.requestedCheckOut;
+
+      // Auto-compute status from the employee's submitted times — mirrors empAuth.js logic
+      if (requestedCheckIn || requestedCheckOut) {
+        const toMin = (hhmm) => {
+          if (!hhmm) return null;
+          const parts = String(hhmm).trim().split(":");
+          const h = Number(parts[0]);
+          const m = Number(parts[1] || 0);
+          if (isNaN(h) || isNaN(m)) return null;
+          return h * 60 + m;
+        };
+
+        const HALF_DAY_CHECKIN_THRESHOLD = 18 * 60;  // 6:00 PM — login after this = Half Day
+        const HALF_DAY_CHECKOUT_THRESHOLD = 21 * 60; // 9:00 PM — checkout before this = Half Day
+
+        const employee = await Employee.findById(attendance.employee).lean();
+
+        // Use emp.rt first (same priority as empAuth.js), fall back to shift start
+        let reportingTimeMinutes = 15 * 60 + 30; // default 3:30 PM
+        if (employee && employee.rt) {
+          const rtMin = toMin(employee.rt);
+          if (rtMin !== null) reportingTimeMinutes = rtMin;
+        } else if (employee && employee.shifts && employee.shifts.length > 0) {
+          const shiftDoc = await Shift.findById(employee.shifts[0]).lean();
+          if (shiftDoc && shiftDoc.start) {
+            const shiftMin = toMin(shiftDoc.start);
+            if (shiftMin !== null) reportingTimeMinutes = shiftMin;
+          }
+        }
+
+        let newStatus = "Present";
+
+        if (requestedCheckIn) {
+          const checkInMin = toMin(requestedCheckIn);
+          if (checkInMin !== null) {
+            if (checkInMin <= reportingTimeMinutes) {
+              newStatus = "Present";
+            } else if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
+              newStatus = "Late";
+            } else {
+              newStatus = "Half Day"; // checked in after 6 PM
+            }
+          }
+        }
+
+        // Early checkout (before 9 PM) also triggers Half Day — same as manual logout logic
+        if (requestedCheckOut && newStatus !== "Half Day") {
+          const checkOutMin = toMin(requestedCheckOut);
+          if (checkOutMin !== null && checkOutMin < HALF_DAY_CHECKOUT_THRESHOLD) {
+            newStatus = "Half Day";
+          }
+        }
+
+        attendance.checkIn = requestedCheckIn || attendance.checkIn;
+        attendance.checkOut = requestedCheckOut || attendance.checkOut;
+        attendance.status = newStatus;
+
+        console.log(`✅ [CHALLENGE-APPROVE] reportingTime=${reportingTimeMinutes}min, checkIn=${attendance.checkIn}, checkOut=${attendance.checkOut}, computed status=${newStatus}`);
+      }
+
+      attendance.challengeStatus = "Approved";
+      attendance.challengeAdminNotes = challengeAdminNotes || "";
+      attendance.challengeAt = new Date();
+      await attendance.save();
+
+      // Reconcile late deductions if status changed away from Late
+      if (oldStatus === "Late" && attendance.status !== "Late") {
         try {
           console.log(`🔍 [CHALLENGE-APPROVE] Reconciling late for Emp=${attendance.employee}, Date=${attendance.date}`);
           const employee = await Employee.findById(attendance.employee).lean();
           const payrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
           const shiftId = employee?.shifts?.[0];
           const payroll = payrolls.find(
-            (p) =>
-              Array.isArray(p.shifts) &&
-              p.shifts.map(String).includes(String(shiftId))
+            (p) => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
           );
-
           if (payroll) {
             const { periodStart, periodEnd } = getPayrollPeriod(attendance.date, payroll);
             await reconcileLateDeductions(
-              attendance.employee,
-              ownerId,
-              attendance.date,
-              periodStart,
-              periodEnd,
-              oldStatus,
-              "Present",
-              false
+              attendance.employee, ownerId, attendance.date,
+              periodStart, periodEnd, oldStatus, attendance.status, false
             );
           } else {
             console.log(`⚠️ [CHALLENGE-APPROVE] No payroll found for employee shift ${shiftId}`);
@@ -2043,6 +2088,11 @@ exports.updateChallengeStatus = async (req, res) => {
           console.error("Failed to reconcile late deductions during challenge approval:", reconcileErr);
         }
       }
+    } else {
+      attendance.challengeStatus = challengeStatus;
+      attendance.challengeAdminNotes = challengeAdminNotes || "";
+      attendance.challengeAt = new Date();
+      await attendance.save();
     }
 
     // Notify employee via socket

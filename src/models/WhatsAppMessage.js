@@ -125,6 +125,11 @@ const WhatsAppMessageSchema = new Schema(
       ],
       default: [],
     },
+    // Ordered list of approvers from first to last (set at message creation)
+    plannedApprovalChain: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
+      default: [],
+    },
 
     // Edit tracking fields
     isEdited: { type: Boolean, default: false },

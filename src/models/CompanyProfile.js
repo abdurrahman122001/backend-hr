@@ -14,7 +14,9 @@ const CompanyProfileSchema = new Schema({
   branches: [BranchSchema],
   email:   { type: String, required: true },
   website: { type: String, default: "" },
-  logo:    { type: String, default: "" }   
+  logo:    { type: String, default: "" },
+  // Sequential counter for auto-generated employee IDs (e.g. ABC-000001)
+  employeeIdSequence: { type: Number, default: 0 }
 }, { timestamps: true });
 
 module.exports = model('CompanyProfile', CompanyProfileSchema);
