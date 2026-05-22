@@ -24,6 +24,42 @@ async function findSupervisorsFromHierarchy(ownerId, employeeId) {
   }
 }
 
+async function getAllJuniorsRecursively(ownerId, seniorId) {
+  if (!isObjId(ownerId) || !isObjId(seniorId)) return [];
+
+  try {
+    const allJuniors = [];
+    const visited = new Set();
+
+    async function collectJuniors(currentSeniorId) {
+      const currentIdStr = String(currentSeniorId);
+      if (visited.has(currentIdStr)) return;
+      visited.add(currentIdStr);
+
+      const hierarchyLinks = await EmployeeHierarchy.find({
+        owner: ownerId,
+        senior: currentSeniorId,
+      })
+        .select("junior")
+        .lean();
+
+      for (const link of hierarchyLinks) {
+        const juniorId = String(link.junior);
+        if (!visited.has(juniorId)) {
+          allJuniors.push(juniorId);
+          await collectJuniors(juniorId);
+        }
+      }
+    }
+
+    await collectJuniors(seniorId);
+    return allJuniors;
+  } catch (error) {
+    console.error("Error getting all juniors recursively:", error);
+    return [];
+  }
+}
+
 async function getManagementChainFromHierarchy(ownerId, employeeId) {
   if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
 
@@ -88,14 +124,12 @@ async function applyVisibility(q, req) {
   }).select("_id").lean();
   const assignedClientIds = assignedClients.map(c => oid(c._id));
 
-  // Hierarchy lookup for junior-based visibility
-  const juniorLinks = await EmployeeHierarchy.find({
-    owner: ownerId,
-    senior: me,
-  })
-    .select("junior")
-    .lean();
-  const juniorIds = juniorLinks.map((link) => oid(link.junior));
+  // Hierarchy lookup for junior-based visibility — all levels, not just direct
+  const allJuniorIdStrings = await getAllJuniorsRecursively(
+    String(ownerId),
+    String(me)
+  );
+  const juniorIds = allJuniorIdStrings.filter(isObjId).map((id) => oid(id));
   const roleHierarchyFilters = [];
   if (currentUserRole === "manager" || currentUserRole === "owner") {
     roleHierarchyFilters.push({ owner: ownerId });
@@ -2358,13 +2392,11 @@ exports.getTeamLeadPendingApprovals =
         return res.status(401).json({ error: "Unauthorized" });
       }
 
-      // 🔥 HIERARCHY-BASED: Get juniors for this supervisor
-      const juniorLinks = await EmployeeHierarchy.find({
-        owner: ownerId,
-        senior: currentUserId,
-      }).select("junior").lean();
-
-      const supervisedEmployeeIds = juniorLinks.map(link => link.junior);
+      // 🔥 HIERARCHY-BASED: Get all juniors recursively for this supervisor
+      const supervisedEmployeeIds = await getAllJuniorsRecursively(
+        String(ownerId),
+        String(currentUserId)
+      );
 
       // Base query: Get pending messages
       // Managers see everything for their owner
