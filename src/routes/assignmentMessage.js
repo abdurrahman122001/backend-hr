@@ -27,6 +27,7 @@ router.get("/trash", filterCtrl.getTrashMessages);
 router.get("/spam", filterCtrl.getSpamMessages);
 
 // General Message Routes
+router.get("/has-juniors", filterCtrl.hasJuniors);
 router.get("/", filterCtrl.listMessages);
 
 router.post("/", ctrl.createMessage);

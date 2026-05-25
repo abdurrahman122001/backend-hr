@@ -103,7 +103,7 @@ function getIO(req) {
 const oid = (v) =>
   mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 
-async function applyVisibility(q, req) {
+async function applyVisibility(q, req, filterParam) {
   if (!req.employee?._id) return { _id: null };
 
   const me = oid(String(req.employee._id));
@@ -130,6 +130,18 @@ async function applyVisibility(q, req) {
     String(me)
   );
   const juniorIds = allJuniorIdStrings.filter(isObjId).map((id) => oid(id));
+
+  // Activity filter: show ALL messages (any status) from every junior in the hierarchy
+  if (filterParam === "review") {
+    const isOwner = currentUserRole === "owner";
+    // Owners see everything in their org; everyone else is limited to their hierarchy juniors
+    if (isOwner) {
+      return { $and: [q, { owner: ownerId }] };
+    }
+    if (juniorIds.length === 0) return { _id: null };
+    return { $and: [q, { sender: { $in: juniorIds } }] };
+  }
+
   const roleHierarchyFilters = [];
   if (currentUserRole === "manager" || currentUserRole === "owner") {
     roleHierarchyFilters.push({ owner: ownerId });
@@ -326,12 +338,12 @@ exports.getMessage = async function getMessage(req, res) {
 
     const msg = await AssignmentMessage.findById(messageId).populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
+      { path: "sender", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       {
         path: "receiver",
-        select: "_id name companyEmail role",
+        select: "_id name companyEmail role designation",
         options: { allowNull: true },
       },
     ]);
@@ -477,17 +489,11 @@ exports.listMessages = async function listMessages(req, res) {
       q.isSpam = { $ne: true };
     }
 
-    // 🔥 CRITICAL FIX: Review filter logic
-    if (filter === "review") {
-      // For review filter: show ONLY direct supervision pending messages
-      q.approvalStatus = "pending";
-      // Populate sender to check supervisionMode
-      // This will be handled in the frontend filtering
-    } else if (approvalStatus === "pending") {
-      q.approvalStatus = "pending";
-    } else {
-      // For normal inbox, include ALL messages (including pending) for receivers
-      // No approvalStatus filter for inbox
+    // Review filter shows all messages from hierarchy juniors — no status restriction
+    if (filter !== "review") {
+      if (approvalStatus === "pending") {
+        q.approvalStatus = "pending";
+      }
     }
 
     // HR Policy exclusion
@@ -560,8 +566,8 @@ exports.listMessages = async function listMessages(req, res) {
     const isSpamVal = isSpam === "true" || isSpam === true;
     const isParticipantView = !!req.query.participant;
 
-    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, or asking for ALL mail (participant view)
-    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView;
+    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity
+    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && filter !== "review";
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
@@ -572,7 +578,7 @@ exports.listMessages = async function listMessages(req, res) {
       ];
     }
 
-    const qFinal = await applyVisibility(q, req);
+    const qFinal = await applyVisibility(q, req, filter);
 
     const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
 
@@ -632,8 +638,8 @@ exports.listMessages = async function listMessages(req, res) {
         AssignmentMessage.find({ _id: { $in: latestMessageIds } })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
             { path: "client", select: "_id clientName" },
           ])
           .lean(),
@@ -697,9 +703,9 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           {
             path: "sender",
-            select: "_id name companyEmail role supervisionMode",
+            select: "_id name companyEmail role designation supervisionMode",
           }, // 🔥 ADDED supervisionMode
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -710,17 +716,7 @@ exports.listMessages = async function listMessages(req, res) {
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // 🔥 CRITICAL: Filter for review messages on backend for team leads
-    let finalItems = items;
-    if (filter === "review" && isTeamLead) {
-      finalItems = items.filter(
-        (item) =>
-          item.sender?.supervisionMode === "direct" &&
-          item.approvalStatus === "pending"
-      );
-    }
-
-    const normalizedItems = finalItems.map((item) => ({
+    const normalizedItems = items.map((item) => ({
       ...item,
       receiver: Array.isArray(item.receiver)
         ? item.receiver
@@ -810,8 +806,8 @@ exports.listMessagesForManager = async function listMessagesForManager(
       .limit(limit)
       .populate([
         { path: "owner", select: "_id name companyEmail" },
-        { path: "sender", select: "_id name companyEmail role" },
-        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "sender", select: "_id name companyEmail role designation" },
+        { path: "receiver", select: "_id name companyEmail role designation" },
         { path: "client", select: "_id clientName" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       ])
@@ -879,7 +875,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.isSpam = { $ne: true };
     }
 
-    if (filter === "review" || approvalStatus === "pending") {
+    if (filter !== "review" && approvalStatus === "pending") {
       q.approvalStatus = "pending";
     }
 
@@ -920,20 +916,19 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
 
     const isSentView = status === "sent";
-    const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true";
+    const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true" && filter !== "review";
 
-    // 🔥 CRM/Manager Fix: External Inbox ONLY shows incoming client mail or mail to self.
-    // Solo sent messages to clients are handled in the 'Sent' tab.
+    // CRM/Manager Fix: External Inbox ONLY shows incoming client mail or mail to self.
     if (isInboxView) {
       q.$or = [
         { isFromClient: true },
         { receiver: me },
         { receiver: { $in: [me] } },
-        { approvalStatus: "pending" } // 🔥 CRM/Manager Fix: Show pending messages in external inbox for review
+        { approvalStatus: "pending" }
       ];
     }
 
-    const qFinal = await applyVisibility(q, req);
+    const qFinal = await applyVisibility(q, req, filter);
 
     // Robust threadMode check
     const isThreaded = threadMode === "true" || threadMode === true;
@@ -1002,8 +997,8 @@ exports.getExternalCommunications = async function getExternalCommunications(
         AssignmentMessage.find({ _id: { $in: latestMessageIds } })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
             { path: "client", select: "_id clientName" },
           ])
           .lean(),
@@ -1071,9 +1066,9 @@ exports.getExternalCommunications = async function getExternalCommunications(
           { path: "owner", select: "_id name companyEmail" },
           {
             path: "sender",
-            select: "_id name companyEmail role supervisionMode",
+            select: "_id name companyEmail role designation supervisionMode",
           },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
         ])
         .lean(),
@@ -1271,8 +1266,8 @@ exports.getInternalCommunications = async function getInternalCommunications(
         AssignmentMessage.find({ _id: { $in: latestMessageIds } })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
           ])
           .lean(),
         AssignmentMessage.aggregate([
@@ -1332,8 +1327,8 @@ exports.getInternalCommunications = async function getInternalCommunications(
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "sender", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
@@ -1448,8 +1443,8 @@ exports.starMessage = async function starMessage(req, res) {
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role" },
-      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "sender", select: "_id name companyEmail role designation" },
+      { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "starredBy", select: "_id name companyEmail" },
@@ -1606,17 +1601,17 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role photographUrl imageUrl" },
-          { path: "receiver", select: "_id name companyEmail role photographUrl imageUrl" },
+          { path: "sender", select: "_id name companyEmail role designation photographUrl imageUrl" },
+          { path: "receiver", select: "_id name companyEmail role designation photographUrl imageUrl" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
-          { path: "approvedBy", select: "_id name companyEmail role" },
-          { path: "disapprovedBy", select: "_id name companyEmail role" },
-          { path: "plannedApprovalChain", select: "_id name role" },
+          { path: "approvedBy", select: "_id name companyEmail role designation" },
+          { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+          { path: "plannedApprovalChain", select: "_id name role designation" },
           {
             path: "approvalChain",
-            populate: { path: "approver", select: "_id name role", model: "Employee" },
+            populate: { path: "approver", select: "_id name role designation", model: "Employee" },
           },
         ])
         .lean(),
@@ -1753,7 +1748,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
         .limit(lim)
         .populate([
           { path: "sender", select: "name supervisionMode" },
-          { path: "receiver", select: "name companyEmail role" },
+          { path: "receiver", select: "name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "name companyEmail" },
         ])
@@ -1778,6 +1773,35 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
     res.status(500).json({ error: "Failed to fetch review messages" });
   }
 };
+// GET /assignment-messages/has-juniors — lightweight check for Activity tab visibility
+exports.hasJuniors = async function hasJuniors(req, res) {
+  try {
+    const me = req.employee?._id;
+    const ownerId = req.employee?.owner;
+    if (!me || !ownerId) return res.json({ hasJuniors: false });
+
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+
+    // Owners always have org-wide activity access
+    if (currentUserRole === "owner") {
+      return res.json({ hasJuniors: true });
+    }
+
+    // Everyone else (including managers) must have an actual hierarchy junior entry
+    const link = await EmployeeHierarchy.findOne({
+      owner: oid(String(ownerId)),
+      senior: oid(String(me)),
+    })
+      .select("_id")
+      .lean();
+
+    res.json({ hasJuniors: !!link });
+  } catch (e) {
+    console.error("hasJuniors error:", e);
+    res.json({ hasJuniors: false });
+  }
+};
+
 exports.getStarredMessages = async function getStarredMessages(req, res) {
   try {
     const {
@@ -1834,8 +1858,8 @@ exports.getStarredMessages = async function getStarredMessages(req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "sender", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -1904,7 +1928,7 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
-      { path: "receiver", select: "_id name companyEmail role" },
+      { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName" },
       { path: "trashedBy", select: "_id name companyEmail" },
     ];
@@ -1982,8 +2006,8 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
           .limit(lim)
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role" },
-            { path: "receiver", select: "_id name companyEmail role" },
+            { path: "sender", select: "_id name companyEmail role designation" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
             { path: "client", select: "_id clientName" },
             { path: "attachments.uploadedBy", select: "_id name companyEmail" },
             { path: "spamReportedBy", select: "_id name companyEmail" },
@@ -2230,8 +2254,8 @@ exports.searchMessages = async function searchMessages(req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "sender", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -2313,8 +2337,8 @@ exports.listDrafts = async function listDrafts(req, res) {
         .limit(lim)
         .populate([
           { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role" },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "sender", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         ])
@@ -2467,9 +2491,9 @@ exports.getTeamLeadPendingApprovals =
           { path: "owner", select: "_id name companyEmail" },
           {
             path: "sender",
-            select: "_id name companyEmail role supervisionMode",
+            select: "_id name companyEmail role designation supervisionMode",
           },
-          { path: "receiver", select: "_id name companyEmail role" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
           { path: "client", select: "_id clientName" },
           { path: "readBy.employee", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" },
