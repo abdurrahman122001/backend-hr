@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const Attendance = require('../models/Attendance');
+const AttendanceChallenge = require('../models/AttendanceChallenge');
 const { upload } = require('../utils/multer');
 
 // GET /api/emp-attendance/me
@@ -221,7 +223,7 @@ router.post('/acknowledge-absence', async (req, res) => {
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
   try {
-    const { date, reason, requestedCheckIn, requestedCheckOut } = req.body;
+    const { date, reason, requestedCheckIn, requestedCheckOut, requestedStatus } = req.body;
     const employeeId = req.employee._id;
     const ownerId = req.employee.owner;
     const challengeAttachment = req.file ? req.file.filename : undefined;
@@ -230,18 +232,25 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
       return res.status(400).json({ error: "Date and reason are required" });
     }
 
-    // Find or create the attendance record for this date
-    // If it doesn't exist, we create an "Absent" record that is challenged
+    // 1. Check if a challenge already exists for this date (either in new schema or legacy)
+    const existingNewChallenge = await AttendanceChallenge.findOne({
+      employee: employeeId,
+      date: date,
+      challengeStatus: 'Pending'
+    });
+
+    // Find the attendance record for this date
     let attendance = await Attendance.findOne({
       employee: employeeId,
       date: date,
       owner: ownerId,
     });
 
-    if (attendance && ['Pending', 'Approved', 'Rejected'].includes(attendance.challengeStatus)) {
+    if (existingNewChallenge || (attendance && ['Pending', 'Approved', 'Rejected'].includes(attendance.challengeStatus))) {
       return res.status(400).json({ error: "An attendance query for this date already exists." });
     }
 
+    // 2. Find or create the attendance record for this date
     if (!attendance) {
       attendance = new Attendance({
         employee: employeeId,
@@ -250,26 +259,48 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
         status: 'Absent', // Default to absent if no record exists
         markedByHR: false
       });
+      await attendance.save();
     }
 
-    // Update challenge fields
+    // 3. Keep quick challengeStatus on Attendance record updated
     attendance.challengeStatus = 'Pending';
     attendance.challengeReason = reason;
-    if (requestedCheckIn) attendance.requestedCheckIn = requestedCheckIn;
-    if (requestedCheckOut) attendance.requestedCheckOut = requestedCheckOut;
+    attendance.requestedStatus = requestedStatus || 'Present';
+    attendance.requestedCheckIn = requestedCheckIn || null;
+    attendance.requestedCheckOut = requestedCheckOut || null;
     attendance.challengeAt = new Date();
-    if (challengeAttachment) {
-      attendance.challengeAttachment = challengeAttachment;
-    }
-    
     await attendance.save();
 
-    // Notify owner and supervisor via socket
+    // 4. Create separate AttendanceChallenge record
+    const challenge = new AttendanceChallenge({
+      owner: ownerId,
+      employee: employeeId,
+      attendance: attendance._id,
+      date: date,
+      requestedStatus: requestedStatus || 'Present',
+      requestedCheckIn: requestedCheckIn || null,
+      requestedCheckOut: requestedCheckOut || null,
+      challengeStatus: 'Pending',
+      challengeReason: reason,
+      challengeAttachment: challengeAttachment || null,
+      challengeAt: new Date()
+    });
+    await challenge.save();
+
+    // 5. Notify owner and supervisor via socket (merge fields for frontend compatibility)
     if (req.app.get("io")) {
       const io = req.app.get("io");
       const populatedAttendance = await Attendance.findById(attendance._id)
         .populate("employee", "name employeeId department photographUrl")
         .lean();
+
+      // Merge challenge details so that standard notifications receive them
+      populatedAttendance.challengeStatus = challenge.challengeStatus;
+      populatedAttendance.challengeReason = challenge.challengeReason;
+      populatedAttendance.challengeAttachment = challenge.challengeAttachment;
+      populatedAttendance.requestedCheckIn = challenge.requestedCheckIn;
+      populatedAttendance.requestedCheckOut = challenge.requestedCheckOut;
+      populatedAttendance.challengeAt = challenge.challengeAt;
 
       const notificationData = {
         attendance: populatedAttendance,
@@ -288,18 +319,19 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
       }
     }
 
-    console.log(`✅ Attendance on ${date} challenged by employee ${employeeId}. Reason: ${reason}`);
+    console.log(`✅ Attendance on ${date} challenged by employee ${employeeId}. Reason: ${reason} (Saved to separate AttendanceChallenge schema)`);
     
     res.json({
       success: true,
       message: "Attendance challenged successfully. Awaiting review.",
       attendance: {
-        date: attendance.date,
-        challengeStatus: attendance.challengeStatus,
-        challengeReason: attendance.challengeReason,
-        challengeAttachment: attendance.challengeAttachment,
-        requestedCheckIn: attendance.requestedCheckIn,
-        requestedCheckOut: attendance.requestedCheckOut,
+        _id: challenge._id, // Return challenge ID so UI can withdraw/edit by it
+        date: challenge.date,
+        challengeStatus: challenge.challengeStatus,
+        challengeReason: challenge.challengeReason,
+        challengeAttachment: challenge.challengeAttachment,
+        requestedCheckIn: challenge.requestedCheckIn,
+        requestedCheckOut: challenge.requestedCheckOut,
       }
     });
   } catch (err) {
@@ -315,6 +347,41 @@ router.post('/challenge/:id/withdraw', async (req, res) => {
     const { id } = req.params;
     const employeeId = req.employee._id;
 
+    // 1. Check if ID belongs to an AttendanceChallenge record
+    let challenge = null;
+    if (mongoose.isValidObjectId(id)) {
+      challenge = await AttendanceChallenge.findOne({
+        $or: [{ _id: id }, { attendance: id }],
+        employee: employeeId,
+        challengeStatus: 'Pending'
+      });
+    }
+
+    if (challenge) {
+      challenge.challengeStatus = 'Withdrawn';
+      await challenge.save();
+
+      const attendance = await Attendance.findById(challenge.attendance);
+      if (attendance) {
+        attendance.challengeStatus = 'Withdrawn';
+        await attendance.save();
+      }
+
+      console.log(`✅ Attendance challenge on ${challenge.date} withdrawn by employee ${employeeId} (via AttendanceChallenge).`);
+      
+      return res.json({
+        success: true,
+        message: "Attendance challenge withdrawn successfully.",
+        attendance: {
+          _id: challenge._id,
+          date: challenge.date,
+          challengeStatus: challenge.challengeStatus,
+          challengeReason: challenge.challengeReason
+        }
+      });
+    }
+
+    // 2. Fallback to legacy challenge directly on Attendance record
     const attendance = await Attendance.findOne({
       _id: id,
       employee: employeeId,
@@ -326,11 +393,9 @@ router.post('/challenge/:id/withdraw', async (req, res) => {
     }
 
     attendance.challengeStatus = 'Withdrawn';
-    // We keep challengeReason and challengeAt intact for history
-    
     await attendance.save();
 
-    console.log(`✅ Attendance challenge on ${attendance.date} withdrawn by employee ${employeeId}.`);
+    console.log(`✅ Attendance challenge on ${attendance.date} withdrawn by employee ${employeeId} (via legacy fallback).`);
     
     res.json({
       success: true,
@@ -360,6 +425,50 @@ router.put('/challenge/:id', async (req, res) => {
       return res.status(400).json({ error: "Reason is required" });
     }
 
+    // 1. Check if ID belongs to an AttendanceChallenge record
+    let challenge = null;
+    if (mongoose.isValidObjectId(id)) {
+      challenge = await AttendanceChallenge.findOne({
+        $or: [{ _id: id }, { attendance: id }],
+        employee: employeeId,
+        challengeStatus: 'Pending'
+      });
+    }
+
+    if (challenge) {
+      challenge.challengeReason = reason;
+      if (requestedCheckIn !== undefined) challenge.requestedCheckIn = requestedCheckIn;
+      if (requestedCheckOut !== undefined) challenge.requestedCheckOut = requestedCheckOut;
+      challenge.challengeAt = new Date();
+      await challenge.save();
+
+      // Sync the quick-access fields on Attendance
+      const attendance = await Attendance.findById(challenge.attendance);
+      if (attendance) {
+        attendance.challengeReason = reason;
+        if (requestedCheckIn !== undefined) attendance.requestedCheckIn = requestedCheckIn;
+        if (requestedCheckOut !== undefined) attendance.requestedCheckOut = requestedCheckOut;
+        attendance.challengeAt = challenge.challengeAt;
+        await attendance.save();
+      }
+
+      console.log(`✅ Attendance challenge on ${challenge.date} updated by employee ${employeeId} (via AttendanceChallenge).`);
+
+      return res.json({
+        success: true,
+        message: "Attendance challenge updated successfully.",
+        attendance: {
+          _id: challenge._id,
+          date: challenge.date,
+          challengeStatus: challenge.challengeStatus,
+          challengeReason: challenge.challengeReason,
+          requestedCheckIn: challenge.requestedCheckIn,
+          requestedCheckOut: challenge.requestedCheckOut,
+        }
+      });
+    }
+
+    // 2. Fallback to legacy challenge directly on Attendance record
     const attendance = await Attendance.findOne({
       _id: id,
       employee: employeeId,
@@ -377,7 +486,7 @@ router.put('/challenge/:id', async (req, res) => {
 
     await attendance.save();
 
-    console.log(`✅ Attendance challenge on ${attendance.date} updated by employee ${employeeId}.`);
+    console.log(`✅ Attendance challenge on ${attendance.date} updated by employee ${employeeId} (via legacy fallback).`);
 
     res.json({
       success: true,

@@ -10,6 +10,7 @@ const BonusRequest = require("../models/BonusRequest");
 const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Attendance = require("../models/Attendance");
+const AttendanceChallenge = require("../models/AttendanceChallenge");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const ProfileRevision = require("../models/ProfileRevision");
 const Employee = require("../models/Employees");
@@ -383,22 +384,46 @@ const [leaves, loans, salaryChanges, advanceSalaries, reimbursements, commission
        });
      });
 
-     // Add Attendance Challenges
-    attendances.forEach(item => {
-      if (item.challengeStatus) {
-        unifiedList.push({
-          _id: item._id,
-          type: "attendance-query",
-          typeLabel: "Attendance Query",
-          employee: item.employee,
-          status: item.challengeStatus.toLowerCase(),
-          date: item.challengeAt || item.date,
-          amount: new Date(item.date).toLocaleDateString(),
-          reason: item.challengeReason,
-          originalData: item
-        });
-      }
-    });
+      // Fetch separate AttendanceChallenge records for these attendances to enrich originalData
+      const attendanceIds = attendances.map(a => a._id);
+      const separateChallenges = await AttendanceChallenge.find({
+        attendance: { $in: attendanceIds }
+      }).lean();
+
+      // Map for fast lookup by attendance ID
+      const challengeMap = {};
+      separateChallenges.forEach(c => {
+        if (c.attendance) {
+          challengeMap[c.attendance.toString()] = c;
+        }
+      });
+
+      // Add Attendance Challenges
+      attendances.forEach(item => {
+        if (item.challengeStatus) {
+          // Create a shallow copy and enrich it with separate challenge details
+          const itemObj = item.toObject ? item.toObject() : { ...item };
+          const challenge = challengeMap[item._id.toString()];
+          if (challenge) {
+            itemObj.requestedCheckIn = challenge.requestedCheckIn;
+            itemObj.requestedCheckOut = challenge.requestedCheckOut;
+            itemObj.requestedStatus = challenge.requestedStatus;
+            itemObj.challengeAttachment = challenge.challengeAttachment;
+          }
+
+          unifiedList.push({
+            _id: item._id,
+            type: "attendance-query",
+            typeLabel: "Attendance Query",
+            employee: item.employee,
+            status: item.challengeStatus.toLowerCase(),
+            date: item.challengeAt || item.date,
+            amount: new Date(item.date).toLocaleDateString(),
+            reason: item.challengeReason,
+            originalData: itemObj
+          });
+        }
+      });
 
      // Add Overtime Requests
      overtimes.forEach(item => {
