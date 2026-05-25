@@ -15,6 +15,11 @@ const userSchema = new mongoose.Schema(
     owner: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, // For tenant isolation
     resetPasswordToken: { type: String },
     resetPasswordExpires: { type: Date },
+    tokenVersion: { type: Number, default: 0 },
+    // Two-Factor Authentication
+    twoFactorSecret: { type: String, select: false },   // TOTP secret (hidden by default)
+    twoFactorEnabled: { type: Boolean, default: false },
+    twoFactorPendingSecret: { type: String, select: false }, // secret during setup, before verified
   },
   { timestamps: true }
 );
