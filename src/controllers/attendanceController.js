@@ -1986,10 +1986,14 @@ exports.isNonWorkingDayHelper = isNonWorkingDayHelper;
 exports.updateChallengeStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { challengeStatus, challengeAdminNotes } = req.body;
+    const { challengeStatus, challengeAdminNotes, overrideCheckIn, overrideCheckOut } = req.body;
     const ownerId = resolveOwnerId(req.user);
 
-    const attendance = await Attendance.findOne({ _id: id, owner: ownerId });
+    // Support both strict owner match and owner-in-array (delegated HR)
+    const attendance = await Attendance.findOne({
+      _id: id,
+      owner: { $in: [oid(ownerId), oid(req.user._id)] },
+    });
 
     if (!attendance) {
       return res.status(404).json({ error: "Attendance record not found" });
@@ -1998,8 +2002,9 @@ exports.updateChallengeStatus = async (req, res) => {
     const oldStatus = attendance.status;
 
     if (challengeStatus === "Approved") {
-      const requestedCheckIn = attendance.requestedCheckIn;
-      const requestedCheckOut = attendance.requestedCheckOut;
+      // Admin override takes priority; fall back to what the employee requested
+      const requestedCheckIn = overrideCheckIn || attendance.requestedCheckIn;
+      const requestedCheckOut = overrideCheckOut || attendance.requestedCheckOut;
 
       // Auto-compute status from the employee's submitted times — mirrors empAuth.js logic
       if (requestedCheckIn || requestedCheckOut) {
