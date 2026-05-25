@@ -514,6 +514,35 @@ io.on("connection", (socket) => {
     }
     socket.join(`employee_${employeeId}`);
   });
+
+  // Join owner/admin room (for leave message notifications to admin dashboard)
+  socket.on("join_owner", (ownerId) => {
+    if (!ownerId) return;
+    socket.join(`owner_${ownerId}`);
+    console.log(`🏢 Admin joined owner room: owner_${ownerId}`);
+  });
+
+  // Admin socket: resolve ownerId from JWT and join owner room
+  socket.on("join_admin", async (token) => {
+    try {
+      const JWT_SECRET = process.env.JWT_SECRET;
+      const jwt = require("jsonwebtoken");
+      const payload = jwt.verify(token, JWT_SECRET);
+      const userId = payload.id || payload._id;
+      const User = require("./models/Users");
+      const user = await User.findById(userId).select("owner createdBy role _id").lean();
+      if (user) {
+        const ownerId = user.owner || user.createdBy || user._id;
+        const finalOwnerId = Array.isArray(ownerId) ? ownerId[0] : ownerId;
+        socket.join(`owner_${finalOwnerId}`);
+        console.log(`🏢 Admin ${userId} joined owner_${finalOwnerId}`);
+        socket.emit("admin_joined", { ownerId: finalOwnerId });
+      }
+    } catch (err) {
+      console.error("[socket][join_admin] error:", err.message);
+    }
+  });
+
   socket.on("join_client_updates", (ownerId) => {
     if (!ownerId) {
       console.error("❌ join_client_updates: ownerId is required");
