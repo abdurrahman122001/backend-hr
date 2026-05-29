@@ -4,6 +4,7 @@ const Employee = require("../models/Employees");
 const PayrollPeriod = require("../models/PayrollPeriod");
 const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
+const AttendanceChallenge = require("../models/AttendanceChallenge");
 const { decrypt, encrypt } = require("../utils/encryption");
 
 const {
@@ -1067,6 +1068,23 @@ exports.markAttendance = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
+    // Sync separate AttendanceChallenge records
+    if (challengeStatus) {
+      try {
+        await AttendanceChallenge.updateOne(
+          { employee: employeeId, date, challengeStatus: 'Pending' },
+          {
+            $set: {
+              challengeStatus: challengeStatus,
+              challengeAdminNotes: challengeAdminNotes || ""
+            }
+          }
+        );
+      } catch (syncErr) {
+        console.error("Failed to synchronize AttendanceChallenge on markAttendance:", syncErr);
+      }
+    }
+
     // LOG THE CHANGE
     try {
       let outcome = "None";
@@ -1986,23 +2004,172 @@ exports.isNonWorkingDayHelper = isNonWorkingDayHelper;
 exports.updateChallengeStatus = async (req, res) => {
   try {
     const { id } = req.params;
-    const { challengeStatus, challengeAdminNotes } = req.body;
-    const ownerId = resolveOwnerId(req.user);
+    const { challengeStatus, challengeAdminNotes, overrideCheckIn, overrideCheckOut, overrideStatus } = req.body;
 
-    const attendance = await Attendance.findOne({ _id: id, owner: ownerId });
+    // 1. Try to find an AttendanceChallenge document (either by challenge _id or by linked attendance ID)
+    let challenge = null;
+    if (mongoose.isValidObjectId(id)) {
+      challenge = await AttendanceChallenge.findOne({
+        $or: [{ _id: id }, { attendance: id }]
+      });
+    }
+    
+    if (challenge) {
+      const attendance = await Attendance.findById(challenge.attendance);
+      if (!attendance) {
+        return res.status(404).json({ error: "Attendance record linked to challenge not found" });
+      }
+
+      const ownerId = attendance.owner;
+      const oldStatus = attendance.status;
+
+      // Update challenge record status
+      challenge.challengeStatus = challengeStatus;
+      challenge.challengeAdminNotes = challengeAdminNotes || "";
+      challenge.challengeAt = new Date();
+      await challenge.save();
+
+      if (challengeStatus === "Approved") {
+        const resolvedCheckIn = overrideCheckIn || challenge.requestedCheckIn || attendance.checkIn;
+        const resolvedCheckOut = overrideCheckOut || challenge.requestedCheckOut || attendance.checkOut;
+        let resolvedStatus = overrideStatus || challenge.requestedStatus || attendance.status;
+
+        // Auto-compute status from times when available; otherwise use the resolved status
+        if (resolvedCheckIn || resolvedCheckOut) {
+          const toMin = (hhmm) => {
+            if (!hhmm) return null;
+            const parts = String(hhmm).trim().split(":");
+            const h = Number(parts[0]);
+            const m = Number(parts[1] || 0);
+            if (isNaN(h) || isNaN(m)) return null;
+            return h * 60 + m;
+          };
+
+          const HALF_DAY_CHECKIN_THRESHOLD = 18 * 60;  // 6:00 PM — login after this = Half Day
+          const HALF_DAY_CHECKOUT_THRESHOLD = 21 * 60; // 9:00 PM — checkout before this = Half Day
+
+          const employee = await Employee.findById(attendance.employee).lean();
+
+          // Use emp.rt first, fall back to shift start
+          let reportingTimeMinutes = 15 * 60 + 30; // default 3:30 PM
+          if (employee && employee.rt) {
+            const rtMin = toMin(employee.rt);
+            if (rtMin !== null) reportingTimeMinutes = rtMin;
+          } else if (employee && employee.shifts && employee.shifts.length > 0) {
+            const shiftDoc = await Shift.findById(employee.shifts[0]).lean();
+            if (shiftDoc && shiftDoc.start) {
+              const shiftMin = toMin(shiftDoc.start);
+              if (shiftMin !== null) reportingTimeMinutes = shiftMin;
+            }
+          }
+
+          let computedStatus = "Present";
+
+          if (resolvedCheckIn) {
+            const checkInMin = toMin(resolvedCheckIn);
+            if (checkInMin !== null) {
+              if (checkInMin <= reportingTimeMinutes) {
+                computedStatus = "Present";
+              } else if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
+                computedStatus = "Late";
+              } else {
+                computedStatus = "Half Day";
+              }
+            }
+          }
+
+          // Early checkout (before 9 PM) also triggers Half Day
+          if (resolvedCheckOut && computedStatus !== "Half Day") {
+            const checkOutMin = toMin(resolvedCheckOut);
+            if (checkOutMin !== null && checkOutMin < HALF_DAY_CHECKOUT_THRESHOLD) {
+              computedStatus = "Half Day";
+            }
+          }
+
+          // Priority order:
+          // 1. Admin chosen overrideStatus
+          // 2. Employee requestedStatus
+          // 3. Auto-calculated computedStatus from times
+          resolvedStatus = overrideStatus || challenge.requestedStatus || computedStatus;
+        }
+
+        // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
+        req.body.employeeId = String(attendance.employee._id || attendance.employee);
+        req.body.date = attendance.date;
+        req.body.status = resolvedStatus;
+        req.body.checkIn = resolvedCheckIn || null;
+        req.body.checkOut = resolvedCheckOut || null;
+        req.body.notes = attendance.notes;
+        req.body.leaveType = attendance.leaveType;
+        req.body.challengeStatus = "Approved";
+        req.body.challengeAdminNotes = challengeAdminNotes || "";
+        req.body.sourceModel = "Attendance"; // To ensure leave/bonus/late effects are run
+
+        const mockRes = {
+          statusCode: 200,
+          status: function (code) {
+            this.statusCode = code;
+            return this;
+          },
+          json: async function (data) {
+            if (this.statusCode && this.statusCode >= 400) {
+              return res.status(this.statusCode).json(data);
+            }
+            // Notify employee via socket
+            if (req.app.get("io")) {
+              const io = req.app.get("io");
+              io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+                attendance: data,
+                action: "approved",
+                message: `Your attendance challenge for ${attendance.date} has been approved.`,
+              });
+            }
+            return res.json({ success: true, attendance: data });
+          },
+        };
+
+        return exports.markAttendance(req, mockRes);
+      } else {
+        // Rejected / Withdrawn
+        attendance.challengeStatus = challengeStatus;
+        attendance.challengeAdminNotes = challengeAdminNotes || "";
+        attendance.challengeAt = new Date();
+        await attendance.save();
+
+        // Notify employee via socket
+        if (req.app.get("io")) {
+          const io = req.app.get("io");
+          io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+            attendance,
+            action: challengeStatus.toLowerCase(),
+            message: `Your attendance challenge for ${attendance.date} has been ${challengeStatus.toLowerCase()}.`,
+          });
+        }
+
+        return res.json({ success: true, attendance });
+      }
+    }
+
+    // 2. Legacy fallback: ID belongs directly to an Attendance record
+    const attendance = await Attendance.findById(id);
 
     if (!attendance) {
       return res.status(404).json({ error: "Attendance record not found" });
     }
 
+    const ownerId = attendance.owner;
     const oldStatus = attendance.status;
 
     if (challengeStatus === "Approved") {
-      const requestedCheckIn = attendance.requestedCheckIn;
-      const requestedCheckOut = attendance.requestedCheckOut;
+      // Admin override takes priority; fall back to what the employee requested, then to the existing check-in/out times
+      // Use the stored requested times even if admin didn't re-type them
+      const resolvedCheckIn = overrideCheckIn || attendance.requestedCheckIn || attendance.checkIn;
+      const resolvedCheckOut = overrideCheckOut || attendance.requestedCheckOut || attendance.checkOut;
 
-      // Auto-compute status from the employee's submitted times — mirrors empAuth.js logic
-      if (requestedCheckIn || requestedCheckOut) {
+      let resolvedStatus = overrideStatus || attendance.requestedStatus || attendance.status;
+
+      // Auto-compute status from times when available; otherwise use the resolved status
+      if (resolvedCheckIn || resolvedCheckOut) {
         const toMin = (hhmm) => {
           if (!hhmm) return null;
           const parts = String(hhmm).trim().split(":");
@@ -2030,82 +2197,90 @@ exports.updateChallengeStatus = async (req, res) => {
           }
         }
 
-        let newStatus = "Present";
+        let computedStatus = "Present";
 
-        if (requestedCheckIn) {
-          const checkInMin = toMin(requestedCheckIn);
+        if (resolvedCheckIn) {
+          const checkInMin = toMin(resolvedCheckIn);
           if (checkInMin !== null) {
             if (checkInMin <= reportingTimeMinutes) {
-              newStatus = "Present";
+              computedStatus = "Present";
             } else if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
-              newStatus = "Late";
+              computedStatus = "Late";
             } else {
-              newStatus = "Half Day"; // checked in after 6 PM
+              computedStatus = "Half Day";
             }
           }
         }
 
-        // Early checkout (before 9 PM) also triggers Half Day — same as manual logout logic
-        if (requestedCheckOut && newStatus !== "Half Day") {
-          const checkOutMin = toMin(requestedCheckOut);
+        // Early checkout (before 9 PM) also triggers Half Day
+        if (resolvedCheckOut && computedStatus !== "Half Day") {
+          const checkOutMin = toMin(resolvedCheckOut);
           if (checkOutMin !== null && checkOutMin < HALF_DAY_CHECKOUT_THRESHOLD) {
-            newStatus = "Half Day";
+            computedStatus = "Half Day";
           }
         }
 
-        attendance.checkIn = requestedCheckIn || attendance.checkIn;
-        attendance.checkOut = requestedCheckOut || attendance.checkOut;
-        attendance.status = newStatus;
-
-        console.log(`✅ [CHALLENGE-APPROVE] reportingTime=${reportingTimeMinutes}min, checkIn=${attendance.checkIn}, checkOut=${attendance.checkOut}, computed status=${newStatus}`);
+        // Priority order:
+        // 1. Admin chosen overrideStatus
+        // 2. Employee requestedStatus
+        // 3. Auto-calculated computedStatus from times
+        resolvedStatus = overrideStatus || attendance.requestedStatus || computedStatus;
       }
 
-      attendance.challengeStatus = "Approved";
-      attendance.challengeAdminNotes = challengeAdminNotes || "";
-      attendance.challengeAt = new Date();
-      await attendance.save();
+      // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
+      req.body.employeeId = String(attendance.employee._id || attendance.employee);
+      req.body.date = attendance.date;
+      req.body.status = resolvedStatus;
+      req.body.checkIn = resolvedCheckIn || null;
+      req.body.checkOut = resolvedCheckOut || null;
+      req.body.notes = attendance.notes;
+      req.body.leaveType = attendance.leaveType;
+      req.body.challengeStatus = "Approved";
+      req.body.challengeAdminNotes = challengeAdminNotes || "";
+      req.body.sourceModel = "Attendance"; // To ensure leave/bonus/late effects are run
 
-      // Reconcile late deductions if status changed away from Late
-      if (oldStatus === "Late" && attendance.status !== "Late") {
-        try {
-          console.log(`🔍 [CHALLENGE-APPROVE] Reconciling late for Emp=${attendance.employee}, Date=${attendance.date}`);
-          const employee = await Employee.findById(attendance.employee).lean();
-          const payrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
-          const shiftId = employee?.shifts?.[0];
-          const payroll = payrolls.find(
-            (p) => Array.isArray(p.shifts) && p.shifts.map(String).includes(String(shiftId))
-          );
-          if (payroll) {
-            const { periodStart, periodEnd } = getPayrollPeriod(attendance.date, payroll);
-            await reconcileLateDeductions(
-              attendance.employee, ownerId, attendance.date,
-              periodStart, periodEnd, oldStatus, attendance.status, false
-            );
-          } else {
-            console.log(`⚠️ [CHALLENGE-APPROVE] No payroll found for employee shift ${shiftId}`);
+      const mockRes = {
+        statusCode: 200,
+        status: function (code) {
+          this.statusCode = code;
+          return this;
+        },
+        json: async function (data) {
+          if (this.statusCode && this.statusCode >= 400) {
+            return res.status(this.statusCode).json(data);
           }
-        } catch (reconcileErr) {
-          console.error("Failed to reconcile late deductions during challenge approval:", reconcileErr);
-        }
-      }
+          // Notify employee via socket
+          if (req.app.get("io")) {
+            const io = req.app.get("io");
+            io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+              attendance: data,
+              action: "approved",
+              message: `Your attendance challenge for ${attendance.date} has been approved.`,
+            });
+          }
+          return res.json({ success: true, attendance: data });
+        },
+      };
+
+      return exports.markAttendance(req, mockRes);
     } else {
       attendance.challengeStatus = challengeStatus;
       attendance.challengeAdminNotes = challengeAdminNotes || "";
       attendance.challengeAt = new Date();
       await attendance.save();
-    }
 
-    // Notify employee via socket
-    if (req.app.get("io")) {
-      const io = req.app.get("io");
-      io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
-        attendance,
-        action: challengeStatus.toLowerCase(),
-        message: `Your attendance challenge for ${attendance.date} has been ${challengeStatus.toLowerCase()}.`,
-      });
-    }
+      // Notify employee via socket
+      if (req.app.get("io")) {
+        const io = req.app.get("io");
+        io.to(`employee_${attendance.employee}`).emit("attendance_query_changed", {
+          attendance,
+          action: challengeStatus.toLowerCase(),
+          message: `Your attendance challenge for ${attendance.date} has been ${challengeStatus.toLowerCase()}.`,
+        });
+      }
 
-    res.json({ success: true, attendance });
+      res.json({ success: true, attendance });
+    }
   } catch (err) {
     console.error("Update challenge status failed:", err);
     res.status(500).json({ error: "Failed to update challenge status" });

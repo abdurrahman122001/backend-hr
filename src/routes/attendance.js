@@ -12,6 +12,7 @@ const {
   updateChallengeStatus
 } = require('../controllers/attendanceController');
 const Attendance = require('../models/Attendance');
+const AttendanceChallenge = require('../models/AttendanceChallenge');
 const AttendanceLog = require('../models/AttendanceLog');
 const anyPayrollAuth = require('../middleware/anyPayrollAuth');
 const leaveYearBalanceController = require('../controllers/leaveYearBalanceController');
@@ -24,22 +25,85 @@ const attendanceAuth = require('../middleware/attendanceAuth');
 
 router.get('/challenges', async (req, res) => {
   try {
-    const query = { challengeStatus: { $in: ['Pending', 'Approved', 'Rejected'] } };
     const ownerId = req.user.owner || req.user._id;
+
+    // 1. Build queries
+    const legacyQuery = {
+      challengeStatus: { $in: ['Pending', 'Approved', 'Rejected', 'Withdrawn'] }
+    };
+    const newQuery = {
+      challengeStatus: { $in: ['Pending', 'Approved', 'Rejected', 'Withdrawn'] }
+    };
 
     // Apply scope if delegated
     if (req.user.isDelegated && Array.isArray(req.user.attendanceScope) && req.user.attendanceScope.length > 0) {
-      query.employee = { $in: req.user.attendanceScope };
+      legacyQuery.employee = { $in: req.user.attendanceScope };
+      newQuery.employee = { $in: req.user.attendanceScope };
     } else {
-      query.owner = ownerId;
+      legacyQuery.owner = ownerId;
+      newQuery.owner = ownerId;
     }
 
-    const challenges = await Attendance.find(query)
+    // 2. Fetch new challenges from AttendanceChallenge
+    const newChallenges = await AttendanceChallenge.find(newQuery)
       .populate('employee', 'name email companyEmail designation department profilePicture photographUrl employeeId')
-      .sort({ challengeAt: -1 });
+      .populate('attendance', 'status checkIn checkOut')
+      .lean();
 
-    // Filter out any records whose employee was deleted (populate returns null)
-    res.json(challenges.filter(c => c.employee != null));
+    // Track covered Attendance IDs to avoid double counting
+    const coveredAttendanceIds = newChallenges.map(c => String(c.attendance?._id || c.attendance));
+
+    // 3. Fetch legacy challenges from Attendance, excluding covered ones
+    legacyQuery._id = { $nin: coveredAttendanceIds };
+    const legacyChallenges = await Attendance.find(legacyQuery)
+      .populate('employee', 'name email companyEmail designation department profilePicture photographUrl employeeId')
+      .lean();
+
+    // 4. Map new challenges to format expected by frontend
+    const mappedNewChallenges = newChallenges.map(c => ({
+      _id: String(c._id),
+      date: c.date,
+      status: c.attendance?.status || 'Absent', // original attendance status
+      checkIn: c.attendance ? (c.attendance.checkIn || null) : null,
+      checkOut: c.attendance ? (c.attendance.checkOut || null) : null,
+      employee: c.employee,
+      challengeStatus: c.challengeStatus,
+      challengeReason: c.challengeReason,
+      challengeAt: c.challengeAt,
+      challengeAdminNotes: c.challengeAdminNotes,
+      challengeAttachment: c.challengeAttachment,
+      requestedStatus: c.requestedStatus,
+      requestedCheckIn: c.requestedCheckIn,
+      requestedCheckOut: c.requestedCheckOut
+    }));
+
+    // 5. Map legacy challenges
+    const mappedLegacyChallenges = legacyChallenges.map(c => ({
+      _id: String(c._id),
+      date: c.date,
+      status: c.status,
+      checkIn: c.checkIn || null,
+      checkOut: c.checkOut || null,
+      employee: c.employee,
+      challengeStatus: c.challengeStatus,
+      challengeReason: c.challengeReason,
+      challengeAt: c.challengeAt,
+      challengeAdminNotes: c.challengeAdminNotes,
+      challengeAttachment: c.challengeAttachment,
+      requestedStatus: c.requestedStatus,
+      requestedCheckIn: c.requestedCheckIn,
+      requestedCheckOut: c.requestedCheckOut
+    }));
+
+    // 6. Merge, sort by challengeAt descending, filter deleted employees
+    const allChallenges = [...mappedNewChallenges, ...mappedLegacyChallenges];
+    allChallenges.sort((a, b) => {
+      const aTime = a.challengeAt ? new Date(a.challengeAt).getTime() : 0;
+      const bTime = b.challengeAt ? new Date(b.challengeAt).getTime() : 0;
+      return bTime - aTime;
+    });
+
+    res.json(allChallenges.filter(c => c.employee != null));
   } catch (err) {
     console.error('Fetch challenges failed:', err);
     res.status(500).json({ error: 'Failed to fetch challenges' });
@@ -51,6 +115,10 @@ router.post('/', markAttendance);      // upsert by {employee, date}
 router.get('/', (req, res) => {
   if (req.query.from || req.query.startDate) {
     return getRecordsByDateRange(req, res);
+  }
+  // Default to today if no date param provided
+  if (!req.query.date) {
+    req.query.date = new Date().toISOString().slice(0, 10);
   }
   return getRecordsByDate(req, res);
 });
