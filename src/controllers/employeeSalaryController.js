@@ -5,7 +5,8 @@ const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
 const CompanyProfile = require("../models/CompanyProfile");
 const { encrypt, decrypt } = require("../utils/encryption");
-const { sendCompleteProfileLink } = require("../services/profileEmailService");
+const { sendCompleteProfileLink, sendSetPasswordEmail } = require("../services/profileEmailService");
+const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
 
@@ -1078,6 +1079,39 @@ exports.resendCompleteProfileLink = async (req, res) => {
     return res
       .status(500)
       .json({ message: err.message || "Failed to resend profile email" });
+  }
+};
+
+exports.resendSetPasswordLink = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-fA-F]{24}$/.test(id))
+      return res.status(400).json({ message: "Invalid employee ID format" });
+    const emp = await Employee.findById(id);
+    if (!emp) return res.status(404).json({ message: "Employee not found" });
+    if (!emp.email)
+      return res.status(400).json({ message: "Employee email is missing" });
+
+    const token = crypto.randomBytes(32).toString("hex");
+    emp.setPasswordToken = token;
+    emp.setPasswordTokenExpires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await emp.save();
+
+    const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
+    await sendSetPasswordEmail({
+      to: emp.email,
+      employeeName: emp.name || "Employee",
+      token,
+      employeeId: emp._id.toString(),
+      ownerId,
+    });
+
+    return res.json({ success: true, message: "Password setup link resent." });
+  } catch (err) {
+    console.error("resendSetPasswordLink error:", err);
+    return res
+      .status(500)
+      .json({ message: err.message || "Failed to resend password setup link" });
   }
 };
 
