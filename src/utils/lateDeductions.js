@@ -618,6 +618,11 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
  */
 async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attendanceDate, attendanceId = null, forceUnpaid = false) {
   try {
+    if (!attendanceId) {
+      console.log(`⚠️ [HALF-DAY] attendanceId is null — skipping LeaveTransaction and LeaveYearBalance changes`);
+      return;
+    }
+
     const employee = await Employee.findById(employeeId).lean();
     if (!employee) return;
 

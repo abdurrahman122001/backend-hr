@@ -449,7 +449,11 @@ async function applyVisibility(q, req) {
 
   // 👷 NORMAL EMPLOYEE: can see messages where they are sender OR receiver
   const now = new Date();
-  const visOr = [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }];
+  const visOr = [
+    { sender: me },
+    { receiver: me },
+    { receiver: { $in: [me] } },
+  ];
 
   // 🔥 If assigned to client, also allow seeing all non-pending messages for that client
   if (isAssignedToClient && clientId) {
@@ -1856,6 +1860,9 @@ exports.approveMessage = async function approveMessage(req, res) {
         }
       }
 
+      console.log("🔔 [approveMessage] Socket emission to allInvolvedUsers:", [...allInvolvedUsers]);
+      console.log("🔔 [approveMessage] updatedMessage.receiver:", (updatedMessage.receiver || []).map(r => String(r._id || r)));
+      console.log("🔔 [approveMessage] approvalFinalized:", approvalFinalized);
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
@@ -3671,7 +3678,11 @@ exports.createMessage = async function createMessage(req, res) {
 
       const beforeFilter = [...receivers];
       receivers = receivers.filter(id => allSeniors.has(String(id)));
+      console.log("🔒 [createMessage] PENDING safeguard — beforeFilter:", beforeFilter, "→ afterFilter:", receivers);
     }
+
+    console.log("📬 [createMessage] FINAL receivers (will be stored in msg.receiver):", receivers);
+    console.log("📬 [createMessage] approvalStatus:", approvalStatus);
 
     if (receivers.length === 0) {
       return res.status(400).json({ error: "No valid receivers found" });
