@@ -88,23 +88,28 @@ cron.schedule("*/10 * * * * *", async () => {
           console.error(`[SESSION-TIMEOUT-CRON] Error fetching shift for ${employeeName}:`, shiftErr);
         }
 
-        // Calculate logout time and status
-        const logoutHour = now.hours();
-        const logoutMinute = now.minutes();
+        // Use lastSeen as the actual logout time — this is the last moment the
+        // employee was genuinely active (heartbeat). Using `now` (cron run time)
+        // would record when the timeout was *detected*, not when the browser closed.
+        const lastSeenKarachi = moment(session.lastSeen).tz(TIMEZONE);
+        const actualLogoutTime = lastSeenKarachi.format("HH:mm");
+        const logoutTimeUTC = lastSeenKarachi.utc().toDate();
+        const logoutHour = lastSeenKarachi.hours();
+        const logoutMinute = lastSeenKarachi.minutes();
         const logoutTotalMinutes = logoutHour * 60 + logoutMinute;
-        const actualLogoutTime = now.format("HH:mm");
-        const logoutTimeUTC = now.utc().toDate();
 
-        // Calculate total hours worked
+        // Calculate total hours worked using lastSeen as the end time
         const loginTimeKarachi = attendance.loginTime ? moment(attendance.loginTime).tz(TIMEZONE) : null;
-        const totalHours = loginTimeKarachi ? now.diff(loginTimeKarachi, 'hours', true) : 0;
+        const totalHours = loginTimeKarachi ? lastSeenKarachi.diff(loginTimeKarachi, 'hours', true) : 0;
 
         let finalStatus = attendance.status;
         const originalStatusBeforeLogout = attendance.status;
 
-        // Check if today is different from attendance date (cross-midnight)
-        const todayKarachi = now.format("YYYY-MM-DD");
-        const isCrossMidnightLogout = todayKarachi !== attendanceDate;
+        // Cross-midnight check: compare the lastSeen date against the attendance date.
+        // An employee whose lastSeen is after midnight worked into the next day and
+        // should NOT be penalised with half-day on the previous day's record.
+        const lastSeenDate = lastSeenKarachi.format("YYYY-MM-DD");
+        const isCrossMidnightLogout = lastSeenDate !== attendanceDate;
 
         // ✅ Mark as Half Day on session timeout ONLY IF before 9 PM and NOT cross-midnight
         const halfDayLogoutThreshold = 21 * 60; // 9:00 PM
