@@ -1367,18 +1367,18 @@ router.post("/heartbeat", requireAuth, async (req, res) => {
   try {
     const employeeId = req.employee._id || req.employee.id;
     const nowKarachi = getKarachiTime();
-    const todayKarachi = getDateOnly(nowKarachi);
 
-    // Update lastSeen timestamp for the active session
+    // Find the active session regardless of date — employees working past midnight
+    // still have an active session from the previous day. Filtering by date would
+    // cause heartbeats to fail after midnight, making the session appear stale.
     const result = await EmployeeSession.findOneAndUpdate(
-      { employeeId, date: todayKarachi, active: true },
+      { employeeId, active: true },
       { lastSeen: nowKarachi.toDate() },
       { new: true }
     );
 
     if (!result) {
-      // No active session found - this shouldn't happen in normal flow
-      console.warn(`⚠️ [HEARTBEAT] No active session found for ${employeeId} on ${todayKarachi}`);
+      console.warn(`⚠️ [HEARTBEAT] No active session found for ${employeeId}`);
       return res.status(404).json({ error: "No active session found" });
     }
 
