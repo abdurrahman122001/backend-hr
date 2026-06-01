@@ -4,7 +4,7 @@ const SalarySlip = require("../models/SalarySlip");
 const HrPolicy = require("../models/HrPolicy");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
-const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const EmployeeHierarchy = require("../models/OrgHierarchy");
 const { encrypt, decrypt } = require("../utils/encryption");
 const mongoose = require("mongoose");
 const {

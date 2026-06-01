@@ -105,19 +105,28 @@ cron.schedule("*/10 * * * * *", async () => {
         let finalStatus = attendance.status;
         const originalStatusBeforeLogout = attendance.status;
 
-        // Cross-midnight check: compare the lastSeen date against the attendance date.
-        // An employee whose lastSeen is after midnight worked into the next day and
-        // should NOT be penalised with half-day on the previous day's record.
+        // Cross-midnight check 1: lastSeen is after midnight (employee worked into next day)
         const lastSeenDate = lastSeenKarachi.format("YYYY-MM-DD");
         const isCrossMidnightLogout = lastSeenDate !== attendanceDate;
 
-        // ✅ Mark as Half Day on session timeout ONLY IF before 9 PM and NOT cross-midnight
+        // Cross-midnight check 2: cron is running on a DIFFERENT day than the attendance date.
+        // This catches the case where the employee's last heartbeat was before midnight (e.g. 8:45 PM)
+        // but the cron only runs after midnight — both lastSeenDate and attendanceDate are the same
+        // previous day, so check 1 passes, but applying half-day retroactively after midnight is wrong.
+        const nowDate = now.format("YYYY-MM-DD");
+        const isRetroactiveProcessing = nowDate !== attendanceDate;
+
+        // ✅ Mark as Half Day ONLY IF: same-day session, cron ran on the same date, and before 9 PM
         const halfDayLogoutThreshold = 21 * 60; // 9:00 PM
-        const shouldMarkHalfDay = !isCrossMidnightLogout && logoutTotalMinutes < halfDayLogoutThreshold && finalStatus !== "Half Day";
+        const shouldMarkHalfDay =
+          !isCrossMidnightLogout &&
+          !isRetroactiveProcessing &&
+          logoutTotalMinutes < halfDayLogoutThreshold &&
+          finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {
           finalStatus = "Half Day";
-          console.log(`📊 [SESSION-TIMEOUT-CRON] Marking ${employeeName} as Half Day (timeout at ${actualLogoutTime}, before 9 PM)`);
+          console.log(`📊 [SESSION-TIMEOUT-CRON] Marking ${employeeName} as Half Day (timeout at ${actualLogoutTime}, before 9 PM, same day)`);
 
           // Apply deduction only if this is a NEW Half Day (not from login after 6 PM)
           if (originalStatusBeforeLogout !== "Half Day") {
@@ -131,6 +140,9 @@ cron.schedule("*/10 * * * * *", async () => {
           } else {
             console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} was already Half Day from login (after 6 PM), no additional deduction`);
           }
+        } else if (isRetroactiveProcessing) {
+          // Cron ran after midnight on a different date — status stays exactly as it was
+          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} — attendance date (${attendanceDate}) is before today (${nowDate}), keeping status as "${finalStatus}"`);
         } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
           console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was after 6 PM)`);
         }
