@@ -296,6 +296,8 @@ app.use("/api/advance-salary-requests", advanceSalaryRoutes);
 app.use("/api/salary-change-requests", salaryChangeRequestRoutes);
 app.use("/api/commission-requests", commissionRoutes);
 app.use("/api/unified-requests", unifiedRequestsRoutes);
+const openRequestsRoutes = require("./routes/openRequestsRoutes");
+app.use("/api/open-requests", openRequestsRoutes);
 app.use("/api/tax-adjustment-requests", taxAdjustmentRequestRoutes);
 const bonusRoutes = require("./routes/bonusRoutes");
 app.use("/api/bonus-requests", bonusRoutes);

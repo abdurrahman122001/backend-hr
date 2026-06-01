@@ -1737,6 +1737,16 @@ exports.approveMessage = async function approveMessage(req, res) {
       hierarchyLevel: currentHierarchyLevel,
     });
 
+    // The approver has reviewed this message — mark it as seen so it doesn't
+    // show up as an unread message in their badge count after approval
+    if (!msg.seenBy) msg.seenBy = [];
+    const alreadySeen = msg.seenBy.some(
+      (s) => String(s.employee) === String(req.employee._id)
+    );
+    if (!alreadySeen) {
+      msg.seenBy.push({ employee: req.employee._id, seenAt: new Date() });
+    }
+
     let approvalFinalized = false;
     let responseStatusMessage = "Message approved successfully";
 

@@ -26,6 +26,9 @@ router.get("/starred/count", filterCtrl.getStarredCount);
 router.get("/trash", filterCtrl.getTrashMessages);
 router.get("/spam", filterCtrl.getSpamMessages);
 
+// Supervision routes (messages from team members to supervisor)
+router.get("/supervision", filterCtrl.getSupervisionMessages);
+
 // General Message Routes
 router.get("/has-juniors", filterCtrl.hasJuniors);
 router.get("/", filterCtrl.listMessages);
