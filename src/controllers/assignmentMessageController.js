@@ -1888,6 +1888,16 @@ exports.approveMessage = async function approveMessage(req, res) {
       hierarchyLevel: currentHierarchyLevel,
     });
 
+    // The approver has reviewed this message — mark it as read so it doesn't
+    // appear as an unread message in their email badge count after approving
+    if (!msg.readBy) msg.readBy = [];
+    const alreadyRead = msg.readBy.some(
+      (r) => String(r.employee?._id || r.employee) === String(req.employee._id)
+    );
+    if (!alreadyRead) {
+      msg.readBy.push({ employee: req.employee._id, readAt: new Date() });
+    }
+
     const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;
     const nextSupervisors = targetSupervisor ? [targetSupervisor] : [];
