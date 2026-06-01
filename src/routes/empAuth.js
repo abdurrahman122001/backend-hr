@@ -744,7 +744,10 @@ router.post("/reset-password/:token", async (req, res) => {
 const codes = new Map();
 
 router.post("/login", async (req, res) => {
-  const { companyEmail, password, deviceFingerprint, deviceToken, testDate } = req.body;
+  const { identifier, companyEmail, password, deviceFingerprint, deviceToken, testDate } = req.body;
+
+  // Support both old `companyEmail` key and new `identifier` key
+  const rawIdentifier = (identifier || companyEmail || "").trim();
 
   try {
     // Get current time in Karachi (allow override for testing)
@@ -759,9 +762,44 @@ router.post("/login", async (req, res) => {
     // ⚠️ TIME RESTRICTION: No login between 12 AM - 8 AM Karachi time
     const isRestrictedTime = currentTime >= 0 && currentTime < (LOGIN_RESTRICTION_END_HOUR * 60);
 
-    const emp = await Employee.findOne({ companyEmail }).select(
-      "_id companyEmail password role owner name trustedDevices department status rt shifts"
-    );
+    // Normalize CNIC input — strip all dashes from input
+    const normalizedInput = rawIdentifier.replace(/-/g, "");
+
+    // Determine lookup strategy: email, employeeId, or CNIC
+    let emp = null;
+    const isEmail = rawIdentifier.includes("@");
+
+    if (isEmail) {
+      emp = await Employee.findOne({ companyEmail: rawIdentifier }).select(
+        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+      );
+    } else {
+      // Try employeeId first (exact match, case-insensitive)
+      emp = await Employee.findOne({
+        employeeId: { $regex: `^${rawIdentifier}$`, $options: "i" }
+      }).select(
+        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+      );
+
+      // If not found by employeeId, try CNIC (strip dashes from stored value and compare)
+      if (!emp) {
+        // Fetch all employees and do in-memory comparison (CNIC has dashes in DB)
+        const candidates = await Employee.find({
+          cnic: { $exists: true, $ne: "" }
+        }).select(
+          "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+        ).lean();
+
+        emp = candidates.find(e => e.cnic && e.cnic.replace(/-/g, "") === normalizedInput) || null;
+
+        if (emp) {
+          // Re-fetch as Mongoose document so comparePassword works
+          emp = await Employee.findById(emp._id).select(
+            "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+          );
+        }
+      }
+    }
 
     if (!emp) return res.status(401).json({ error: "Invalid credentials" });
 

@@ -19,6 +19,14 @@ function _getCompanyShortcut(name) {
   return words[0].substring(0, 3).toUpperCase();
 }
 
+function _getEmployeeInitials(name) {
+  if (!name) return "XX";
+  const parts = name.trim().split(/\s+/);
+  if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return "XX";
+}
+
 /** --- helpers --- */
 const isValidObjectId = (id) => /^[0-9a-fA-F]{24}$/.test(id);
 const CNIC_REGEX = /^\d{5}-\d{7}-\d$/;
@@ -363,36 +371,7 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     }
 
     // Auto-generate employeeId if missing
-    if (!employee.employeeId) {
-      const CompanyProfile = require("../models/CompanyProfile");
-      const company = await CompanyProfile.findOne({ owner: employee.owner }).lean();
-      
-      const getCompanyShortcut = (name) => {
-        if (!name) return "EMP";
-        const cleaned = name.replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "");
-        const words = cleaned.trim().split(/\s+/);
-        if (words.length >= 3) return (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
-        if (words.length === 2) return (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
-        if (words.length === 1) return words[0].substring(0, 3).toUpperCase();
-        return "EMP";
-      };
-
-      const getEmployeeInitials = (name) => {
-        if (!name) return "XX";
-        const parts = name.trim().split(/\s+/);
-        if (parts.length >= 2) return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-        if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
-        return "XX";
-      };
-
-      const companyShortcut = getCompanyShortcut(company?.name);
-      const initials = getEmployeeInitials(employee.name);
-      const randomNum = Math.floor(1000 + Math.random() * 9000);
-      const generatedId = `${companyShortcut}-${initials}-${randomNum}`;
-
-      employee.employeeId = generatedId;
-      await Employee.updateOne({ _id: employee._id }, { $set: { employeeId: generatedId } });
-    }
+    // NOTE: ID generation is now handled during final onboarding step (password setup)
 
     const salarySlip = await SalarySlip.findOne({ employee: req.params.id });
 
@@ -1140,26 +1119,7 @@ exports.getAllMasterSalaries = async (req, res) => {
     }).lean();
 
     // Auto-generate employeeId for any employees that are missing it
-    const missingIdEmps = allEmployees.filter((e) => !e.employeeId);
-    if (missingIdEmps.length > 0) {
-      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
-      const shortcut = _getCompanyShortcut(company?.name);
-      const currentCounter = company?.employeeIdSequence ?? 0;
-      const year = new Date().getFullYear();
-      await CompanyProfile.findOneAndUpdate(
-        { owner: ownerId },
-        { $inc: { employeeIdSequence: missingIdEmps.length } },
-        { new: true, upsert: true }
-      );
-      for (let i = 0; i < missingIdEmps.length; i++) {
-        const seq = String(currentCounter + i + 1).padStart(3, "0");
-        const genId = `${shortcut}-${year}-${seq}`;
-        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: genId } });
-        missingIdEmps[i].employeeId = genId;
-        const emp = allEmployees.find((e) => String(e._id) === String(missingIdEmps[i]._id));
-        if (emp) emp.employeeId = genId;
-      }
-    }
+    // NOTE: ID generation is now handled during final onboarding step (password setup)
 
     const decryptedSalaries = await Promise.all(
       allEmployees.map(async (emp) => {

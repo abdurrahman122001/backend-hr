@@ -1899,6 +1899,19 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     }
 
+    // Denormalize onto ClientInfo when approval is finalized so the sidebar refreshes
+    if (approvalFinalized && msg.client && !msg.isGroupMessage) {
+      const ClientInfo = require("../models/ClientInfo");
+      ClientInfo.findByIdAndUpdate(msg.client, {
+        $set: {
+          "lastWhatsAppMessage.text": (msg.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
+          "lastWhatsAppMessage.at": msg.approvedAt || new Date(),
+          "lastWhatsAppMessage.senderId": msg.sender?._id || msg.sender,
+          "lastWhatsAppMessage.hasAttachments": Array.isArray(msg.attachments) && msg.attachments.length > 0,
+        },
+      }, { timestamps: false }).catch(() => {});
+    }
+
     return res.json({
       ...updatedMessage,
       message: responseStatusMessage,
@@ -3940,9 +3953,201 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
+    // Denormalize last message onto ClientInfo for fast sidebar loading
+    if (responseWithSupervision.client && !responseWithSupervision.isGroupMessage) {
+      const clientId = responseWithSupervision.client?._id || responseWithSupervision.client;
+      if (clientId) {
+        const ClientInfo = require("../models/ClientInfo");
+        ClientInfo.findByIdAndUpdate(clientId, {
+          $set: {
+            "lastWhatsAppMessage.text": (responseWithSupervision.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
+            "lastWhatsAppMessage.at": responseWithSupervision.createdAt || new Date(),
+            "lastWhatsAppMessage.senderId": responseWithSupervision.sender?._id || responseWithSupervision.sender,
+            "lastWhatsAppMessage.hasAttachments": Array.isArray(responseWithSupervision.attachments) && responseWithSupervision.attachments.length > 0,
+          },
+        }, { timestamps: false }).catch(() => {}); // fire-and-forget, non-blocking
+      }
+    }
+
     res.status(201).json(responseWithSupervision);
   } catch (e) {
     console.error("❌ Create message error:", e);
     res.status(500).json({ error: "Failed to create assignment message" });
+  }
+};
+
+/**
+ * GET /whatsApp-messages/chat-list
+ *
+ * Fast sidebar chat list — O(clients + groups) instead of O(messages).
+ *
+ * Uses denormalized `lastWhatsAppMessage` on ClientInfo (updated on every send/approve)
+ * so this becomes two simple find() queries + one small unread aggregation, all parallel.
+ */
+exports.getChatList = async function getChatList(req, res) {
+  try {
+    const owner = req.employee?.owner || req.employee?._id;
+    const meId = new mongoose.Types.ObjectId(String(req.employee._id));
+    const ownerObjId = typeof owner === "string" ? new mongoose.Types.ObjectId(owner) : owner;
+    const ClientInfo = require("../models/ClientInfo");
+
+    // ── Step 1: Get all clients assigned/supervised to me ──────────────────
+    const allMyClients = await ClientInfo.find({
+      owner: ownerObjId,
+      $or: [{ assignedTo: meId }, { supervisedBy: meId }],
+    })
+      .select("_id clientName dba lastWhatsAppMessage")
+      .lean();
+
+    const myClientIds = allMyClients.map((c) => c._id);
+
+    // ── Step 2: Auto-migrate clients missing lastWhatsAppMessage (first run) ─
+    // Find which clients have null/empty lastWhatsAppMessage.at
+    const unmigrated = allMyClients
+      .filter((c) => !c.lastWhatsAppMessage?.at)
+      .map((c) => c._id);
+
+    let migratedMap = new Map(); // clientId → { text, at, senderId, hasAttachments }
+
+    if (unmigrated.length > 0) {
+      // One aggregation to get the latest message for each unmigrated client
+      const latestPerClient = await WhatsAppMessage.aggregate([
+        {
+          $match: {
+            owner: ownerObjId,
+            client: { $in: unmigrated },
+            isGroupMessage: { $ne: true },
+            status: { $ne: "draft" },
+            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: "$client",
+            note: { $first: "$note" },
+            at: { $first: "$createdAt" },
+            senderId: { $first: "$sender" },
+            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
+          },
+        },
+      ]);
+
+      // Persist and build map — fire-and-forget updates
+      for (const row of latestPerClient) {
+        const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+        migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
+        ClientInfo.findByIdAndUpdate(row._id, {
+          $set: {
+            "lastWhatsAppMessage.text": text,
+            "lastWhatsAppMessage.at": row.at,
+            "lastWhatsAppMessage.senderId": row.senderId,
+            "lastWhatsAppMessage.hasAttachments": row.hasAtt,
+          },
+        }, { timestamps: false }).catch(() => {});
+      }
+    }
+
+    // ── Step 3: Groups + Unread counts — in parallel ────────────────────────
+    const [groups, unreadRows] = await Promise.all([
+      WhatsAppGroup.find({
+        owner: ownerObjId,
+        isActive: true,
+        "members.memberId": String(meId),
+      })
+        .select("_id name avatar lastMessage lastMessageAt members")
+        .sort({ lastMessageAt: -1 })
+        .limit(60)
+        .lean(),
+
+      // Unread per chat — scoped to receiver=me only (fast with index)
+      WhatsAppMessage.aggregate([
+        {
+          $match: {
+            owner: ownerObjId,
+            receiver: meId,
+            status: { $ne: "draft" },
+            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+            "seenBy.employee": { $ne: meId },
+          },
+        },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                "$isGroupMessage",
+                { $toString: "$groupId" },
+                { $toString: "$client" },
+              ],
+            },
+            count: { $sum: 1 },
+          },
+        },
+      ]),
+    ]);
+
+    const unreadMap = new Map(unreadRows.map((r) => [String(r._id), r.count]));
+
+    // ── Step 4: Build sidebar list — ONLY clients with messages ────────────
+    const chats = [];
+
+    for (const c of allMyClients) {
+      const cid = String(c._id);
+      const lastMsg = c.lastWhatsAppMessage?.at
+        ? c.lastWhatsAppMessage
+        : migratedMap.get(cid);
+
+      // Skip clients with NO messages at all
+      if (!lastMsg?.at) continue;
+
+      const rawText = lastMsg.text || "";
+      const cleanText = rawText.replace(/<[^>]*>/g, "").trim();
+
+      chats.push({
+        chatId: cid,
+        clientId: cid,
+        clientName: c.clientName,
+        dba: c.dba,
+        lastMessage: cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : ""),
+        lastMessageAt: lastMsg.at,
+        senderId: lastMsg.senderId || null,
+        hasAttachments: lastMsg.hasAttachments || false,
+        unreadCount: unreadMap.get(cid) || 0,
+        hasUnreadMessages: !!(unreadMap.get(cid)),
+        isGroupMessage: false,
+        isClientEmployeeMessage: false,
+      });
+    }
+
+    // Groups — only show if there's a last message
+    for (const g of groups) {
+      if (!g.lastMessageAt && !g.lastMessage) continue;
+      const gid = String(g._id);
+      chats.push({
+        chatId: `group_${gid}`,
+        groupId: gid,
+        groupName: g.name,
+        groupAvatar: g.avatar,
+        groupMembers: g.members,
+        lastMessage: g.lastMessage || "",
+        lastMessageAt: g.lastMessageAt || null,
+        unreadCount: unreadMap.get(gid) || 0,
+        hasUnreadMessages: !!(unreadMap.get(gid)),
+        isGroupMessage: true,
+        isClientEmployeeMessage: false,
+      });
+    }
+
+    // Sort newest first
+    chats.sort((a, b) => {
+      const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
+      const tb = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
+      return tb - ta;
+    });
+
+    res.json({ chats, total: chats.length });
+  } catch (err) {
+    console.error("❌ getChatList error:", err);
+    res.status(500).json({ error: "Failed to load chat list" });
   }
 };
