@@ -1888,6 +1888,16 @@ exports.approveMessage = async function approveMessage(req, res) {
       hierarchyLevel: currentHierarchyLevel,
     });
 
+    // The approver has reviewed this message — mark it as read so it doesn't
+    // appear as an unread message in their email badge count after approving
+    if (!msg.readBy) msg.readBy = [];
+    const alreadyRead = msg.readBy.some(
+      (r) => String(r.employee?._id || r.employee) === String(req.employee._id)
+    );
+    if (!alreadyRead) {
+      msg.readBy.push({ employee: req.employee._id, readAt: new Date() });
+    }
+
     const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;
     const nextSupervisors = targetSupervisor ? [targetSupervisor] : [];
@@ -2046,7 +2056,9 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Add the person who just approved
       allInvolvedUsers.add(String(req.employee._id));
 
-      // Emit to ALL involved users
+      const approverId = String(req.employee._id);
+
+      // Emit status-update events to ALL involved users (including the approver)
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("assignment_message_updated", {
           message: populated,
@@ -2058,15 +2070,11 @@ exports.approveMessage = async function approveMessage(req, res) {
           nextSupervisors: nextSupervisors,
         });
 
-        // 🔥 CRITICAL: Also emit standard new_assignment_message so it shows up in real-time for everyone
-        io.to(`employee_${userId}`).emit("new_assignment_message", populated);
-
-        // Also emit specific event for compatibility
         io.to(`employee_${userId}`).emit("assignment_message_approved", {
           messageId: populated._id,
           approvalStatus: populated.approvalStatus,
           message: populated,
-          isNewMessage: true, // Force it to be treated as a new event
+          isNewMessage: true,
           approvedBy: {
             _id: req.employee._id,
             name: req.employee.name,
@@ -2075,6 +2083,13 @@ exports.approveMessage = async function approveMessage(req, res) {
           timestamp: new Date(),
           hasNextLevel: hasNextLevel,
         });
+      });
+
+      // new_assignment_message → only receivers, NOT the approver
+      // The approver already knows about this message; sending it to them creates a spurious notification
+      allInvolvedUsers.forEach((userId) => {
+        if (userId === approverId) return;
+        io.to(`employee_${userId}`).emit("new_assignment_message", populated);
       });
 
       // Notify assignment managers if completely finalized

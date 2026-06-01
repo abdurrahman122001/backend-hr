@@ -2401,6 +2401,79 @@ exports.listDrafts = async function listDrafts(req, res) {
   }
 };
 
+// GET /api/assignment-messages/supervision - Pending messages from team members (juniors) to supervisor (senior)
+// Shows pending approval messages sent by team members
+exports.getSupervisionMessages = async function getSupervisionMessages(req, res) {
+  try {
+    const { page = 1, limit = 50, client } = req.query;
+    const currentUserId = req.employee?._id;
+    const ownerId = req.employee?.owner;
+
+    if (!isObjId(currentUserId) || !isObjId(ownerId)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    // Get all juniors (team members) under current user in the hierarchy
+    const juniorIds = await getAllJuniorsRecursively(String(ownerId), String(currentUserId));
+
+    // If no juniors, return empty list
+    if (juniorIds.length === 0) {
+      return res.json({
+        items: [],
+        total: 0,
+        page: 1,
+        pages: 0,
+        limit,
+      });
+    }
+
+    // Query for PENDING messages sent FROM team members (juniors)
+    const query = {
+      owner: ownerId,
+      sender: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) }, // Messages from juniors
+      approvalStatus: "pending", // 🔥 Only pending messages
+      isTrashed: false,
+      isSpam: false,
+    };
+
+    // Apply client filter if provided
+    if (isObjId(client)) {
+      query.client = client;
+    }
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(query)
+        .sort({ createdAt: -1 }) // Newest first
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "client", select: "_id clientName" },
+          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(query),
+    ]);
+
+    res.json({
+      items,
+      total,
+      page: pageNum,
+      pages: Math.ceil(total / lim),
+      limit: lim,
+      juniorCount: juniorIds.length,
+    });
+  } catch (e) {
+    console.error("Error in getSupervisionMessages:", e);
+    res.status(500).json({ error: "Failed to fetch supervision messages" });
+  }
+};
+
 // GET /api/assignment-messages/drafts/count - Get draft count for current user
 exports.getDraftCount = async function getDraftCount(req, res) {
   try {
