@@ -25,6 +25,8 @@ router.get("/", ctrl.listMessages);
 router.post("/", ctrl.createMessage);
 router.get("/sent", ctrl.listMySentToClient);
 
+router.get("/chat-list", ctrl.getChatList);
+
 router.get("/messages", ctrl.listMessagesForManager);
 router.get("/messages/:clientId", ctrl.listMessagesForManager);
 
