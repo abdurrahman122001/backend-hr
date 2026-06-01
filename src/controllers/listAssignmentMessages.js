@@ -96,6 +96,35 @@ async function getManagementChainFromHierarchy(ownerId, employeeId) {
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
 
+// ── In-process hierarchy cache (5-minute TTL per employee) ──────────────────
+// Hierarchy traversals hit the DB up to 10× per request. Caching per employee
+// for 5 min eliminates nearly all of that overhead on repeated list fetches.
+const _hc = new Map(); // key → { data, exp }
+const HC_TTL = 5 * 60 * 1000;
+
+function _hcKey(type, ownerId, empId) {
+  return `${type}|${String(ownerId)}|${String(empId)}`;
+}
+
+async function getCachedJuniors(ownerId, empId) {
+  const k = _hcKey("j", ownerId, empId);
+  const e = _hc.get(k);
+  if (e && Date.now() < e.exp) return e.data;
+  const data = await getAllJuniorsRecursively(String(ownerId), String(empId));
+  _hc.set(k, { data, exp: Date.now() + HC_TTL });
+  return data;
+}
+
+async function getCachedChain(ownerId, empId) {
+  const k = _hcKey("c", ownerId, empId);
+  const e = _hc.get(k);
+  if (e && Date.now() < e.exp) return e.data;
+  const data = await getManagementChainFromHierarchy(String(ownerId), String(empId));
+  _hc.set(k, { data, exp: Date.now() + HC_TTL });
+  return data;
+}
+// ────────────────────────────────────────────────────────────────────────────
+
 /** ---------- SOCKET.IO UTILITIES ---------- **/
 function getIO(req) {
   return req.app.get("io");
@@ -125,10 +154,7 @@ async function applyVisibility(q, req, filterParam) {
   const assignedClientIds = assignedClients.map(c => oid(c._id));
 
   // Hierarchy lookup for junior-based visibility — all levels, not just direct
-  const allJuniorIdStrings = await getAllJuniorsRecursively(
-    String(ownerId),
-    String(me)
-  );
+  const allJuniorIdStrings = await getCachedJuniors(ownerId, me);
   const juniorIds = allJuniorIdStrings.filter(isObjId).map((id) => oid(id));
 
   // Activity filter: show ALL messages (any status) from every junior in the hierarchy
@@ -400,7 +426,7 @@ exports.getMessage = async function getMessage(req, res) {
     // Check hierarchy access (senior viewing junior)
     // 🔥 APPROVAL FIX: Hierarchy access does NOT apply to pending messages
     if (!hasAccess && senderId) {
-      const seniorsOfSender = await getManagementChainFromHierarchy(ownerId, senderId);
+      const seniorsOfSender = await getCachedChain(ownerId, senderId);
       if (seniorsOfSender.includes(userId) && msg.approvalStatus !== "pending") hasAccess = true;
     }
 
@@ -567,7 +593,7 @@ exports.listMessages = async function listMessages(req, res) {
     const isParticipantView = !!req.query.participant;
 
     // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity
-    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && filter !== "review";
+    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && !["review", "all", "inbox", "external", "internal"].includes(filter);
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
@@ -583,7 +609,7 @@ exports.listMessages = async function listMessages(req, res) {
     const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
 
     if (isThreaded) {
-      const distinctThreads = await AssignmentMessage.aggregate([
+      const pipeline = [
         { $match: qFinal },
         { $sort: { createdAt: -1 } },
         {
@@ -622,28 +648,29 @@ exports.listMessages = async function listMessages(req, res) {
               }
             }
           }
-        },
-        { $match: { receivedSomething: true } },
+        }
+      ];
+
+      // Only restrict to received threads if we are strictly filtering for incoming-only inboxes.
+      // For 'all' or 'inbox' (which acts as All Inbox), we want to show all threads, including newly started ones.
+      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+        pipeline.push({ $match: { receivedSomething: true } });
+      }
+
+      pipeline.push(
         { $sort: { latestMessageAt: -1 } },
         { $skip: (pageNum - 1) * lim },
         { $limit: lim }
-      ]);
+      );
+
+      const distinctThreads = await AssignmentMessage.aggregate(pipeline);
 
       const latestMessageIds = distinctThreads.map(t => t.latestId);
       if (latestMessageIds.length === 0) {
         return res.json({ items: [], total: 0, page: pageNum, pages: 0, limit: lim });
       }
 
-      const [messages, totalThreadsResult] = await Promise.all([
-        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
-          .populate([
-            { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role designation" },
-            { path: "client", select: "_id clientName" },
-          ])
-          .lean(),
-        AssignmentMessage.aggregate([
+      const totalPipeline = [
           { $match: qFinal },
           {
             $group: {
@@ -664,10 +691,25 @@ exports.listMessages = async function listMessages(req, res) {
                 }
               }
             }
-          },
-          { $match: { receivedSomething: true } },
-          { $count: "total" }
-        ])
+          }
+      ];
+
+      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+        totalPipeline.push({ $match: { receivedSomething: true } });
+      }
+      
+      totalPipeline.push({ $count: "total" });
+
+      const [messages, totalThreadsResult] = await Promise.all([
+        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+          .populate([
+            { path: "owner", select: "_id name companyEmail" },
+            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
+            { path: "client", select: "_id clientName" },
+          ])
+          .lean(),
+        AssignmentMessage.aggregate(totalPipeline)
       ]);
 
       const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
@@ -2417,10 +2459,7 @@ exports.getTeamLeadPendingApprovals =
       }
 
       // 🔥 HIERARCHY-BASED: Get all juniors recursively for this supervisor
-      const supervisedEmployeeIds = await getAllJuniorsRecursively(
-        String(ownerId),
-        String(currentUserId)
-      );
+      const supervisedEmployeeIds = await getCachedJuniors(ownerId, currentUserId);
 
       // Base query: Get pending messages
       // Managers see everything for their owner

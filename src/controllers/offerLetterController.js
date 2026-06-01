@@ -504,21 +504,6 @@ async function sendOfferLetter(req, res) {
     const normalizedRT = normalizeTime(reportingTime);
     const probationDaysNum = Number(probationDays) || 0;
 
-    // Generate sequential employee ID
-    const nextSeqDoc = await CompanyProfile.findOneAndUpdate(
-      { owner: ownerId },
-      { $inc: { employeeIdSequence: 1 } },
-      { new: true, upsert: true, projection: { employeeIdSequence: 1, name: 1 } }
-    ).lean();
-    const seq = String(nextSeqDoc?.employeeIdSequence ?? 1).padStart(6, '0');
-    const cleaned = (nextSeqDoc?.name || "").replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "").trim();
-    const words = cleaned.split(/\s+/);
-    let shortcut = "EMP";
-    if (words.length >= 3) shortcut = (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
-    else if (words.length === 2) shortcut = (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
-    else if (words.length === 1) shortcut = words[0].substring(0, 3).toUpperCase();
-    const newEmployeeId = `${shortcut}-${seq}`;
-
     let employee = await Employee.create({
       name: sanitizeName(candidateName),
       email: candidateEmail,
@@ -528,7 +513,6 @@ async function sendOfferLetter(req, res) {
       subDepartment: subDepartment || null,
       owner: ownerId,
       createdBy: ownerId,
-      employeeId: newEmployeeId,
       status: "Offered",
       rt: normalizedRT,
       shifts: shift ? [shift] : undefined,

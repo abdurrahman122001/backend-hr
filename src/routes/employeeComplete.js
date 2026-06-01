@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const bcrypt = require("bcryptjs");
 const Employee = require("../models/Employees");
+const CompanyProfile = require("../models/CompanyProfile");
 const Signature = require("../models/Signature");
 const sendEmail = require("../services/mailService").sendEmail;
 const multer = require("multer");
@@ -298,6 +299,33 @@ router.put("/set-password", async (req, res) => {
       return res
         .status(400)
         .json({ error: "Invalid or expired set password link." });
+    }
+
+    // Generate 8-digit Employee ID if not already generated
+    if (!emp.employeeId) {
+      const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
+      if (ownerId) {
+        const company = await CompanyProfile.findOne({ owner: ownerId });
+        if (company) {
+          let ownerIndex = company.ownerIndex;
+          if (!ownerIndex) {
+            // Find max ownerIndex globally
+            const maxCompany = await CompanyProfile.findOne().sort({ ownerIndex: -1 }).lean();
+            const maxIndex = maxCompany && maxCompany.ownerIndex ? maxCompany.ownerIndex : 0;
+            ownerIndex = maxIndex + 1;
+            company.ownerIndex = ownerIndex;
+          }
+          
+          company.employeeIdSequence = (company.employeeIdSequence || 0) + 1;
+          await company.save();
+          
+          const seq = (ownerIndex * 1000) + company.employeeIdSequence;
+          const year = new Date().getFullYear();
+          
+          // Format: [YYYY][SEQ] (e.g. 20251001)
+          emp.employeeId = `${year}${seq}`;
+        }
+      }
     }
 
     // Hash password and update

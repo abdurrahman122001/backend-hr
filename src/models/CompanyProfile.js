@@ -16,7 +16,8 @@ const CompanyProfileSchema = new Schema({
   website: { type: String, default: "" },
   logo:    { type: String, default: "" },
   // Sequential counter for auto-generated employee IDs (e.g. ABC-000001)
-  employeeIdSequence: { type: Number, default: 0 }
+  employeeIdSequence: { type: Number, default: 0 },
+  ownerIndex: { type: Number }
 }, { timestamps: true });
 
 module.exports = model('CompanyProfile', CompanyProfileSchema);

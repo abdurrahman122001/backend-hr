@@ -209,6 +209,12 @@ AssignmentMessageSchema.index({ isFromCompanyEmployee: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ clientEmployeeEmail: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ "cc.email": 1, createdAt: -1 });
 
+// Compound indexes for common inbox/sent/trash query patterns (major perf boost)
+AssignmentMessageSchema.index({ owner: 1, isTrashed: 1, isSpam: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ receiver: 1, isTrashed: 1, isSpam: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ owner: 1, approvalStatus: 1, createdAt: -1 });
+AssignmentMessageSchema.index({ sender: 1, isTrashed: 1, isSpam: 1, createdAt: -1 });
+
 AssignmentMessageSchema.pre("save", function (next) {
   if (!this.threadId) {
     let threadId;
