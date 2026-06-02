@@ -69,7 +69,8 @@ async function emitToThreadParticipants(io, message, eventName = "new_thread_cha
       .populate("owner")
       .populate("sender")
       .populate("receiver")
-      .populate("client");
+      .populate("client")
+      .populate({ path: "assignmentMessageId", select: "subject" });
 
     if (!populatedMessage) return;
 
