@@ -2648,6 +2648,16 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
+    // Approved messages cannot be deleted by anyone
+    if (msg.approvalStatus === "approved") {
+      return res.status(403).json({ error: "Approved messages cannot be deleted" });
+    }
+
+    // Only the sender can delete their own message
+    if (String(msg.sender) !== currentUserId) {
+      return res.status(403).json({ error: "Only the sender can delete this message" });
+    }
+
     const io = req.app.get("io");
 
     if (deleteType === "everyone") {

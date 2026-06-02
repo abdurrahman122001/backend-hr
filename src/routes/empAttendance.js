@@ -62,7 +62,8 @@ router.get('/absences-without-leave', async (req, res) => {
     let absentRecords = await Attendance.find(query).lean();
     console.log('[DEBUG] Found absent records:', absentRecords.length, absentRecords.map(r => ({ date: r.date, status: r.status })));
 
-    // After 6 PM: also check today's half-day (not absent — it's still the same day)
+    // After 6 PM: also check today's half-day
+    // (login after 6PM auto-creates a Half Day record, so the popup fires immediately)
     if (includeToday) {
       const todayHalfDay = await Attendance.find({
         employee: employeeId,
@@ -118,6 +119,15 @@ router.get('/absences-without-leave', async (req, res) => {
       // Skip if already acknowledged by employee (unpaid acknowledgment)
       if (record.acknowledgedByEmployee) {
         console.log('[DEBUG] Record', recordDateStr, 'already acknowledged by employee - skipping');
+        return false;
+      }
+
+      // Skip Half Day records where the employee was originally Present or Late —
+      // the status was changed by the system/admin; employee should not be asked to justify it.
+      // Only ask when originalStatus was also Half Day (genuine half-day from the start).
+      const isHalfDay = ['Half Day', 'halfday', 'half-day', 'Half-Day'].includes(record.status);
+      if (isHalfDay && (record.originalStatus === 'Present' || record.originalStatus === 'Late')) {
+        console.log('[DEBUG] Record', recordDateStr, 'is Half Day but originalStatus was', record.originalStatus, '- skipping');
         return false;
       }
       
