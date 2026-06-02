@@ -254,6 +254,7 @@ exports.sendGroupMessage = async function (req, res) {
       receiverType = "all",
       receiverId,
       parentClientId,
+      receiverDisplayName = "",
       isReply,
       repliedTo,
       replyContent,
@@ -436,7 +437,10 @@ exports.sendGroupMessage = async function (req, res) {
     };
 
     if (messageClientId) msgDoc.client = messageClientId;
-    
+
+    // Store the UI-selected display name so every viewer gets the right label
+    if (receiverDisplayName) msgDoc.receiverDisplayName = receiverDisplayName;
+
     // 🔥 FIXED: Ensure these values are assigned correctly
     msgDoc.clientEmployeeData = clientEmployeeData;
     msgDoc.parentClientId = clientEmployeeData?.parentClientId;

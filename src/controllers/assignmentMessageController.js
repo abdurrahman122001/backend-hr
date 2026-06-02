@@ -2162,51 +2162,72 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     msg.updatedAt = new Date();
     await msg.save();
 
-    // Populate the updated message for response
+    // Populate the updated message for response — include approvalChain so
+    // previous approvers are identifiable both here and in the frontend
     const populated = await AssignmentMessage.findById(msg._id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName" },
+      {
+        path: "approvalChain.approver",
+        select: "_id name companyEmail role designation",
+        model: "Employee",
+      },
     ]);
 
     // 🔥 FIXED: Emit specific disapproval event
     const io = getIO(req);
     if (io) {
-      // Get all participants
+      // Collect ALL users who must see the disapproval in real time
       const allParticipants = new Set();
 
+      // Original sender
       const senderId = String(populated.sender._id);
       allParticipants.add(senderId);
 
+      // Current receivers (the person who just disapproved is likely here too)
       if (populated.receiver && Array.isArray(populated.receiver)) {
         populated.receiver.forEach((receiver) => {
-          const receiverId = String(receiver._id);
-          allParticipants.add(receiverId);
+          allParticipants.add(String(receiver._id));
         });
       }
 
+      // Every senior in the approval chain who previously approved —
+      // they must see the disapproval from a higher-level senior.
+      // msg.approvalChain uses raw ObjectIds (not populated), so call String() directly.
+      if (Array.isArray(msg.approvalChain)) {
+        msg.approvalChain.forEach((step) => {
+          const raw = step.approver;
+          const aid = raw?._id ? String(raw._id) : raw ? String(raw) : null;
+          if (aid) allParticipants.add(aid);
+        });
+      }
+
+      // The senior who disapproved
       allParticipants.add(String(req.employee._id));
+
+      const disapprovalPayload = {
+        messageId: String(populated._id),
+        approvalStatus: "disapproved",
+        message: populated,
+        disapprovedBy: {
+          _id: req.employee._id,
+          name: req.employee.name,
+          companyEmail: req.employee.companyEmail,
+        },
+        timestamp: new Date(),
+        disapprovalNote: msg.disapprovalNote,
+      };
 
       // Emit to all participants
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit(
           "assignment_message_disapproved",
-          {
-            messageId: populated._id,
-            approvalStatus: "disapproved",
-            message: populated,
-            disapprovedBy: {
-              _id: req.employee._id,
-              name: req.employee.name,
-              companyEmail: req.employee.companyEmail,
-            },
-            timestamp: new Date(),
-            disapprovalNote: msg.disapprovalNote, // Include the note in the emission
-          }
+          disapprovalPayload
         );
 
-        // 🔥 CRITICAL: Also emit standard new_assignment_message for real-time list updates
+        // Also update the email list view
         io.to(`employee_${participantId}`).emit("new_assignment_message", populated);
       });
 
@@ -2992,14 +3013,22 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     const isTeamLead = userRole.includes("team") && userRole.includes("lead");
     const isManager = userRole.includes("manager");
 
-    // Allow sender or team leads to edit
-    if (!isSender && !isTeamLead && !isManager) {
+    // Allow any senior who previously approved the message to also edit & resubmit
+    const isInApprovalChain =
+      Array.isArray(msg.approvalChain) &&
+      msg.approvalChain.some((step) => {
+        const raw = step.approver;
+        const aid = raw?._id ? String(raw._id) : raw ? String(raw) : null;
+        return aid === String(currentUserId);
+      });
+
+    if (!isSender && !isTeamLead && !isManager && !isInApprovalChain) {
       return res.status(403).json({
         error: "You don't have permission to edit this message",
         messageOwner: messageSenderId,
         currentUser: currentUserId,
         userRole: req.employee?.role || "unknown",
-        allowedRoles: ["sender", "team_lead", "manager"],
+        allowedRoles: ["sender", "team_lead", "manager", "previous_approver"],
       });
     }
 
@@ -3023,24 +3052,33 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       });
     }
 
-    // Prepare update data
+    // Capture previous approvers before resetting so we can notify them
+    const previousApproverIds = (msg.approvalChain || []).map((step) => {
+      const aid = typeof step.approver === "object" ? step.approver?._id : step.approver;
+      return aid ? String(aid) : null;
+    }).filter(Boolean);
+
+    // Prepare update data – reset approvalChain so the chain restarts from scratch
     const updateData = {
       approvalStatus: "pending",
+      approvalChain: [],
       updatedAt: new Date(),
       resubmittedAt: new Date(),
       lastEditedBy: currentUserId,
       lastEditedAt: new Date(),
     };
 
-    // 🔥 HIERARCHY-BASED: Re-calculate receiver upon resubmission
-    // Get clientDoc for the client associated with the message
+    // 🔥 HIERARCHY-BASED: Re-calculate receiver upon resubmission.
+    // When the original sender resubmits, route from their position (→ Senior B).
+    // When a previous approver (senior) resubmits, route from THEIR position
+    // so the message goes to their own higher-order senior, not back to themselves.
     if (msg.client) {
       const clientDoc = await ClientInfo.findById(msg.client).lean();
       if (clientDoc) {
-        const hierarchyResult = await calculateHierarchyReceiver(msg.owner, msg.sender, clientDoc);
+        const hierarchyFrom = isSender ? msg.sender : currentUserId;
+        const hierarchyResult = await calculateHierarchyReceiver(msg.owner, hierarchyFrom, clientDoc);
         updateData.receiver = hierarchyResult.receivers;
         updateData.approvalStatus = hierarchyResult.approvalStatus;
-        // Note: targetSupervisor can be used for emission later if needed
       }
     }
 
@@ -3166,6 +3204,10 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         // Add the editor
         allParticipants.add(String(currentUserId));
 
+        // Also notify every senior who had previously approved — they need to
+        // re-approve and should see the message flip back to pending
+        previousApproverIds.forEach((aid) => allParticipants.add(aid));
+
         // Emit resubmission event
         const resubmitEvent = {
           message: populated,
@@ -3176,6 +3218,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
             companyEmail: req.employee.companyEmail,
             role: req.employee.role,
           },
+          previousApproverIds,
           timestamp: new Date(),
         };
 

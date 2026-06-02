@@ -24,20 +24,28 @@ exports.getRoster = async (req, res) => {
     const isTeamLead = role === "team lead" || role === "team_lead";
     const isManager = role === "manager";
 
-    const pathRegex = new RegExp(`(^|\\.)${me._id}(\\.|$)`);
-    const myJuniorsLinks = await EmployeeHierarchy.find({
+    // Find direct juniors from EmployeeHierarchy (senior: me)
+    const hierarchyJuniorLinks = await EmployeeHierarchy.find({
       owner: me.owner,
-      path: pathRegex
+      senior: me._id,
     }).select("junior").lean();
+    const hierarchyJuniorIds = hierarchyJuniorLinks.map(l => String(l.junior));
 
-    // gather unique junior ids from hierarchy
-    const juniorIdsFromHierarchy = myJuniorsLinks.map(link => String(link.junior));
+    // Also include employees whose supervisor field points to me
+    const supervisorFieldJuniors = await Employee.find({
+      owner: me.owner,
+      supervisor: me._id,
+    }).select("_id").lean();
+    const supervisorFieldIds = supervisorFieldJuniors.map(e => String(e._id));
 
-    // Supervision flag now comes from ClientInfo: a junior is "supervised by me"
-    // if at least one of their assigned clients lists me in supervisedBy.
+    // Combine both sources
+    const juniorIds = [...new Set([...hierarchyJuniorIds, ...supervisorFieldIds])];
+    const isSenior = juniorIds.length > 0;
+
+    // Build juniorMap: tracks which juniors have supervision enabled on their clients
     const supervisedClients = await ClientInfo.find({
       owner: me.owner,
-      assignedTo: { $in: juniorIdsFromHierarchy.map(id => new mongoose.Types.ObjectId(id)) },
+      assignedTo: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
       supervisedBy: me._id,
     }).select("assignedTo").lean();
 
@@ -45,25 +53,14 @@ exports.getRoster = async (req, res) => {
     supervisedClients.forEach(c => {
       (c.assignedTo || []).forEach(aId => {
         const idStr = String(aId);
-        if (juniorIdsFromHierarchy.includes(idStr)) supervisedJuniorIds.add(idStr);
+        if (juniorIds.includes(idStr)) supervisedJuniorIds.add(idStr);
       });
     });
 
     const juniorMap = new Map();
-    juniorIdsFromHierarchy.forEach(jid => {
+    juniorIds.forEach(jid => {
       juniorMap.set(jid, supervisedJuniorIds.has(jid));
     });
-
-    // also include any employees whose `supervisor` field is me (direct reports)
-    const directJuniors = await Employee.find({
-      owner: me.owner,
-      supervisor: me._id,
-    }).select("_id").lean();
-    const directIds = directJuniors.map(e => String(e._id));
-
-    const juniorIdsSet = new Set([...juniorIdsFromHierarchy, ...directIds]);
-    const juniorIds = [...juniorIdsSet];
-    const isSenior = juniorIds.length > 0;
 
     const canSeeManagementTabs = isManager || isTeamLead || isSenior;
     const isEmployee = !isManager && !isTeamLead; // but could be a senior staff
@@ -240,17 +237,29 @@ exports.getEmployeeRoster = async (req, res) => {
 
     const { name } = req.query; // optional name search
 
-    const isManagerLike =
+    const isManagerRole =
       me.role?.toLowerCase() === "manager" ||
       me.role?.toLowerCase() === "team lead" ||
       me.role?.toLowerCase() === "team_lead" ||
       me.role?.toLowerCase() === "teamlead";
 
+    // Get direct juniors from hierarchy
+    let juniorIds = [];
+    if (!isManagerRole) {
+      const juniorLinks = await EmployeeHierarchy.find({
+        owner: me.owner,
+        senior: me._id,
+      }).select("junior");
+      juniorIds = juniorLinks.map((l) => l.junior);
+    }
+
+    const isHierarchySenior = juniorIds.length > 0;
+
     // --- Employees Query ---
     const employees = await Employee.find({
       owner: me.owner,
-      status: "active", // Only show active employees
-      _id: { $ne: me._id }, // Exclude the current user
+      status: "active",
+      _id: { $ne: me._id },
       $or: [
         { department: "Operations" },
         { role: { $in: ["Employee", "Manager", "Team Lead"] } },
@@ -265,9 +274,14 @@ exports.getEmployeeRoster = async (req, res) => {
     // --- Clients Query ---
     const clientQuery = { owner: me.owner };
 
-    // For non-managers, show only clients assigned to them
-    if (!isManagerLike) {
-      clientQuery.assignedTo = { $in: [me._id, me._id.toString()] };
+    if (isManagerRole) {
+      // Managers/Team Leads see all owner clients
+    } else if (isHierarchySenior) {
+      // Seniors see only clients where their juniors are assigned
+      clientQuery.assignedTo = { $in: juniorIds };
+    } else {
+      // Regular employees see only their own assigned clients
+      clientQuery.assignedTo = { $in: [me._id] };
     }
 
     // Optional name filter
@@ -429,8 +443,6 @@ exports.assignClient = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id);
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role))
-      return res.status(403).json({ error: "Unauthorized" });
     if (!me.owner)
       return res
         .status(400)
@@ -443,6 +455,22 @@ exports.assignClient = async (req, res) => {
 
     if (!clientId)
       return res.status(400).json({ error: "clientId is required" });
+
+    // Allow if: Manager/Team Lead role OR is a senior in EmployeeHierarchy for any of the target employees
+    const isManagerRole = isManagerLike(me.role);
+    let isHierarchySenior = false;
+    if (!isManagerRole && Array.isArray(employeeIds) && employeeIds.length > 0) {
+      const seniorLink = await EmployeeHierarchy.exists({
+        owner: me.owner,
+        senior: me._id,
+        junior: { $in: employeeIds },
+      });
+      isHierarchySenior = !!seniorLink;
+    }
+
+    if (!isManagerRole && !isHierarchySenior) {
+      return res.status(403).json({ error: "Unauthorized: you are not a manager/team lead and do not supervise any of the target employees" });
+    }
 
     // Get the client before update
     const clientBeforeUpdate = await ClientInfo.findOne({

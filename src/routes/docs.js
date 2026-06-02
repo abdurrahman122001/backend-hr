@@ -2113,3 +2113,27 @@ router.delete("/document/:filename", async (req, res) => {
 });
 
 module.exports = router;
+
+/**
+ * Programmatic certificate generator — called by the document-request approval flow.
+ * Returns { saveResult, referenceNumber } so the controller can store the URL.
+ */
+module.exports.generateSalaryCertificateForEmployee = async (employeeId, ownerId) => {
+  const referenceNumber = await generateReferenceNumber("salary_certificate", ownerId);
+  const pdfBuffer = await generateDocumentPDF(
+    employeeId,
+    "salary_certificate",
+    "",       // no specific templateId — uses owner's saved template
+    ownerId,
+    null,     // no precomputedTokens
+    referenceNumber
+  );
+  const saveResult = await saveDocumentToFile(
+    pdfBuffer,
+    employeeId,
+    "salary_certificate",
+    ownerId,
+    referenceNumber
+  );
+  return { pdfBuffer, saveResult, referenceNumber };
+};

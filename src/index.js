@@ -1097,11 +1097,23 @@ io.on("connection", (socket) => {
         typeof populatedMessage.sender === "string"
           ? populatedMessage.sender
           : populatedMessage.sender?._id;
-      // 1. Emit specific disapproval event to all participants
+      // 1. Collect all participants: sender + receivers + approval chain members
+      const chainMemberIds = Array.isArray(populatedMessage.approvalChain)
+        ? populatedMessage.approvalChain
+            .map((step) => {
+              const id = typeof step === "object"
+                ? (step?.approver?._id || step?.approver || step?._id)
+                : step;
+              return id ? String(id) : null;
+            })
+            .filter(Boolean)
+        : [];
+
       const allParticipants = new Set(
-        [senderId, ...actualReceiverIds].filter(Boolean),
+        [senderId, ...actualReceiverIds, ...chainMemberIds].filter(Boolean),
       );
-      // Emit to all participants
+
+      // Emit disapproval event to all participants (incl. intermediate approvers)
       allParticipants.forEach((participantId) => {
         io.to(`employee_${participantId}`).emit(
           "assignment_message_disapproved",
@@ -1109,6 +1121,7 @@ io.on("connection", (socket) => {
             messageId: populatedMessage._id,
             approvalStatus: "disapproved",
             message: populatedMessage,
+            disapprovedBy: data.disapprovedBy || null,
             timestamp: new Date(),
           },
         );
