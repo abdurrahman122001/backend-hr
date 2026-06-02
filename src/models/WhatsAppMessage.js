@@ -176,6 +176,8 @@ const WhatsAppMessageSchema = new Schema(
 
     // parentClientId stored as a plain string (mirrors isClientEmployeeMessage practice)
     parentClientId: { type: String, default: null },
+    // Display name of the selected client/client-employee (set by sender at compose time)
+    receiverDisplayName: { type: String, default: null },
 
     sentAt: { type: Date },
     status: {
