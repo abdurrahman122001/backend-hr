@@ -98,17 +98,19 @@ exports.addComment = async (req, res) => {
         io.to(`conversation_${message.groupId}`).emit("comment:added", payload);
       }
 
-      // 4) Notify all participants in their user rooms
+      // 4) Notify all participants in their user rooms (sender + receivers + approval chain)
       const participants = new Set([
         String(message.sender),
         ...(Array.isArray(message.receiver)
           ? message.receiver.map((r) => String(r))
-          : [String(message.receiver)]),
+          : message.receiver ? [String(message.receiver)] : []),
+        ...(Array.isArray(message.approvalChain)
+          ? message.approvalChain.map((a) => String(a?.approver || a)).filter(Boolean)
+          : []),
       ]);
 
       participants.forEach((userId) => {
         io.to(`employee_${userId}`).emit("comment:added", payload);
-        io.to(`user:${userId}`).emit("comment:added", payload);
       });
 
       // 5) Mention notifications

@@ -241,6 +241,10 @@ const WhatsAppMessageSchema = new Schema(
 
 /** Helpful query patterns */
 WhatsAppMessageSchema.index({ owner: 1, createdAt: -1 });
+// Compound index for getChatList aggregation: owner + status filter + sort by createdAt
+WhatsAppMessageSchema.index({ owner: 1, status: 1, createdAt: -1 });
+// Receiver-based unread count inside aggregation
+WhatsAppMessageSchema.index({ owner: 1, receiver: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ client: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ sender: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ receiver: 1, createdAt: -1 });

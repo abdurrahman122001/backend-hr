@@ -121,6 +121,14 @@ const ClientInfoSchema = new Schema(
       },
     ],
 
+    // Denormalized last-message snapshot for fast WhatsApp sidebar (updated on every send/approve)
+    lastWhatsAppMessage: {
+      text:      { type: String, default: null },
+      at:        { type: Date,   default: null },
+      senderId:  { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+      hasAttachments: { type: Boolean, default: false },
+    },
+
     // 🔹 Metadata
     createdBy: {
       type: Schema.Types.ObjectId,
@@ -132,5 +140,6 @@ const ClientInfoSchema = new Schema(
 // Create index for efficient assignment queries
 ClientInfoSchema.index({ assignedTo: 1 });
 ClientInfoSchema.index({ owner: 1, assignedTo: 1 });
+ClientInfoSchema.index({ owner: 1, "lastWhatsAppMessage.at": -1 });
 
 module.exports = model("ClientInfo", ClientInfoSchema);

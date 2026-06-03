@@ -1,3 +1,4 @@
+
 const Leave = require("../models/ApplyLeave");
 const Employee = require("../models/Employees");
 const SalarySlip = require("../models/SalarySlip");
@@ -826,6 +827,60 @@ exports.applyLeave = async (req, res) => {
       message: error.message,
       error: process.env.NODE_ENV === "development" ? error.stack : undefined,
     });
+  }
+};
+
+// @route   PUT /api/leaves/:id
+// @access  Private
+exports.updateLeave = async (req, res) => {
+  try {
+    const { dates, leaveType, customLeaveType, reason } = req.body;
+    const leaveId = req.params.id;
+    const employeeId = req.user.employeeId || req.user.id;
+
+    const leave = await Leave.findOne({ _id: leaveId, employee: employeeId });
+    if (!leave) {
+      return res.status(404).json({ message: "Leave request not found or unauthorized" });
+    }
+
+    if (leave.status !== "pending") {
+      return res.status(400).json({ message: "Only pending leaves can be updated" });
+    }
+
+    // Update fields
+    if (dates && dates.length > 0) {
+      leave.dates = dates;
+      
+      const sortedDates = [...dates].sort((a, b) => new Date(a.date) - new Date(b.date));
+      leave.startDate = new Date(sortedDates[0].date);
+      leave.endDate = new Date(sortedDates[sortedDates.length - 1].date);
+      
+      leave.totalHours = dates.reduce((sum, day) => sum + (Number(day.hours) || 0), 0);
+      leave.totalDays = leave.totalHours / 8;
+    }
+
+    if (leaveType) leave.leaveType = leaveType;
+    if (customLeaveType !== undefined) leave.customLeaveType = leaveType === "other" ? customLeaveType : undefined;
+    if (reason) leave.reason = reason;
+
+    leave.workflowHistory.push({
+      action: "submitted",
+      performedBy: employeeId,
+      performedByName: req.user.name || "Employee",
+      notes: "Leave request updated",
+      timestamp: new Date(),
+    });
+
+    await leave.save();
+
+    res.json({
+      success: true,
+      message: "Leave updated successfully",
+      data: leave
+    });
+  } catch (error) {
+    console.error("❌ Update leave error:", error);
+    res.status(500).json({ message: "Failed to update leave", error: error.message });
   }
 };
 
