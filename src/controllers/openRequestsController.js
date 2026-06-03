@@ -54,8 +54,14 @@ exports.getMyOpenRequests = async (req, res) => {
       WhistleblowingReport.find({ employee: employeeId }).lean(),
       OvertimeRequest.find(base).lean(),
       ProfileRevision.find(base).lean(),
-      // ApplyLeave - filter out trashed but get all statuses
-      ApplyLeave.find({ employee: employeeId, isTrashed: { $ne: true } }).lean(),
+      // ApplyLeave - populate all fields needed for the detail modal
+      ApplyLeave.find({ employee: employeeId, isTrashed: { $ne: true } })
+        .populate("employee", "name email role designation photographUrl photoUrl")
+        .populate("approvalChain", "name role designation")
+        .populate("approvedBy", "name role designation")
+        .populate("rejectedBy", "name role designation")
+        .populate("appliedBy", "name role designation")
+        .lean(),
       // AttendanceChallenge - get all statuses
       AttendanceChallenge.find({ employee: employeeId }).lean(),
     ]);
@@ -98,6 +104,11 @@ exports.getLeaveApprovals = async (req, res) => {
     const empIdStr = String(empObjId);
     const populateEmp = "name designation department photographUrl";
 
+    const populateChain = { path: "approvalChain", select: "name role designation" };
+    const populateApprovedBy = { path: "approvedBy", select: "name role designation" };
+    const populateRejectedBy = { path: "rejectedBy", select: "name role designation" };
+    const populateAppliedBy = { path: "appliedBy", select: "name role designation" };
+
     const [forApproval, escalated] = await Promise.all([
       // Pending leaves where it is THIS employee's turn to approve
       ApplyLeave.find({
@@ -112,6 +123,10 @@ exports.getLeaveApprovals = async (req, res) => {
         },
       })
         .populate("employee", populateEmp)
+        .populate(populateChain)
+        .populate(populateApprovedBy)
+        .populate(populateRejectedBy)
+        .populate(populateAppliedBy)
         .sort({ createdAt: -1 })
         .lean(),
 
@@ -120,7 +135,6 @@ exports.getLeaveApprovals = async (req, res) => {
         approvalChain: empObjId,
         isTrashed: { $ne: true },
         $or: [
-          // Still pending but their turn already passed (forwarded to next approver)
           {
             status: "pending",
             $expr: {
@@ -135,13 +149,15 @@ exports.getLeaveApprovals = async (req, res) => {
               ],
             },
           },
-          // They rejected it
           { rejectedBy: empObjId },
-          // They were the final approver
           { approvedBy: empObjId },
         ],
       })
         .populate("employee", populateEmp)
+        .populate(populateChain)
+        .populate(populateApprovedBy)
+        .populate(populateRejectedBy)
+        .populate(populateAppliedBy)
         .sort({ updatedAt: -1 })
         .lean(),
     ]);

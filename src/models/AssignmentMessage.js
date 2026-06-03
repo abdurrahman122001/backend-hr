@@ -268,6 +268,9 @@ AssignmentMessageSchema.pre("save", function (next) {
 });
 
 AssignmentMessageSchema.pre("save", function (next) {
+  // Drafts don't need a receiver yet
+  if (this.status === "draft") return next();
+
   if (!this.receiver || this.receiver.length === 0) {
     const error = new Error("At least one receiver is required");
     return next(error);
