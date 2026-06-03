@@ -144,7 +144,27 @@ cron.schedule("*/10 * * * * *", async () => {
           // Cron ran after midnight on a different date — status stays exactly as it was
           console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} — attendance date (${attendanceDate}) is before today (${nowDate}), keeping status as "${finalStatus}"`);
         } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was after 6 PM)`);
+          // Employee was Half Day from login (logged in after 6 PM).
+          // Upgrade to Present if lastSeen was at/after 9 PM (same day) OR crossed midnight.
+          const shouldUpgrade = attendance.isLoginAfter6PM === true && (
+            (!isCrossMidnightLogout && logoutTotalMinutes >= halfDayLogoutThreshold) ||
+            isCrossMidnightLogout
+          );
+
+          if (shouldUpgrade) {
+            finalStatus = "Present";
+            const reason = isCrossMidnightLogout ? "crossed midnight" : `lastSeen at ${actualLogoutTime}`;
+            console.log(`📊 [SESSION-TIMEOUT-CRON] Upgrading ${employeeName} Half Day → Present (login after 6 PM, ${reason})`);
+            try {
+              const { reverseHalfDayDeduction } = require("../utils/lateDeductions");
+              await reverseHalfDayDeduction(employeeId, ownerId, employeeId, attendanceDate);
+              console.log(`✅ [SESSION-TIMEOUT-CRON] Half-day login deduction reversed for ${employeeName}`);
+            } catch (hdErr) {
+              console.error(`❌ [SESSION-TIMEOUT-CRON] Error reversing deduction for ${employeeName}:`, hdErr);
+            }
+          } else {
+            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was after 6 PM, lastSeen before 9 PM)`);
+          }
         }
 
         // Update attendance record

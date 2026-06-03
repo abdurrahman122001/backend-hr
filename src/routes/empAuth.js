@@ -1326,7 +1326,28 @@ router.post("/logout", requireAuth, async (req, res) => {
         console.log(`ℹ️ [LOGOUT] Half Day status maintained (was already Half Day from login after 6 PM)`);
       }
     } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-      console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was after 6 PM)`);
+      // Employee was marked Half Day at login (logged in after 6 PM).
+      // Upgrade to Present if:
+      //   • Same-day logout at or after 9 PM, OR
+      //   • Cross-midnight logout (they must have passed 9 PM to reach next day)
+      const shouldUpgrade = attendance.isLoginAfter6PM === true && (
+        (!isCrossMidnightLogout && logoutTotalMinutes >= halfDayLogoutThreshold) ||
+        isCrossMidnightLogout
+      );
+
+      if (shouldUpgrade) {
+        finalStatus = "Present";
+        const reason = isCrossMidnightLogout ? "crossed midnight" : `stayed until ${actualLogoutTime}`;
+        console.log(`📊 [LOGOUT] Upgrading Half Day → Present (login after 6 PM, ${reason})`);
+        try {
+          await reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDate);
+          console.log(`✅ [LOGOUT] Half-day login deduction reversed`);
+        } catch (hdErr) {
+          console.error("[HALF-DAY-UPGRADE] Error reversing deduction:", hdErr);
+        }
+      } else {
+        console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was after 6 PM, logout before 9 PM)`);
+      }
     }
     try {
       updated = await Attendance.findByIdAndUpdate(
