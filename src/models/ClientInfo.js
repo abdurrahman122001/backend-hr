@@ -129,6 +129,9 @@ const ClientInfoSchema = new Schema(
       hasAttachments: { type: Boolean, default: false },
     },
 
+    // Client active/inactive status
+    isActive: { type: Boolean, default: true },
+
     // 🔹 Metadata
     createdBy: {
       type: Schema.Types.ObjectId,

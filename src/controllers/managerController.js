@@ -7,7 +7,7 @@ const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isManagerLike = (role) => {
   const r = String(role || "").toLowerCase();
-  return /\bmanager\b/.test(r) || /team\s*lead/.test(r);
+  return /\bmanager\b/.test(r) || /team\s*lead/.test(r) || /\bcrm\b/.test(r);
 };
 
 exports.getRoster = async (req, res) => {
@@ -307,7 +307,7 @@ exports.getEmployeeRoster = async (req, res) => {
       .sort({ name: 1 });
 
     // --- Clients Query ---
-    const clientQuery = { owner: me.owner };
+    const clientQuery = { owner: me.owner, isActive: { $ne: false } };
 
     if (isManagerRole) {
       // Managers/Team Leads see all owner clients
@@ -326,7 +326,7 @@ exports.getEmployeeRoster = async (req, res) => {
 
     const clients = await ClientInfo.find(clientQuery)
       .select(
-        "_id clientName dba industry taxStatus companyLocation assignedTo",
+        "_id clientName dba industry taxStatus companyLocation isActive assignedTo",
       )
       .populate("assignedTo", "_id name companyEmail")
       .sort({ clientName: 1 });

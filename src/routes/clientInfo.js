@@ -15,6 +15,8 @@ router.get("/my", requireAuth, clientInfoCtrl.getMyClients);
 
 // Update specific client info (Owner/Manager/Team Lead/Assigned Employee)
 router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
+// Partial update — used by CRM for toggling isActive and other field-level patches
+router.patch("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
 
 // Delete specific client info (Owner/Manager/Team Lead/Creator)
 router.delete("/:id", requireAuth, clientInfoCtrl.deleteClientInfo);

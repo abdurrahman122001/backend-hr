@@ -5,8 +5,7 @@ const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isManagerLike = (role) => {
   const r = String(role || "").toLowerCase();
-  // treat any role string containing manager or team lead as managerial
-  return /\bmanager\b/.test(r) || /team\s*lead/.test(r);
+  return /\bmanager\b/.test(r) || /team\s*lead/.test(r) || /\bcrm\b/.test(r);
 };
 
 exports.createClientInfo = async (req, res) => {
@@ -461,9 +460,10 @@ exports.searchClientByName = async (req, res) => {
 
     const role = String(emp.role || "").trim().toLowerCase();
 
-    // Base query: always scope by owner
+    // Base query: always scope by owner, exclude inactive clients from search results
     let query = {
       owner: emp.owner,
+      isActive: { $ne: false },
       $or: [
         { clientName: { $regex: search, $options: "i" } },
         { dba: { $regex: search, $options: "i" } },
@@ -631,7 +631,7 @@ exports.searchClientByEmail = async (req, res) => {
     }
 
     // Build query based on role
-    let query = { owner: emp.owner };
+    let query = { owner: emp.owner, isActive: { $ne: false } };
 
     // For non-managers, only search assigned clients
     if (emp.role?.toLowerCase() !== "manager") {
@@ -665,7 +665,7 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
     }
 
     // Build query based on role
-    let query = { owner: emp.owner };
+    let query = { owner: emp.owner, isActive: { $ne: false } };
 
     // For non-managers, only search within assigned clients
     if (emp.role?.toLowerCase() !== "manager") {
