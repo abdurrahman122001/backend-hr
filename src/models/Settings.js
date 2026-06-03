@@ -20,6 +20,7 @@ const SettingsSchema = new Schema({
   allowEmployeesMultipleShifts: { type: Boolean, default: false },
   timeFormat: { type: String, enum: ['12', '24'], default: '24' },
   autoGenerateSalaryCertificate: { type: Boolean, default: false },
+  autoGenerateSalarySlip: { type: Boolean, default: false },
 }, {
   timestamps: true,
 });

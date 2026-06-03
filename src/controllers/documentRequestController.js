@@ -1,14 +1,14 @@
 const DocumentRequest = require("../models/DocumentRequest");
 const Employee = require("../models/Employees");
 const Settings = require("../models/Settings");
-const { generateSalaryCertificateForEmployee } = require("../routes/docs");
+const { generateSalaryCertificateForEmployee, generateSalarySlipForEmployee } = require("../routes/docs");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
 
 exports.applyDocumentRequest = async (req, res) => {
   try {
-    const { documentType, month, purpose, copyType, reason } = req.body;
+    const { documentType, monthMode, month, fromMonth, toMonth, purpose, purposeOther, copyType, reason } = req.body;
     const employeeId = req.employee?._id;
     const ownerId = getOwnerId(req);
 
@@ -17,26 +17,34 @@ exports.applyDocumentRequest = async (req, res) => {
       return res.status(400).json({ message: "Invalid document type" });
     }
 
-    // Salary certificate requires a copy type
-    if (documentType === "salary-certificate" && !["soft-copy", "hard-copy", "attested"].includes(copyType)) {
-      return res.status(400).json({ message: "Please specify how you'd like to receive the certificate (soft-copy, hard-copy, or attested)" });
+    // Validate copy type for both salary-slip and salary-certificate
+    if (!["soft-copy", "attested"].includes(copyType)) {
+      return res.status(400).json({ message: "Please specify how you'd like to receive the document (soft-copy or attested)" });
     }
 
     // Check if soft-copy auto-generation is enabled for this owner
-    const isSoftCopy = documentType === "salary-certificate" && copyType === "soft-copy";
+    const isSoftCopy = copyType === "soft-copy";
     let autoGenerate = false;
     if (isSoftCopy) {
       const ownerSettings = await Settings.findOne({ owner: ownerId }).lean();
-      autoGenerate = ownerSettings?.autoGenerateSalaryCertificate === true;
+      if (documentType === "salary-certificate") {
+        autoGenerate = ownerSettings?.autoGenerateSalaryCertificate === true;
+      } else if (documentType === "salary-slip") {
+        autoGenerate = ownerSettings?.autoGenerateSalarySlip === true;
+      }
     }
 
     const newRequest = new DocumentRequest({
       employee: employeeId,
       owner: ownerId,
       documentType,
-      month: documentType === "salary-slip" ? (month || undefined) : undefined,
+      monthMode: documentType === "salary-slip" ? (monthMode || "single") : undefined,
+      month: documentType === "salary-slip" && monthMode === "single" ? month : (documentType === "salary-certificate" ? month : undefined),
+      fromMonth: documentType === "salary-slip" && monthMode === "multiple" ? fromMonth : undefined,
+      toMonth: documentType === "salary-slip" && monthMode === "multiple" ? toMonth : undefined,
       purpose: purpose || undefined,
-      copyType: documentType === "salary-certificate" ? copyType : undefined,
+      purposeOther: purposeOther || undefined,
+      copyType: copyType || undefined,
       reason: reason || undefined,
       // If auto-generate is on for soft-copy, approve immediately
       status: autoGenerate ? "approved" : "pending",
@@ -45,26 +53,26 @@ exports.applyDocumentRequest = async (req, res) => {
 
     await newRequest.save();
 
-    // Auto-generate the certificate PDF for soft-copy if setting is enabled
-    if (autoGenerate) {
+    // Salary certificate: Auto-generate PDF on backend (already working)
+    if (autoGenerate && documentType === "salary-certificate") {
       try {
-        const { saveResult, referenceNumber } = await generateSalaryCertificateForEmployee(
-          String(employeeId),
-          String(ownerId)
-        );
-        if (saveResult.success) {
-          newRequest.generatedDocUrl = saveResult.url;
-          newRequest.referenceNumber = referenceNumber;
+        const genResult = await generateSalaryCertificateForEmployee(String(employeeId), String(ownerId));
+        if (genResult?.saveResult?.success) {
+          newRequest.generatedDocUrl = genResult.saveResult.url;
+          newRequest.referenceNumber = genResult.referenceNumber;
           await newRequest.save();
         }
       } catch (genErr) {
-        console.error("Auto-generation of salary certificate failed:", genErr.message);
+        console.error(`Auto-generation of salary-certificate failed:`, genErr.message);
       }
     }
 
+    // Salary slip: Just save request, frontend will generate PDF from SalarySlipPDFContent
+    // No backend PDF generation needed
+
     res.status(201).json({
       message: autoGenerate
-        ? "Salary certificate generated automatically. You can download it now."
+        ? `${documentType === "salary-certificate" ? "Salary certificate" : "Salary slip"} generated automatically. You can download it now.`
         : "Document request submitted successfully",
       data: newRequest,
       autoGenerated: autoGenerate,

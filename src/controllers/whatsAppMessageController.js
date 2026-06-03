@@ -1780,20 +1780,48 @@ exports.approveMessage = async function approveMessage(req, res) {
       }
     }
 
-    // 🔥 NEW: Add Managers to receivers if finalized (instead of creating a separate message)
+    // 🔥 Expand receivers on finalization (non-group only)
     if (approvalFinalized && !msg.isGroupMessage && !msg.groupId && msg.chatType !== 'group') {
-      const { managers } = await findTLsAndManagersByOwner(msg.owner);
       const senderRole = normalizeRole(msg.sender?.role || "");
+      const senderId = String(msg.sender?._id || msg.sender);
+      const currentReceiverSet = new Set(msg.receiver.map(r => String(r._id || r)));
 
-      if (senderRole === "employee" && managers.length > 0) {
-        // Add managers who are not already receivers
-        const currentReceivers = msg.receiver.map(r => String(r._id || r));
-        managers.forEach(mId => {
-          if (!currentReceivers.includes(String(mId))) {
-            msg.receiver.push(mId);
+      const addReceiver = (id) => {
+        const s = String(id);
+        if (s && s !== senderId && !currentReceiverSet.has(s)) {
+          msg.receiver.push(s);
+          currentReceiverSet.add(s);
+        }
+      };
+
+      if (senderRole === "manager") {
+        // Manager-sent: expand to intendedReceivers (assigned employees stored at creation)
+        (msg.intendedReceivers || [])
+          .map(r => typeof r === "object" ? r._id : r)
+          .forEach(addReceiver);
+      } else {
+        // Employee / team_lead: add CRM managers so they see the finalized message
+        const { managers: mgrs } = await findTLsAndManagersByOwner(msg.owner);
+        mgrs.forEach(addReceiver);
+
+        // Also add the assigned employees for this client (they must receive the approved msg)
+        if (msg.client) {
+          const ClientModel = require("../models/ClientInfo");
+          const clientForExp = await ClientModel.findById(msg.client)
+            .select("assignedTo supervisedBy")
+            .lean();
+          if (clientForExp) {
+            (clientForExp.assignedTo || []).forEach(empId => {
+              addReceiver(typeof empId === "object" ? empId._id : empId);
+            });
+            // Also add any supervisor in the chain not yet in receivers
+            (clientForExp.supervisedBy || []).forEach(supId => {
+              addReceiver(typeof supId === "object" ? supId._id : supId);
+            });
           }
-        });
+        }
       }
+      console.log("✅ [approveMessage] Final receivers after expansion:", [...currentReceiverSet]);
     }
 
     await msg.save();
@@ -1847,8 +1875,16 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // Filter managers to only those NOT already involved
-      const managersToForward = managers.filter(mId => !allInvolvedUsers.has(String(mId)));
+      // When approval is finalized: all previous approvers + all managers must be notified
+      if (approvalFinalized) {
+        // All steps already recorded in approvalChain
+        (msg.approvalChain || []).forEach(step => {
+          const aid = step.approver?._id || step.approver;
+          if (aid) allInvolvedUsers.add(String(aid));
+        });
+        // Always include CRM/managers on final approval
+        managers.forEach(id => allInvolvedUsers.add(String(id)));
+      }
 
       // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
       if (msg.isGroupMessage && msg.groupId) {
@@ -3491,82 +3527,45 @@ exports.createMessage = async function createMessage(req, res) {
       assignedEmployeeIds = [String(clientDoc.assignedTo._id)];
     }
 
-    // 🔥 TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEES
-    if (senderRole === "team_lead") {
-      receivers = [];
+    // 🔥 MANAGER/CRM LOGIC
+    // CRM is the top authority — no approval needed for their outgoing messages.
+    // Deliver simultaneously to EVERYONE in the supervision chain for this client:
+    //   1. All supervisors in clientDoc.supervisedBy (excluding sender)
+    //   2. Full management chain of every assigned employee (fills in intermediate levels)
+    //   3. The assigned employees themselves
+    if (senderRole === "manager") {
+      const supervisedByList = (clientDoc?.supervisedBy || []).map(id => String(id));
+      const nonSenderSupervisors = supervisedByList.filter(id => id !== String(sender));
 
-      // Add managers as receivers
-      if (managers.length > 0) {
-        managers.forEach((managerId) => {
-          if (!receivers.includes(managerId) && managerId !== String(sender)) {
-            receivers.push(managerId);
-          }
-        });
-      }
-
-      // Add assigned employees as receivers (only for non-group messages)
-      if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (
-            employeeId &&
-            employeeId !== String(sender) &&
-            !receivers.includes(employeeId)
-          ) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-
-      // Get CRM employee ID
-      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-      let crmUser = null;
-      if (!crmEmployeeId) {
-        crmUser = await Employee.findOne({
-          owner: owner,
-          $or: [
-            { role: /crm/i },
-            { role: /customer relationship/i },
-            { companyEmail: /crm/i },
-            { name: /CRM/i },
-          ],
-        })
-          .select("_id")
-          .lean();
-      }
-
-      const crmId = crmEmployeeId || (crmUser ? String(crmUser._id) : null);
-      if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
-        receivers.push(crmId);
-      }
-
-      approvalStatus = null;
-    }
-    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEES
-    else if (senderRole === "manager") {
-      // Add team leads to receivers
-      tls.forEach((teamLeadId) => {
-        if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
-          receivers.push(teamLeadId);
-        }
+      // Step 1: supervisors explicitly linked to this client
+      nonSenderSupervisors.forEach(supervisorId => {
+        if (!receivers.includes(supervisorId)) receivers.push(supervisorId);
       });
 
-      // Add assigned employees (only for non-group messages)
+      // Step 2: walk full hierarchy chain of each assigned employee
+      for (const assignedEmpId of assignedEmployeeIds) {
+        const chain = await getManagementChainFromHierarchy(owner, assignedEmpId);
+        chain.forEach(seniorId => {
+          if (seniorId !== String(sender) && !receivers.includes(seniorId)) {
+            receivers.push(seniorId);
+          }
+        });
+      }
+
+      // Step 3: assigned employees (non-group only)
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (
-            employeeId &&
-            employeeId !== String(sender) &&
-            !receivers.includes(employeeId)
-          ) {
-            receivers.push(employeeId);
+        assignedEmployeeIds.forEach(empId => {
+          if (empId && empId !== String(sender) && !receivers.includes(empId)) {
+            receivers.push(empId);
           }
         });
       }
 
       approvalStatus = null;
     }
-    // 👷 EMPLOYEE LOGIC: Use assigned employees (only for non-group messages)
-    else if (senderRole === "employee") {
+    // 👷 EMPLOYEE / TEAM LEAD LOGIC
+    // Team leads follow the same approval chain as employees — no auto-approval bypass.
+    else if (senderRole === "employee" || senderRole === "team_lead") {
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (
@@ -3746,8 +3745,6 @@ exports.createMessage = async function createMessage(req, res) {
     if (approvalStatus === undefined) {
       if (senderRole === "manager") {
         approvalStatus = null;
-      } else if (senderRole === "team_lead") {
-        approvalStatus = null;
       } else if (needsApproval) {
         // Route to the immediate senior in the hierarchy — regardless of role.
         // The full hierarchy chain is followed: e.g. Abdur Rahman New → Ali →
@@ -3761,17 +3758,10 @@ exports.createMessage = async function createMessage(req, res) {
           receivers = [immediateSupervisors[0]];
           console.log("✅ [createMessage] Routing to immediate hierarchy supervisor:", immediateSupervisors[0]);
         } else {
-          // No senior in hierarchy at all — fallback to manager/TL chain
-          console.warn("⚠️ [createMessage] No hierarchy senior found in DB for sender:", String(sender));
-          approvalStatus = "pending";
-          const managerInChain = await findFirstManagerOrTeamLeadInChain(owner, String(sender));
-          if (managerInChain) {
-            receivers = [managerInChain];
-          } else if (managers.length > 0) {
-            receivers = [managers[0]];
-          } else if (tls.length > 0) {
-            receivers = [tls[0]];
-          }
+          // Sender is the highest-level person in the hierarchy (no one above them).
+          // Approve directly — there is no senior to route to.
+          console.log("✅ [createMessage] Sender is top of hierarchy, approving directly:", String(sender));
+          approvalStatus = null;
         }
       } else if (isDirect) {
         approvalStatus = "approved";
@@ -4054,8 +4044,16 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // Denormalize last message onto ClientInfo for fast sidebar loading
-    if (responseWithSupervision.client && !responseWithSupervision.isGroupMessage) {
+    // Denormalize last message onto ClientInfo for fast sidebar loading.
+    // SKIP pending messages — they are only visible to the designated approver,
+    // so writing them to lastWhatsAppMessage would expose the preview text to
+    // all employees who are assigned/supervising the client.
+    // The sidebar should only show the last approved/direct message.
+    if (
+      responseWithSupervision.client &&
+      !responseWithSupervision.isGroupMessage &&
+      responseWithSupervision.approvalStatus !== "pending"
+    ) {
       const clientId = responseWithSupervision.client?._id || responseWithSupervision.client;
       if (clientId) {
         const ClientInfo = require("../models/ClientInfo");
@@ -4102,42 +4100,42 @@ exports.getChatList = async function getChatList(req, res) {
 
     const myClientIds = allMyClients.map((c) => c._id);
 
-    // ── Step 2: Auto-migrate clients missing lastWhatsAppMessage (first run) ─
-    // Find which clients have null/empty lastWhatsAppMessage.at
-    const unmigrated = allMyClients
-      .filter((c) => !c.lastWhatsAppMessage?.at)
-      .map((c) => c._id);
-
-    let migratedMap = new Map(); // clientId → { text, at, senderId, hasAttachments }
-
-    if (unmigrated.length > 0) {
-      // One aggregation to get the latest message for each unmigrated client
-      const latestPerClient = await WhatsAppMessage.aggregate([
-        {
-          $match: {
-            owner: ownerObjId,
-            client: { $in: unmigrated },
-            isGroupMessage: { $ne: true },
-            status: { $ne: "draft" },
-            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
-          },
+    // ── Step 2: Always get the last NON-PENDING message for every client ──────
+    // We query messages directly (not the cached lastWhatsAppMessage field) to
+    // prevent stale pending-message text from leaking into the sidebar preview
+    // for users who are not receivers of that pending message.
+    const latestPerClient = await WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          client: { $in: myClientIds },
+          isGroupMessage: { $ne: true },
+          status: { $ne: "draft" },
+          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
         },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: "$client",
-            note: { $first: "$note" },
-            at: { $first: "$createdAt" },
-            senderId: { $first: "$sender" },
-            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
-          },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$client",
+          note: { $first: "$note" },
+          at: { $first: "$createdAt" },
+          senderId: { $first: "$sender" },
+          hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
         },
-      ]);
+      },
+    ]);
 
-      // Persist and build map — fire-and-forget updates
-      for (const row of latestPerClient) {
-        const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
-        migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
+    // Build preview map and repair any stale lastWhatsAppMessage in the DB (fire-and-forget)
+    const migratedMap = new Map();
+    for (const row of latestPerClient) {
+      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
+
+      // Repair ClientInfo if the cached value is missing or stale (e.g. set by old pending msg)
+      const cached = allMyClients.find((c) => String(c._id) === String(row._id));
+      const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
+      if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
         ClientInfo.findByIdAndUpdate(row._id, {
           $set: {
             "lastWhatsAppMessage.text": text,
@@ -4194,9 +4192,10 @@ exports.getChatList = async function getChatList(req, res) {
 
     for (const c of allMyClients) {
       const cid = String(c._id);
-      const lastMsg = c.lastWhatsAppMessage?.at
-        ? c.lastWhatsAppMessage
-        : migratedMap.get(cid);
+      // Prefer the freshly-queried non-pending last message.
+      // Fall back to cached lastWhatsAppMessage only if no messages were found
+      // by the aggregation (client truly has no approved/null messages yet).
+      const lastMsg = migratedMap.get(cid) || (c.lastWhatsAppMessage?.at ? c.lastWhatsAppMessage : null);
 
       // Skip clients with NO messages at all
       if (!lastMsg?.at) continue;

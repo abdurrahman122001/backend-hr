@@ -20,7 +20,7 @@ exports.getMyOpenRequests = async (req, res) => {
     const employeeId = req.employee?._id;
     if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
 
-    const base = { employee: employeeId, status: "pending" };
+    const base = { employee: employeeId };
 
     const [
       loans,
@@ -51,13 +51,13 @@ exports.getMyOpenRequests = async (req, res) => {
       LeaveCarryForwardRequest.find(base).lean(),
       DocumentRequest.find({ ...base, documentType: "salary-slip" }).lean(),
       DocumentRequest.find({ ...base, documentType: "salary-certificate" }).lean(),
-      WhistleblowingReport.find({ employee: employeeId, status: { $in: ["pending", "under-review"] } }).lean(),
+      WhistleblowingReport.find({ employee: employeeId }).lean(),
       OvertimeRequest.find(base).lean(),
       ProfileRevision.find(base).lean(),
-      // ApplyLeave uses status: "pending", filter out trashed
-      ApplyLeave.find({ employee: employeeId, status: "pending", isTrashed: { $ne: true } }).lean(),
-      // AttendanceChallenge uses challengeStatus with capital P
-      AttendanceChallenge.find({ employee: employeeId, challengeStatus: "Pending" }).lean(),
+      // ApplyLeave - filter out trashed but get all statuses
+      ApplyLeave.find({ employee: employeeId, isTrashed: { $ne: true } }).lean(),
+      // AttendanceChallenge - get all statuses
+      AttendanceChallenge.find({ employee: employeeId }).lean(),
     ]);
 
     const tag = (items, type, category) =>
