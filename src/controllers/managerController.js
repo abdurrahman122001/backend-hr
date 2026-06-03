@@ -24,12 +24,22 @@ exports.getRoster = async (req, res) => {
     const isTeamLead = role === "team lead" || role === "team_lead";
     const isManager = role === "manager";
 
-    // Find direct juniors from EmployeeHierarchy (senior: me)
-    const hierarchyJuniorLinks = await EmployeeHierarchy.find({
+    // Find ALL descendants in the hierarchy tree (any depth) using the path field.
+    // path stores the full ancestry chain as "id1.id2.id3", so matching on me._id
+    // anywhere in the path returns every junior at every level below me.
+    const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
+    const allDescendantLinks = await EmployeeHierarchy.find({
+      owner: me.owner,
+      path: pathRegex,
+    }).select("junior").lean();
+    const allDescendantIds = allDescendantLinks.map(l => String(l.junior));
+
+    // Also capture direct juniors via the legacy senior: me._id index (fast lookup)
+    const directJuniorLinks = await EmployeeHierarchy.find({
       owner: me.owner,
       senior: me._id,
     }).select("junior").lean();
-    const hierarchyJuniorIds = hierarchyJuniorLinks.map(l => String(l.junior));
+    const directJuniorIds = directJuniorLinks.map(l => String(l.junior));
 
     // Also include employees whose supervisor field points to me
     const supervisorFieldJuniors = await Employee.find({
@@ -38,8 +48,8 @@ exports.getRoster = async (req, res) => {
     }).select("_id").lean();
     const supervisorFieldIds = supervisorFieldJuniors.map(e => String(e._id));
 
-    // Combine both sources
-    const juniorIds = [...new Set([...hierarchyJuniorIds, ...supervisorFieldIds])];
+    // Combine: full descendant tree + direct juniors + supervisor-field reports
+    const juniorIds = [...new Set([...allDescendantIds, ...directJuniorIds, ...supervisorFieldIds])];
     const isSenior = juniorIds.length > 0;
 
     // Build juniorMap: tracks which juniors have supervision enabled on their clients
@@ -198,12 +208,37 @@ exports.getRoster = async (req, res) => {
       });
     });
 
+    /* ------------------ DIRECT JUNIOR MAP (for ContactsPanel supervised count) ----------- */
+    // Fetch all hierarchy links where any of our juniors is a senior themselves.
+    // This gives us the direct-junior relationships for the full descendant tree
+    // so the frontend can BFS without relying on the Employee.supervisor field
+    // (which may be out of sync with EmployeeHierarchy).
+    const seniorToDirectJuniors = {};
+    if (juniorIds.length > 0) {
+      const juniorAsseniorLinks = await EmployeeHierarchy.find({
+        owner: me.owner,
+        senior: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
+        junior: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
+      }).select("senior junior").lean();
+
+      for (const link of juniorAsseniorLinks) {
+        const sid = String(link.senior);
+        if (!seniorToDirectJuniors[sid]) seniorToDirectJuniors[sid] = [];
+        const jid = String(link.junior);
+        if (!seniorToDirectJuniors[sid].includes(jid)) {
+          seniorToDirectJuniors[sid].push(jid);
+        }
+      }
+    }
+
     /* ------------------ RESPONSE ------------------ */
     const employeesWithHierarchyStatus = employees.map(emp => {
       const empObj = emp.toObject();
       if (juniorMap.has(String(emp._id))) {
         empObj.supervisionEnabled = juniorMap.get(String(emp._id));
       }
+      // Attach direct junior IDs from EmployeeHierarchy (authoritative source)
+      empObj.directJuniorIds = seniorToDirectJuniors[String(emp._id)] || [];
       return empObj;
     });
 
