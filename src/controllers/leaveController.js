@@ -1429,7 +1429,10 @@ exports.rejectLeave = async (req, res) => {
     }
 
     const leave = await Leave.findById(req.params.id)
-      .populate("employee", "name email photographUrl")
+      .populate(
+        "employee",
+        "name email role department supervisor photographUrl leaveEntitlement owner",
+      )
       .populate("supervisor", "name email");
 
     if (!leave) {
@@ -1532,7 +1535,19 @@ exports.rejectLeave = async (req, res) => {
       const Attendance = require("../models/Attendance");
 
       for (const dateObj of leave.dates) {
-        const dateStr = dateObj.date; // Format: YYYY-MM-DD
+        // Convert date to YYYY-MM-DD format consistently
+        let dateStr;
+        if (typeof dateObj.date === 'string') {
+          if (dateObj.date.includes('T')) {
+            dateStr = dateObj.date.split('T')[0];
+          } else {
+            dateStr = dateObj.date;
+          }
+        } else if (dateObj.date instanceof Date) {
+          dateStr = dateObj.date.toISOString().split('T')[0];
+        } else {
+          dateStr = new Date(dateObj.date).toISOString().split('T')[0];
+        }
 
         // Check if attendance record exists for this date
         let attendance = await Attendance.findOne({
@@ -1736,9 +1751,12 @@ exports.getLeaves = async (req, res) => {
 
     // Process employee data
     const processedLeaves = leaves.map((leave) => {
-      const isAwaitingSenior = leave.supervisor &&
-        leave.supervisor.role !== "admin" &&
-        leave.supervisor.role !== "hr";
+      let isAwaitingSenior = false;
+      if (leave.approvalChain && leave.approvalChain.length > 0) {
+        isAwaitingSenior = (leave.currentApprovalIndex || 0) < leave.approvalChain.length;
+      } else if (leave.supervisor && leave.supervisor.role !== "admin" && leave.supervisor.role !== "hr") {
+        isAwaitingSenior = (leave.currentApprovalIndex || 0) === 0;
+      }
 
       return {
         ...leave,
