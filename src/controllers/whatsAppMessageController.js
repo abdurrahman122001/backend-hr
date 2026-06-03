@@ -1968,7 +1968,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     msg.disapprovedAt = new Date();
     await msg.save();
 
-    // Get fully populated message for real-time emission
+    // Get fully populated message for real-time emission (includes approvalChain)
     const populatedMsg = await WhatsAppMessage.findById(id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
@@ -1976,6 +1976,10 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+      {
+        path: "approvalChain",
+        populate: { path: "approver", select: "_id name role designation", model: "Employee" },
+      },
     ]);
 
     // Add client supervision info
@@ -2009,7 +2013,20 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         });
       }
 
-      // Add the team lead who disapproved
+      // Add all previous approvers from the approval chain so every
+      // senior who already approved sees the disapproval in real time.
+      // NOTE: approvalChain is NOT populated on msg, so step.approver is a
+      // raw Mongoose ObjectId — calling String() on it gives the hex ID directly.
+      if (Array.isArray(msg.approvalChain)) {
+        msg.approvalChain.forEach((step) => {
+          const raw = step.approver;
+          // Handle both populated ({_id,...}) and raw ObjectId forms
+          const approverId = raw?._id ? String(raw._id) : raw ? String(raw) : null;
+          if (approverId) allInvolvedUsers.add(approverId);
+        });
+      }
+
+      // Add the senior who disapproved
       allInvolvedUsers.add(String(req.employee._id));
 
       // Convert to array and emit to each user
@@ -2079,6 +2096,8 @@ exports.editMessage = async function editMessage(req, res) {
       { path: "client", select: "_id clientName" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
       { path: "repliedTo", select: "_id note message sender attachments" },
+      // Populate approvalChain so step.approver._id is always reliable
+      { path: "approvalChain.approver", select: "_id", model: "Employee" },
     ]);
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
@@ -2111,8 +2130,40 @@ exports.editMessage = async function editMessage(req, res) {
     const isOriginalSenderTeamLead = originalSenderRole === "team_lead";
     const isOriginalSenderEmployee = originalSenderRole === "employee";
 
-    // 🔥 CRITICAL FIX 4: Enhanced permission check with client supervision
-    if (!isSender && !isTeamLead) {
+    // Check if the current user is the current receiver
+    const isReceiver =
+      Array.isArray(msg.receiver) &&
+      msg.receiver.some((r) => String(r._id || r) === currentUserId);
+
+    // --- Check 1: Was this user in the approval chain? (lean, no populate) ---
+    const rawChainDoc = await WhatsAppMessage.findById(id)
+      .select("approvalChain")
+      .lean();
+    const isInApprovalChain = (rawChainDoc?.approvalChain || []).some(
+      (step) => step?.approver && String(step.approver) === currentUserId,
+    );
+
+    // --- Check 2: Is this user a supervisor for this client? ---
+    // client.supervisedBy is the authoritative list of who can approve/edit
+    // messages for this client. If the user is in this list they have
+    // edit authority over disapproved messages.
+    const clientFull = await Client.findById(msg.client?._id || msg.client)
+      .select("supervisedBy supervision")
+      .lean();
+    const supervisedByList = (clientFull?.supervisedBy || []).map(id => String(id));
+    const isClientSupervisor = supervisedByList.includes(currentUserId);
+
+    // isPreviousApprover: user has authority over this message but is not the
+    // original sender and not a formal team_lead/manager role label
+    const isPreviousApprover =
+      (isInApprovalChain || isClientSupervisor) &&
+      !isSender && !isTeamLead && !isManager;
+
+    const canEdit =
+      isSender || isReceiver || isTeamLead || isManager || isPreviousApprover;
+
+    // Permission gate
+    if (!canEdit) {
       return res.status(403).json({
         error:
           "You can only edit your own messages or messages pending your approval",
@@ -2128,7 +2179,6 @@ exports.editMessage = async function editMessage(req, res) {
           clientSupervision: clientSupervision,
         });
       }
-
       if (
         msg.approvalStatus !== "pending" &&
         msg.approvalStatus !== "disapproved"
@@ -2136,6 +2186,21 @@ exports.editMessage = async function editMessage(req, res) {
         return res.status(403).json({
           error:
             "Team leads can only edit messages with pending or disapproved status",
+        });
+      }
+    }
+
+    // Previous approvers / client supervisors may only edit disapproved messages
+    if (isPreviousApprover) {
+      if (!clientRequiresApproval) {
+        return res.status(403).json({
+          error: "This client uses direct supervision. Resubmission not required.",
+          clientSupervision,
+        });
+      }
+      if (msg.approvalStatus !== "disapproved") {
+        return res.status(403).json({
+          error: "Previous approvers can only edit disapproved messages for resubmission",
         });
       }
     }
@@ -2183,14 +2248,44 @@ exports.editMessage = async function editMessage(req, res) {
     // 🔥 CRITICAL FIX: ENHANCED APPROVAL WORKFLOW LOGIC WITH CLIENT SUPERVISION
     // THIS IS THE SINGLE PLACE WHERE APPROVAL STATUS SHOULD BE SET
     if (hasContentChanges) {
+      // CASE 0 (NEW): Previous approver (any role) resubmitting a disapproved message.
+      // Route from the EDITOR's position so the message goes to their own higher-order
+      // senior — not back to themselves.
+      if (isPreviousApprover && msg.approvalStatus === "disapproved" && clientRequiresApproval) {
+        msg.approvalStatus = "pending";
+        msg.approvalChain = []; // restart the chain so seniors re-approve in order
+        msg.markModified("approvalChain"); // ensure Mongoose tracks the reset
+
+        // reuse clientFull.supervisedBy already fetched above
+        const supervisedByList = (clientFull?.supervisedBy || []).map(id => String(id));
+        // Route from editor (Senior B) → finds Senior C
+        const nextActiveSupervisors = await findNextActiveSupervisors(
+          msg.owner,
+          currentUserId,
+          supervisedByList
+        );
+        if (nextActiveSupervisors && nextActiveSupervisors.length > 0) {
+          msg.receiver = [nextActiveSupervisors[0]];
+        } else {
+          msg.approvalStatus = "approved";
+          msg.status = "sent";
+        }
+      }
       // CASE 1 & 4 Consolidated: Team Lead or Manager editing someone else's message
-      if ((isTeamLead || isManager) && !isSender && clientRequiresApproval) {
+      else if ((isTeamLead || isManager) && !isSender && clientRequiresApproval) {
         // Manager or TL editing an employee's message - handle status
         if (isOriginalSenderEmployee) {
           // If editing ≠ approving, we should decide if it goes to pending.
           if (!msg.approvalStatus || msg.approvalStatus === "disapproved") {
             msg.approvalStatus = "pending";
           }
+
+          // When editor is in the approvalChain (e.g. the team lead who approved
+          // earlier), route from the editor's position so the message reaches their
+          // own higher-level senior instead of cycling back to themselves.
+          const routeFromId = (isInApprovalChain || isSupervisorOfSender)
+            ? currentUserId
+            : String(msg.sender?._id || msg.sender);
 
           // If message is ALREADY pending with a receiver, validate they have supervision enabled
           if (msg.approvalStatus === "pending" && msg.receiver && msg.receiver.length > 0) {
@@ -2204,12 +2299,9 @@ exports.editMessage = async function editMessage(req, res) {
             );
 
             if (validReceivers.length === 0) {
-              // Current receivers don't have supervision - recalculate
-              const senderId = msg.sender?._id || msg.sender;
-              const senderIdStr = String(senderId);
               const nextActiveSupervisors = await findNextActiveSupervisors(
                 msg.owner,
-                senderIdStr,
+                routeFromId,
                 supervisedByList
               );
               if (nextActiveSupervisors && nextActiveSupervisors.length > 0) {
@@ -2220,16 +2312,13 @@ exports.editMessage = async function editMessage(req, res) {
               }
             }
           } else if (!msg.receiver || msg.receiver.length === 0) {
-            // No receivers yet - calculate them
-            const senderId = msg.sender?._id || msg.sender;
-            const senderIdStr = String(senderId);
             const clientData = await Client.findById(msg.client)
               .select("supervisedBy")
               .lean();
             const supervisedByList = (clientData?.supervisedBy || []).map(id => String(id));
             const nextActiveSupervisors = await findNextActiveSupervisors(
               msg.owner,
-              senderIdStr,
+              routeFromId,
               supervisedByList
             );
             if (nextActiveSupervisors && nextActiveSupervisors.length > 0) {
@@ -2359,6 +2448,9 @@ exports.editMessage = async function editMessage(req, res) {
       requiresApproval: clientRequiresApproval,
     };
 
+    // Declare at function scope so it's reachable outside the if(io) block
+    let forwardedMessage = null;
+
     // 🔥 ENHANCED REAL-TIME NOTIFICATION SYSTEM FOR EDITS
     if (req.app.get("io")) {
       const io = req.app.get("io");
@@ -2389,7 +2481,6 @@ exports.editMessage = async function editMessage(req, res) {
 
       // 🔥 NEW: FORWARD TO MANAGERS WHEN TEAM LEAD EDITS AND APPROVES
       // Only forward if client requires approval
-      let forwardedMessage = null;
       if (
         hasContentChanges &&
         isTeamLead &&

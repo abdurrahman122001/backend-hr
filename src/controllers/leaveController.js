@@ -2004,8 +2004,11 @@ exports.cancelLeave = async (req, res) => {
       try {
         const io = req.app.get("io");
         const populatedLeave = await Leave.findById(leave._id)
-          .populate("employee", "name employeeId department photographUrl")
+          .populate("employee", "name employeeId department photographUrl owner")
           .lean();
+
+        // Resolve the owner from the populated employee record
+        const ownerId = populatedLeave.employee?.owner;
 
         const payload = {
           leave: populatedLeave,
@@ -2013,6 +2016,9 @@ exports.cancelLeave = async (req, res) => {
           message: `${populatedLeave.employee?.name || "Employee"} has cancelled their leave request.`,
           canAct: false
         };
+
+        // Notify the employee who withdrew (so their own list updates)
+        io.to(`employee_${leave.employee}`).emit("leave_changed", payload);
 
         // Notify Current Approver
         if (leave.approver) {
@@ -2026,6 +2032,11 @@ exports.cancelLeave = async (req, res) => {
               io.to(`employee_${seniorId}`).emit("leave_changed", payload);
             }
           });
+        }
+
+        // Notify admin/owner dashboard (owner_${ownerId} room joined via join_admin)
+        if (ownerId) {
+          io.to(`owner_${ownerId}`).emit("leave_changed", payload);
         }
       } catch (emitErr) {
         console.error("Error emitting leave_changed (cancelled):", emitErr);
