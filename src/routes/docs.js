@@ -7,17 +7,19 @@ const fs = require("fs");
 
 const Employee = require("../models/Employees");
 const Salary = require("../models/Salaries");
+const SalarySlip = require("../models/SalarySlip");
 const DocTemplate = require("../models/DocTemplate");
 const ReferenceCounter = require("../models/ReferenceCounter");
 const Settings = require("../models/Settings");
 const Certificate = require("../models/Certificate");
-const { decrypt } = require("../utils/encryption");
+const { decrypt, encrypt } = require("../utils/encryption");
 
 /* ───────────────── helpers ───────────────── */
 
 const TYPE_ALIASES = {
   "experience-letter": "experience_letter",
   "salary-certificate": "salary_certificate",
+  "salary-slip": "salary_slip",
   nda: "nda",
   contract: "contract",
   "employee-cover-page": "employee_cover_page",
@@ -2137,3 +2139,575 @@ module.exports.generateSalaryCertificateForEmployee = async (employeeId, ownerId
   );
   return { pdfBuffer, saveResult, referenceNumber };
 };
+
+/**
+ * Salary slip generator — generates salary slip PDF(s) for requested month(s)
+ * Returns { saveResult, referenceNumber } so the controller can store the URL.
+ */
+module.exports.generateSalarySlipForEmployee = async (employeeId, ownerId, monthMode, month, fromMonth, toMonth) => {
+  // Generate reference number
+  const referenceNumber = await generateReferenceNumber("salary_slip", ownerId);
+
+  // Helper to convert YYYY-MM to month name
+  const getMonthName = (monthStr) => {
+    const [year, monthNum] = monthStr.split("-");
+    const date = new Date(year, parseInt(monthNum) - 1, 1);
+    return date.toLocaleString("en-US", { month: "long" });
+  };
+
+  // Determine which months/years to fetch
+  const monthYearPairs = [];
+  console.log(`[generateSalarySlipForEmployee] monthMode=${monthMode}, month=${month}, fromMonth=${fromMonth}, toMonth=${toMonth}`);
+
+  if (monthMode === "single" && month) {
+    const [year, monthNum] = month.split("-");
+    const monthName = getMonthName(month);
+    console.log(`[generateSalarySlipForEmployee] Single month: ${monthName} ${year}`);
+    monthYearPairs.push({ month: monthName, year });
+  } else if (monthMode === "multiple" && fromMonth && toMonth) {
+    const from = new Date(fromMonth + "-01");
+    const to = new Date(toMonth + "-01");
+    const current = new Date(from);
+
+    while (current <= to) {
+      const year = current.getFullYear().toString();
+      const monthName = current.toLocaleString("en-US", { month: "long" });
+      console.log(`[generateSalarySlipForEmployee] Range month: ${monthName} ${year}`);
+      monthYearPairs.push({ month: monthName, year });
+      current.setMonth(current.getMonth() + 1);
+    }
+  }
+
+  if (monthYearPairs.length === 0) {
+    throw new Error("No valid months specified for salary slip generation");
+  }
+
+  // Fetch salary slips and employee data
+  const emp = await Employee.findById(employeeId).lean();
+  if (!emp) throw new Error("Employee not found");
+
+  // Build query for finding salary slips by month and year combinations
+  const monthYearQueries = monthYearPairs.map(pair => ({ month: pair.month, year: pair.year }));
+  console.log(`[generateSalarySlipForEmployee] Looking for slips with query:`, { employee: employeeId, monthYearQueries });
+
+  const slips = await SalarySlip.find({
+    employee: employeeId,
+    $or: monthYearQueries
+  }).lean();
+
+  console.log(`[generateSalarySlipForEmployee] Found ${slips.length} salary slip(s)`);
+  if (slips.length === 0) {
+    const monthList = monthYearPairs.map(p => `${p.month} ${p.year}`).join(", ");
+    const errorMsg = `No salary slips found for employee ${employeeId} for month(s): ${monthList}. Please ensure salary slips exist in the database for the requested period.`;
+    console.error(`[generateSalarySlipForEmployee] ${errorMsg}`);
+    throw new Error(errorMsg);
+  }
+
+  // Get company settings
+  const settings = await Settings.findOne({ owner: ownerId }).lean();
+  const timezone = settings?.timezone || "UTC";
+
+  // Get company profile for logo and info
+  const CompanyProfile = require("../models/CompanyProfile");
+  const companyProfile = await CompanyProfile.findOne({ owner: ownerId }).lean();
+  const companyName = companyProfile?.companyName || "Company Name";
+  const companyAddress = companyProfile?.address || "";
+  const companyLogo = companyProfile?.logo || null;
+
+  // Get salary field configuration (which fields are enabled)
+  const SalarySlipFields = require("../models/SalarySlipFields");
+  const salaryFields = await SalarySlipFields.findOne({ owner: ownerId }).lean();
+
+  console.log(`[generateSalarySlipForEmployee] Using company: ${companyName}`);
+
+  // Generate PDFs for each slip
+  const browser = await puppeteer.launch({
+    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  });
+
+  try {
+    const mergedPdf = await PDFDocument.create();
+
+    for (const slip of slips) {
+      const html = generateSalarySlipHTML(slip, emp, settings, companyName, companyAddress, companyLogo, salaryFields);
+
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1200, height: 1600 });
+      await page.setContent(html, { waitUntil: "networkidle0" });
+      await page.emulateMediaType("print");
+
+      const pdfBuffer = await page.pdf({
+        format: "A4",
+        printBackground: true,
+        margin: { top: "0.5cm", bottom: "0.5cm", left: "0.5cm", right: "0.5cm" }
+      });
+
+      const tempPdf = await PDFDocument.load(pdfBuffer);
+      const pageCount = tempPdf.getPageCount();
+
+      for (let i = 0; i < pageCount; i++) {
+        const [copiedPage] = await mergedPdf.copyPages(tempPdf, [i]);
+        mergedPdf.addPage(copiedPage);
+      }
+
+      await page.close();
+    }
+
+    const mergedPdfBytes = await mergedPdf.save();
+    const pdfBuffer = Buffer.from(mergedPdfBytes);
+
+    // Save the merged PDF
+    const saveResult = await saveDocumentToFile(
+      pdfBuffer,
+      employeeId,
+      "salary_slip",
+      ownerId,
+      referenceNumber
+    );
+
+    return { pdfBuffer, saveResult, referenceNumber };
+  } finally {
+    await browser.close();
+  }
+};
+
+/**
+ * Helper: Generate HTML for a single salary slip - Uses actual admin dashboard configuration
+ */
+function generateSalarySlipHTML(slip, emp, settings, companyName, companyAddress, companyLogo, salaryFields) {
+  const encryptionKey = settings?.encryptionKey;
+
+  // Helper to decrypt value if needed
+  const getValue = (val) => {
+    if (val === undefined || val === null) return 0;
+    if (!encryptionKey) return Number(val) || 0;
+    if (typeof val === "string" && val.includes(":")) {
+      try {
+        return Number(decrypt(val, encryptionKey)) || 0;
+      } catch (e) {
+        return Number(val) || 0;
+      }
+    }
+    return Number(val) || 0;
+  };
+
+  const formatCurrency = (val) => {
+    const num = Number(val);
+    if (val === null || val === undefined || val === "" || isNaN(num) || num === 0) return "-";
+    return Math.round(num).toLocaleString();
+  };
+
+  // All available compensation fields (from admin dashboard)
+  const allCompFields = [
+    ["Basic Pay", "basic"],
+    ["Dearness Allowance", "dearnessAllowance"],
+    ["House Rent Allowance", "houseRentAllowance"],
+    ["Conveyance Allowance", "conveyanceAllowance"],
+    ["Medical Allowance", "medicalAllowance"],
+    ["Utility Allowance", "utilityAllowance"],
+    ["Overtime Compensation", "overtimeCompensation"],
+    ["Dislocation Allowance", "dislocationAllowance"],
+    ["Leave Encashment", "leaveEncashment"],
+    ["Bonus", "bonus"],
+    ["Arrears", "arrears"],
+    ["Auto Allowance", "autoAllowance"],
+    ["Incentive", "incentive"],
+    ["Fuel Allowance", "fuelAllowance"],
+    ["Other Allowances", "othersAllowances"],
+  ];
+
+  // All available deduction fields (from admin dashboard)
+  const allDedFields = [
+    ["Leave Deduction", "leaveDeductions"],
+    ["Late Deduction", "lateDeductions"],
+    ["EOBI Deduction", "eobiDeduction"],
+    ["SESSI Deduction", "sessiDeduction"],
+    ["Provident Fund Deduction", "providentFundDeduction"],
+    ["Gratuity Fund Deduction", "gratuityFundDeduction"],
+    ["Vehicle Loan Deduction", "vehicleLoanDeduction"],
+    ["Other Loan Deduction", "otherLoanDeductions"],
+    ["Advance Salary Deduction", "advanceSalaryDeductions"],
+    ["Medical Insurance", "medicalInsurance"],
+    ["Life Insurance", "lifeInsurance"],
+    ["Penalties", "penalties"],
+    ["Other Deduction", "otherDeductions"],
+    ["Tax Deduction", "taxDeduction"],
+  ];
+
+  // Filter to only enabled fields (matching admin dashboard logic)
+  const enabledSalaryFields = salaryFields?.enabledSalaryFields || [];
+  const enabledDeductionFields = salaryFields?.enabledDeductionFields || [];
+
+  const earningFields = allCompFields.filter(
+    ([, key]) => enabledSalaryFields.includes(key) || key === "loanBenefits"
+  );
+
+  const deductionFields = allDedFields.filter(
+    ([, key]) => enabledDeductionFields.includes(key)
+  );
+
+  // Calculate totals
+  const totalAddition = earningFields.reduce((sum, [, key]) => sum + getValue(slip[key]), 0);
+  const totalDeduction = deductionFields.reduce((sum, [, key]) => sum + getValue(slip[key]), 0);
+  const netSalary = totalAddition - totalDeduction;
+
+  // Format date
+  const createdDate = slip.createdAt ? new Date(slip.createdAt) : new Date();
+  const formattedDate = createdDate.toLocaleDateString("en-GB") + ", " + createdDate.toLocaleTimeString("en-GB", { hour12: true });
+
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="UTF-8">
+      <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+          width: 100%;
+          height: 100%;
+          margin: 0;
+          padding: 0;
+          font-family: 'Inter', 'Arial', sans-serif;
+          font-size: 12px;
+          line-height: 1.5;
+          color: #1f2937;
+          background: white;
+        }
+        .a4-salary-slip {
+          width: 100%;
+          max-width: 100%;
+          background: #fff;
+          font-family: 'Inter', 'Arial', sans-serif;
+          font-size: 12px;
+          padding: 0;
+          box-sizing: border-box;
+          position: relative;
+          page-break-inside: auto;
+          overflow: visible;
+          line-height: 1.5;
+        }
+
+        .header-section {
+          margin-bottom: 12px;
+          border-bottom: 1.5px solid #dbeafe;
+          padding-bottom: 8px;
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+        }
+
+        .header-left {
+          display: flex;
+          flex-direction: row;
+          align-items: flex-start;
+          flex: 1;
+          gap: 16px;
+        }
+
+        .company-logo {
+          width: 80px;
+          height: auto;
+          max-height: 100px;
+          object-fit: contain;
+          border-radius: 8px;
+        }
+
+        .company-info {
+          display: flex;
+          flex-direction: column;
+          align-items: flex-start;
+        }
+
+        .company-name {
+          font-weight: 700;
+          font-size: 16px;
+          line-height: 1.3;
+          color: #0f172a;
+          margin-bottom: 2px;
+        }
+
+        .company-address {
+          color: #64748b;
+          font-size: 12px;
+          margin-top: 2px;
+          line-height: 1.4;
+        }
+
+        .header-right {
+          text-align: right;
+          margin-left: 24px;
+        }
+
+        .slip-title {
+          font-weight: 600;
+          font-size: 13px;
+          color: #334155;
+          line-height: 1.3;
+          margin-bottom: 4px;
+        }
+
+        .slip-generated {
+          font-size: 11px;
+          color: #64748b;
+          line-height: 1.4;
+        }
+
+        .profile-section {
+          background: #fff;
+          border-radius: 12px;
+          box-shadow: 0 1px 4px rgba(224, 231, 239, 0.1);
+          border: 1.5px solid #dbeafe;
+          padding: 10px 14px;
+          margin-bottom: 12px;
+        }
+
+        .profile-table {
+          width: 100%;
+          border-collapse: collapse;
+        }
+
+        .profile-row { }
+
+        .profile-cell {
+          padding: 4px 8px;
+          line-height: 1.4;
+        }
+
+        .profile-label {
+          color: #0f172a;
+          font-weight: 600;
+          font-size: 12px;
+        }
+
+        .profile-value {
+          color: #111827;
+          font-weight: 500;
+          margin-top: 0;
+          margin-left: auto;
+          font-size: 12px;
+          line-height: 1.4;
+          text-align: right;
+        }
+
+        .section-title {
+          font-weight: 700;
+          font-size: 12px;
+          background: #f1f5f9;
+          color: #334155;
+          padding: 8px 10px;
+          border: 1px solid #cbd5e1;
+          margin-top: 12px;
+          margin-bottom: 8px;
+        }
+
+        .salary-table {
+          width: 100%;
+          border-collapse: collapse;
+          margin-bottom: 12px;
+          font-size: 12px;
+        }
+
+        .salary-table th {
+          background: #f1f5f9;
+          color: #334155;
+          border: 1px solid #cbd5e1;
+          padding: 8px 10px;
+          text-align: left;
+          font-weight: 700;
+          line-height: 1.4;
+        }
+
+        .salary-table td {
+          border-left: 1px solid #cbd5e1;
+          padding: 2px 10px;
+          font-size: 12px;
+          line-height: 1.4;
+          word-break: break-word;
+          overflow: visible;
+        }
+
+        .salary-table td:first-child {
+          text-align: left;
+        }
+
+        .salary-table td:last-child {
+          text-align: right;
+          border-right: 1px solid #cbd5e1;
+        }
+
+        .total-row {
+          font-weight: 700;
+          background: #f9f9f9;
+        }
+
+        .total-row td {
+          border-top: 1px solid #cbd5e1;
+          border-bottom: 1px solid #cbd5e1;
+        }
+
+        .summary-section {
+          display: grid;
+          grid-template-columns: repeat(3, 1fr);
+          gap: 12px;
+          margin-top: 16px;
+          padding-top: 12px;
+          border-top: 1px solid #cbd5e1;
+        }
+
+        .summary-box {
+          text-align: center;
+          padding: 12px;
+          background: #f5f5f5;
+          border-radius: 4px;
+        }
+
+        .summary-label {
+          font-size: 11px;
+          color: #64748b;
+          margin-bottom: 4px;
+          font-weight: 500;
+        }
+
+        .summary-value {
+          font-size: 14px;
+          font-weight: 700;
+          color: #111827;
+        }
+
+        .footer {
+          margin-top: 20px;
+          text-align: center;
+          font-size: 11px;
+          color: #9ca3af;
+          border-top: 1px solid #e5e7eb;
+          padding-top: 12px;
+        }
+
+        @media print {
+          body { margin: 0; padding: 0; }
+          .a4-salary-slip { margin: 0; padding: 0; }
+          .section-title { page-break-inside: avoid; }
+          .salary-table { page-break-inside: avoid; }
+        }
+      </style>
+    </head>
+    <body>
+      <div class="a4-salary-slip">
+        <!-- Header Section -->
+        <div class="header-section">
+          <div class="header-left">
+            ${companyLogo ? `<img src="${companyLogo}" alt="Company Logo" class="company-logo" />` : ""}
+            <div class="company-info">
+              <div class="company-name">${companyName}</div>
+              <div class="company-address">${companyAddress || ""}</div>
+            </div>
+          </div>
+          <div class="header-right">
+            <div class="slip-title">Pay slip – ${slip.month || "Month"} ${slip.year || ""}</div>
+            <div class="slip-generated">Generated: ${formattedDate}</div>
+          </div>
+        </div>
+
+        <!-- Profile Section -->
+        <div class="profile-section">
+          <table class="profile-table">
+            <tbody>
+              <tr class="profile-row">
+                <td class="profile-cell">
+                  <div class="profile-label">Name</div>
+                  <div class="profile-value">${emp.firstName || emp.name || "-"} ${emp.lastName || ""}</div>
+                </td>
+                <td class="profile-cell">
+                  <div class="profile-label">Employee ID</div>
+                  <div class="profile-value">${emp.empId || "-"}</div>
+                </td>
+              </tr>
+              <tr class="profile-row">
+                <td class="profile-cell">
+                  <div class="profile-label">Designation</div>
+                  <div class="profile-value">${emp.designation || "-"}</div>
+                </td>
+                <td class="profile-cell">
+                  <div class="profile-label">Department</div>
+                  <div class="profile-value">${emp.department || "-"}</div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Earnings Section -->
+        <div class="section-title">EARNINGS</div>
+        <table class="salary-table">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th style="width: 100px;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${earningFields.map(([label, key]) => {
+              const value = getValue(slip[key]);
+              if (value === 0) return "";
+              return `<tr>
+                <td>${label}</td>
+                <td style="text-align: right;">${formatCurrency(value)}</td>
+              </tr>`;
+            }).join("")}
+            <tr class="total-row">
+              <td>TOTAL EARNINGS</td>
+              <td style="text-align: right;">${formatCurrency(totalAddition)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Deductions Section -->
+        <div class="section-title">DEDUCTIONS</div>
+        <table class="salary-table">
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th style="width: 100px;">Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${deductionFields.map(([label, key]) => {
+              const value = getValue(slip[key]);
+              if (value === 0) return "";
+              return `<tr>
+                <td>${label}</td>
+                <td style="text-align: right;">${formatCurrency(value)}</td>
+              </tr>`;
+            }).join("")}
+            <tr class="total-row">
+              <td>TOTAL DEDUCTIONS</td>
+              <td style="text-align: right;">${formatCurrency(totalDeduction)}</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <!-- Summary Section -->
+        <div class="summary-section">
+          <div class="summary-box">
+            <div class="summary-label">TOTAL EARNINGS</div>
+            <div class="summary-value">${formatCurrency(totalAddition)}</div>
+          </div>
+          <div class="summary-box">
+            <div class="summary-label">TOTAL DEDUCTIONS</div>
+            <div class="summary-value">${formatCurrency(totalDeduction)}</div>
+          </div>
+          <div class="summary-box">
+            <div class="summary-label">NET SALARY</div>
+            <div class="summary-value">${formatCurrency(netSalary)}</div>
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+          <p style="margin: 4px 0;">This is a computer-generated document. No signature required.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+}

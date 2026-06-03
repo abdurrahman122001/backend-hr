@@ -301,29 +301,46 @@ router.put("/set-password", async (req, res) => {
         .json({ error: "Invalid or expired set password link." });
     }
 
-    // Generate 8-digit Employee ID if not already generated
+    // Generate Employee ID if not already generated
+    // Format: [YYYY][OwnerIndex][Sequence] (e.g., 20261001, 20261002, ..., 20269999, then 20271001)
     if (!emp.employeeId) {
       const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
       if (ownerId) {
         const company = await CompanyProfile.findOne({ owner: ownerId });
         if (company) {
+          // Assign owner index if not already assigned
           let ownerIndex = company.ownerIndex;
           if (!ownerIndex) {
-            // Find max ownerIndex globally
+            // Find max ownerIndex globally across all companies
             const maxCompany = await CompanyProfile.findOne().sort({ ownerIndex: -1 }).lean();
-            const maxIndex = maxCompany && maxCompany.ownerIndex ? maxCompany.ownerIndex : 0;
-            ownerIndex = maxIndex + 1;
+            ownerIndex = (maxCompany && maxCompany.ownerIndex ? maxCompany.ownerIndex : 0) + 1;
             company.ownerIndex = ownerIndex;
+            await company.save();
           }
-          
-          company.employeeIdSequence = (company.employeeIdSequence || 0) + 1;
+
+          // Fixed base prefix for employee ID format
+          const basePrefix = 2025;
+          let targetPrefix = basePrefix;
+
+          // Get next sequence number (001-999) for this owner
+          let sequence = (company.employeeIdSequence || 0) + 1;
+
+          // If sequence exceeds 999, move to next prefix and reset sequence to 001
+          if (sequence > 999) {
+            // Calculate how many prefixes to advance
+            const prefixIncrement = Math.floor(sequence / 1000);
+            targetPrefix = basePrefix + prefixIncrement;
+            sequence = sequence % 1000;
+            if (sequence === 0) sequence = 1; // Handle edge case
+          }
+
+          // Update sequence in company profile
+          company.employeeIdSequence = sequence;
           await company.save();
-          
-          const seq = (ownerIndex * 1000) + company.employeeIdSequence;
-          const year = new Date().getFullYear();
-          
-          // Format: [YYYY][SEQ] (e.g. 20251001)
-          emp.employeeId = `${year}${seq}`;
+
+          // Format: [Prefix][OwnerIndex][Sequence] (e.g., 20251001, 20261001, 20271001, etc.)
+          const sequenceStr = String(sequence).padStart(3, '0');
+          emp.employeeId = `${targetPrefix}${ownerIndex}${sequenceStr}`;
         }
       }
     }

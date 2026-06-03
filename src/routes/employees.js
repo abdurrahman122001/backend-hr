@@ -149,32 +149,7 @@ router.get("/", unifiedAuth, async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Auto-generate employeeId if missing – sequential, scoped by owner
-    const missingIdEmps = list.filter((emp) => !emp.employeeId);
-    if (missingIdEmps.length > 0) {
-      // Pre-fetch all sequential numbers in one inc by incrementing the counter once
-      // per missing employee so each gets a unique, ordered value
-      const ownerId = getEffectiveOwnerId(req.user);
-      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
-      const currentCounter = company?.employeeIdSequence ?? 0;
-      const companyShortcut = getCompanyShortcut(company?.name);
-
-      // Atomically bump the counter up by the number of missing IDs
-      await CompanyProfile.findOneAndUpdate(
-        { owner: ownerId },
-        { $inc: { employeeIdSequence: missingIdEmps.length } },
-        { new: true, upsert: true }
-      );
-
-      // Assign sequential IDs: first missing employee → counter+1, next → counter+2, etc.
-      const year = new Date().getFullYear();
-      for (let i = 0; i < missingIdEmps.length; i++) {
-        const seqNum = String(currentCounter + i + 1).padStart(3, '0');
-        const generatedId = `${companyShortcut}-${year}-${seqNum}`;
-        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: generatedId } });
-        missingIdEmps[i].employeeId = generatedId;
-      }
-    }
+    // DO NOT auto-generate employeeId here - it will be generated when employee sets password
 
     res.json({
       status: "success",
@@ -277,9 +252,7 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const ownerId = getEffectiveOwnerId(req.user);
 
-    // Auto-generate a sequential employeeId on creation
-    const employeeId = await generateEmployeeId(name, ownerId);
-
+    // DO NOT auto-generate employeeId here - it will be generated when employee sets password
     const emp = await Employee.create({
       owner: [ownerId], // tenant/HR id (array as per your schema)
       createdBy: req.user._id, // who created this employee
@@ -287,7 +260,7 @@ router.post("/", requireAuth, async (req, res) => {
       position,
       department,
       email,
-      employeeId,
+      employeeId: "", // Will be generated on password set
       companyEmail,
       phone,
       qualification,
@@ -328,28 +301,7 @@ router.get("/list", requireAuth, async (req, res) => {
       .sort({ name: 1 })
       .lean();
 
-    // Auto-generate employeeId if missing – sequential, scoped by owner
-    const missingIdEmps = emps.filter((emp) => !emp.employeeId);
-    if (missingIdEmps.length > 0) {
-      const ownerId = getEffectiveOwnerId(req.user);
-      const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
-      const currentCounter = company?.employeeIdSequence ?? 0;
-      const companyShortcut = getCompanyShortcut(company?.name);
-
-      await CompanyProfile.findOneAndUpdate(
-        { owner: ownerId },
-        { $inc: { employeeIdSequence: missingIdEmps.length } },
-        { new: true, upsert: true }
-      );
-
-      const year = new Date().getFullYear();
-      for (let i = 0; i < missingIdEmps.length; i++) {
-        const seqNum = String(currentCounter + i + 1).padStart(3, '0');
-        const generatedId = `${companyShortcut}-${year}-${seqNum}`;
-        await Employee.updateOne({ _id: missingIdEmps[i]._id }, { $set: { employeeId: generatedId } });
-        missingIdEmps[i].employeeId = generatedId;
-      }
-    }
+    // DO NOT auto-generate employeeId here - it will be generated when employee sets password
 
     res.json({ status: "success", data: emps });
   } catch (err) {

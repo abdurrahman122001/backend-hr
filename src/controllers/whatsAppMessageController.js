@@ -4044,8 +4044,16 @@ exports.createMessage = async function createMessage(req, res) {
       }
     }
 
-    // Denormalize last message onto ClientInfo for fast sidebar loading
-    if (responseWithSupervision.client && !responseWithSupervision.isGroupMessage) {
+    // Denormalize last message onto ClientInfo for fast sidebar loading.
+    // SKIP pending messages — they are only visible to the designated approver,
+    // so writing them to lastWhatsAppMessage would expose the preview text to
+    // all employees who are assigned/supervising the client.
+    // The sidebar should only show the last approved/direct message.
+    if (
+      responseWithSupervision.client &&
+      !responseWithSupervision.isGroupMessage &&
+      responseWithSupervision.approvalStatus !== "pending"
+    ) {
       const clientId = responseWithSupervision.client?._id || responseWithSupervision.client;
       if (clientId) {
         const ClientInfo = require("../models/ClientInfo");
@@ -4092,42 +4100,42 @@ exports.getChatList = async function getChatList(req, res) {
 
     const myClientIds = allMyClients.map((c) => c._id);
 
-    // ── Step 2: Auto-migrate clients missing lastWhatsAppMessage (first run) ─
-    // Find which clients have null/empty lastWhatsAppMessage.at
-    const unmigrated = allMyClients
-      .filter((c) => !c.lastWhatsAppMessage?.at)
-      .map((c) => c._id);
-
-    let migratedMap = new Map(); // clientId → { text, at, senderId, hasAttachments }
-
-    if (unmigrated.length > 0) {
-      // One aggregation to get the latest message for each unmigrated client
-      const latestPerClient = await WhatsAppMessage.aggregate([
-        {
-          $match: {
-            owner: ownerObjId,
-            client: { $in: unmigrated },
-            isGroupMessage: { $ne: true },
-            status: { $ne: "draft" },
-            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
-          },
+    // ── Step 2: Always get the last NON-PENDING message for every client ──────
+    // We query messages directly (not the cached lastWhatsAppMessage field) to
+    // prevent stale pending-message text from leaking into the sidebar preview
+    // for users who are not receivers of that pending message.
+    const latestPerClient = await WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          client: { $in: myClientIds },
+          isGroupMessage: { $ne: true },
+          status: { $ne: "draft" },
+          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
         },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: "$client",
-            note: { $first: "$note" },
-            at: { $first: "$createdAt" },
-            senderId: { $first: "$sender" },
-            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
-          },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: "$client",
+          note: { $first: "$note" },
+          at: { $first: "$createdAt" },
+          senderId: { $first: "$sender" },
+          hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
         },
-      ]);
+      },
+    ]);
 
-      // Persist and build map — fire-and-forget updates
-      for (const row of latestPerClient) {
-        const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
-        migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
+    // Build preview map and repair any stale lastWhatsAppMessage in the DB (fire-and-forget)
+    const migratedMap = new Map();
+    for (const row of latestPerClient) {
+      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
+
+      // Repair ClientInfo if the cached value is missing or stale (e.g. set by old pending msg)
+      const cached = allMyClients.find((c) => String(c._id) === String(row._id));
+      const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
+      if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
         ClientInfo.findByIdAndUpdate(row._id, {
           $set: {
             "lastWhatsAppMessage.text": text,
@@ -4184,9 +4192,10 @@ exports.getChatList = async function getChatList(req, res) {
 
     for (const c of allMyClients) {
       const cid = String(c._id);
-      const lastMsg = c.lastWhatsAppMessage?.at
-        ? c.lastWhatsAppMessage
-        : migratedMap.get(cid);
+      // Prefer the freshly-queried non-pending last message.
+      // Fall back to cached lastWhatsAppMessage only if no messages were found
+      // by the aggregation (client truly has no approved/null messages yet).
+      const lastMsg = migratedMap.get(cid) || (c.lastWhatsAppMessage?.at ? c.lastWhatsAppMessage : null);
 
       // Skip clients with NO messages at all
       if (!lastMsg?.at) continue;

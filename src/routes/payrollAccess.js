@@ -632,14 +632,18 @@ router.get('/leave-summary/:targetId', requireEmpAuth, async (req, res) => {
 
         if (!month || !year) return res.status(400).json({ error: 'month and year are required' });
 
-        const grant = await findCurrentGrant(requesterId, ownerId);
-        if (!grant) return res.status(403).json({ error: 'No payroll access' });
+        // Allow employees to fetch their own leave summary without payroll access grant
+        if (String(targetId) !== String(requesterId)) {
+            // For other employees, check if they have payroll access
+            const grant = await findCurrentGrant(requesterId, ownerId);
+            if (!grant) return res.status(403).json({ error: 'No payroll access' });
 
-        // Check scope
-        const scopeIds = (grant.scope || []).map(s => String(s._id || s));
-        const canAccess = scopeIds.length === 0 || scopeIds.includes(String(targetId));
-        if (!canAccess && String(targetId) !== String(requesterId)) {
-            return res.status(403).json({ error: 'No access to this employee' });
+            // Check scope
+            const scopeIds = (grant.scope || []).map(s => String(s._id || s));
+            const canAccess = scopeIds.length === 0 || scopeIds.includes(String(targetId));
+            if (!canAccess) {
+                return res.status(403).json({ error: 'No access to this employee' });
+            }
         }
 
         // Use the full calculation logic from the internal helper below

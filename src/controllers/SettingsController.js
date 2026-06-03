@@ -11,14 +11,15 @@ exports.getSettings = async (req, res) => {
     allowEmployeesMultipleShifts: s?.allowEmployeesMultipleShifts ?? false,
     timeFormat: s?.timeFormat || '24',
     autoGenerateSalaryCertificate: s?.autoGenerateSalaryCertificate ?? false,
+    autoGenerateSalarySlip: s?.autoGenerateSalarySlip ?? false,
   });
 };
 
 exports.updateSettings = async (req, res) => {
-  const { timezone, useSystemTimezone, allowEmployeesMultipleShifts, timeFormat, autoGenerateSalaryCertificate } = req.body;
+  const { timezone, useSystemTimezone, allowEmployeesMultipleShifts, timeFormat, autoGenerateSalaryCertificate, autoGenerateSalarySlip } = req.body;
   const s = await Settings.findOneAndUpdate(
     { owner: req.user._id },
-    { timezone, useSystemTimezone, allowEmployeesMultipleShifts, timeFormat, autoGenerateSalaryCertificate },
+    { timezone, useSystemTimezone, allowEmployeesMultipleShifts, timeFormat, autoGenerateSalaryCertificate, autoGenerateSalarySlip },
     { upsert: true, new: true }
   ).lean();
   res.json({
@@ -27,5 +28,6 @@ exports.updateSettings = async (req, res) => {
     allowEmployeesMultipleShifts: s.allowEmployeesMultipleShifts,
     timeFormat: s.timeFormat,
     autoGenerateSalaryCertificate: s.autoGenerateSalaryCertificate,
+    autoGenerateSalarySlip: s.autoGenerateSalarySlip,
   });
 };

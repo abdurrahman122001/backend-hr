@@ -180,6 +180,7 @@ exports.updateNonWorkingDays = async (req, res) => {
 exports.getNonWorkingDays = async (req, res) => {
   const tenantId = req.user?.owner || req.user?.createdBy || req.user?._id;
   const userId = req.user?._id;
+  const { payrollPeriodId } = req.query;
 
   const query = {
     $or: [

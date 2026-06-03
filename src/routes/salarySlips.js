@@ -1,5 +1,6 @@
 const express = require("express");
 const PDFDocument = require("pdfkit");
+const jwt = require("jsonwebtoken");
 const router = express.Router();
 const requireAuth = require("../middleware/auth");
 const SalarySlip = require("../models/SalarySlip");
@@ -121,6 +122,119 @@ router.get("/", requireAuth, async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching salary slips:", err);
+    res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ---------- FETCH salary slips by specific months (for PDF generation) - EMPLOYEE ACCESS ----------
+router.post("/by-months", async (req, res) => {
+  try {
+    const { months } = req.body;
+    if (!months || !Array.isArray(months) || months.length === 0) {
+      return res.status(400).json({ status: "error", message: "months array is required" });
+    }
+
+    // Get token from header for employee access
+    const token = req.headers.authorization?.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ status: "error", message: "No token provided" });
+    }
+
+    // Verify token and get employee ID
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET || "secret");
+    } catch (err) {
+      return res.status(401).json({ status: "error", message: "Invalid token" });
+    }
+
+    // Get employee ID - employee tokens use 'id' field
+    const targetEmpId = decoded.id || decoded.employeeId || decoded._id;
+    if (!targetEmpId) {
+      return res.status(403).json({ status: "error", message: "Employee ID not found in token" });
+    }
+
+    // Convert YYYY-MM format to month and year queries
+    const monthYearPairs = months.map(monthStr => {
+      const [year, monthNum] = monthStr.split("-");
+      const date = new Date(year, parseInt(monthNum) - 1, 1);
+      const monthName = date.toLocaleString("en-US", { month: "long" });
+      return { month: monthName, year: year };
+    });
+
+    // Fetch slips for all requested months
+    const monthYearQueries = monthYearPairs.map(pair => ({ month: pair.month, year: pair.year }));
+    const slips = await SalarySlip.find({
+      employee: targetEmpId,
+      $or: monthYearQueries
+    }).populate("employee", "firstName lastName designation department empId joiningDate").lean();
+
+    // Decrypt all salary fields
+    const decryptedSlips = await Promise.all(
+      slips.map(async (slip) => {
+        const decrypted = { ...slip };
+
+        // List of all encrypted salary fields
+        const encryptedFields = [
+          "basic", "dearnessAllowance", "houseRentAllowance", "conveyanceAllowance",
+          "medicalAllowance", "utilityAllowance", "overtimeCompensation", "dislocationAllowance",
+          "leaveEncashment", "bonus", "arrears", "autoAllowance", "incentive", "fuelAllowance",
+          "othersAllowances", "grossSalary", "leaveDeductions", "lateDeductions", "eobiDeduction",
+          "sessiDeduction", "providentFundDeduction", "gratuityFundDeduction", "advanceSalaryDeductions",
+          "medicalInsurance", "lifeInsurance", "penalties", "otherDeductions", "taxDeduction",
+          "totalAllowances", "totalDeductions", "netPayable"
+        ];
+
+        // Decrypt each field
+        for (const field of encryptedFields) {
+          if (slip[field]) {
+            try {
+              decrypted[field] = await decrypt(slip[field]);
+            } catch (err) {
+              decrypted[field] = slip[field]; // Keep original if decryption fails
+            }
+          }
+        }
+
+        // Also handle loanDeductions nested fields and map to flat structure
+        if (slip.loanDeductions?.vehicleLoan) {
+          try {
+            decrypted.vehicleLoanDeduction = await decrypt(slip.loanDeductions.vehicleLoan);
+          } catch (err) {
+            decrypted.vehicleLoanDeduction = slip.loanDeductions.vehicleLoan;
+          }
+        }
+        if (slip.loanDeductions?.otherLoans) {
+          try {
+            decrypted.otherLoanDeductions = await decrypt(slip.loanDeductions.otherLoans);
+          } catch (err) {
+            decrypted.otherLoanDeductions = slip.loanDeductions.otherLoans;
+          }
+        }
+
+        // Map netPayable to netSalary for compatibility
+        if (!decrypted.netSalary && decrypted.netPayable) {
+          decrypted.netSalary = decrypted.netPayable;
+        }
+
+        // Add amountInWords and modeOfPayment if not present
+        if (!decrypted.amountInWords) {
+          decrypted.amountInWords = "-";
+        }
+        if (!decrypted.modeOfPayment) {
+          decrypted.modeOfPayment = "Bank Transfer";
+        }
+
+        return decrypted;
+      })
+    );
+
+    res.json({
+      status: "success",
+      slips: decryptedSlips || []
+    });
+  } catch (err) {
+    console.error("Error fetching salary slips by months:", err);
     res.status(500).json({ status: "error", message: err.message });
   }
 });
