@@ -1780,20 +1780,48 @@ exports.approveMessage = async function approveMessage(req, res) {
       }
     }
 
-    // 🔥 NEW: Add Managers to receivers if finalized (instead of creating a separate message)
+    // 🔥 Expand receivers on finalization (non-group only)
     if (approvalFinalized && !msg.isGroupMessage && !msg.groupId && msg.chatType !== 'group') {
-      const { managers } = await findTLsAndManagersByOwner(msg.owner);
       const senderRole = normalizeRole(msg.sender?.role || "");
+      const senderId = String(msg.sender?._id || msg.sender);
+      const currentReceiverSet = new Set(msg.receiver.map(r => String(r._id || r)));
 
-      if (senderRole === "employee" && managers.length > 0) {
-        // Add managers who are not already receivers
-        const currentReceivers = msg.receiver.map(r => String(r._id || r));
-        managers.forEach(mId => {
-          if (!currentReceivers.includes(String(mId))) {
-            msg.receiver.push(mId);
+      const addReceiver = (id) => {
+        const s = String(id);
+        if (s && s !== senderId && !currentReceiverSet.has(s)) {
+          msg.receiver.push(s);
+          currentReceiverSet.add(s);
+        }
+      };
+
+      if (senderRole === "manager") {
+        // Manager-sent: expand to intendedReceivers (assigned employees stored at creation)
+        (msg.intendedReceivers || [])
+          .map(r => typeof r === "object" ? r._id : r)
+          .forEach(addReceiver);
+      } else {
+        // Employee / team_lead: add CRM managers so they see the finalized message
+        const { managers: mgrs } = await findTLsAndManagersByOwner(msg.owner);
+        mgrs.forEach(addReceiver);
+
+        // Also add the assigned employees for this client (they must receive the approved msg)
+        if (msg.client) {
+          const ClientModel = require("../models/ClientInfo");
+          const clientForExp = await ClientModel.findById(msg.client)
+            .select("assignedTo supervisedBy")
+            .lean();
+          if (clientForExp) {
+            (clientForExp.assignedTo || []).forEach(empId => {
+              addReceiver(typeof empId === "object" ? empId._id : empId);
+            });
+            // Also add any supervisor in the chain not yet in receivers
+            (clientForExp.supervisedBy || []).forEach(supId => {
+              addReceiver(typeof supId === "object" ? supId._id : supId);
+            });
           }
-        });
+        }
       }
+      console.log("✅ [approveMessage] Final receivers after expansion:", [...currentReceiverSet]);
     }
 
     await msg.save();
@@ -1847,8 +1875,16 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // Filter managers to only those NOT already involved
-      const managersToForward = managers.filter(mId => !allInvolvedUsers.has(String(mId)));
+      // When approval is finalized: all previous approvers + all managers must be notified
+      if (approvalFinalized) {
+        // All steps already recorded in approvalChain
+        (msg.approvalChain || []).forEach(step => {
+          const aid = step.approver?._id || step.approver;
+          if (aid) allInvolvedUsers.add(String(aid));
+        });
+        // Always include CRM/managers on final approval
+        managers.forEach(id => allInvolvedUsers.add(String(id)));
+      }
 
       // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
       if (msg.isGroupMessage && msg.groupId) {
@@ -3491,82 +3527,45 @@ exports.createMessage = async function createMessage(req, res) {
       assignedEmployeeIds = [String(clientDoc.assignedTo._id)];
     }
 
-    // 🔥 TEAM LEAD LOGIC - SEND TO MANAGERS AND ASSIGNED EMPLOYEES
-    if (senderRole === "team_lead") {
-      receivers = [];
+    // 🔥 MANAGER/CRM LOGIC
+    // CRM is the top authority — no approval needed for their outgoing messages.
+    // Deliver simultaneously to EVERYONE in the supervision chain for this client:
+    //   1. All supervisors in clientDoc.supervisedBy (excluding sender)
+    //   2. Full management chain of every assigned employee (fills in intermediate levels)
+    //   3. The assigned employees themselves
+    if (senderRole === "manager") {
+      const supervisedByList = (clientDoc?.supervisedBy || []).map(id => String(id));
+      const nonSenderSupervisors = supervisedByList.filter(id => id !== String(sender));
 
-      // Add managers as receivers
-      if (managers.length > 0) {
-        managers.forEach((managerId) => {
-          if (!receivers.includes(managerId) && managerId !== String(sender)) {
-            receivers.push(managerId);
-          }
-        });
-      }
-
-      // Add assigned employees as receivers (only for non-group messages)
-      if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (
-            employeeId &&
-            employeeId !== String(sender) &&
-            !receivers.includes(employeeId)
-          ) {
-            receivers.push(employeeId);
-          }
-        });
-      }
-
-      // Get CRM employee ID
-      const crmEmployeeId = process.env.CRM_EMPLOYEE_ID;
-      let crmUser = null;
-      if (!crmEmployeeId) {
-        crmUser = await Employee.findOne({
-          owner: owner,
-          $or: [
-            { role: /crm/i },
-            { role: /customer relationship/i },
-            { companyEmail: /crm/i },
-            { name: /CRM/i },
-          ],
-        })
-          .select("_id")
-          .lean();
-      }
-
-      const crmId = crmEmployeeId || (crmUser ? String(crmUser._id) : null);
-      if (crmId && !receivers.includes(crmId) && crmId !== String(sender)) {
-        receivers.push(crmId);
-      }
-
-      approvalStatus = null;
-    }
-    // 🔥 MANAGER LOGIC - SEND TO TEAM LEADS AND ASSIGNED EMPLOYEES
-    else if (senderRole === "manager") {
-      // Add team leads to receivers
-      tls.forEach((teamLeadId) => {
-        if (!receivers.includes(teamLeadId) && teamLeadId !== String(sender)) {
-          receivers.push(teamLeadId);
-        }
+      // Step 1: supervisors explicitly linked to this client
+      nonSenderSupervisors.forEach(supervisorId => {
+        if (!receivers.includes(supervisorId)) receivers.push(supervisorId);
       });
 
-      // Add assigned employees (only for non-group messages)
+      // Step 2: walk full hierarchy chain of each assigned employee
+      for (const assignedEmpId of assignedEmployeeIds) {
+        const chain = await getManagementChainFromHierarchy(owner, assignedEmpId);
+        chain.forEach(seniorId => {
+          if (seniorId !== String(sender) && !receivers.includes(seniorId)) {
+            receivers.push(seniorId);
+          }
+        });
+      }
+
+      // Step 3: assigned employees (non-group only)
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
-        assignedEmployeeIds.forEach((employeeId) => {
-          if (
-            employeeId &&
-            employeeId !== String(sender) &&
-            !receivers.includes(employeeId)
-          ) {
-            receivers.push(employeeId);
+        assignedEmployeeIds.forEach(empId => {
+          if (empId && empId !== String(sender) && !receivers.includes(empId)) {
+            receivers.push(empId);
           }
         });
       }
 
       approvalStatus = null;
     }
-    // 👷 EMPLOYEE LOGIC: Use assigned employees (only for non-group messages)
-    else if (senderRole === "employee") {
+    // 👷 EMPLOYEE / TEAM LEAD LOGIC
+    // Team leads follow the same approval chain as employees — no auto-approval bypass.
+    else if (senderRole === "employee" || senderRole === "team_lead") {
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (
@@ -3746,8 +3745,6 @@ exports.createMessage = async function createMessage(req, res) {
     if (approvalStatus === undefined) {
       if (senderRole === "manager") {
         approvalStatus = null;
-      } else if (senderRole === "team_lead") {
-        approvalStatus = null;
       } else if (needsApproval) {
         // Route to the immediate senior in the hierarchy — regardless of role.
         // The full hierarchy chain is followed: e.g. Abdur Rahman New → Ali →
@@ -3761,17 +3758,10 @@ exports.createMessage = async function createMessage(req, res) {
           receivers = [immediateSupervisors[0]];
           console.log("✅ [createMessage] Routing to immediate hierarchy supervisor:", immediateSupervisors[0]);
         } else {
-          // No senior in hierarchy at all — fallback to manager/TL chain
-          console.warn("⚠️ [createMessage] No hierarchy senior found in DB for sender:", String(sender));
-          approvalStatus = "pending";
-          const managerInChain = await findFirstManagerOrTeamLeadInChain(owner, String(sender));
-          if (managerInChain) {
-            receivers = [managerInChain];
-          } else if (managers.length > 0) {
-            receivers = [managers[0]];
-          } else if (tls.length > 0) {
-            receivers = [tls[0]];
-          }
+          // Sender is the highest-level person in the hierarchy (no one above them).
+          // Approve directly — there is no senior to route to.
+          console.log("✅ [createMessage] Sender is top of hierarchy, approving directly:", String(sender));
+          approvalStatus = null;
         }
       } else if (isDirect) {
         approvalStatus = "approved";

@@ -24,12 +24,22 @@ exports.getRoster = async (req, res) => {
     const isTeamLead = role === "team lead" || role === "team_lead";
     const isManager = role === "manager";
 
-    // Find direct juniors from EmployeeHierarchy (senior: me)
-    const hierarchyJuniorLinks = await EmployeeHierarchy.find({
+    // Find ALL descendants in the hierarchy tree (any depth) using the path field.
+    // path stores the full ancestry chain as "id1.id2.id3", so matching on me._id
+    // anywhere in the path returns every junior at every level below me.
+    const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
+    const allDescendantLinks = await EmployeeHierarchy.find({
+      owner: me.owner,
+      path: pathRegex,
+    }).select("junior").lean();
+    const allDescendantIds = allDescendantLinks.map(l => String(l.junior));
+
+    // Also capture direct juniors via the legacy senior: me._id index (fast lookup)
+    const directJuniorLinks = await EmployeeHierarchy.find({
       owner: me.owner,
       senior: me._id,
     }).select("junior").lean();
-    const hierarchyJuniorIds = hierarchyJuniorLinks.map(l => String(l.junior));
+    const directJuniorIds = directJuniorLinks.map(l => String(l.junior));
 
     // Also include employees whose supervisor field points to me
     const supervisorFieldJuniors = await Employee.find({
@@ -38,8 +48,8 @@ exports.getRoster = async (req, res) => {
     }).select("_id").lean();
     const supervisorFieldIds = supervisorFieldJuniors.map(e => String(e._id));
 
-    // Combine both sources
-    const juniorIds = [...new Set([...hierarchyJuniorIds, ...supervisorFieldIds])];
+    // Combine: full descendant tree + direct juniors + supervisor-field reports
+    const juniorIds = [...new Set([...allDescendantIds, ...directJuniorIds, ...supervisorFieldIds])];
     const isSenior = juniorIds.length > 0;
 
     // Build juniorMap: tracks which juniors have supervision enabled on their clients
