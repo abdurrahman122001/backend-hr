@@ -351,6 +351,8 @@ async function applyVisibility(q, req) {
         { sender: me },
         { receiver: me },
         { receiver: { $in: [me] } },
+        // Keep messages visible after the team lead has approved them
+        { "approvalChain.approver": me },
         // Allow team leads to see manager messages (non-pending only)
         {
           sender: { $in: managers.map((id) => oid(id)) },
@@ -401,6 +403,8 @@ async function applyVisibility(q, req) {
       { sender: me },
       { receiver: me },
       { receiver: { $in: [me] } },
+      // Keep approved messages visible after the senior has approved them
+      { "approvalChain.approver": me },
     ];
 
     // If assigned to client, also allow seeing all non-pending messages for that client
@@ -453,6 +457,8 @@ async function applyVisibility(q, req) {
     { sender: me },
     { receiver: me },
     { receiver: { $in: [me] } },
+    // Keep approved messages visible after the user has approved them
+    { "approvalChain.approver": me },
   ];
 
   // 🔥 If assigned to client, also allow seeing all non-pending messages for that client
@@ -2239,8 +2245,11 @@ exports.editMessage = async function editMessage(req, res) {
       }
     }
 
-    // Previous approvers / client supervisors may only edit disapproved messages
-    if (isPreviousApprover) {
+    // Previous approvers / client supervisors may only edit disapproved messages.
+    // EXCEPTION: the current designated receiver (isReceiver === true) is the
+    // active approver for this pending message — they must be allowed to edit
+    // it as part of the "Edit & Approve" flow.
+    if (isPreviousApprover && !isReceiver) {
       if (!clientRequiresApproval) {
         return res.status(403).json({
           error: "This client uses direct supervision. Resubmission not required.",
