@@ -79,6 +79,7 @@ const employeeLeavesRouter = require("./routes/employeeLeaves");
 const generateRouter = require("./routes/generate-pdfs");
 const AssignmentMessage = require("./models/AssignmentMessage");
 const assignmentMessageController = require("./controllers/assignmentMessageController");
+const whatsAppMessageController = require("./controllers/whatsAppMessageController");
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
@@ -2790,16 +2791,22 @@ cron.schedule(
   "* * * * *", // Every minute
   async () => {
     try {
-      console.log("[cron] Checking for scheduled messages to send...");
-      const results =
-        await assignmentMessageController.sendScheduledMessages(io);
-      if (results.sent > 0) {
-        console.log(`[cron] Sent ${results.sent} scheduled messages`);
+      // Email (AssignmentMessage) scheduled messages
+      const emailResults = await assignmentMessageController.sendScheduledMessages(io);
+      if (emailResults.sent > 0) {
+        console.log(`[cron] Sent ${emailResults.sent} scheduled email messages`);
       }
-      if (results.failed > 0) {
-        console.error(
-          `[cron] Failed to send ${results.failed} scheduled messages`,
-        );
+      if (emailResults.failed > 0) {
+        console.error(`[cron] Failed to send ${emailResults.failed} scheduled email messages`);
+      }
+
+      // WhatsApp scheduled messages
+      const waResults = await whatsAppMessageController.sendScheduledMessages(io);
+      if (waResults.sent > 0) {
+        console.log(`[cron] Sent ${waResults.sent} scheduled WhatsApp messages`);
+      }
+      if (waResults.failed > 0) {
+        console.error(`[cron] Failed to send ${waResults.failed} scheduled WhatsApp messages`);
       }
     } catch (err) {
       console.error("[cron] Error sending scheduled messages:", err);
