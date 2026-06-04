@@ -31,7 +31,7 @@ const ProfileRevisionSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ['pending', 'approved', 'rejected'],
+      enum: ['pending', 'approved', 'rejected', 'cancelled'],
       default: 'pending',
     },
     // Admin approval info

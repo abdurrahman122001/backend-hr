@@ -21,7 +21,7 @@ const documentRequestSchema = new mongoose.Schema(
       default: null,
     }, // for both salary-slip and salary-certificate
     reason: { type: String },
-    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+    status: { type: String, enum: ["pending", "approved", "rejected", "cancelled"], default: "pending" },
     adminReason: { type: String },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     approvedAt: { type: Date },

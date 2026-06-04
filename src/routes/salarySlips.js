@@ -167,7 +167,19 @@ router.post("/by-months", async (req, res) => {
     const slips = await SalarySlip.find({
       employee: targetEmpId,
       $or: monthYearQueries
-    }).populate("employee", "firstName lastName designation department empId joiningDate").lean();
+    }).populate(
+      "employee",
+      "name designation department employeeId joiningDate photographUrl " +
+      "phone email companyEmail " +
+      "dateOfBirth fatherOrHusbandName gender religion maritalStatus nationality " +
+      "cnic cnicIssueDate cnicExpiryDate " +
+      "latestQualification fieldOfQualification " +
+      "presentAddress permanentAddress " +
+      "bankName bankAccountNumber " +
+      "nomineeName nomineeCnic nomineeRelation nomineeNo " +
+      "emergencyContactName emergencyContactRelation emergencyContactNumber " +
+      "shifts providentFund"
+    ).lean();
 
     // Decrypt all salary fields
     const decryptedSlips = await Promise.all(
@@ -215,6 +227,11 @@ router.post("/by-months", async (req, res) => {
         // Map netPayable to netSalary for compatibility
         if (!decrypted.netSalary && decrypted.netPayable) {
           decrypted.netSalary = decrypted.netPayable;
+        }
+        
+        // If still missing, calculate dynamically
+        if (!decrypted.netSalary || isNaN(Number(decrypted.netSalary))) {
+          decrypted.netSalary = calcNet(decrypted);
         }
 
         // Add amountInWords and modeOfPayment if not present

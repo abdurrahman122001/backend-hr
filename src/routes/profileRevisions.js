@@ -9,6 +9,8 @@ const {
   getRevisionDetail,
   approveRevision,
   rejectRevision,
+  withdrawRevision,
+  editRevision,
   EDITABLE_FIELDS,
 } = require('../controllers/profileRevisionController');
 const { uploadPhotos } = require('../middleware/upload');
@@ -21,6 +23,8 @@ router.post('/upload-photo', empAuth, uploadPhotos.single('photo'), (req, res) =
 });
 router.post('/', empAuth, createRevision);
 router.get('/', empAuth, getEmployeeRevisions);
+router.put('/:id', empAuth, editRevision);
+router.patch('/:id/withdraw', empAuth, withdrawRevision);
 
 // Get editable fields list (public for frontend)
 router.get('/fields/editable', (req, res) => {

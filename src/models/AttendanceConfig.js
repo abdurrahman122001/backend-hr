@@ -10,10 +10,10 @@ const AttendanceConfigSchema = new Schema({
   markAbsentManually: { type: Boolean, default: false },
   allowDeleteRecords: { type: Boolean, default: false },
   allowEditRecords:   { type: Boolean, default: false },
-  attendanceMode: { 
-    type: String, 
-    enum: ['auth_login', 'manual'], 
-    default: 'auth_login' 
+  attendanceMode: {
+    type: String,
+    enum: ['auth_login', 'manual'],
+    default: 'auth_login'
   },
 
   // EDIT SCOPE
