@@ -1800,23 +1800,15 @@ exports.approveMessage = async function approveMessage(req, res) {
           .map(r => typeof r === "object" ? r._id : r)
           .forEach(addReceiver);
       } else {
-        // Employee / team_lead: add CRM managers so they see the finalized message
-        const { managers: mgrs } = await findTLsAndManagersByOwner(msg.owner);
-        mgrs.forEach(addReceiver);
-
-        // Also add the assigned employees for this client (they must receive the approved msg)
+        // Employee / team_lead: only add assigned employees — supervisors receive approval notifications only
         if (msg.client) {
           const ClientModel = require("../models/ClientInfo");
           const clientForExp = await ClientModel.findById(msg.client)
-            .select("assignedTo supervisedBy")
+            .select("assignedTo")
             .lean();
           if (clientForExp) {
             (clientForExp.assignedTo || []).forEach(empId => {
               addReceiver(typeof empId === "object" ? empId._id : empId);
-            });
-            // Also add any supervisor in the chain not yet in receivers
-            (clientForExp.supervisedBy || []).forEach(supId => {
-              addReceiver(typeof supId === "object" ? supId._id : supId);
             });
           }
         }
@@ -1875,15 +1867,15 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // When approval is finalized: all previous approvers + all managers must be notified
+      // When finalized: notify previous approvers (approval status update) but NOT all managers
+      // Supervisors receive approval notifications only; client notifications go to assigned employees
       if (approvalFinalized) {
-        // All steps already recorded in approvalChain
         (msg.approvalChain || []).forEach(step => {
           const aid = step.approver?._id || step.approver;
           if (aid) allInvolvedUsers.add(String(aid));
         });
-        // Always include CRM/managers on final approval
-        managers.forEach(id => allInvolvedUsers.add(String(id)));
+        // msg.receiver already contains only assigned employees (expanded above)
+        // — no need to add all managers here
       }
 
       // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
@@ -3529,30 +3521,9 @@ exports.createMessage = async function createMessage(req, res) {
 
     // 🔥 MANAGER/CRM LOGIC
     // CRM is the top authority — no approval needed for their outgoing messages.
-    // Deliver simultaneously to EVERYONE in the supervision chain for this client:
-    //   1. All supervisors in clientDoc.supervisedBy (excluding sender)
-    //   2. Full management chain of every assigned employee (fills in intermediate levels)
-    //   3. The assigned employees themselves
+    // Supervisors receive approval notifications only; client messages go to assigned employees only.
     if (senderRole === "manager") {
-      const supervisedByList = (clientDoc?.supervisedBy || []).map(id => String(id));
-      const nonSenderSupervisors = supervisedByList.filter(id => id !== String(sender));
-
-      // Step 1: supervisors explicitly linked to this client
-      nonSenderSupervisors.forEach(supervisorId => {
-        if (!receivers.includes(supervisorId)) receivers.push(supervisorId);
-      });
-
-      // Step 2: walk full hierarchy chain of each assigned employee
-      for (const assignedEmpId of assignedEmployeeIds) {
-        const chain = await getManagementChainFromHierarchy(owner, assignedEmpId);
-        chain.forEach(seniorId => {
-          if (seniorId !== String(sender) && !receivers.includes(seniorId)) {
-            receivers.push(seniorId);
-          }
-        });
-      }
-
-      // Step 3: assigned employees (non-group only)
+      // Only add assigned employees as receivers — supervisors are not notified of client messages
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach(empId => {
           if (empId && empId !== String(sender) && !receivers.includes(empId)) {
