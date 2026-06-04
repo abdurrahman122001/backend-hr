@@ -1182,13 +1182,14 @@ exports.approveLeave = async (req, res) => {
       await revertLeaveSalaryDeduction(leave.employee._id, actualApprovedDays, leave.startDate);
     }
 
-    // APPLY SALARY DEDUCTION IF UNPAID
-    if (!finalIsPaid) {
+    // APPLY SALARY DEDUCTION IF UNPAID (early_leave = present, no deduction)
+    if (!finalIsPaid && leave.leaveType !== "early_leave") {
       await deductLeaveFromSalary(leave.employee._id, actualApprovedDays, leave.startDate);
     }
 
     // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
-    try {
+    // early_leave = employee was present and just left early — no leave day consumed
+    if (leave.leaveType !== "early_leave") try {
       const leaveYear = getLeaveYear(leave.startDate);
       const employeeId = leave.employee._id;
       const ownerId = leave.employee.owner;
@@ -1272,8 +1273,8 @@ exports.approveLeave = async (req, res) => {
     }
 
     // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
-    // When leave is approved, mark all leave dates as "Leave" in attendance
-    try {
+    // early_leave = employee was present and left early — attendance stays unchanged
+    if (leave.leaveType !== "early_leave") try {
       const Attendance = require("../models/Attendance");
 
       for (const dateObj of leave.dates) {

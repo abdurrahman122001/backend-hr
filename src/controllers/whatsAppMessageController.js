@@ -1577,71 +1577,92 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
   try {
     const now = new Date();
 
-    // Find messages scheduled to be sent now or in the past
     const scheduledMessages = await WhatsAppMessage.find({
       isScheduled: true,
       status: "scheduled",
       scheduledFor: { $lte: now },
-    }).populate("sender receiver client");
+    });
 
-    const results = {
-      sent: 0,
-      failed: 0,
-      errors: [],
-    };
+    const results = { sent: 0, failed: 0, errors: [] };
 
     for (const message of scheduledMessages) {
       try {
-        // Update message status to sent
+        // Mark as sent
         message.isScheduled = false;
         message.status = "sent";
         message.sentAt = new Date();
-
         await message.save();
 
-        // Send real-time notifications ONLY to relevant users via Socket.IO
-        if (io) {
-          const receiverIds = message.receiver.map((receiver) =>
-            typeof receiver === "string" ? receiver : receiver._id,
-          );
+        // Fully populate for the socket payload (mirrors what createMessage sends)
+        const populated = await WhatsAppMessage.findById(message._id).populate([
+          { path: "owner",    select: "_id name companyEmail" },
+          { path: "sender",   select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "client",   select: "_id clientName assignedTo" },
+          { path: "repliedTo",select: "_id note message sender attachments" },
+        ]);
+        if (!populated) { results.failed++; continue; }
 
-          // Notify each receiver using new_message event
-          receiverIds.forEach((receiverId) => {
-            io.to(`employee_${receiverId}`).emit("new_message", {
-              message: message,
-              type: "scheduled_message_delivered",
-            });
+        const msgObj = populated.toObject();
+
+        // Update lastWhatsAppMessage cache on ClientInfo
+        if (msgObj.client && !msgObj.isGroupMessage) {
+          const ClientInfo = require("../models/ClientInfo");
+          ClientInfo.findByIdAndUpdate(
+            msgObj.client._id || msgObj.client,
+            { $set: {
+              "lastWhatsAppMessage.text": (msgObj.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
+              "lastWhatsAppMessage.at": msgObj.sentAt || now,
+              "lastWhatsAppMessage.senderId": msgObj.sender?._id || msgObj.sender,
+              "lastWhatsAppMessage.hasAttachments": Array.isArray(msgObj.attachments) && msgObj.attachments.length > 0,
+            }},
+            { timestamps: false }
+          ).catch(() => {});
+        }
+
+        if (io) {
+          const socketPayload = {
+            message: msgObj,
+            type: "scheduled_message_delivered",
+            action: "received",
+            approvalStatus: msgObj.approvalStatus,
+          };
+
+          // Notify each receiver — they see it as a new incoming message
+          const receiverIds = (msgObj.receiver || []).map((r) =>
+            String(typeof r === "object" ? r._id : r)
+          );
+          receiverIds.forEach((rid) => {
+            io.to(`employee_${rid}`).emit("new_message", socketPayload);
           });
 
-          // Notify sender that scheduled message was sent
-          const senderId =
-            typeof message.sender === "string"
-              ? message.sender
-              : message.sender?._id;
+          // Notify sender — their scheduled message was delivered
+          const senderId = String(msgObj.sender?._id || msgObj.sender || "");
           if (senderId) {
             io.to(`employee_${senderId}`).emit("new_message", {
-              message: message,
+              ...socketPayload,
               type: "scheduled_message_sent",
+              action: "sent",
             });
           }
+
+          // If group message, also emit to the group room
+          if (msgObj.isGroupMessage && msgObj.groupId) {
+            io.to(`group_${msgObj.groupId}`).emit("new_message", socketPayload);
+          }
         }
+
         results.sent++;
       } catch (error) {
-        console.error(
-          `Failed to send scheduled message ${message._id}:`,
-          error,
-        );
+        console.error(`Failed to send scheduled WhatsApp message ${message._id}:`, error);
         results.failed++;
-        results.errors.push({
-          messageId: message._id,
-          error: error.message,
-        });
+        results.errors.push({ messageId: message._id, error: error.message });
       }
     }
 
     return results;
   } catch (e) {
-    console.error("Error in sendScheduledMessages:", e);
+    console.error("Error in sendScheduledMessages (whatsapp):", e);
     throw e;
   }
 };
@@ -1800,23 +1821,15 @@ exports.approveMessage = async function approveMessage(req, res) {
           .map(r => typeof r === "object" ? r._id : r)
           .forEach(addReceiver);
       } else {
-        // Employee / team_lead: add CRM managers so they see the finalized message
-        const { managers: mgrs } = await findTLsAndManagersByOwner(msg.owner);
-        mgrs.forEach(addReceiver);
-
-        // Also add the assigned employees for this client (they must receive the approved msg)
+        // Employee / team_lead: only add assigned employees — supervisors receive approval notifications only
         if (msg.client) {
           const ClientModel = require("../models/ClientInfo");
           const clientForExp = await ClientModel.findById(msg.client)
-            .select("assignedTo supervisedBy")
+            .select("assignedTo")
             .lean();
           if (clientForExp) {
             (clientForExp.assignedTo || []).forEach(empId => {
               addReceiver(typeof empId === "object" ? empId._id : empId);
-            });
-            // Also add any supervisor in the chain not yet in receivers
-            (clientForExp.supervisedBy || []).forEach(supId => {
-              addReceiver(typeof supId === "object" ? supId._id : supId);
             });
           }
         }
@@ -1875,15 +1888,15 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // When approval is finalized: all previous approvers + all managers must be notified
+      // When finalized: notify previous approvers (approval status update) but NOT all managers
+      // Supervisors receive approval notifications only; client notifications go to assigned employees
       if (approvalFinalized) {
-        // All steps already recorded in approvalChain
         (msg.approvalChain || []).forEach(step => {
           const aid = step.approver?._id || step.approver;
           if (aid) allInvolvedUsers.add(String(aid));
         });
-        // Always include CRM/managers on final approval
-        managers.forEach(id => allInvolvedUsers.add(String(id)));
+        // msg.receiver already contains only assigned employees (expanded above)
+        // — no need to add all managers here
       }
 
       // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
@@ -3529,30 +3542,9 @@ exports.createMessage = async function createMessage(req, res) {
 
     // 🔥 MANAGER/CRM LOGIC
     // CRM is the top authority — no approval needed for their outgoing messages.
-    // Deliver simultaneously to EVERYONE in the supervision chain for this client:
-    //   1. All supervisors in clientDoc.supervisedBy (excluding sender)
-    //   2. Full management chain of every assigned employee (fills in intermediate levels)
-    //   3. The assigned employees themselves
+    // Supervisors receive approval notifications only; client messages go to assigned employees only.
     if (senderRole === "manager") {
-      const supervisedByList = (clientDoc?.supervisedBy || []).map(id => String(id));
-      const nonSenderSupervisors = supervisedByList.filter(id => id !== String(sender));
-
-      // Step 1: supervisors explicitly linked to this client
-      nonSenderSupervisors.forEach(supervisorId => {
-        if (!receivers.includes(supervisorId)) receivers.push(supervisorId);
-      });
-
-      // Step 2: walk full hierarchy chain of each assigned employee
-      for (const assignedEmpId of assignedEmployeeIds) {
-        const chain = await getManagementChainFromHierarchy(owner, assignedEmpId);
-        chain.forEach(seniorId => {
-          if (seniorId !== String(sender) && !receivers.includes(seniorId)) {
-            receivers.push(seniorId);
-          }
-        });
-      }
-
-      // Step 3: assigned employees (non-group only)
+      // Only add assigned employees as receivers — supervisors are not notified of client messages
       if (!isGroupMessage && !groupId && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach(empId => {
           if (empId && empId !== String(sender) && !receivers.includes(empId)) {
@@ -3955,46 +3947,48 @@ exports.createMessage = async function createMessage(req, res) {
         approvalStatus: responseWithSupervision.approvalStatus,
       });
 
-      // 🎯 CRITICAL FIX: Only notify receivers if message is approved OR if they are supervisors for pending approval
-      // Get sender's hierarchy supervisors for checking notifications
-      const senderSupervisors = await findSupervisorsFromHierarchy(
-        owner,
-        String(sender)
-      );
+      // Scheduled messages are delivered by the scheduler at the appointed time.
+      // Do NOT notify receivers now — only notify when status transitions to "sent".
+      if (!isScheduled) {
+        // Get sender's hierarchy supervisors for checking notifications
+        const senderSupervisors = await findSupervisorsFromHierarchy(
+          owner,
+          String(sender)
+        );
 
-      receivers.forEach((receiverId) => {
-        const isReceiverTeamLead = tls.includes(receiverId);
-        const isReceiverManager = managers.includes(receiverId);
+        receivers.forEach((receiverId) => {
+          const isReceiverTeamLead = tls.includes(receiverId);
+          const isReceiverManager = managers.includes(receiverId);
 
-        // Check if receiver is a supervisor for the sender (active or hierarchy)
-        const isReceiverHierarchySupervisor =
-          senderSupervisors.includes(receiverId) ||
-          receivers.includes(String(receiverId)); // If they are in the receivers list for a pending message, they ARE an approver
+          const isReceiverHierarchySupervisor =
+            senderSupervisors.includes(receiverId) ||
+            receivers.includes(String(receiverId));
 
-        const shouldNotify =
-          responseWithSupervision.approvalStatus === "approved" ||
-          responseWithSupervision.approvalStatus === null ||
-          (responseWithSupervision.approvalStatus === "pending" &&
-            (isReceiverTeamLead || isReceiverManager || isReceiverHierarchySupervisor));
+          const shouldNotify =
+            responseWithSupervision.approvalStatus === "approved" ||
+            responseWithSupervision.approvalStatus === null ||
+            (responseWithSupervision.approvalStatus === "pending" &&
+              (isReceiverTeamLead || isReceiverManager || isReceiverHierarchySupervisor));
 
-        if (shouldNotify) {
-          io.to(`employee_${receiverId}`).emit("new_message", {
-            message: responseWithSupervision,
-            type:
-              responseWithSupervision.approvalStatus === "pending"
-                ? "reply_needs_approval"
-                : "new_assignment",
-            action: "received",
-            isClientEmployeeChat: isClientEmployeeChat,
-            clientEmployeeName: clientEmployeeData?.clientEmployeeName,
-            requiresApproval:
-              responseWithSupervision.approvalStatus === "pending",
-            isHierarchySupervisor: isReceiverHierarchySupervisor,
-          });
-        }
-      });
+          if (shouldNotify) {
+            io.to(`employee_${receiverId}`).emit("new_message", {
+              message: responseWithSupervision,
+              type:
+                responseWithSupervision.approvalStatus === "pending"
+                  ? "reply_needs_approval"
+                  : "new_assignment",
+              action: "received",
+              isClientEmployeeChat: isClientEmployeeChat,
+              clientEmployeeName: clientEmployeeData?.clientEmployeeName,
+              requiresApproval:
+                responseWithSupervision.approvalStatus === "pending",
+              isHierarchySupervisor: isReceiverHierarchySupervisor,
+            });
+          }
+        });
+      }
 
-      if (responseWithSupervision.approvalStatus !== "pending") {
+      if (!isScheduled && responseWithSupervision.approvalStatus !== "pending") {
         if (isGroupMessage || (responseWithSupervision.isGroupMessage && responseWithSupervision.groupId)) {
           const targetGroupId = groupId || responseWithSupervision.groupId;
           if (targetGroupId) {
@@ -4008,8 +4002,8 @@ exports.createMessage = async function createMessage(req, res) {
         }
       }
 
-      // 🔥 SPECIAL NOTIFICATION: When team lead sends/replies to client employee chat
-      if (senderRole === "team_lead" && assignedEmployeeIds.length > 0) {
+      // Team lead special notifications — skip for scheduled messages
+      if (!isScheduled && senderRole === "team_lead" && assignedEmployeeIds.length > 0) {
         assignedEmployeeIds.forEach((employeeId) => {
           if (receivers.includes(employeeId)) {
             io.to(`employee_${employeeId}`).emit("new_message", {
@@ -4026,6 +4020,7 @@ exports.createMessage = async function createMessage(req, res) {
       }
 
       if (
+        !isScheduled &&
         senderRole === "team_lead" &&
         responseWithSupervision.approvalStatus !== "pending"
       ) {
@@ -4052,7 +4047,8 @@ exports.createMessage = async function createMessage(req, res) {
     if (
       responseWithSupervision.client &&
       !responseWithSupervision.isGroupMessage &&
-      responseWithSupervision.approvalStatus !== "pending"
+      responseWithSupervision.approvalStatus !== "pending" &&
+      !isScheduled
     ) {
       const clientId = responseWithSupervision.client?._id || responseWithSupervision.client;
       if (clientId) {

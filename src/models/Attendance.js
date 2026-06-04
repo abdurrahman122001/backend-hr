@@ -36,7 +36,26 @@ const AttendanceSchema = new Schema({
   challengeReason: { type: String },
   challengeAt: { type: Date },
   challengeAdminNotes: { type: String },
-  challengeAttachment: { type: String }, // URL of the uploaded image/screenshot for the query
+  challengeAttachment: { type: String },
+
+  // Session timing — used by logout to calculate hours and determine half-day upgrade
+  loginTime: { type: Date },
+  logoutTime: { type: Date },
+  totalHours: { type: Number, default: 0 },
+
+  // True when employee checked in at or after 6 PM — logout at 9 PM+ upgrades to Present
+  isLoginAfter6PM: { type: Boolean, default: false },
+  halfDayFromAutoLogout: { type: Boolean, default: false },
+
+  // Shift snapshot at time of check-in
+  shiftId: { type: Schema.Types.ObjectId, ref: 'Shift', default: null },
+  shiftName: { type: String },
+  shiftStartTime: { type: String },
+  shiftEndTime: { type: String },
+  timezone: { type: String },
+
+  deviceFingerprint: { type: String },
+  active: { type: Boolean, default: false },
 
 }, { timestamps: true });
 
