@@ -51,6 +51,11 @@ exports.getRoster = async (req, res) => {
     // Combine: full descendant tree + direct juniors + supervisor-field reports
     const juniorIds = [...new Set([...allDescendantIds, ...directJuniorIds, ...supervisorFieldIds])];
     const isSenior = juniorIds.length > 0;
+    // Top senior = has juniors AND is not a junior to any other employee in EmployeeHierarchy
+    const isJuniorInHierarchy = isSenior
+      ? !!(await EmployeeHierarchy.exists({ owner: me.owner, junior: me._id }))
+      : false;
+    const isTopSenior = isSenior && !isJuniorInHierarchy;
 
     // Build juniorMap: tracks which juniors have supervision enabled on their clients
     const supervisedClients = await ClientInfo.find({
@@ -106,10 +111,22 @@ exports.getRoster = async (req, res) => {
       const myId = new mongoose.Types.ObjectId(me._id);
       const targetIds = [myId, ...juniorIds.map(id => new mongoose.Types.ObjectId(id))];
 
-      clientQuery = {
-        ...clientQuery,
-        assignedTo: { $in: targetIds },
-      };
+      if (isSenior) {
+        // Seniors see: own clients, juniors' clients, AND unassigned clients
+        clientQuery = {
+          ...clientQuery,
+          $or: [
+            { assignedTo: { $in: targetIds } },
+            { assignedTo: { $size: 0 } },
+            { assignedTo: null },
+          ],
+        };
+      } else {
+        clientQuery = {
+          ...clientQuery,
+          assignedTo: { $in: targetIds },
+        };
+      }
     }
 
     const clients = await ClientInfo.find(clientQuery)
@@ -250,6 +267,7 @@ exports.getRoster = async (req, res) => {
       clients: clientsWithReadStatus,
       clientEmployees,
       isSenior,
+      isTopSenior,
       userRole: role,
     });
   } catch (err) {
