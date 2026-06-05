@@ -22,6 +22,43 @@ exports.applyDocumentRequest = async (req, res) => {
       return res.status(400).json({ message: "Please specify how you'd like to receive the document (soft-copy or attested)" });
     }
 
+    // Duplicate check
+    if (documentType === "salary-slip") {
+      // Salary slip: block if pending or approved request exists for the same month(s)
+      const slipQuery = {
+        employee: employeeId,
+        documentType: "salary-slip",
+        status: { $in: ["pending", "approved"] },
+      };
+      if (monthMode === "multiple") {
+        slipQuery.monthMode = "multiple";
+        slipQuery.fromMonth = fromMonth;
+        slipQuery.toMonth = toMonth;
+      } else {
+        slipQuery.monthMode = monthMode || "single";
+        slipQuery.month = month;
+      }
+      const existing = await DocumentRequest.findOne(slipQuery);
+      if (existing) {
+        return res.status(400).json({
+          message: "A salary slip request already exists for the selected month(s).",
+        });
+      }
+    } else if (documentType === "salary-certificate") {
+      // Salary certificate: only block if there is already a PENDING request
+      // Approved/rejected ones don't block — employee can re-request anytime
+      const existing = await DocumentRequest.findOne({
+        employee: employeeId,
+        documentType: "salary-certificate",
+        status: "pending",
+      });
+      if (existing) {
+        return res.status(400).json({
+          message: "You already have a pending salary certificate request. Please wait for it to be processed.",
+        });
+      }
+    }
+
     // Check if soft-copy auto-generation is enabled for this owner
     const isSoftCopy = copyType === "soft-copy";
     let autoGenerate = false;
@@ -178,6 +215,76 @@ exports.updateStatus = async (req, res) => {
     res.status(200).json({ message: `Document request ${status}`, data: request });
   } catch (error) {
     console.error("DocumentRequest UpdateStatus Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.withdrawRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employeeId = req.employee?._id;
+    if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
+
+    const request = await DocumentRequest.findOne({ _id: id, employee: employeeId });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (request.status !== "pending") {
+      return res.status(400).json({ message: "Only pending requests can be withdrawn" });
+    }
+
+    request.status = "cancelled";
+    await request.save();
+
+    res.status(200).json({ message: "Document request withdrawn successfully", data: request });
+  } catch (error) {
+    console.error("DocumentRequest Withdraw Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+exports.editRequest = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const employeeId = req.employee?._id;
+    if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
+
+    const request = await DocumentRequest.findOne({ _id: id, employee: employeeId });
+    if (!request) return res.status(404).json({ message: "Request not found" });
+    if (request.status !== "pending") {
+      return res.status(400).json({ message: "Only pending requests can be edited" });
+    }
+
+    const { monthMode, month, fromMonth, toMonth, purpose, purposeOther, copyType, reason } = req.body;
+
+    if (request.documentType === "salary-slip") {
+      request.monthMode = monthMode || request.monthMode;
+      if (monthMode === "single" || request.monthMode === "single") {
+        request.month = month || request.month;
+        request.fromMonth = undefined;
+        request.toMonth = undefined;
+      } else {
+        request.fromMonth = fromMonth || request.fromMonth;
+        request.toMonth = toMonth || request.toMonth;
+        request.month = undefined;
+      }
+    } else {
+      // salary-certificate always uses single month
+      request.month = month || request.month;
+    }
+
+    if (purpose !== undefined) request.purpose = purpose || undefined;
+    if (purposeOther !== undefined) request.purposeOther = purposeOther || undefined;
+    if (copyType !== undefined) {
+      if (!["soft-copy", "attested"].includes(copyType)) {
+        return res.status(400).json({ message: "Invalid copy type" });
+      }
+      request.copyType = copyType;
+    }
+    if (reason !== undefined) request.reason = reason || undefined;
+
+    await request.save();
+    res.status(200).json({ message: "Request updated successfully", data: request });
+  } catch (error) {
+    console.error("DocumentRequest Edit Error:", error);
     res.status(500).json({ message: error.message });
   }
 };

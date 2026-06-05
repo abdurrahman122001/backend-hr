@@ -13,8 +13,17 @@ exports.createClientInfo = async (req, res) => {
     const emp = await Employee.findById(req.employee._id);
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
-    if (!isManagerLike(emp.role)) {
-      return res.status(403).json({ error: "Only Managers/Team Leads can create client info" });
+    let authorized = isManagerLike(emp.role);
+    if (!authorized) {
+      // Only the top-level senior (has juniors but is not a junior to anyone else) can create clients
+      const isSenior = await EmployeeHierarchy.exists({ owner: emp.owner, senior: emp._id });
+      const isJunior = isSenior
+        ? await EmployeeHierarchy.exists({ owner: emp.owner, junior: emp._id })
+        : true;
+      authorized = !!isSenior && !isJunior;
+    }
+    if (!authorized) {
+      return res.status(403).json({ error: "Only Managers/Team Leads or the top-level senior can create client info" });
     }
 
     const { ownerId, companyEmployees = [], ...rest } = req.body;

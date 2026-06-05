@@ -391,6 +391,83 @@ async function rejectRevision(req, res) {
   }
 }
 
+/**
+ * PATCH /emp-profile-revisions/:id/withdraw
+ * Employee withdraws a pending revision
+ */
+async function withdrawRevision(req, res) {
+  try {
+    const { id } = req.params;
+    const employeeId = req.employee._id;
+
+    const revision = await ProfileRevision.findOne({ _id: id, employee: employeeId });
+    if (!revision) return res.status(404).json({ error: 'Revision not found' });
+    if (revision.status !== 'pending') {
+      return res.status(400).json({ error: 'Only pending requests can be withdrawn' });
+    }
+
+    revision.status = 'cancelled';
+    await revision.save();
+
+    return res.json({ message: 'Profile revision withdrawn successfully' });
+  } catch (err) {
+    console.error('[PROFILE-REVISION-WITHDRAW] Error:', err);
+    return res.status(500).json({ error: 'Failed to withdraw revision' });
+  }
+}
+
+/**
+ * PUT /emp-profile-revisions/:id
+ * Employee edits a pending revision (changes array + reason)
+ */
+async function editRevision(req, res) {
+  try {
+    const { id } = req.params;
+    const employeeId = req.employee._id;
+    const { changes, reason } = req.body;
+
+    const revision = await ProfileRevision.findOne({ _id: id, employee: employeeId });
+    if (!revision) return res.status(404).json({ error: 'Revision not found' });
+    if (revision.status !== 'pending') {
+      return res.status(400).json({ error: 'Only pending requests can be edited' });
+    }
+
+    if (!changes || changes.length === 0) {
+      return res.status(400).json({ error: 'At least one change is required' });
+    }
+    if (!reason || reason.trim().length === 0) {
+      return res.status(400).json({ error: 'Reason is required' });
+    }
+
+    const invalidFields = changes.filter(c => !EDITABLE_FIELDS.includes(c.fieldName));
+    if (invalidFields.length > 0) {
+      return res.status(400).json({
+        error: `Invalid fields: ${invalidFields.map(c => c.fieldName).join(', ')}`,
+      });
+    }
+
+    // Re-fetch employee to get fresh old values
+    const employee = await Employee.findById(employeeId).lean();
+    if (!employee) return res.status(404).json({ error: 'Employee not found' });
+
+    const processedChanges = changes.map(change => ({
+      fieldName: change.fieldName,
+      oldValue: employee[change.fieldName] ?? null,
+      newValue: change.newValue ?? null,
+      fieldType: change.fieldType || 'text',
+    }));
+
+    revision.changes = processedChanges;
+    revision.reason = reason.trim();
+    await revision.save();
+
+    return res.json({ message: 'Profile revision updated successfully', revision });
+  } catch (err) {
+    console.error('[PROFILE-REVISION-EDIT] Error:', err);
+    return res.status(500).json({ error: 'Failed to edit revision' });
+  }
+}
+
 module.exports = {
   createRevision,
   getEmployeeRevisions,
@@ -398,5 +475,7 @@ module.exports = {
   getRevisionDetail,
   approveRevision,
   rejectRevision,
+  withdrawRevision,
+  editRevision,
   EDITABLE_FIELDS,
 };
