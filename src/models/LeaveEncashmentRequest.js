@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 
 const leaveEncashmentRequestSchema = new mongoose.Schema(
   {
@@ -7,7 +7,7 @@ const leaveEncashmentRequestSchema = new mongoose.Schema(
     days: { type: Number, required: true },
     encashmentRate: { type: Number, required: true },
     reason: { type: String },
-    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+    status: { type: String, enum: ["pending", "approved", "rejected", "cancelled"], default: "pending" },
     adminReason: { type: String },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     approvedAt: { type: Date },

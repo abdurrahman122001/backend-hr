@@ -146,10 +146,10 @@ async function applyVisibility(q, req, filterParam) {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // Get clients I'm assigned to for shared visibility
+  // Get clients I'm assigned to OR supervising for shared visibility
   const assignedClients = await ClientInfo.find({
     owner: ownerId,
-    assignedTo: me
+    $or: [{ assignedTo: me }, { supervisedBy: me }],
   }).select("_id").lean();
   const assignedClientIds = assignedClients.map(c => oid(c._id));
 
@@ -416,9 +416,10 @@ exports.getMessage = async function getMessage(req, res) {
     // 🔥 APPROVAL FIX: Assigned-client access does NOT apply to pending messages
     if (!hasAccess && msg.client) {
       const clientId = msg.client?._id || msg.client;
+      // Check both assignedTo (deployed employees) AND supervisedBy (hierarchy seniors)
       const client = await ClientInfo.findOne({
         _id: clientId,
-        assignedTo: me
+        $or: [{ assignedTo: me }, { supervisedBy: me }],
       }).select("_id").lean();
       if (client && msg.approvalStatus !== "pending") hasAccess = true;
     }

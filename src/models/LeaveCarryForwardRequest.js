@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 
 const leaveCarryForwardRequestSchema = new mongoose.Schema(
   {
@@ -7,7 +7,7 @@ const leaveCarryForwardRequestSchema = new mongoose.Schema(
     days: { type: Number, required: true },
     year: { type: String, required: true }, // e.g., "2025"
     reason: { type: String },
-    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+    status: { type: String, enum: ["pending", "approved", "rejected", "cancelled"], default: "pending" },
     adminReason: { type: String },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     approvedAt: { type: Date },

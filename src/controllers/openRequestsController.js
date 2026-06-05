@@ -193,3 +193,78 @@ exports.getLeaveApprovals = async (req, res) => {
     return res.status(500).json({ message: error.message });
   }
 };
+
+// ── Unified edit for payroll request types ────────────────────────────────
+const TYPE_MODEL_MAP = {
+  loan:                LoanRequest,
+  bonus:               BonusRequest,
+  reimbursement:       ReimbursementRequest,
+  advance:             AdvanceSalaryRequest,
+  commission:          CommissionRequest,
+  "leave-encashment":  LeaveEncashmentRequest,
+  "leave-carry-forward": LeaveCarryForwardRequest,
+  "overtime-request":  OvertimeRequest,
+};
+
+const TYPE_EDITABLE_FIELDS = {
+  loan:                ["amount", "period", "reason", "loanCategory", "loanAllowanceField"],
+  bonus:               ["amount", "reason"],
+  reimbursement:       ["amount", "reason"],
+  advance:             ["amount", "reason"],
+  commission:          ["amount", "reason"],
+  "leave-encashment":  ["days", "encashmentRate", "reason"],
+  "leave-carry-forward": ["days", "year", "reason"],
+  "overtime-request":  ["hours", "reason"],
+};
+
+exports.editPayrollRequest = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const employeeId = req.employee?._id;
+    if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
+
+    const Model = TYPE_MODEL_MAP[type];
+    if (!Model) return res.status(400).json({ message: "Invalid request type" });
+
+    const record = await Model.findOne({ _id: id, employee: employeeId });
+    if (!record) return res.status(404).json({ message: "Request not found" });
+    if (record.status !== "pending") {
+      return res.status(400).json({ message: "Only pending requests can be edited" });
+    }
+
+    const allowed = TYPE_EDITABLE_FIELDS[type] || [];
+    allowed.forEach((field) => {
+      if (req.body[field] !== undefined) record[field] = req.body[field];
+    });
+
+    await record.save();
+    return res.status(200).json({ message: "Request updated successfully", data: record });
+  } catch (error) {
+    console.error("Edit Payroll Request Error:", error);
+    return res.status(500).json({ message: error.message });
+  }
+};
+
+exports.withdrawPayrollRequest = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const employeeId = req.employee?._id;
+    if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
+
+    const Model = TYPE_MODEL_MAP[type];
+    if (!Model) return res.status(400).json({ message: "Invalid request type" });
+
+    const record = await Model.findOne({ _id: id, employee: employeeId });
+    if (!record) return res.status(404).json({ message: "Request not found" });
+    if (record.status !== "pending") {
+      return res.status(400).json({ message: "Only pending requests can be withdrawn" });
+    }
+
+    record.status = "cancelled";
+    await record.save();
+    return res.status(200).json({ message: "Request withdrawn successfully" });
+  } catch (error) {
+    console.error("Withdraw Payroll Request Error:", error);
+    return res.status(500).json({ message: error.message });
+  }
+};

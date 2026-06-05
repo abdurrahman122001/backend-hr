@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 
 const advanceSalaryRequestSchema = new mongoose.Schema(
   {
@@ -26,7 +26,7 @@ const advanceSalaryRequestSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected"],
+      enum: ["pending", "approved", "rejected", "cancelled"],
       default: "pending",
     },
     adminReason: {
@@ -37,3 +37,4 @@ const advanceSalaryRequestSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("AdvanceSalaryRequest", advanceSalaryRequestSchema);
+

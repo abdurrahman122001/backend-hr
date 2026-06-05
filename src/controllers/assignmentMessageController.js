@@ -368,10 +368,10 @@ async function applyVisibility(q, req) {
     $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
   };
 
-  // Get clients I'm assigned to for shared visibility
+  // Get clients I'm assigned to OR supervising for shared visibility
   const assignedClients = await ClientInfo.find({
     owner: ownerId,
-    assignedTo: me
+    $or: [{ assignedTo: me }, { supervisedBy: me }],
   }).select("_id").lean();
   const assignedClientIds = assignedClients.map(c => oid(c._id));
 
@@ -669,13 +669,13 @@ async function calculateHierarchyReceiver(owner, sender, clientDoc) {
       targetSupervisor
     };
   } else {
-    // No hierarchy senior at all — fallback to CRM/Managers and auto-approve
+    // No hierarchy senior configured — route to managers/CRM but keep pending
     const { managers, crm } = await findTLsAndManagersByOwner(owner);
     const crmIds = Array.isArray(crm) ? crm : [];
     const fallbackReceivers = Array.from(new Set([...managers, ...crmIds]));
     return {
       receivers: fallbackReceivers,
-      approvalStatus: "approved",
+      approvalStatus: "pending",
       targetSupervisor: null
     };
   }
@@ -1135,8 +1135,8 @@ exports.createMessage = async function createMessage(req, res) {
 
       if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
         approvalStatus = "approved";
-      } else if (clientSupervisionMode === "needs_approval" && isSenderAssigned) {
-        // 🔥 CRITICAL: Only set to pending if sender is actually assigned to this client
+      } else if (clientSupervisionMode === "needs_approval" &&
+                 (isSenderAssigned || senderRole === "employee")) {
         approvalStatus = "pending";
       } else {
         approvalStatus = "approved";
@@ -1179,8 +1179,7 @@ exports.createMessage = async function createMessage(req, res) {
     const originalIntendedReceivers = [...receivers]; // 💾 Capture final intended list before supervision replaces it
 
     // 🔥 HIERARCHY-BASED: Find the first active supervisor in the hierarchy for the sender
-    // NOTE: only applies if sender is assigned to client and client needs approval
-    if (client && isObjId(client) && isSenderAssigned && approvalStatus === "pending") {
+    if (client && isObjId(client) && approvalStatus === "pending") {
       if (senderRole === "employee" || senderRole === "team_lead" || senderRole === "manager") {
         const hierarchyResult = await calculateHierarchyReceiver(owner, sender, clientDoc);
         receivers = hierarchyResult.receivers;
@@ -1907,8 +1906,15 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     if (targetSupervisor) {
       // Escalate to the next immediate senior in the hierarchy.
+      // Keep the current approver in the receiver list so the message
+      // remains visible in their email inbox after they approve.
       msg.approvalStatus = "pending";
-      msg.receiver = [targetSupervisor];
+      const previousApprovers = (msg.approvalChain || []).map(
+        (entry) => String(entry.approver?._id || entry.approver)
+      );
+      msg.receiver = Array.from(
+        new Set([targetSupervisor, ...previousApprovers])
+      );
 
       // Reset read status for the next supervisor so it appears as new (bold) for them
       if (msg.readBy && msg.readBy.length > 0) {
@@ -1933,8 +1939,13 @@ exports.approveMessage = async function approveMessage(req, res) {
         ? msg.receiver.map((r) => String(r._id || r))
         : [];
 
+      // Include all approvers from the chain so the message stays in their inbox
+      const chainApprovers = (msg.approvalChain || []).map(
+        (entry) => String(entry.approver?._id || entry.approver)
+      );
+
       const finalReceivers = Array.from(
-        new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients])
+        new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients, ...chainApprovers])
       ).filter((rid) => rid !== String(msg.sender?._id || msg.sender));
 
       msg.receiver = finalReceivers;

@@ -389,9 +389,10 @@ async function applyVisibility(q, req) {
   const clientId = q.client;
   if (clientId && isObjId(clientId)) {
     const ClientInfo = require("../models/ClientInfo");
+    // Check both assignedTo (deployed employees) AND supervisedBy (hierarchy seniors)
     const clientDoc = await ClientInfo.findOne({
       _id: clientId,
-      assignedTo: me,
+      $or: [{ assignedTo: me }, { supervisedBy: me }],
     }).select("_id").lean();
     isAssignedToClient = !!clientDoc;
   }
@@ -3992,6 +3993,22 @@ exports.createMessage = async function createMessage(req, res) {
               requiresApproval:
                 responseWithSupervision.approvalStatus === "pending",
               isHierarchySupervisor: isReceiverHierarchySupervisor,
+            });
+          }
+        });
+      }
+
+      // Notify hierarchy seniors of the sender so they receive real-time updates
+      if (!isScheduled && (responseWithSupervision.approvalStatus === null || responseWithSupervision.approvalStatus === "approved")) {
+        const hierarchySeniors = await getManagementChainFromHierarchy(owner, String(sender));
+        hierarchySeniors.forEach((seniorId) => {
+          const sid = String(seniorId);
+          if (sid && sid !== String(sender) && !receivers.includes(sid)) {
+            io.to(`employee_${sid}`).emit("new_message", {
+              message: responseWithSupervision,
+              type: "new_assignment",
+              action: "received",
+              isClientEmployeeChat: isClientEmployeeChat,
             });
           }
         });

@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 const { Schema } = mongoose;
 
 const LoanRequestSchema = new Schema(
@@ -27,7 +27,7 @@ const LoanRequestSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected"],
+      enum: ["pending", "approved", "rejected", "cancelled"],
       default: "pending",
     },
     rejectionReason: {
@@ -49,3 +49,4 @@ const LoanRequestSchema = new Schema(
 );
 
 module.exports = mongoose.model("LoanRequest", LoanRequestSchema);
+
