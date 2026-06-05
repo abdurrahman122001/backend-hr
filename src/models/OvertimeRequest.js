@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
 
 const OvertimeRequestSchema = new Schema(
@@ -30,7 +30,7 @@ const OvertimeRequestSchema = new Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected"],
+      enum: ["pending", "approved", "rejected", "cancelled"],
       default: "pending",
     },
     adminReason: {
@@ -51,3 +51,4 @@ const OvertimeRequestSchema = new Schema(
 );
 
 module.exports = model("OvertimeRequest", OvertimeRequestSchema);
+

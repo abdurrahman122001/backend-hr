@@ -1,4 +1,4 @@
-const mongoose = require("mongoose");
+﻿const mongoose = require("mongoose");
 
 const bonusRequestSchema = new mongoose.Schema(
   {
@@ -7,7 +7,7 @@ const bonusRequestSchema = new mongoose.Schema(
     amount: { type: Number, required: true },
     month: { type: String },
     reason: { type: String },
-    status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending" },
+    status: { type: String, enum: ["pending", "approved", "rejected", "cancelled"], default: "pending" },
     adminReason: { type: String },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     approvedAt: { type: Date },
@@ -16,3 +16,4 @@ const bonusRequestSchema = new mongoose.Schema(
 );
 
 module.exports = mongoose.model("BonusRequest", bonusRequestSchema);
+
