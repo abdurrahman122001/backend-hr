@@ -663,4 +663,33 @@ router.get("/roles", requireAuth, async (req, res) => {
 router.patch("/:id/role", updateEmployeeRole);
 router.put("/:id/permissions", requireAuth, updateEmployeePermissions);
 router.get("/:id/permissions", requireAuth, getEmployeePermissions);
+
+// ------------------------------
+// DELETE /api/employees/:id/devices/:deviceSubId
+// Revoke a trusted device by subdocument _id
+// ------------------------------
+router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
+  try {
+    const { id, deviceSubId } = req.params;
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(deviceSubId)) {
+      return res.status(400).json({ status: "error", message: "Invalid ID format" });
+    }
+
+    const scope = buildEmployeeScope(req.user);
+    const emp = await Employee.findOneAndUpdate(
+      { _id: id, ...scope },
+      { $pull: { trustedDevices: { _id: deviceSubId } } },
+      { new: true }
+    );
+
+    if (!emp) {
+      return res.status(404).json({ error: "Employee not found or unauthorized" });
+    }
+
+    res.json({ status: "success", message: "Device revoked", data: emp.trustedDevices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
