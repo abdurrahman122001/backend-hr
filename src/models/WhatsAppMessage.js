@@ -217,6 +217,19 @@ const WhatsAppMessageSchema = new Schema(
       { type: Schema.Types.ObjectId, ref: "Employee" },
     ],
 
+    // Message-level reactions
+    reactions: {
+      type: [
+        {
+          userId: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+          userName: { type: String },
+          emoji: { type: String, required: true },
+          createdAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+
     // NEW: Comments system
     comments: [CommentSchema],
     commentCount: {
@@ -510,6 +523,29 @@ WhatsAppMessageSchema.methods.addReactionToComment = async function (
 
   await this.save();
   return comment.reactions;
+};
+
+// Toggle emoji reaction on a message (add if not present, remove if same user+emoji exists)
+WhatsAppMessageSchema.methods.toggleReaction = async function (emoji, employee) {
+  if (!this.reactions) this.reactions = [];
+
+  const existingIdx = this.reactions.findIndex(
+    (r) => r.userId.toString() === employee._id.toString() && r.emoji === emoji,
+  );
+
+  if (existingIdx !== -1) {
+    this.reactions.splice(existingIdx, 1);
+  } else {
+    this.reactions.push({
+      userId: employee._id,
+      userName: employee.name || "",
+      emoji,
+      createdAt: new Date(),
+    });
+  }
+
+  await this.save();
+  return this.reactions;
 };
 
 // NEW: Method to get organized comments (with nested replies)

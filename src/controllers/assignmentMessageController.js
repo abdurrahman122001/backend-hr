@@ -2166,8 +2166,28 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     if (disapprovalNote && disapprovalNote.trim() !== "") {
       msg.disapprovalNote = disapprovalNote.trim();
     } else {
-      // Optional: Set a default note or leave it undefined
       msg.disapprovalNote = "Message requires revisions before resubmission.";
+    }
+
+    // Route disapproved message to the previous approver in the chain (not directly to sender).
+    // If the disapprover was themselves in the chain (further-reject), remove them first.
+    {
+      const workingChain = Array.isArray(msg.approvalChain) ? [...msg.approvalChain] : [];
+      let disapproverIdx = -1;
+      for (let i = workingChain.length - 1; i >= 0; i--) {
+        const aid = String(workingChain[i].approver?._id || workingChain[i].approver);
+        if (aid === currentUserId) { disapproverIdx = i; break; }
+      }
+      if (disapproverIdx >= 0) {
+        workingChain.splice(disapproverIdx, 1);
+        msg.approvalChain = workingChain;
+      }
+      if (workingChain.length > 0) {
+        const lastApprover = workingChain[workingChain.length - 1];
+        msg.receiver = [String(lastApprover.approver?._id || lastApprover.approver)];
+      } else {
+        msg.receiver = [String(msg.sender?._id || msg.sender)];
+      }
     }
 
     msg.updatedAt = new Date();

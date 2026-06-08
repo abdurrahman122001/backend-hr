@@ -37,6 +37,8 @@ router.get("/client/:clientId/scheduled", ctrl.getScheduledMessagesForClient);
 
 router.get("/search", ctrl.searchMessages);
 
+router.get("/frequent-emojis", ctrl.getFrequentEmojis);
+
 router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
 router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
@@ -60,6 +62,8 @@ router.patch("/:id", ctrl.updateMessage);
 router.patch("/:id/edit", ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 router.patch("/:id/seen", ctrl.markAsSeen);
+
+router.post("/:messageId/reactions", ctrl.toggleMessageReaction);
 
 router.post("/:messageId/comments", commentController.addComment);
 router.get("/:messageId/comments", commentController.getComments);
