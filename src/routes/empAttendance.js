@@ -229,6 +229,15 @@ router.post('/acknowledge-absence', async (req, res) => {
   }
 });
 
+// Helper function to convert 24-hour format to 12-hour format
+function formatTo12Hour(time24) {
+  if (!time24) return '';
+  const [hours, minutes] = time24.split(':').map(Number);
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  const hours12 = hours % 12 || 12;
+  return `${hours12}:${String(minutes).padStart(2, '0')} ${ampm}`;
+}
+
 // POST /api/emp-attendance/challenge
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
@@ -279,6 +288,14 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     attendance.requestedCheckIn = requestedCheckIn || null;
     attendance.requestedCheckOut = requestedCheckOut || null;
     attendance.challengeAt = new Date();
+
+    // Add note describing the challenge request
+    const previousCheckInTime = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
+    const challengeNote = `Challenge requested: Employee requested status change to '${requestedStatus || 'Present'}' with reason: "${reason}". Previous check-in: ${previousCheckInTime}`;
+    attendance.notes = attendance.notes
+      ? `${attendance.notes}; ${challengeNote}`
+      : challengeNote;
+
     await attendance.save();
 
     // 4. Create separate AttendanceChallenge record

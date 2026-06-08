@@ -20,6 +20,14 @@ const SalarySlip = require("../models/SalarySlip");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 
+function formatTo12Hour(time24) {
+  if (!time24) return '';
+  const [hours, minutes] = time24.split(':').map(Number);
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  const hours12 = hours % 12 || 12;
+  return `${hours12}:${String(minutes).padStart(2, '0')} ${ampm}`;
+}
+
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
   const [inH, inM] = checkIn.split(":").map(Number);
@@ -2093,13 +2101,17 @@ exports.updateChallengeStatus = async (req, res) => {
           resolvedStatus = overrideStatus || challenge.requestedStatus || computedStatus;
         }
 
+        // Build approval note with details
+        const previousCheckIn = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
+        const approvalNote = `Employee requested status '${challenge.requestedStatus || 'Not specified'}'. Previous check-in: ${previousCheckIn}. Status updated to '${resolvedStatus}' with check-in: ${resolvedCheckIn ? formatTo12Hour(resolvedCheckIn) : 'Not set'}.${challengeAdminNotes ? ` Admin notes: ${challengeAdminNotes}` : ''}`;
+
         // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
         req.body.employeeId = String(attendance.employee._id || attendance.employee);
         req.body.date = attendance.date;
         req.body.status = resolvedStatus;
         req.body.checkIn = resolvedCheckIn || null;
         req.body.checkOut = resolvedCheckOut || null;
-        req.body.notes = attendance.notes;
+        req.body.notes = attendance.notes ? `${attendance.notes}; ${approvalNote}` : approvalNote;
         req.body.leaveType = attendance.leaveType;
         req.body.challengeStatus = "Approved";
         req.body.challengeAdminNotes = challengeAdminNotes || "";
@@ -2134,6 +2146,15 @@ exports.updateChallengeStatus = async (req, res) => {
         attendance.challengeStatus = challengeStatus;
         attendance.challengeAdminNotes = challengeAdminNotes || "";
         attendance.challengeAt = new Date();
+
+        // Add rejection/withdrawal note with details
+        const previousCheckIn = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
+        const rejectionNote = `Challenge ${challengeStatus.toLowerCase()}: Employee requested status '${challenge.requestedStatus || 'Not specified'}'. Previous check-in: ${previousCheckIn}. Status remains '${attendance.status}'.${challengeAdminNotes ? ` Reason: ${challengeAdminNotes}` : ''}`;
+
+        attendance.notes = attendance.notes
+          ? `${attendance.notes}; ${rejectionNote}`
+          : rejectionNote;
+
         await attendance.save();
 
         // Notify employee via socket
@@ -2227,13 +2248,17 @@ exports.updateChallengeStatus = async (req, res) => {
         resolvedStatus = overrideStatus || attendance.requestedStatus || computedStatus;
       }
 
+      // Build approval note with details
+      const previousCheckIn = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
+      const approvalNote = `Employee requested status '${attendance.requestedStatus || 'Not specified'}'. Previous check-in: ${previousCheckIn}. Status updated to '${resolvedStatus}' with check-in: ${resolvedCheckIn ? formatTo12Hour(resolvedCheckIn) : 'Not set'}.${challengeAdminNotes ? ` Admin notes: ${challengeAdminNotes}` : ''}`;
+
       // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
       req.body.employeeId = String(attendance.employee._id || attendance.employee);
       req.body.date = attendance.date;
       req.body.status = resolvedStatus;
       req.body.checkIn = resolvedCheckIn || null;
       req.body.checkOut = resolvedCheckOut || null;
-      req.body.notes = attendance.notes;
+      req.body.notes = attendance.notes ? `${attendance.notes}; ${approvalNote}` : approvalNote;
       req.body.leaveType = attendance.leaveType;
       req.body.challengeStatus = "Approved";
       req.body.challengeAdminNotes = challengeAdminNotes || "";
@@ -2267,6 +2292,15 @@ exports.updateChallengeStatus = async (req, res) => {
       attendance.challengeStatus = challengeStatus;
       attendance.challengeAdminNotes = challengeAdminNotes || "";
       attendance.challengeAt = new Date();
+
+      // Add rejection/withdrawal note with details
+      const previousCheckIn = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
+      const rejectionNote = `Challenge ${challengeStatus.toLowerCase()}: Employee requested status '${attendance.requestedStatus || 'Not specified'}'. Previous check-in: ${previousCheckIn}. Status remains '${attendance.status}'.${challengeAdminNotes ? ` Reason: ${challengeAdminNotes}` : ''}`;
+
+      attendance.notes = attendance.notes
+        ? `${attendance.notes}; ${rejectionNote}`
+        : rejectionNote;
+
       await attendance.save();
 
       // Notify employee via socket
