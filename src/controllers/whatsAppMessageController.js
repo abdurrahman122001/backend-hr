@@ -4273,3 +4273,77 @@ exports.getChatList = async function getChatList(req, res) {
     res.status(500).json({ error: "Failed to load chat list" });
   }
 };
+
+// POST /:messageId/reactions  — toggle a reaction on a message
+exports.toggleMessageReaction = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    const { emoji } = req.body;
+
+    if (!emoji) return res.status(400).json({ error: "emoji is required" });
+    if (!mongoose.isValidObjectId(messageId))
+      return res.status(400).json({ error: "Invalid message id" });
+
+    const message = await WhatsAppMessage.findById(messageId);
+    if (!message) return res.status(404).json({ error: "Message not found" });
+
+    const employee = await Employee.findById(req.employee._id).select("_id name emojiUsage");
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
+
+    const updatedReactions = await message.toggleReaction(emoji, employee);
+
+    // Track emoji usage frequency — only increment when adding (not removing)
+    const wasAdded = updatedReactions.some(
+      (r) => r.userId.toString() === employee._id.toString() && r.emoji === emoji,
+    );
+    if (wasAdded) {
+      const usageEntry = employee.emojiUsage.find((e) => e.emoji === emoji);
+      if (usageEntry) {
+        usageEntry.count += 1;
+      } else {
+        employee.emojiUsage.push({ emoji, count: 1 });
+      }
+      await employee.save();
+    }
+
+    // Emit real-time update to all participants via socket
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("message:reaction", {
+        messageId: message._id,
+        reactions: updatedReactions,
+      });
+    }
+
+    res.json({ reactions: updatedReactions });
+  } catch (err) {
+    console.error("❌ toggleMessageReaction error:", err);
+    res.status(500).json({ error: "Failed to toggle reaction" });
+  }
+};
+
+// GET /frequent-emojis  — return current employee's top 6 most-used emojis
+exports.getFrequentEmojis = async (req, res) => {
+  try {
+    const employee = await Employee.findById(req.employee._id).select("emojiUsage");
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
+
+    const defaults = ["👍", "❤️", "😂", "😮", "😢", "👏"];
+
+    if (!employee.emojiUsage || employee.emojiUsage.length === 0) {
+      return res.json({ emojis: defaults });
+    }
+
+    const sorted = [...employee.emojiUsage]
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 6)
+      .map((e) => e.emoji);
+
+    // Fill remaining slots with defaults if fewer than 6
+    const combined = [...new Set([...sorted, ...defaults])].slice(0, 6);
+    res.json({ emojis: combined });
+  } catch (err) {
+    console.error("❌ getFrequentEmojis error:", err);
+    res.status(500).json({ error: "Failed to fetch frequent emojis" });
+  }
+};

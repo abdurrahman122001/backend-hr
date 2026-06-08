@@ -197,6 +197,11 @@ const EmployeeSchema = new Schema(
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
     trashedBy: { type: Schema.Types.ObjectId, ref: "User" },
+
+    emojiUsage: {
+      type: [{ emoji: String, count: { type: Number, default: 1 } }],
+      default: [],
+    },
   },
   {
     timestamps: true,
