@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const requireAuth = require("../middleware/empAuth");
 const clientInfoCtrl = require("../controllers/clientInfoController");
+const { upload } = require("../utils/multer");
 // Add to your routes
 
 // Manager/Team Lead creates client info
@@ -42,6 +43,10 @@ router.get(
 router.post("/:id/company-employees", requireAuth, clientInfoCtrl.addCompanyEmployee);
 router.delete("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.removeCompanyEmployee);
 router.put("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.updateCompanyEmployee);
+
+// Photo uploads
+router.post("/:id/upload-photo", requireAuth, upload.single("photo"), clientInfoCtrl.uploadClientPhoto);
+router.post("/:id/company-employees/:employeeIndex/upload-photo", requireAuth, upload.single("photo"), clientInfoCtrl.uploadCompanyEmployeePhoto);
 
 // WhatsApp flags
 router.patch(

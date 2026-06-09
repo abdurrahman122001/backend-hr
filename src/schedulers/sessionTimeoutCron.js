@@ -125,6 +125,7 @@ cron.schedule("*/10 * * * * *", async () => {
           finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {
+          // lastSeen was before 9 PM on the same day — mark Half Day
           finalStatus = "Half Day";
           console.log(`📊 [SESSION-TIMEOUT-CRON] Marking ${employeeName} as Half Day (timeout at ${actualLogoutTime}, before 9 PM, same day)`);
 
@@ -140,31 +141,44 @@ cron.schedule("*/10 * * * * *", async () => {
           } else {
             console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} was already Half Day from login (after 6 PM), no additional deduction`);
           }
-        } else if (isRetroactiveProcessing) {
-          // Cron ran after midnight on a different date — status stays exactly as it was
-          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} — attendance date (${attendanceDate}) is before today (${nowDate}), keeping status as "${finalStatus}"`);
         } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-          // Employee was Half Day from login (logged in after 6 PM).
-          // Upgrade to Present if lastSeen was at/after 9 PM (same day) OR crossed midnight.
-          const shouldUpgrade = attendance.isLoginAfter6PM === true && (
+          // Only upgrade Half Day for employees who logged in BEFORE 6 PM and were
+          // penalised by a previous cron run (auto-logged out before 9 PM). Their
+          // pre-penalty status is stored in attendance.originalStatus (e.g. "Present").
+          // Employees who logged in AFTER 6 PM are always Half Day — no upgrade.
+          const afterNine =
             (!isCrossMidnightLogout && logoutTotalMinutes >= halfDayLogoutThreshold) ||
-            isCrossMidnightLogout
-          );
+            isCrossMidnightLogout;
+
+          const isHalfDayFromAutoLogout =
+            attendance.isLoginAfter6PM !== true &&
+            !!attendance.originalStatus &&
+            attendance.originalStatus !== "Half Day";
+
+          const shouldUpgrade = afterNine && isHalfDayFromAutoLogout;
 
           if (shouldUpgrade) {
-            finalStatus = "Present";
+            finalStatus = attendance.originalStatus;
             const reason = isCrossMidnightLogout ? "crossed midnight" : `lastSeen at ${actualLogoutTime}`;
-            console.log(`📊 [SESSION-TIMEOUT-CRON] Upgrading ${employeeName} Half Day → Present (login after 6 PM, ${reason})`);
+            console.log(`📊 [SESSION-TIMEOUT-CRON] Upgrading ${employeeName} Half Day → ${finalStatus} (pre-6PM auto-logout restored, ${reason})`);
             try {
               const { reverseHalfDayDeduction } = require("../utils/lateDeductions");
               await reverseHalfDayDeduction(employeeId, ownerId, employeeId, attendanceDate);
-              console.log(`✅ [SESSION-TIMEOUT-CRON] Half-day login deduction reversed for ${employeeName}`);
+              console.log(`✅ [SESSION-TIMEOUT-CRON] Half-day deduction reversed for ${employeeName}`);
             } catch (hdErr) {
               console.error(`❌ [SESSION-TIMEOUT-CRON] Error reversing deduction for ${employeeName}:`, hdErr);
             }
           } else {
-            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day status (login was after 6 PM, lastSeen before 9 PM)`);
+            const reason = attendance.isLoginAfter6PM === true ? "login after 6 PM — always Half Day" : `lastSeen ${actualLogoutTime} — before 9 PM, no upgrade`;
+            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} maintaining Half Day (${reason})`);
           }
+        } else if (isRetroactiveProcessing) {
+          // Cron ran on a different calendar day — don't apply Half Day retroactively,
+          // but still record the checkOut below so the session closes cleanly.
+          console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} — retroactive processing (attendance ${attendanceDate}, today ${nowDate}), keeping status "${finalStatus}"`);
+        } else {
+          // lastSeen was at or after 9 PM — employee was present, status unchanged
+          console.log(`📊 [SESSION-TIMEOUT-CRON] ${employeeName} auto-logged out at ${actualLogoutTime} (at/after 9 PM), status remains "${finalStatus}"`);
         }
 
         // Update attendance record
@@ -175,7 +189,11 @@ cron.schedule("*/10 * * * * *", async () => {
             checkOut: actualLogoutTime,
             status: finalStatus,
             totalHours: parseFloat(totalHours.toFixed(2)),
-            originalStatus: originalStatusBeforeLogout
+            // If finalStatus is Half Day (penalised), save the pre-penalty status so reactivation
+            // restores the employee to what they were before the half-day was applied.
+            // If finalStatus was upgraded (e.g. Half Day → Present), save the upgraded status
+            // so reactivation doesn't roll it back to the old Half Day.
+            originalStatus: finalStatus === "Half Day" ? originalStatusBeforeLogout : finalStatus
           },
           { new: true }
         );

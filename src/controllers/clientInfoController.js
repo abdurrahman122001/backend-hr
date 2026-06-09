@@ -155,6 +155,7 @@ exports.updateClientInfo = async (req, res) => {
         }
 
         validatedEmployees.push({
+          _id: empData._id,
           name: empData.name.trim(),
           designation: empData.designation.trim(),
           email: empData.email ? empData.email.trim().toLowerCase() : undefined,
@@ -162,6 +163,7 @@ exports.updateClientInfo = async (req, res) => {
           department: empData.department ? empData.department.trim() : undefined,
           isPrimaryContact: empData.isPrimaryContact || false,
           notes: empData.notes ? empData.notes.trim() : undefined,
+          photographUrl: empData.photographUrl || undefined,
           addedAt: empData.addedAt || new Date()
         });
       }
@@ -538,6 +540,7 @@ exports.getWhatsAppFlags = async (req, res) => {
       isFavourite: client.whatsappFavourite || false,
       isMuted: client.whatsappMuted || false,
       isArchived: client.whatsappArchived || false,
+      photographUrl: client.photographUrl || null,
     });
   } catch (err) {
     console.error("getWhatsAppFlags error:", err);
@@ -845,6 +848,47 @@ exports.updateClientSupervision = async (req, res) => {
   } catch (err) {
     console.error("updateClientSupervision error:", err);
     res.status(500).json({ error: "Failed to update supervision" });
+  }
+};
+
+exports.uploadClientPhoto = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const { id } = req.params;
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    client.photographUrl = `/uploads/${req.file.filename}`;
+    await client.save();
+
+    res.json({ photographUrl: client.photographUrl });
+  } catch (err) {
+    console.error("uploadClientPhoto error:", err);
+    res.status(500).json({ error: "Failed to upload photo" });
+  }
+};
+
+exports.uploadCompanyEmployeePhoto = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const { id, employeeIndex } = req.params;
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const index = parseInt(employeeIndex);
+    if (isNaN(index) || index < 0 || index >= client.companyEmployees.length) {
+      return res.status(400).json({ error: "Invalid employee index" });
+    }
+
+    client.companyEmployees[index].photographUrl = `/uploads/${req.file.filename}`;
+    client.markModified("companyEmployees");
+    await client.save();
+
+    res.json({ photographUrl: client.companyEmployees[index].photographUrl });
+  } catch (err) {
+    console.error("uploadCompanyEmployeePhoto error:", err);
+    res.status(500).json({ error: "Failed to upload photo" });
   }
 };
 

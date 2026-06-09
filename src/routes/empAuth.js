@@ -1326,27 +1326,34 @@ router.post("/logout", requireAuth, async (req, res) => {
         console.log(`ℹ️ [LOGOUT] Half Day status maintained (was already Half Day from login after 6 PM)`);
       }
     } else if (finalStatus === "Half Day" && originalStatusBeforeLogout === "Half Day") {
-      // Employee was marked Half Day at login (logged in after 6 PM).
-      // Upgrade to Present if:
-      //   • Same-day logout at or after 9 PM, OR
-      //   • Cross-midnight logout (they must have passed 9 PM to reach next day)
-      const shouldUpgrade = attendance.isLoginAfter6PM === true && (
+      // Only upgrade Half Day for employees who logged in BEFORE 6 PM and were
+      // penalised by the cron (auto-logged out before 9 PM). The cron stores their
+      // pre-penalty status in attendance.originalStatus (e.g. "Present").
+      // Employees who logged in AFTER 6 PM are always Half Day — no upgrade.
+      const afterNine =
         (!isCrossMidnightLogout && logoutTotalMinutes >= halfDayLogoutThreshold) ||
-        isCrossMidnightLogout
-      );
+        isCrossMidnightLogout;
+
+      const isHalfDayFromAutoLogout =
+        attendance.isLoginAfter6PM !== true &&
+        !!attendance.originalStatus &&
+        attendance.originalStatus !== "Half Day";
+
+      const shouldUpgrade = afterNine && isHalfDayFromAutoLogout;
 
       if (shouldUpgrade) {
-        finalStatus = "Present";
+        finalStatus = attendance.originalStatus;
         const reason = isCrossMidnightLogout ? "crossed midnight" : `stayed until ${actualLogoutTime}`;
-        console.log(`📊 [LOGOUT] Upgrading Half Day → Present (login after 6 PM, ${reason})`);
+        console.log(`📊 [LOGOUT] Upgrading Half Day → ${finalStatus} (pre-6PM auto-logout restored, ${reason})`);
         try {
           await reverseHalfDayDeduction(employeeId, ownerId, userId, attendanceDate);
-          console.log(`✅ [LOGOUT] Half-day login deduction reversed`);
+          console.log(`✅ [LOGOUT] Half-day deduction reversed`);
         } catch (hdErr) {
           console.error("[HALF-DAY-UPGRADE] Error reversing deduction:", hdErr);
         }
       } else {
-        console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (login was after 6 PM, logout before 9 PM)`);
+        const reason = attendance.isLoginAfter6PM === true ? "login after 6 PM — always Half Day" : "no upgrade criteria met";
+        console.log(`ℹ️ [LOGOUT] Maintaining Half Day status (${reason})`);
       }
     }
     try {
@@ -1357,7 +1364,10 @@ router.post("/logout", requireAuth, async (req, res) => {
           checkOut: actualLogoutTime,
           status: finalStatus,
           totalHours: parseFloat(totalHours.toFixed(2)),
-          originalStatus: originalStatusBeforeLogout
+          // If finalStatus is Half Day (penalised), save the pre-penalty status so reactivation
+          // restores to the correct earned status. If finalStatus was upgraded (Half Day → Present),
+          // save the upgraded value so reactivation doesn't roll back the upgrade to Half Day.
+          originalStatus: finalStatus === "Half Day" ? originalStatusBeforeLogout : finalStatus
         },
         { new: true }
       );
@@ -1453,18 +1463,20 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
     const employeeId = req.employee._id || req.employee.id;
     const nowKarachi = getKarachiTime();
     const todayKarachi = getDateOnly(nowKarachi);
+    const yesterdayKarachi = getDateOnly(moment(nowKarachi).subtract(1, 'day'));
 
     console.info(`🔄 [REACTIVATE-SESSION] Attempting to reactivate session for ${employeeId}`);
 
-    // 1. First, check for an existing active session for today.
-    // If it's already active, that's fine - we still need to restore attendance status
+    // 0. Check for ANY active session regardless of date (handles cross-midnight employees
+    //    whose session date is yesterday but whose session is still active).
+    //    Without this, steps 1 & 2 (date: todayKarachi) miss it, step 3 grabs a stale old
+    //    session, restores its attendance, returns wasRestored:true, and creates a refresh loop.
     let session = await EmployeeSession.findOne({
       employeeId,
-      date: todayKarachi,
       active: true
-    });
+    }).sort({ updatedAt: -1 });
 
-    // 2. If no active session, look for any inactive session for today that can be reactivated.
+    // 1. No active session — look for an inactive session from today.
     if (!session) {
       session = await EmployeeSession.findOne({
         employeeId,
@@ -1473,24 +1485,30 @@ router.post("/reactivate-session", requireAuth, async (req, res) => {
       }).sort({ updatedAt: -1 });
     }
 
-    // 3. Fallback: most recent inactive auto-logout session (no time limit)
+    // 2. Still nothing — look for an inactive session from yesterday (cross-midnight auto-logout).
     if (!session) {
       session = await EmployeeSession.findOne({
         employeeId,
-        active: false,
-        isAutoLogout: true
+        date: yesterdayKarachi,
+        active: false
       }).sort({ updatedAt: -1 });
+    }
 
-      if (!session) {
-        console.info(`🔄 [REACTIVATE-SESSION] No recent session to reactivate for ${employeeId}. Creating fresh for today.`);
+    // 3. No session found within today/yesterday — create a fresh one for today.
+    //    NOTE: We intentionally do NOT search further back in history here.
+    //    The old unlimited fallback caused an infinite-refresh loop after midnight:
+    //    it would find a stale auto-logout session from days ago, restore its attendance,
+    //    return wasRestored:true, dispatch emp-session-restored, and the cron would
+    //    re-auto-logout it on the next cycle — repeating forever.
+    if (!session) {
+      console.info(`🔄 [REACTIVATE-SESSION] No recent session to reactivate for ${employeeId}. Creating fresh for today.`);
 
-        await EmployeeSession.findOneAndUpdate(
-          { employeeId, date: todayKarachi },
-          { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate(), lastSeen: nowKarachi.toDate() },
-          { upsert: true, new: true }
-        );
-        return res.json({ status: "success", message: "New session created" });
-      }
+      await EmployeeSession.findOneAndUpdate(
+        { employeeId, date: todayKarachi },
+        { active: true, isAutoLogout: false, loginTime: nowKarachi.toDate(), lastSeen: nowKarachi.toDate() },
+        { upsert: true, new: true }
+      );
+      return res.json({ status: "success", message: "New session created", wasRestored: false });
     }
 
     // ✅ ALWAYS RESTORE ATTENDANCE RECORD (whether session was already active or not)

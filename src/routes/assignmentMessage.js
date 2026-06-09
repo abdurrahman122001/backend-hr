@@ -51,6 +51,7 @@ router.delete("/thread/:threadId", ctrl.deleteThread);
 router.delete("/thread/:threadId/permanent", ctrl.permanentlyDeleteThread);
 router.patch("/thread/:threadId/trash", ctrl.moveThreadToTrash);
 router.patch("/thread/:threadId/restore", ctrl.restoreThreadFromTrash);
+router.post("/thread/:threadId/read-all", ctrl.markThreadAsRead);
 router.get("/client/:threadId/threads", filterCtrl.getClientThreads);
 
 // =============================
@@ -101,7 +102,6 @@ router.post("/:id/read", ctrl.markAsRead);
 router.post("/:id/unread", ctrl.markAsUnread);
 router.post("/read-multiple", ctrl.markMultipleAsRead);
 router.get("/unread/count", filterCtrl.getUnreadCount);
-router.post("/thread/:threadId/read-all", ctrl.markThreadAsRead);
 router.get("/activity", ctrl.getActivity);
 
 // In your backend routes file

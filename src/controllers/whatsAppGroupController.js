@@ -326,10 +326,10 @@ exports.sendGroupMessage = async function (req, res) {
       const clientDoc = await ClientInfo.findById(messageClientId)
         .select("supervision supervisedBy assignedTo")
         .lean();
-      // Only "employee" role needs approval; managers/team leads bypass
+      // Employees and team leads need approval; managers/admins/owners bypass
       needsApproval =
         clientDoc?.supervision === "needs_approval" &&
-        senderRole === "employee";
+        (senderRole === "employee" || senderRole === "team_lead");
       supervisedByList = (clientDoc?.supervisedBy || []).map((id) =>
         String(id)
       );

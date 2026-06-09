@@ -131,7 +131,7 @@ exports.getRoster = async (req, res) => {
 
     const clients = await ClientInfo.find(clientQuery)
       .select(
-        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail createdAt updatedAt"
+        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail photographUrl createdAt updatedAt"
       )
       .populate("assignedTo", "_id name companyEmail role")
       .populate("owner", "_id name companyEmail")
@@ -216,9 +216,12 @@ exports.getRoster = async (req, res) => {
           phone: emp.phone,
           department: emp.department,
           isPrimaryContact: emp.isPrimaryContact,
+          photographUrl: emp.photographUrl || null,
           clientId: client._id,
           clientName: client.clientName,
           clientEmail: client.clientEmail,
+          clientPhotographUrl: client.photographUrl || null,
+          clientEmployeeId: emp._id,
           type: "company_employee",
           addedAt: emp.addedAt,
         });

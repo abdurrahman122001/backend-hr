@@ -37,6 +37,8 @@ function normalizeRole(role) {
   if (["teamlead", "team lead", "team_lead", "team-lead", "lead"].includes(r))
     return "team_lead";
   if (r === "manager") return "manager";
+  if (r === "owner" || r === "admin") return "owner";
+  if (r === "crm" || r.includes("crm") || r.includes("customer_relationship")) return "manager";
   if (["employee", "staff", "associate"].includes(r)) return "employee";
   return r;
 }
@@ -55,7 +57,12 @@ async function findTLsAndManagersByOwner(ownerId) {
 
   const managers = await Employee.find({
     owner: ownerId,
-    $or: [{ role: "Manager" }, { role: "manager" }],
+    $or: [
+      { role: "Manager" },
+      { role: "manager" },
+      { role: /crm/i },
+      { role: /customer.relationship/i },
+    ],
   })
     .select("_id")
     .lean();
@@ -222,17 +229,16 @@ async function getManagementChainFromHierarchy(ownerId, employeeId) {
     const visited = new Set();
 
     // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops).
-    // Sort by hierarchyLevel DESC to always pick the most immediate parent.
     for (let i = 0; i < 10; i++) {
       if (visited.has(currentEmployee)) break;
       visited.add(currentEmployee);
 
+      // findOne returns one document — .sort() on findOne is a no-op so omit it.
       const hierarchyLink = await EmployeeHierarchy.findOne({
         owner: ownerId,
         junior: currentEmployee,
       })
         .select("senior hierarchyLevel")
-        .sort({ hierarchyLevel: -1 })
         .lean();
 
       if (!hierarchyLink || !hierarchyLink.senior) break;
@@ -1677,7 +1683,13 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
-    const msg = await WhatsAppMessage.findById(id).populate([
+
+    // Fetch only non-approved messages atomically to guard against concurrent approvals.
+    // If two requests arrive simultaneously both see "pending", we want only one to win.
+    const msg = await WhatsAppMessage.findOne({
+      _id: id,
+      approvalStatus: { $ne: "approved" },
+    }).populate([
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName" },
@@ -1685,7 +1697,12 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "repliedTo", select: "_id note message sender attachments" },
     ]);
 
-    if (!msg) return res.status(404).json({ error: "Message not found" });
+    if (!msg) {
+      // Distinguish "not found" from "already approved"
+      const exists = await WhatsAppMessage.exists({ _id: id });
+      if (exists) return res.status(400).json({ error: "Message is already fully approved." });
+      return res.status(404).json({ error: "Message not found" });
+    }
 
     const Client = require("../models/ClientInfo");
     const client = await Client.findById(msg.client)
@@ -1711,11 +1728,6 @@ exports.approveMessage = async function approveMessage(req, res) {
       return res.status(403).json({
         error: "You are not a designated approver for this message.",
       });
-    }
-
-    // Prevent double-approving
-    if (msg.approvalStatus === "approved") {
-      return res.status(400).json({ error: "Message is already fully approved." });
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -1779,9 +1791,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     let responseStatusMessage = "Message approved successfully";
 
     if (immediateSeniors.length > 0) {
-      // Always escalate to the next senior in the hierarchy — regardless of role.
-      // The full hierarchy chain (e.g. Abdur Rahman New → Ali → Abdullah Ahmed Qureshi)
-      // is followed in full, so the manager at the top still approves explicitly.
+      // Escalate to next immediate senior in hierarchy
       msg.approvalStatus = "pending";
       msg.receiver = [immediateSeniors[0]];
       responseStatusMessage = "Message approved and escalated to next-level supervisor";
@@ -1823,12 +1833,20 @@ exports.approveMessage = async function approveMessage(req, res) {
       };
 
       if (senderRole === "manager") {
-        // Manager-sent: expand to intendedReceivers (assigned employees stored at creation)
-        (msg.intendedReceivers || [])
-          .map(r => typeof r === "object" ? r._id : r)
-          .forEach(addReceiver);
+        // Manager-sent: expand to intendedReceivers stored at creation.
+        // Fall back to client.assignedTo when intendedReceivers is missing (e.g. edited messages).
+        const intendedIds = (msg.intendedReceivers || []).map(r => typeof r === "object" ? r._id : r);
+        if (intendedIds.length > 0) {
+          intendedIds.forEach(addReceiver);
+        } else if (msg.client) {
+          const ClientModel = require("../models/ClientInfo");
+          const clientFallback = await ClientModel.findById(msg.client).select("assignedTo").lean();
+          (clientFallback?.assignedTo || []).forEach(empId => {
+            addReceiver(typeof empId === "object" ? empId._id : empId);
+          });
+        }
       } else {
-        // Employee / team_lead: only add assigned employees — supervisors receive approval notifications only
+        // Employee / team_lead / client employee: add assigned employees + managers
         if (msg.client) {
           const ClientModel = require("../models/ClientInfo");
           const clientForExp = await ClientModel.findById(msg.client)
@@ -1840,6 +1858,9 @@ exports.approveMessage = async function approveMessage(req, res) {
             });
           }
         }
+        // Always deliver the approved message to managers
+        const { managers: orgManagers } = await findTLsAndManagersByOwner(ownerId);
+        orgManagers.forEach(id => addReceiver(id));
       }
       console.log("✅ [approveMessage] Final receivers after expansion:", [...currentReceiverSet]);
     }
@@ -1878,7 +1899,6 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     const io = req.app.get("io");
     if (io) {
-      const { managers } = await findTLsAndManagersByOwner(msg.owner);
       const allInvolvedUsers = new Set();
 
       // Original message sender
@@ -1906,21 +1926,21 @@ exports.approveMessage = async function approveMessage(req, res) {
         // — no need to add all managers here
       }
 
-      // 🔥 If it's a group message, include ALL group members, Managers, and CRM employees
+      // 🔥 If it's a group message:
+      // - When finalized: broadcast to ALL group members + managers + TLs (message is approved)
+      // - When escalating: only notify sender + current approver + next receiver in chain
+      //   (CRM/manager should NOT see it until the message actually reaches them)
       if (msg.isGroupMessage && msg.groupId) {
         try {
-          const group = await WhatsAppGroup.findById(msg.groupId).lean();
-          if (group && group.members) {
-            group.members.forEach(m => {
-              if (m.memberId) allInvolvedUsers.add(String(m.memberId));
-            });
+          if (approvalFinalized) {
+            // Fully approved — add managers/TLs to allInvolvedUsers for individual room emit.
+            // Group members are notified via the group_${groupId} room emit below (no duplication).
+            const { managers: orgManagers, tls } = await findTLsAndManagersByOwner(msg.owner);
+            orgManagers.forEach(id => allInvolvedUsers.add(String(id)));
+            tls.forEach(id => allInvolvedUsers.add(String(id)));
           }
-
-          // Also include all managers and CRM-like roles who supervise this owner's chats
-          const { tls } = await findTLsAndManagersByOwner(msg.owner);
-          managers.forEach(id => allInvolvedUsers.add(String(id)));
-          tls.forEach(id => allInvolvedUsers.add(String(id)));
-
+          // When NOT finalized (escalation): only sender + current approver + next receiver
+          // are notified. Managers/TLs should not see it until the message reaches them.
         } catch (err) {
           console.error("Error fetching group members for approval emission:", err);
         }
@@ -1941,11 +1961,12 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       });
 
-      // 🔥 ALSO emit to the group room so anyone inside the chat gets the update instantly
-      if (msg.isGroupMessage && msg.groupId) {
+      // Emit to the group room only when finalized so all group members see the approved message.
+      // During escalation the message is still pending — only the next receiver should see it.
+      if (msg.isGroupMessage && msg.groupId && approvalFinalized) {
         io.to(`group_${msg.groupId}`).emit("new_message", {
           message: updatedMessage,
-          type: approvalFinalized ? "message_approved" : "message_escalated",
+          type: "message_approved",
           action: "approved",
           approvedBy: currentUserId,
           timestamp: new Date(),
@@ -2342,6 +2363,11 @@ exports.editMessage = async function editMessage(req, res) {
           // When editor is in the approvalChain (e.g. the team lead who approved
           // earlier), route from the editor's position so the message reaches their
           // own higher-level senior instead of cycling back to themselves.
+          const isSupervisorOfSender = !!(await EmployeeHierarchy.findOne({
+            owner: msg.owner,
+            junior: String(msg.sender?._id || msg.sender),
+            senior: currentUserId,
+          }).lean());
           const routeFromId = (isInApprovalChain || isSupervisorOfSender)
             ? currentUserId
             : String(msg.sender?._id || msg.sender);
@@ -4117,35 +4143,63 @@ exports.getChatList = async function getChatList(req, res) {
       owner: ownerObjId,
       $or: [{ assignedTo: meId }, { supervisedBy: meId }],
     })
-      .select("_id clientName dba lastWhatsAppMessage")
+      .select("_id clientName dba lastWhatsAppMessage photographUrl companyEmployees")
       .lean();
 
     const myClientIds = allMyClients.map((c) => c._id);
 
-    // ── Step 2: Always get the last NON-PENDING message for every client ──────
-    // We query messages directly (not the cached lastWhatsAppMessage field) to
-    // prevent stale pending-message text from leaking into the sidebar preview
-    // for users who are not receivers of that pending message.
-    const latestPerClient = await WhatsAppMessage.aggregate([
-      {
-        $match: {
-          owner: ownerObjId,
-          client: { $in: myClientIds },
-          isGroupMessage: { $ne: true },
-          status: { $ne: "draft" },
-          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+    // ── Step 2: Last NON-PENDING message for every client + every client-employee ──
+    // Run both in parallel. Employee messages are excluded from the client grouping
+    // so they don't bleed through as the "last message" for the parent client chat.
+    const [latestPerClient, latestPerClientEmployee] = await Promise.all([
+      WhatsAppMessage.aggregate([
+        {
+          $match: {
+            owner: ownerObjId,
+            client: { $in: myClientIds },
+            isGroupMessage: { $ne: true },
+            isClientEmployeeMessage: { $ne: true }, // exclude client-employee messages
+            status: { $ne: "draft" },
+            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          },
         },
-      },
-      { $sort: { createdAt: -1 } },
-      {
-        $group: {
-          _id: "$client",
-          note: { $first: "$note" },
-          at: { $first: "$createdAt" },
-          senderId: { $first: "$sender" },
-          hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: "$client",
+            note: { $first: "$note" },
+            at: { $first: "$createdAt" },
+            senderId: { $first: "$sender" },
+            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
+          },
         },
-      },
+      ]),
+
+      // Separate aggregation for client-employee conversations
+      WhatsAppMessage.aggregate([
+        {
+          $match: {
+            owner: ownerObjId,
+            client: { $in: myClientIds },
+            isClientEmployeeMessage: true,
+            isGroupMessage: { $ne: true },
+            status: { $ne: "draft" },
+            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { client: "$client", clientEmployeeId: "$clientEmployeeId" },
+            note: { $first: "$note" },
+            at: { $first: "$createdAt" },
+            senderId: { $first: "$sender" },
+            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
+            clientEmployeeData: { $first: "$clientEmployeeData" },
+            clientEmployeeId: { $first: "$clientEmployeeId" },
+          },
+        },
+      ]),
     ]);
 
     // Build preview map and repair any stale lastWhatsAppMessage in the DB (fire-and-forget)
@@ -4182,6 +4236,8 @@ exports.getChatList = async function getChatList(req, res) {
         .lean(),
 
       // Unread per chat — scoped to receiver=me only (fast with index)
+      // Client-employee messages use a composite key so their unread badges
+      // are tracked independently from the parent client chat.
       WhatsAppMessage.aggregate([
         {
           $match: {
@@ -4198,7 +4254,20 @@ exports.getChatList = async function getChatList(req, res) {
               $cond: [
                 "$isGroupMessage",
                 { $toString: "$groupId" },
-                { $toString: "$client" },
+                {
+                  $cond: [
+                    { $eq: ["$isClientEmployeeMessage", true] },
+                    {
+                      $concat: [
+                        "client_employee_",
+                        { $toString: "$client" },
+                        "_",
+                        { $toString: "$clientEmployeeId" },
+                      ],
+                    },
+                    { $toString: "$client" },
+                  ],
+                },
               ],
             },
             count: { $sum: 1 },
@@ -4230,6 +4299,7 @@ exports.getChatList = async function getChatList(req, res) {
         clientId: cid,
         clientName: c.clientName,
         dba: c.dba,
+        photographUrl: c.photographUrl || null,
         lastMessage: cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : ""),
         lastMessageAt: lastMsg.at,
         senderId: lastMsg.senderId || null,
@@ -4238,6 +4308,56 @@ exports.getChatList = async function getChatList(req, res) {
         hasUnreadMessages: !!(unreadMap.get(cid)),
         isGroupMessage: false,
         isClientEmployeeMessage: false,
+      });
+    }
+
+    // ── Client-employee conversations — one entry per employee ────────────────
+    const clientMap = new Map(allMyClients.map((c) => [String(c._id), c]));
+    for (const row of latestPerClientEmployee) {
+      const clientId = String(row._id.client);
+      const empId = row.clientEmployeeId ? String(row.clientEmployeeId) : String(row._id.clientEmployeeId);
+      if (!clientId || !empId || empId === "null" || empId === "undefined") continue;
+
+      const chatId = `client_employee_${clientId}_${empId}`;
+      const clientInfo = clientMap.get(clientId);
+
+      const empName =
+        row.clientEmployeeData?.clientEmployeeName ||
+        row.clientEmployeeData?.name ||
+        `Employee (${clientInfo?.clientName || "Client"})`;
+
+      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+
+      // Find employee's own photo from companyEmployees array
+      const empPhotoUrl = (() => {
+        const emps = clientInfo?.companyEmployees || [];
+        // Primary: match by MongoDB _id
+        let found = emps.find((e) => String(e._id) === empId);
+        // Fallback: match by name (for old messages that stored synthetic clientEmployeeId)
+        if (!found && empName) {
+          found = emps.find(
+            (e) => e.name && e.name.trim().toLowerCase() === empName.trim().toLowerCase()
+          );
+        }
+        return found?.photographUrl || null;
+      })();
+
+      chats.push({
+        chatId,
+        clientId,
+        clientName: clientInfo?.clientName || "",
+        clientPhotographUrl: clientInfo?.photographUrl || null,
+        clientEmployeeId: empId,
+        clientEmployeeData: row.clientEmployeeData || null,
+        employeePhotographUrl: empPhotoUrl,
+        lastMessage: text || (row.hasAtt ? "📎 Attachment" : ""),
+        lastMessageAt: row.at,
+        senderId: row.senderId || null,
+        hasAttachments: row.hasAtt || false,
+        unreadCount: unreadMap.get(chatId) || 0,
+        hasUnreadMessages: !!(unreadMap.get(chatId)),
+        isGroupMessage: false,
+        isClientEmployeeMessage: true,
       });
     }
 
