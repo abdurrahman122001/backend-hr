@@ -99,6 +99,9 @@ const ClientInfoSchema = new Schema(
           type: String,
           trim: true,
         },
+        photographUrl: {
+          type: String,
+        },
         addedAt: {
           type: Date,
           default: Date.now,
@@ -128,6 +131,9 @@ const ClientInfoSchema = new Schema(
       senderId:  { type: Schema.Types.ObjectId, ref: "Employee", default: null },
       hasAttachments: { type: Boolean, default: false },
     },
+
+    // Client photo
+    photographUrl: { type: String },
 
     // Client active/inactive status
     isActive: { type: Boolean, default: true },

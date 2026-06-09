@@ -3,6 +3,7 @@ const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -37,6 +38,9 @@ function normalizeRole(role) {
     if (["teamlead", "team lead", "team_lead", "team-lead", "lead"].includes(r))
         return "team_lead";
     if (r === "manager") return "manager";
+    if (r === "owner" || r === "admin") return "owner";
+    // CRM roles are manager-level: they finalize approvals and have full visibility
+    if (r === "crm" || r.includes("crm") || r.includes("customer_relationship")) return "manager";
     if (["employee", "staff", "associate"].includes(r)) return "employee";
     return r;
 }
@@ -55,7 +59,12 @@ async function findTLsAndManagersByOwner(ownerId) {
 
     const managers = await Employee.find({
         owner: ownerId,
-        $or: [{ role: "Manager" }, { role: "manager" }],
+        $or: [
+            { role: "Manager" },
+            { role: "manager" },
+            { role: /crm/i },
+            { role: /customer.relationship/i },
+        ],
     })
         .select("_id")
         .lean();
@@ -73,8 +82,6 @@ async function findTLsAndManagersByOwner(ownerId) {
         employees: employees.map((x) => String(x._id)),
     };
 }
-/** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
-const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 /**
  * Find the supervisor(s) of an employee using the EmployeeHierarchy model.
@@ -1433,7 +1440,14 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
 exports.approveMessage = async function approveMessage(req, res) {
     try {
         const { id } = req.params;
-        const msg = await WhatsAppMessage.findById(id).populate([
+        const currentUserId = String(req.employee._id);
+        const userRole = normalizeRole(req.employee?.role || "");
+
+        // Atomic fetch: prevent two concurrent approvals both reading "pending"
+        const msg = await WhatsAppMessage.findOne({
+            _id: id,
+            approvalStatus: { $ne: "approved" },
+        }).populate([
             { path: "sender", select: "_id name companyEmail role" },
             { path: "receiver", select: "_id name companyEmail role" },
             { path: "client", select: "_id clientName" },
@@ -1441,7 +1455,11 @@ exports.approveMessage = async function approveMessage(req, res) {
             { path: "repliedTo", select: "_id note message sender attachments" },
         ]);
 
-        if (!msg) return res.status(404).json({ error: "Message not found" });
+        if (!msg) {
+            const exists = await WhatsAppMessage.exists({ _id: id });
+            if (exists) return res.status(400).json({ error: "Message is already fully approved." });
+            return res.status(404).json({ error: "Message not found" });
+        }
 
         // 🔥 CHECK CLIENT SUPERVISION
         const Client = require("../models/ClientInfo");
@@ -1450,41 +1468,100 @@ exports.approveMessage = async function approveMessage(req, res) {
             .lean();
         const clientSupervision = client?.supervision || "direct";
 
-        // Only allow approval if client has "needs_approval" supervision
         if (clientSupervision !== "needs_approval") {
             return res.status(400).json({
                 error: "This client uses direct supervision. Approval not required.",
-                clientSupervision: clientSupervision,
+                clientSupervision,
             });
         }
 
-        const userRole = normalizeRole(req.employee?.role || "");
-        if (userRole !== "team_lead") {
-            return res
-                .status(403)
-                .json({ error: "Only Team Leads can approve messages" });
+        // Any current receiver in the hierarchy chain may approve (not just team_lead)
+        const isReceiver = (msg.receiver || []).some(
+            (r) => String(r._id || r) === currentUserId
+        );
+        if (!isReceiver) {
+            return res.status(403).json({
+                error: "You are not in the approval chain for this message",
+            });
         }
 
-        msg.approvalStatus = "approved";
+        const { managers } = await findTLsAndManagersByOwner(msg.owner);
 
-        // ✅ Add managers as receivers to the same message if sender was an Employee under supervision
-        const senderRole = normalizeRole(msg.sender?.role || "");
-        if (senderRole === "employee") {
-            const { managers } = await findTLsAndManagersByOwner(msg.owner);
-            if (managers && managers.length > 0) {
-                msg.isForwarded = true;
-                msg.forwardedBy = req.employee._id;
+        // ── Determine whether this approval finalises the chain ──────────────
+        // Managers / owners always finalise. TLs and other hierarchy seniors
+        // escalate to the managers above them (if any exist in the org).
+        let approvalFinalized = false;
+        let nextReceiverIds = [];
 
-                // Add managers to existing receiver list without duplicates
-                const existingReceivers = (msg.receiver || []).map((r) =>
-                    String(r._id || r),
-                );
-                managers.forEach((managerId) => {
-                    if (!existingReceivers.includes(String(managerId))) {
-                        msg.receiver.push(managerId);
-                    }
+        if (userRole === "manager" || userRole === "owner") {
+            approvalFinalized = true;
+        } else {
+            // Walk up the hierarchy from the current approver to find managers
+            const chainAbove = await getManagementChainFromHierarchy(
+                msg.owner,
+                currentUserId
+            );
+            const managersAbove = chainAbove.filter((id) =>
+                managers.includes(id)
+            );
+
+            if (managersAbove.length > 0) {
+                nextReceiverIds = managersAbove;
+            } else if (managers.length > 0) {
+                // No direct hierarchy link to a manager, but managers exist — route to all
+                nextReceiverIds = [...managers];
+            } else {
+                // No managers in the org; this is the final approval step
+                approvalFinalized = true;
+            }
+        }
+
+        // ── Apply state changes ───────────────────────────────────────────────
+        if (approvalFinalized) {
+            msg.approvalStatus = "approved";
+            msg.isForwarded = true;
+            msg.forwardedBy = currentUserId;
+            msg.approvedBy = currentUserId;
+            msg.approvedAt = new Date();
+
+            const existingReceiverSet = new Set(
+                (msg.receiver || []).map((r) => String(r._id || r))
+            );
+
+            // Expand to intendedReceivers (assigned employees stored at creation)
+            const intendedIds = (msg.intendedReceivers || []).map((r) =>
+                typeof r === "object" ? String(r._id) : String(r)
+            );
+
+            // Fallback: if intendedReceivers is empty, read from client.assignedTo
+            if (intendedIds.length === 0 && msg.client) {
+                const clientFallback = await Client.findById(msg.client)
+                    .select("assignedTo")
+                    .lean();
+                (clientFallback?.assignedTo || []).forEach((empId) => {
+                    intendedIds.push(
+                        typeof empId === "object" ? String(empId._id) : String(empId)
+                    );
                 });
             }
+
+            intendedIds.forEach((id) => {
+                if (id && !existingReceiverSet.has(id)) {
+                    msg.receiver.push(id);
+                    existingReceiverSet.add(id);
+                }
+            });
+
+            // Also ensure all managers are receivers
+            managers.forEach((managerId) => {
+                if (!existingReceiverSet.has(String(managerId))) {
+                    msg.receiver.push(managerId);
+                    existingReceiverSet.add(String(managerId));
+                }
+            });
+        } else {
+            // Route to next level (managers) — keep status pending
+            msg.receiver = nextReceiverIds;
         }
 
         await msg.save();
@@ -1500,72 +1577,51 @@ exports.approveMessage = async function approveMessage(req, res) {
             { path: "repliedTo", select: "_id note message sender attachments" },
         ]);
 
-        // Add client supervision info to the message
         const updatedMessage = {
             ...populatedMsg.toObject(),
-            approvalStatus: "approved",
-            clientSupervision: clientSupervision,
-            requiresApproval: clientSupervision === "needs_approval",
+            approvalStatus: msg.approvalStatus,
+            clientSupervision,
+            requiresApproval: true,
+            approvalFinalized,
         };
 
-        // 🔥 CRITICAL FIX: Emit events to ALL relevant users
+        // 🔥 Targeted socket emission — only notify who needs to know right now
         if (req.app.get("io")) {
             const io = req.app.get("io");
+            const notifySet = new Set();
 
-            // 🎯 CRITICAL: Emit to ALL users involved in this message
-            const allInvolvedUsers = new Set();
+            // Always tell the original sender and the current approver
+            if (msg.sender?._id) notifySet.add(String(msg.sender._id));
+            notifySet.add(currentUserId);
 
-            // Add sender
-            if (msg.sender && msg.sender._id) {
-                allInvolvedUsers.add(String(msg.sender._id));
-            }
-
-            // Add all receivers
-            if (msg.receiver && Array.isArray(msg.receiver)) {
-                msg.receiver.forEach((receiver) => {
-                    const receiverId =
-                        typeof receiver === "object" ? receiver._id : receiver;
-                    if (receiverId) {
-                        allInvolvedUsers.add(String(receiverId));
-                    }
+            if (approvalFinalized) {
+                // Broadcast to all final receivers (includes newly added assignees + managers)
+                (msg.receiver || []).forEach((r) => {
+                    notifySet.add(String(r._id || r));
                 });
+            } else {
+                // Only notify the next receivers in the chain (managers waiting)
+                nextReceiverIds.forEach((id) => notifySet.add(String(id)));
             }
 
-            // Add the team lead who approved
-            allInvolvedUsers.add(String(req.employee._id));
-
-            // Convert to array and emit to each user
-            const involvedUsersArray = Array.from(allInvolvedUsers);
-
-            involvedUsersArray.forEach((userId) => {
+            notifySet.forEach((userId) => {
                 io.to(`employee_${userId}`).emit("new_message", {
                     message: updatedMessage,
-                    type: "message_updated",
-                    action: "approved",
-                    approvedBy: req.employee._id,
+                    type: "message_approved",
+                    approvalFinalized,
+                    approvedBy: currentUserId,
                     timestamp: new Date(),
                 });
             });
-
-            // 🔒 REMOVED PUBLIC BROADCAST TO PREVENT PRIVACY LEAKS
-            // Realtime updates should only go to specific involved users (Sender, Receiver, Managers)
-            /* 
-            if (msg.client && msg.client._id) {
-              io.to(`client_${msg.client._id}`).emit("new_message", {
-                message: updatedMessage,
-                type: "message_updated",
-                action: "approved",
-              });
-            }
-            */
         }
 
         return res.json({
             ...updatedMessage,
-            message: msg.isForwarded
-                ? "Message approved and managers added as receivers"
-                : "Message approved successfully",
-            clientSupervision: clientSupervision,
+            message: approvalFinalized
+                ? "Message approved and forwarded to all receivers"
+                : "Message approved and routed to manager for final approval",
+            clientSupervision,
+            approvalFinalized,
         });
     } catch (e) {
         console.error("❌ Error in approveMessage:", e);
@@ -2894,9 +2950,11 @@ exports.createMessage = async function createMessage(req, res) {
 
             approvalStatus = null;
         }
-        // 👷 EMPLOYEE LOGIC: Use assigned employees
+        // 👷 EMPLOYEE LOGIC: Use assigned employees (only for direct supervision)
+        // For needs_approval clients, assigned employees are stored as intendedReceivers
+        // and added to receiver only after final approval.
         else if (senderRole === "employee") {
-            if (assignedEmployeeIds.length > 0) {
+            if (!needsApproval && assignedEmployeeIds.length > 0) {
                 assignedEmployeeIds.forEach((employeeId) => {
                     if (
                         employeeId &&
@@ -3040,6 +3098,9 @@ exports.createMessage = async function createMessage(req, res) {
             }
         }
 
+        // Track intended receivers for approval-based routing
+        let intendedReceiverIds = [];
+
         // 🔥 CORRECTED Approval status logic
         if (approvalStatus === undefined) {
             if (senderRole === "manager") {
@@ -3048,18 +3109,23 @@ exports.createMessage = async function createMessage(req, res) {
                 approvalStatus = null;
             } else if (needsApproval) {
                 approvalStatus = "pending";
-                // 🔥 HIERARCHY-BASED: Find supervisor from hierarchy first
+
+                // Save the assigned employees as intendedReceivers — they see the
+                // message only after final approval, not while it's still pending.
+                intendedReceiverIds = assignedEmployeeIds.filter(
+                    (id) => id !== String(sender)
+                );
+
+                // For pending messages, route ONLY to the immediate hierarchy supervisor(s)
                 const senderHierarchySupervisors = await findSupervisorsFromHierarchy(
                     owner,
                     String(sender)
                 );
 
                 if (senderHierarchySupervisors.length > 0) {
-                    // Use hierarchy-based supervisors
-                    receivers = [...receivers, ...senderHierarchySupervisors];
+                    receivers = [...senderHierarchySupervisors];
                 } else if (tls.length > 0) {
-                    // Fallback to all team leads if no hierarchy is set
-                    receivers = [...receivers, ...tls.map((id) => String(id))];
+                    receivers = [...tls.map((id) => String(id))];
                 }
             } else if (isDirect) {
                 approvalStatus = "approved";
@@ -3108,6 +3174,8 @@ exports.createMessage = async function createMessage(req, res) {
             subject: subject || "",
             note: note || "",
             approvalStatus: approvalStatus,
+            // Intended final receivers, expanded into receiver on final approval
+            intendedReceivers: intendedReceiverIds,
             isScheduled,
             status,
             scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
