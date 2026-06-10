@@ -184,8 +184,51 @@ exports.getLeaveApprovals = async (req, res) => {
       return { ...leave, _yourAction: yourAction };
     });
 
+    // Admin employees also see pending attendance challenges from their org
+    let pendingChallenges = [];
+    if (req.employee?.isAdmin) {
+      const ownerIds = [req.employee.owner, req.employee._id].filter(Boolean);
+      pendingChallenges = await AttendanceChallenge.find({
+        owner: { $in: ownerIds },
+        challengeStatus: "Pending",
+      })
+        .populate("employee", populateEmp)
+        .populate("attendance", "status checkIn checkOut")
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // Flatten attendance fields onto the challenge document
+      pendingChallenges = pendingChallenges.map((c) => ({
+        ...c,
+        status: c.attendance?.status || c.status,
+        checkIn: c.attendance?.checkIn || c.checkIn,
+        checkOut: c.attendance?.checkOut || c.checkOut,
+        _type: "attendance-challenge",
+        canAct: true,
+      }));
+    }
+
+    // Admin employees also see pending document requests from their org
+    let pendingDocRequests = [];
+    if (req.employee?.isAdmin) {
+      const ownerIds = [req.employee.owner, req.employee._id].filter(Boolean);
+      const docs = await DocumentRequest.find({
+        owner: { $in: ownerIds },
+        status: "pending",
+      })
+        .populate("employee", populateEmp)
+        .sort({ createdAt: -1 })
+        .lean();
+
+      pendingDocRequests = docs.map((d) => ({
+        ...d,
+        _type: d.documentType,
+        canAct: true,
+      }));
+    }
+
     return res.status(200).json({
-      forApproval,
+      forApproval: [...forApproval, ...pendingChallenges, ...pendingDocRequests],
       escalated: annotatedEscalated,
     });
   } catch (error) {

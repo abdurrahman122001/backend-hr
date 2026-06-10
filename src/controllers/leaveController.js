@@ -956,17 +956,6 @@ exports.approveLeave = async (req, res) => {
       isSuperAdmin = true;
     }
 
-    // Multi-stage Hierarchy Enforcement:
-    // Admin/HR CANNOT approve if it's currently assigned to a senior/manager.
-    // They can ONLY approve if it's their turn as supervisor or if the senior phase is complete.
-    if (isSuperAdmin && !isSupervisor && leave.supervisor &&
-      leave.supervisor.role !== "admin" && leave.supervisor.role !== "hr") {
-      return res.status(403).json({
-        message: `Strict Hierarchy Policy: This request is still awaiting approval from ${leave.supervisor.name || "the senior supervisor"}. Administrators can only take the final decision after senior approval.`,
-        currentSupervisor: leave.supervisor.name
-      });
-    }
-
     // Only admins/HR or supervisors can approve
     if (!isSuperAdmin && !isSupervisor) {
       return res.status(403).json({
@@ -1036,40 +1025,15 @@ exports.approveLeave = async (req, res) => {
       }
     }
 
-    // Check if there's someone next in the hierarchy chain
-    // OR if current approver is not admin (require admin final approval)
-    const isCurrentApproverAdmin = isSuperAdmin;
-    const hasMoreApprovers = leave.approvalChain && leave.currentApprovalIndex < leave.approvalChain.length - 1;
-
-    // If current approver is not admin, we need to find an admin for final approval
-    let needsAdminApproval = !isCurrentApproverAdmin;
-
     const isLastInChain = !leave.approvalChain || leave.approvalChain.length === 0 ||
       leave.currentApprovalIndex >= leave.approvalChain.length - 1;
 
-    // The user wants the super admin to take the FINAL decision only AFTER the senior has approved.
-    // So we follow the hierarchy chain. Initial senior approval moves it to next level (Admin).
-    // Final approval only happens when admin approves.
-    const isFinalApproval = isLastInChain && !needsAdminApproval;
+    const isFinalApproval = isLastInChain;
 
     if (!isFinalApproval) {
       // Move to next level in hierarchy
       leave.currentApprovalIndex += 1;
       let nextSupervisorId = leave.approvalChain[leave.currentApprovalIndex];
-
-      // If no next supervisor in chain but we need admin approval, find an admin
-      if (!nextSupervisorId && needsAdminApproval) {
-        const admin = await Employee.findOne({
-          $or: [{ role: "admin" }, { role: "hr" }],
-          owner: leave.employee.owner
-        }).sort({ createdAt: 1 });
-
-        if (admin) {
-          nextSupervisorId = admin._id;
-          // Add admin to the chain
-          leave.approvalChain.push(admin._id);
-        }
-      }
 
       leave.supervisor = nextSupervisorId;
       leave.status = "pending"; // Stay pending

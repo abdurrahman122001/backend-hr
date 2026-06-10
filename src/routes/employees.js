@@ -665,6 +665,63 @@ router.put("/:id/permissions", requireAuth, updateEmployeePermissions);
 router.get("/:id/permissions", requireAuth, getEmployeePermissions);
 
 // ------------------------------
+// Admin rights management (super-admin only)
+// Sets employee.isAdmin so they can log into the admin dashboard
+// using their existing company email + password.
+// ------------------------------
+function ensureSuperAdmin(req, res) {
+  const role = String(req.user?.role || "").toLowerCase();
+  if (req.user?.isEmployee || role !== "super-admin") {
+    res.status(403).json({ error: "Only a super admin can manage admin rights" });
+    return false;
+  }
+  return true;
+}
+
+// GET /api/employees/:id/admin-rights
+router.get("/:id/admin-rights", requireAuth, async (req, res) => {
+  try {
+    if (!ensureSuperAdmin(req, res)) return;
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid employee ID" });
+    const scope = buildEmployeeScope(req.user);
+    const employee = await Employee.findOne({ _id: id, ...scope }).select("name isAdmin");
+    if (!employee)
+      return res.status(404).json({ error: "Employee not found or unauthorized" });
+    res.json({ isAdmin: !!employee.isAdmin });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH /api/employees/:id/admin-rights  { isAdmin: true|false }
+router.patch("/:id/admin-rights", requireAuth, async (req, res) => {
+  try {
+    if (!ensureSuperAdmin(req, res)) return;
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id))
+      return res.status(400).json({ error: "Invalid employee ID" });
+    const grant = !!req.body.isAdmin;
+    const scope = buildEmployeeScope(req.user);
+    const employee = await Employee.findOneAndUpdate(
+      { _id: id, ...scope },
+      { isAdmin: grant },
+      { new: true }
+    ).select("name isAdmin");
+    if (!employee)
+      return res.status(404).json({ error: "Employee not found or unauthorized" });
+    res.json({
+      success: true,
+      isAdmin: employee.isAdmin,
+      message: `Admin rights ${grant ? "granted to" : "revoked from"} ${employee.name}`,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ------------------------------
 // DELETE /api/employees/:id/devices/:deviceSubId
 // Revoke a trusted device by subdocument _id
 // ------------------------------

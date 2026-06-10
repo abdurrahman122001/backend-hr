@@ -153,6 +153,8 @@ const EmployeeSchema = new Schema(
       ref: "User",
       required: false,
     },
+    // Admin access — super admin can grant this employee access to the admin dashboard
+    isAdmin: { type: Boolean, default: false },
     // Monetary bonus/cash awarded via admin approvals
     bonusCash: { type: Number, default: 0 },
     providentFund: {
