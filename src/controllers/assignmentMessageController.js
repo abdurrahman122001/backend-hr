@@ -2558,6 +2558,11 @@ exports.createDraft = async function createDraft(req, res) {
       subject,
       note,
       cc: ccBody,
+      isFromClient,
+      isFromCompanyEmployee,
+      clientEmployeeName,
+      clientEmployeeEmail,
+      clientName,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -2586,6 +2591,26 @@ exports.createDraft = async function createDraft(req, res) {
     // Note: Drafts can be saved without receivers. 
     // The requirement for receivers should only be enforced when sending.
 
+    const senderDoc = await Employee.findById(sender).select("_id role").lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+
+    // Resolve client employee tracking fields — only managers may set them
+    let inheritedIsFromClient = false;
+    let inheritedIsFromCompanyEmployee = false;
+    let inheritedClientEmployeeName = null;
+    let inheritedClientEmployeeEmail = null;
+    let inheritedClientName = null;
+
+    if (senderRole === "manager") {
+      if (isFromClient || isFromCompanyEmployee) {
+        inheritedIsFromClient = isFromClient || false;
+        inheritedIsFromCompanyEmployee = isFromCompanyEmployee || false;
+        inheritedClientEmployeeName = clientEmployeeName || null;
+        inheritedClientEmployeeEmail = clientEmployeeEmail || null;
+        inheritedClientName = clientName || null;
+      }
+    }
+
     const draftData = {
       owner,
       sender,
@@ -2595,6 +2620,11 @@ exports.createDraft = async function createDraft(req, res) {
       status: "draft",
       isScheduled: false,
       cc: ccEmails,
+      isFromClient: inheritedIsFromClient,
+      isFromCompanyEmployee: inheritedIsFromCompanyEmployee,
+      clientEmployeeName: inheritedClientEmployeeName,
+      clientEmployeeEmail: inheritedClientEmployeeEmail,
+      clientName: inheritedClientName,
       // Only include client if provided and valid
       ...(client && isObjId(client) && { client }),
     };
@@ -2661,6 +2691,12 @@ exports.updateMessage = async function updateMessage(req, res) {
       receiver: receiverBody,
       receivers: receiversBody,
       cc: ccBody,
+      client: clientBody,
+      isFromClient,
+      isFromCompanyEmployee,
+      clientEmployeeName,
+      clientEmployeeEmail,
+      clientName,
     } = req.body;
     const msg = await AssignmentMessage.findById(req.params.id);
 
@@ -2673,9 +2709,26 @@ exports.updateMessage = async function updateMessage(req, res) {
       });
     }
 
-    // Update fields if provided
+    // Update basic fields if provided
     if (typeof subject === "string") msg.subject = subject;
     if (typeof note === "string") msg.note = note;
+
+    // Update client reference if provided
+    if (clientBody && isObjId(clientBody)) {
+      msg.client = clientBody;
+    }
+
+    // Update client employee tracking fields for managers
+    const senderDoc = await Employee.findById(msg.sender).select("_id role").lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+
+    if (senderRole === "manager") {
+      if (isFromClient !== undefined) msg.isFromClient = isFromClient || false;
+      if (isFromCompanyEmployee !== undefined) msg.isFromCompanyEmployee = isFromCompanyEmployee || false;
+      if (clientEmployeeName !== undefined) msg.clientEmployeeName = clientEmployeeName || null;
+      if (clientEmployeeEmail !== undefined) msg.clientEmployeeEmail = clientEmployeeEmail || null;
+      if (clientName !== undefined) msg.clientName = clientName || null;
+    }
 
     // Handle receiver updates for drafts
     if (receiverBody || receiversBody) {
@@ -2759,6 +2812,12 @@ exports.sendDraft = async function sendDraft(req, res) {
       isScheduled: isScheduledBody,
       scheduledFor,
       cc: ccBody,
+      client: clientBody,
+      isFromClient,
+      isFromCompanyEmployee,
+      clientEmployeeName,
+      clientEmployeeEmail,
+      clientName,
     } = req.body;
 
     const msg = await AssignmentMessage.findById(id);
@@ -2784,6 +2843,23 @@ exports.sendDraft = async function sendDraft(req, res) {
     // Update fields
     if (subject !== undefined) msg.subject = subject;
     if (note !== undefined) msg.note = note;
+
+    // Update client reference if provided in the send payload
+    if (clientBody && isObjId(clientBody)) {
+      msg.client = clientBody;
+    }
+
+    // Update client employee tracking fields for managers
+    const senderDoc = await Employee.findById(msg.sender).select("_id role").lean();
+    const senderRole = normalizeRole(senderDoc?.role || "");
+
+    if (senderRole === "manager") {
+      if (isFromClient !== undefined) msg.isFromClient = isFromClient || false;
+      if (isFromCompanyEmployee !== undefined) msg.isFromCompanyEmployee = isFromCompanyEmployee || false;
+      if (clientEmployeeName !== undefined) msg.clientEmployeeName = clientEmployeeName || null;
+      if (clientEmployeeEmail !== undefined) msg.clientEmployeeEmail = clientEmployeeEmail || null;
+      if (clientName !== undefined) msg.clientName = clientName || null;
+    }
 
     // Update receivers if provided
     let receivers = msg.receiver.map((id) => String(id));
@@ -2852,7 +2928,12 @@ exports.sendDraft = async function sendDraft(req, res) {
 
       // 🔥 HIERARCHY-BASED: Determine approval status and hierarchy routing
       targetSupervisor = null;
-      if (msg.client) {
+
+      // 🔥 If the message is from a client or company employee, auto-approve immediately
+      // (no supervision/approval needed for external-originated messages)
+      if (msg.isFromClient || msg.isFromCompanyEmployee) {
+        msg.approvalStatus = "approved";
+      } else if (msg.client) {
         const clientDoc = await ClientInfo.findById(msg.client).lean();
         const senderId = String(msg.sender);
         const assignedToIds = (clientDoc?.assignedTo || []).map((id) =>
@@ -2871,7 +2952,7 @@ exports.sendDraft = async function sendDraft(req, res) {
           msg.approvalStatus = hierarchyResult.approvalStatus;
           targetSupervisor = hierarchyResult.targetSupervisor;
 
-          // If it's pending, store the original intended receivers
+          // If it’s pending, store the original intended receivers
           if (msg.approvalStatus === "pending") {
             msg.intendedRecipients = receivers;
           }
