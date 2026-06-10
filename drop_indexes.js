@@ -9,7 +9,6 @@ async function dropBadIndexes() {
     console.log('Connected to MongoDB');
     
     const collection = mongoose.connection.db.collection('referencecounters');
-    
     const indexesToDrop = [
       'prefix_1_docType_1',
       'docType_1_yearMonth_1',
