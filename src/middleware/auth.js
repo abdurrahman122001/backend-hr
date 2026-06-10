@@ -34,16 +34,17 @@ module.exports = async function requireAuth(req, res, next) {
     let employee = null;
 
     if (!user) {
-      // Fallback: Check if it's an Employee ID (e.g. from Employee Dashboard)
+      // Fallback: Check if it's an Employee ID (employee-admin or Employee Dashboard)
       employee = await Employee.findById(payload.id).select(
-        "_id role permissions name department designation owner companyEmail"
+        "_id role isAdmin permissions name department designation owner companyEmail"
       );
-      
+
       if (employee) {
         // Create a user-like object from employee data
+        // If the employee has been granted admin rights, treat them as admin
         user = {
           _id: employee._id,
-          role: employee.role,
+          role: employee.isAdmin ? "admin" : employee.role,
           name: employee.name,
           companyEmail: employee.companyEmail,
           owner: employee.owner,

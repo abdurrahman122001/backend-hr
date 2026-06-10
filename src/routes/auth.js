@@ -4,6 +4,8 @@ const jwt = require("jsonwebtoken");
 const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const User = require("../models/Users");
+const Employee = require("../models/Employees");
+const bcrypt = require("bcrypt");
 const requireAuth = require("../middleware/auth");
 
 const router = express.Router();
@@ -85,41 +87,74 @@ router.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
   try {
-    const user = await User.findOne({ username }).select("+twoFactorSecret +twoFactorEnabled");
-    if (!user || !(await user.comparePassword(password))) {
-      return res.status(401).json({ message: "Invalid credentials" });
-    }
+    // Try User model first (super-admin, admin, hr accounts)
+    const user = await User.findOne({
+      $or: [{ username }, { email: username }],
+    }).select("+twoFactorSecret +twoFactorEnabled");
 
-    // If 2FA is enabled, issue a short-lived pending token and ask for OTP
-    if (user.twoFactorEnabled) {
-      const pendingToken = jwt.sign(
-        { id: user._id, twoFactorPending: true },
+    if (user) {
+      if (!(await user.comparePassword(password))) {
+        return res.status(401).json({ message: "Invalid credentials" });
+      }
+
+      if (user.twoFactorEnabled) {
+        const pendingToken = jwt.sign(
+          { id: user._id, twoFactorPending: true },
+          JWT_SECRET,
+          { expiresIn: TWO_FA_PENDING_TTL }
+        );
+        return res.json({
+          requiresTwoFactor: true,
+          pendingToken,
+          user: { id: user._id, username: user.username },
+        });
+      }
+
+      const accessToken = jwt.sign(
+        { id: user._id, tv: user.tokenVersion || 0 },
         JWT_SECRET,
-        { expiresIn: TWO_FA_PENDING_TTL }
+        { expiresIn: ACCESS_TTL }
+      );
+      const refreshToken = jwt.sign(
+        { id: user._id, tv: user.tokenVersion || 0 },
+        REFRESH_SECRET,
+        { expiresIn: REFRESH_TTL }
       );
       return res.json({
-        requiresTwoFactor: true,
-        pendingToken,
+        token: accessToken,
+        refreshToken,
         user: { id: user._id, username: user.username },
       });
     }
 
-    // No 2FA — issue full tokens directly
+    // Fallback: employee with isAdmin:true can log in with companyEmail
+    const emp = await Employee.findOne({
+      $or: [{ companyEmail: username }, { email: username }],
+      isAdmin: true,
+    }).select("_id name companyEmail email password owner isAdmin");
+
+    if (!emp || !emp.password) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+    const ok = await emp.comparePassword(password);
+    if (!ok) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
     const accessToken = jwt.sign(
-      { id: user._id, tv: user.tokenVersion || 0 },
+      { id: emp._id, isEmployeeAdmin: true },
       JWT_SECRET,
       { expiresIn: ACCESS_TTL }
     );
     const refreshToken = jwt.sign(
-      { id: user._id, tv: user.tokenVersion || 0 },
+      { id: emp._id, isEmployeeAdmin: true },
       REFRESH_SECRET,
       { expiresIn: REFRESH_TTL }
     );
-
     return res.json({
       token: accessToken,
       refreshToken,
-      user: { id: user._id, username: user.username },
+      user: { id: emp._id, username: emp.companyEmail || emp.email },
     });
   } catch (err) {
     console.error(err);

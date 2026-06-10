@@ -1054,6 +1054,8 @@ exports.markAttendance = async (req, res) => {
       },
     };
 
+    if (req.body.originalStatus) updateDoc.$set.originalStatus = req.body.originalStatus;
+
     if (challengeStatus) updateDoc.$set.challengeStatus = challengeStatus;
     if (challengeAdminNotes) updateDoc.$set.challengeAdminNotes = challengeAdminNotes;
     if (
@@ -2116,6 +2118,7 @@ exports.updateChallengeStatus = async (req, res) => {
         req.body.challengeStatus = "Approved";
         req.body.challengeAdminNotes = challengeAdminNotes || "";
         req.body.sourceModel = "Attendance"; // To ensure leave/bonus/late effects are run
+        req.body.originalStatus = attendance.status; // Store status before update
 
         const mockRes = {
           statusCode: 200,
@@ -2263,6 +2266,7 @@ exports.updateChallengeStatus = async (req, res) => {
       req.body.challengeStatus = "Approved";
       req.body.challengeAdminNotes = challengeAdminNotes || "";
       req.body.sourceModel = "Attendance"; // To ensure leave/bonus/late effects are run
+      req.body.originalStatus = attendance.status; // Store status before update
 
       const mockRes = {
         statusCode: 200,

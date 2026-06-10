@@ -440,6 +440,78 @@ router.post('/challenge/:id/withdraw', async (req, res) => {
   }
 });
 
+// PATCH /api/emp-attendance/challenge/:id/review
+// Employee-admin approves or rejects a pending attendance challenge
+router.patch('/challenge/:id/review', async (req, res) => {
+  try {
+    if (!req.employee?.isAdmin) {
+      return res.status(403).json({ error: "Only admin employees can review attendance challenges" });
+    }
+
+    const { id } = req.params;
+    const { action, notes } = req.body;
+
+    if (!["Approved", "Rejected"].includes(action)) {
+      return res.status(400).json({ error: "action must be 'Approved' or 'Rejected'" });
+    }
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ error: "Invalid challenge ID" });
+    }
+
+    const challenge = await AttendanceChallenge.findOne({
+      $or: [{ _id: id }, { attendance: id }],
+      challengeStatus: "Pending",
+      owner: req.employee.owner,
+    });
+
+    if (!challenge) {
+      return res.status(404).json({ error: "Pending attendance challenge not found" });
+    }
+
+    const Attendance = require("../models/Attendance");
+    const attendance = await Attendance.findById(challenge.attendance);
+    if (!attendance) {
+      return res.status(404).json({ error: "Linked attendance record not found" });
+    }
+
+    challenge.challengeStatus = action;
+    challenge.challengeAdminNotes = notes || "";
+    challenge.challengeAt = new Date();
+    await challenge.save();
+
+    attendance.challengeStatus = action;
+    attendance.challengeAdminNotes = notes || "";
+    attendance.challengeAt = new Date();
+
+    if (action === "Approved") {
+      if (challenge.requestedCheckIn) attendance.checkIn = challenge.requestedCheckIn;
+      if (challenge.requestedCheckOut) attendance.checkOut = challenge.requestedCheckOut;
+      if (challenge.requestedStatus) attendance.status = challenge.requestedStatus;
+    }
+
+    const note = `Challenge ${action.toLowerCase()} by employee-admin.${notes ? ` Notes: ${notes}` : ""}`;
+    attendance.notes = attendance.notes ? `${attendance.notes}; ${note}` : note;
+    await attendance.save();
+
+    // Notify employee via socket
+    if (req.app.get("io")) {
+      req.app.get("io")
+        .to(`employee_${challenge.employee}`)
+        .emit("attendance_query_changed", {
+          attendance,
+          action: action.toLowerCase(),
+          message: `Your attendance challenge for ${attendance.date} has been ${action.toLowerCase()}.`,
+        });
+    }
+
+    return res.json({ success: true, challengeStatus: action, attendance });
+  } catch (err) {
+    console.error("❌ Review attendance challenge failed:", err);
+    res.status(500).json({ error: "Failed to review attendance challenge" });
+  }
+});
+
 // PUT /api/emp-attendance/challenge/:id
 // Employee edits a pending attendance challenge
 router.put('/challenge/:id', async (req, res) => {
