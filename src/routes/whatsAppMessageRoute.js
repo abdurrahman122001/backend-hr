@@ -27,6 +27,9 @@ router.get("/sent", ctrl.listMySentToClient);
 
 router.get("/chat-list", ctrl.getChatList);
 
+// Delete an entire chat (client chat or client-employee sub-chat)
+router.delete("/chats/:clientId", ctrl.deleteChat);
+
 router.get("/messages", ctrl.listMessagesForManager);
 router.get("/messages/:clientId", ctrl.listMessagesForManager);
 

@@ -419,14 +419,40 @@ exports.toggleWhatsAppFlag = async (req, res) => {
       return res.status(400).json({ error: "Invalid flag type" });
     }
 
-    // 🔥 HANDLE GROUP IDs
+    // 🔥 HANDLE GROUP IDs — flags are stored per member on the group, so
+    // archiving/pinning a group only affects the member who toggled it
     if (id.startsWith("group_")) {
-       return res.json({
-         success: true,
-         message: `${flag} toggled locally (groups not supported yet)`,
-         flag,
-         newValue: false,
-       });
+      const WhatsAppGroup = require("../models/WhatsAppGroup");
+      const groupId = id.replace(/^group_/, "");
+      if (!mongoose.isValidObjectId(groupId)) {
+        return res.status(400).json({ error: "Invalid group ID" });
+      }
+
+      const group = await WhatsAppGroup.findById(groupId);
+      if (!group || group.isActive === false) {
+        return res.status(404).json({ error: "Group not found" });
+      }
+
+      const isMember = (group.members || []).some(
+        (m) => String(m.memberId) === String(emp._id)
+      );
+      if (!isMember) {
+        return res.status(403).json({ error: "Not a member of this group" });
+      }
+
+      const key = String(emp._id);
+      const current = (group.memberFlags && group.memberFlags.get(key)) || {};
+      const newValue = !current[flag];
+      group.memberFlags.set(key, { ...current, [flag]: newValue });
+      group.markModified("memberFlags");
+      await group.save();
+
+      return res.json({
+        success: true,
+        message: `${flag} toggled successfully`,
+        flag,
+        newValue,
+      });
     }
 
     const client = await ClientInfo.findById(id);
@@ -508,14 +534,26 @@ exports.getWhatsAppFlags = async (req, res) => {
 
     const { id } = req.params;
 
-    // 🔥 HANDLE GROUP IDs
+    // 🔥 HANDLE GROUP IDs — return this member's own flags for the group
     if (id.startsWith("group_")) {
+      const WhatsAppGroup = require("../models/WhatsAppGroup");
+      const groupId = id.replace(/^group_/, "");
+      let flags = {};
+      if (mongoose.isValidObjectId(groupId)) {
+        const group = await WhatsAppGroup.findById(groupId)
+          .select("memberFlags")
+          .lean();
+        const mf = group?.memberFlags || {};
+        flags =
+          (mf instanceof Map ? mf.get(String(emp._id)) : mf[String(emp._id)]) ||
+          {};
+      }
       return res.json({
-        isPinned: false,
+        isPinned: !!flags.whatsappPinned,
         isRead: true,
-        isFavourite: false,
-        isMuted: false,
-        isArchived: false,
+        isFavourite: !!flags.whatsappFavourite,
+        isMuted: !!flags.whatsappMuted,
+        isArchived: !!flags.whatsappArchived,
       });
     }
 

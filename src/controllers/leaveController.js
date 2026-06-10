@@ -1530,73 +1530,9 @@ exports.rejectLeave = async (req, res) => {
       }
     }
 
-    // UPDATE ATTENDANCE RECORDS WHEN LEAVE IS REJECTED
-    // Mark leave dates as "Absent" and "Unpaid" unless already Absent and Unpaid
-    try {
-      const Attendance = require("../models/Attendance");
-
-      for (const dateObj of leave.dates) {
-        // Convert date to YYYY-MM-DD format consistently
-        let dateStr;
-        if (typeof dateObj.date === 'string') {
-          if (dateObj.date.includes('T')) {
-            dateStr = dateObj.date.split('T')[0];
-          } else {
-            dateStr = dateObj.date;
-          }
-        } else if (dateObj.date instanceof Date) {
-          dateStr = dateObj.date.toISOString().split('T')[0];
-        } else {
-          dateStr = new Date(dateObj.date).toISOString().split('T')[0];
-        }
-
-        // Check if attendance record exists for this date
-        let attendance = await Attendance.findOne({
-          employee: leave.employee._id,
-          date: dateStr,
-          owner: leave.employee.owner,
-        });
-
-        if (attendance) {
-          // Only update if NOT already Absent and Unpaid
-          const isAlreadyAbsentUnpaid = attendance.status === "Absent" && attendance.leaveType === "Unpaid";
-
-          if (!isAlreadyAbsentUnpaid) {
-            // Update existing attendance to Absent/Unpaid
-            if (!attendance.originalStatus) {
-              attendance.originalStatus = attendance.status;
-            }
-            attendance.status = "Absent";
-            attendance.leaveType = "Unpaid";
-            attendance.markedByHR = true;
-            attendance.notes = attendance.notes
-              ? `${attendance.notes}; Marked as Absent due to rejected leave`
-              : "Marked as Absent - leave request was rejected";
-            await attendance.save();
-          }
-        } else {
-          // Create new attendance record as Absent/Unpaid
-          attendance = new Attendance({
-            owner: leave.employee.owner,
-            employee: leave.employee._id,
-            date: dateStr,
-            status: "Absent",
-            leaveType: "Unpaid",
-            markedByHR: true,
-            notes: "Auto-created from rejected leave request",
-          });
-          await attendance.save();
-        }
-      }
-    } catch (attendanceError) {
-      console.error("⚠️ Error updating attendance for rejected leave:", attendanceError);
-      // Don't fail the rejection if attendance update fails
-    }
-
-    // IMPLEMENT SALARY DEDUCTION FOR REJECTED LEAVE
-    // Rejected leave is treated as absence, thus always unpaid/deductible
-    await deductLeaveFromSalary(leave.employee._id, leave.totalDays, leave.startDate);
-
+    // NOTE: Rejected leave does NOT mark attendance as Absent or deduct salary.
+    // The employee is expected to work on those dates; if they don't show up,
+    // the normal attendance flow will mark them absent and deduct salary.
 
     const processedLeave = {
       ...leave.toObject(),

@@ -647,10 +647,31 @@ exports.deleteGroup = async function (req, res) {
 
     const owner = req.employee?.owner || req.employee?._id;
 
-    await WhatsAppGroup.findOneAndUpdate(
+    const group = await WhatsAppGroup.findOneAndUpdate(
       { _id: groupId, owner },
       { isActive: false }
     );
+    if (!group) return res.status(404).json({ error: "Group not found" });
+
+    // Realtime: tell every member (and anyone in the group room) the chat is gone
+    const io = req.app.get("io");
+    if (io) {
+      const payload = {
+        groupId: String(groupId),
+        chatId: String(groupId),
+        deletedBy: {
+          _id: String(req.employee._id),
+          name: req.employee?.name || "",
+        },
+        at: new Date(),
+      };
+      (group.members || []).forEach((m) => {
+        if (m.memberId) {
+          io.to(`employee_${m.memberId}`).emit("whatsapp_chat_deleted", payload);
+        }
+      });
+      io.to(`group_${groupId}`).emit("whatsapp_chat_deleted", payload);
+    }
 
     res.json({ message: "Group deleted" });
   } catch (error) {
