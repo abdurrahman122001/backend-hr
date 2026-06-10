@@ -196,12 +196,6 @@ async function applyVisibility(q, req, filterParam) {
     $or: roleHierarchyFilters
   };
 
-  const organizationSentVisibility = {
-    owner: ownerId,
-    status: { $in: ["sent", "scheduled"] },
-    approvalStatus: { $ne: "pending" }
-  };
-
   const inboxVisibility = {
     $or: [
       isParticipant,
@@ -211,7 +205,6 @@ async function applyVisibility(q, req, filterParam) {
           {
             $or: [
               roleHierarchyFilter,
-              organizationSentVisibility,
               ...(assignedClientIds.length > 0 ? [{ client: { $in: assignedClientIds } }] : [])
             ]
           }
@@ -603,6 +596,30 @@ exports.listMessages = async function listMessages(req, res) {
         { receiver: me },
         { receiver: { $in: [me] } }
       ];
+    } else if (
+      ["all", "inbox", "allMail"].includes(filter) &&
+      !isSentView &&
+      !isDraftView &&
+      !isScheduledView &&
+      !isTrashedVal &&
+      !isSpamVal &&
+      !isParticipantView
+    ) {
+      // Inbox/All Mail: only threads the user actually participates in.
+      // Include own sent messages so newly started threads still appear;
+      // incoming client mail is narrowed further by applyVisibility.
+      q.$or = [
+        { isFromClient: true },
+        { receiver: me },
+        { receiver: { $in: [me] } },
+        { sender: me }
+      ];
+    }
+
+    // Sent view: only the user's own sent messages unless an explicit
+    // sender/participant scope was requested.
+    if (isSentView && !isParticipantView && between.length !== 2 && !isObjId(sender)) {
+      q.sender = me;
     }
 
     const qFinal = await applyVisibility(q, req, filter);

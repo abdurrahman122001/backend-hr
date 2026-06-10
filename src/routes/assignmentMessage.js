@@ -101,6 +101,7 @@ router.patch(
 router.post("/:id/read", ctrl.markAsRead);
 router.post("/:id/unread", ctrl.markAsUnread);
 router.post("/read-multiple", ctrl.markMultipleAsRead);
+router.post("/read-all", ctrl.markAllMessagesRead);
 router.get("/unread/count", filterCtrl.getUnreadCount);
 router.get("/activity", ctrl.getActivity);
 

@@ -2893,6 +2893,93 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   }
 };
 
+// DELETE /api/whatsApp-messages/chats/:clientId?clientEmployeeId=...
+// Deletes an entire chat (client chat or client-employee sub-chat) and
+// notifies every employee who can see it so their chat list updates live.
+exports.deleteChat = async function deleteChat(req, res) {
+  try {
+    const { clientId } = req.params;
+    const clientEmployeeId = req.query.clientEmployeeId
+      ? String(req.query.clientEmployeeId)
+      : null;
+
+    if (!isObjId(clientId)) {
+      return res.status(400).json({ error: "Invalid client ID" });
+    }
+
+    const owner = req.employee?.owner || req.employee?._id;
+    const currentUserId = String(req.employee._id);
+    const ClientInfo = require("../models/ClientInfo");
+
+    const clientDoc = await ClientInfo.findOne({ _id: clientId, owner })
+      .select("_id assignedTo supervisedBy")
+      .lean();
+    if (!clientDoc) return res.status(404).json({ error: "Chat not found" });
+
+    // Participants are notified via socket below; only CRM (manager) or
+    // owner roles may delete a chat ("crm" normalizes to "manager")
+    const participantIds = []
+      .concat(clientDoc.assignedTo || [], clientDoc.supervisedBy || [])
+      .map((id) => String(id._id || id));
+    const role = normalizeRole(req.employee?.role || "");
+    const canDelete = role === "manager" || role === "owner";
+    if (!canDelete) {
+      return res
+        .status(403)
+        .json({ error: "Only CRM (manager) can delete chats" });
+    }
+
+    const q = {
+      owner,
+      client: clientId,
+      isGroupMessage: { $ne: true },
+    };
+    if (clientEmployeeId) {
+      q.isClientEmployeeMessage = true;
+      q.clientEmployeeId = clientEmployeeId;
+    } else {
+      q.isClientEmployeeMessage = { $ne: true };
+    }
+
+    const result = await WhatsAppMessage.deleteMany(q);
+
+    // Clear the cached last-message preview when the main client chat is removed
+    if (!clientEmployeeId) {
+      await ClientInfo.findByIdAndUpdate(
+        clientId,
+        { $unset: { lastWhatsAppMessage: "" } },
+        { timestamps: false }
+      ).catch(() => {});
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      const payload = {
+        clientId: String(clientId),
+        clientEmployeeId,
+        chatId: clientEmployeeId
+          ? `client_employee_${clientId}_${clientEmployeeId}`
+          : String(clientId),
+        deletedBy: { _id: currentUserId, name: req.employee?.name || "" },
+        deletedCount: result.deletedCount,
+        at: new Date(),
+      };
+
+      const targets = new Set([currentUserId, ...participantIds]);
+      targets.forEach((uid) => {
+        io.to(`employee_${uid}`).emit("whatsapp_chat_deleted", payload);
+      });
+      // Anyone currently viewing this client's chat room
+      io.to(`client_${clientId}`).emit("whatsapp_chat_deleted", payload);
+    }
+
+    return res.json({ ok: true, deletedCount: result.deletedCount });
+  } catch (e) {
+    console.error("❌ Error deleting chat:", e);
+    res.status(500).json({ error: "Failed to delete chat" });
+  }
+};
+
 // In uploadAttachments function, update the file validation
 exports.uploadAttachments = async function uploadAttachments(req, res) {
   try {

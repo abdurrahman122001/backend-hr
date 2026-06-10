@@ -46,6 +46,12 @@ const WhatsAppGroupSchema = new Schema(
     },
     avatar: { type: String, default: null },
     isActive: { type: Boolean, default: true },
+    /**
+     * Per-member WhatsApp flags (whatsappPinned / whatsappFavourite /
+     * whatsappMuted / whatsappArchived) keyed by the member's employee id,
+     * so archiving a group only affects the member who archived it.
+     */
+    memberFlags: { type: Map, of: Schema.Types.Mixed, default: {} },
     // Last-message metadata (denormalized for sidebar speed)
     lastMessage: { type: String, default: null },
     lastMessageAt: { type: Date, default: null },

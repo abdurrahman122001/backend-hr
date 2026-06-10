@@ -2509,7 +2509,8 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
 
     const q = {
       client: client,
-      status: "sent"
+      status: "sent",
+      sender: me
     };
     if (isObjId(owner)) q.owner = owner;
 
@@ -4318,6 +4319,52 @@ exports.markAsRead = async function markAsRead(req, res) {
   }
 };
 
+// POST /api/assignment-messages/read-all
+// Marks EVERY unread message for the current user as read in one query —
+// covers all folders and all pages so sidebar unread counts reach zero.
+exports.markAllMessagesRead = async function markAllMessagesRead(req, res) {
+  try {
+    const userId = req.employee._id;
+
+    const result = await AssignmentMessage.updateMany(
+      {
+        $or: [{ receiver: userId }, { receiver: { $in: [userId] } }],
+        "readBy.employee": { $ne: userId },
+        status: "sent",
+      },
+      {
+        $push: {
+          readBy: {
+            employee: userId,
+            readAt: new Date(),
+          },
+        },
+      }
+    );
+
+    // Let the user's other open tabs/devices refresh their counts
+    const io = getIO(req);
+    if (io) {
+      io.to(`employee_${String(userId)}`).emit("all_messages_read", {
+        markedBy: String(userId),
+        markedCount: result.modifiedCount || 0,
+        timestamp: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      markedCount: result.modifiedCount || 0,
+    });
+  } catch (error) {
+    console.error("Error marking all messages as read:", error);
+    res.status(500).json({
+      success: false,
+      error: "Server error while marking all messages as read",
+    });
+  }
+};
+
 exports.markThreadAsRead = async function markThreadAsRead(req, res) {
   try {
     const { threadId } = req.params;
@@ -4334,14 +4381,20 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     const threadMessages = await AssignmentMessage.find({
       threadId: threadId,
       $or: [{ receiver: userId }, { receiver: { $in: [userId] } }, { sender: userId }],
-      isTrashed: false,
-      isSpam: false,
+      // $ne matches older documents where these fields were never set
+      isTrashed: { $ne: true },
+      isSpam: { $ne: true },
     });
 
     if (threadMessages.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "No messages found in this thread or you don't have access",
+      // Nothing for this user to mark (e.g. a hierarchy-visible thread where
+      // they are not a direct participant) — succeed quietly instead of 404
+      // so bulk "mark all as read" doesn't fail.
+      return res.json({
+        success: true,
+        message: "No messages to mark as read in this thread",
+        threadId: threadId,
+        markedCount: 0,
       });
     }
 
