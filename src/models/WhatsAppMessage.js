@@ -527,17 +527,20 @@ WhatsAppMessageSchema.methods.addReactionToComment = async function (
   return comment.reactions;
 };
 
-// Toggle emoji reaction on a message (add if not present, remove if same user+emoji exists)
+// Toggle emoji reaction on a message — WhatsApp behavior: one reaction per
+// user; the same emoji toggles off, a different emoji replaces the previous one
 WhatsAppMessageSchema.methods.toggleReaction = async function (emoji, employee) {
   if (!this.reactions) this.reactions = [];
 
-  const existingIdx = this.reactions.findIndex(
-    (r) => r.userId.toString() === employee._id.toString() && r.emoji === emoji,
+  const myExisting = this.reactions.find(
+    (r) => r.userId.toString() === employee._id.toString(),
   );
 
-  if (existingIdx !== -1) {
-    this.reactions.splice(existingIdx, 1);
-  } else {
+  this.reactions = this.reactions.filter(
+    (r) => r.userId.toString() !== employee._id.toString(),
+  );
+
+  if (!myExisting || myExisting.emoji !== emoji) {
     this.reactions.push({
       userId: employee._id,
       userName: employee.name || "",

@@ -471,9 +471,14 @@ exports.listMessages = async function listMessages(req, res) {
       approvalStatus,
       includeDirectMessages = "true",
       excludeHrPolicy = "false",
+      threadId,
     } = req.query;
 
     const q = {};
+
+    // Thread scope: narrows the query to a single thread so clients don't
+    // have to download a large page and filter locally.
+    if (threadId) q.threadId = String(threadId);
 
     // Owner scope
     if (isObjId(owner)) q.owner = owner;
@@ -722,9 +727,11 @@ exports.listMessages = async function listMessages(req, res) {
         AssignmentMessage.find({ _id: { $in: latestMessageIds } })
           .populate([
             { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+            { path: "sender", select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl" },
             { path: "receiver", select: "_id name companyEmail role designation" },
-            { path: "client", select: "_id clientName" },
+            // client photo + contacts travel with the thread list so detail
+            // view avatars render instantly without extra requests
+            { path: "client", select: "_id clientName photographUrl companyEmployees" },
           ])
           .lean(),
         AssignmentMessage.aggregate(totalPipeline)
@@ -763,10 +770,10 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           {
             path: "sender",
-            select: "_id name companyEmail role designation supervisionMode",
+            select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl",
           }, // 🔥 ADDED supervisionMode
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName photographUrl companyEmployees" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "trashedBy", select: "_id name companyEmail" },
@@ -1663,7 +1670,9 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation photographUrl imageUrl" },
           { path: "receiver", select: "_id name companyEmail role designation photographUrl imageUrl" },
-          { path: "client", select: "_id clientName" },
+          // photographUrl + companyEmployees ride along so the client/contact
+          // avatars render without a separate client-info request
+          { path: "client", select: "_id clientName photographUrl companyEmployees" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "approvedBy", select: "_id name companyEmail role designation" },
@@ -1710,6 +1719,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     // Get counts for different categories
     const [
       inboxCount,
+      unreadCount,
       starredCount,
       sentCount,
       draftCount,
@@ -1723,6 +1733,15 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         status: "sent",
         isTrashed: false,
         isSpam: false,
+      }),
+
+      // Unread: inbox messages the current user hasn't read yet
+      AssignmentMessage.countDocuments({
+        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+        status: "sent",
+        isTrashed: false,
+        isSpam: false,
+        "readBy.employee": { $ne: currentUser },
       }),
 
       // Starred: messages starred by current user
@@ -1770,16 +1789,9 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       }),
     ]);
 
-    // Debug: Check if there are any starred messages at all
-    const allStarredMessages = await AssignmentMessage.find({
-      starredBy: { $exists: true, $ne: [] },
-    })
-      .select("starredBy")
-      .limit(5)
-      .lean();
-
     res.json({
       inbox: inboxCount,
+      unread: unreadCount,
       starred: starredCount,
       sent: sentCount,
       draft: draftCount,

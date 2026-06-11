@@ -355,13 +355,16 @@ exports.getClientById = async (req, res) => {
 
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    // Optional: restrict access (only Owner, Manager/Team Lead, or assigned employee)
+    // Restrict access: Owner, Manager/Team Lead, assigned employee, or supervised employee
     const role = String(emp.role || "").trim().toLowerCase();
-    if (
-      role !== "owner" &&
-      !isManagerLike(emp.role) &&
-      String(client.assignedTo?._id) !== String(emp._id)
-    ) {
+    const empIdStr = String(emp._id);
+    const isAssigned = Array.isArray(client.assignedTo)
+      ? client.assignedTo.some((a) => String(a._id || a) === empIdStr)
+      : false;
+    const isSupervised = Array.isArray(client.supervisedBy)
+      ? client.supervisedBy.some((a) => String(a._id || a) === empIdStr)
+      : false;
+    if (role !== "owner" && !isManagerLike(emp.role) && !isAssigned && !isSupervised) {
       return res.status(403).json({ error: "Not authorized to view this client" });
     }
 
