@@ -67,5 +67,7 @@ const WhatsAppGroupSchema = new Schema(
 WhatsAppGroupSchema.index({ owner: 1, createdAt: -1 });
 WhatsAppGroupSchema.index({ "members.memberId": 1 });
 WhatsAppGroupSchema.index({ isActive: 1, owner: 1, updatedAt: -1 });
+// getChatList groups query: owner + isActive + my membership, sorted by lastMessageAt
+WhatsAppGroupSchema.index({ owner: 1, isActive: 1, "members.memberId": 1, lastMessageAt: -1 });
 
 module.exports = mongoose.model("WhatsAppGroup", WhatsAppGroupSchema);

@@ -116,12 +116,13 @@ cron.schedule("*/10 * * * * *", async () => {
         const nowDate = now.format("YYYY-MM-DD");
         const isRetroactiveProcessing = nowDate !== attendanceDate;
 
-        // ✅ Mark as Half Day ONLY IF: same-day session, cron ran on the same date, and before 9 PM
+        // ✅ Mark as Half Day ONLY IF: same-day session, cron ran on the same date, and BEFORE 9 PM (not after)
         const halfDayLogoutThreshold = 21 * 60; // 9:00 PM
+        const isAfter9PM = logoutTotalMinutes >= halfDayLogoutThreshold;
         const shouldMarkHalfDay =
           !isCrossMidnightLogout &&
           !isRetroactiveProcessing &&
-          logoutTotalMinutes < halfDayLogoutThreshold &&
+          !isAfter9PM &&
           finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {

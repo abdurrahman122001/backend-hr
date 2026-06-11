@@ -14,6 +14,10 @@ router.get("/", requireAuth, clientInfoCtrl.getClientInfo);
 // Fetch only the logged-in employee's assigned clients
 router.get("/my", requireAuth, clientInfoCtrl.getMyClients);
 
+// Bulk WhatsApp flags for ALL my clients + groups in one request
+// (must be registered before "/:id" so it isn't captured as an id)
+router.get("/whatsapp-flags-bulk", requireAuth, clientInfoCtrl.getWhatsAppFlagsBulk);
+
 // Update specific client info (Owner/Manager/Team Lead/Assigned Employee)
 router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
 // Partial update — used by CRM for toggling isActive and other field-level patches
