@@ -179,9 +179,13 @@ const moment = require("moment-timezone");
 require("./schedulers/leaveSyncCron");
 require("./schedulers/sessionTimeoutCron"); // ✅ Session timeout cron for auto-logout
 // ---------- Static ----------
+// Uploaded files get unique names, so the browser can cache them for a week —
+// without maxAge, every avatar re-downloads on every page/thread open.
+const STATIC_CACHE_OPTS = { maxAge: "7d", immutable: true };
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "./uploads"), {
+    ...STATIC_CACHE_OPTS,
     setHeaders: (res) => {
       res.setHeader("Access-Control-Allow-Origin", "*"); // or restrict to http://localhost:8080
       res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -192,13 +196,13 @@ app.use(
     },
   }),
 );
-app.use("/upload", express.static(path.join(__dirname, "../uploads")));
-app.use("/uploads", express.static(path.join(__dirname, "../uploads")));
+app.use("/upload", express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS));
+app.use("/uploads", express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS));
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
 app.use(
   "/uploads/chat-attachments",
-  express.static(path.join(__dirname, "../uploads/chat-attachments")),
+  express.static(path.join(__dirname, "../uploads/chat-attachments"), STATIC_CACHE_OPTS),
 );
 
 app.use(

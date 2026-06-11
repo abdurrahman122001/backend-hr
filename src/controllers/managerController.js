@@ -28,54 +28,30 @@ exports.getRoster = async (req, res) => {
     // path stores the full ancestry chain as "id1.id2.id3", so matching on me._id
     // anywhere in the path returns every junior at every level below me.
     const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
-    const allDescendantLinks = await EmployeeHierarchy.find({
-      owner: me.owner,
-      path: pathRegex,
-    }).select("junior").lean();
+    // These three lookups are independent — run them together
+    const [allDescendantLinks, directJuniorLinks, supervisorFieldJuniors] =
+      await Promise.all([
+        EmployeeHierarchy.find({
+          owner: me.owner,
+          path: pathRegex,
+        }).select("junior").lean(),
+        EmployeeHierarchy.find({
+          owner: me.owner,
+          senior: me._id,
+        }).select("junior").lean(),
+        Employee.find({
+          owner: me.owner,
+          supervisor: me._id,
+        }).select("_id").lean(),
+      ]);
     const allDescendantIds = allDescendantLinks.map(l => String(l.junior));
-
-    // Also capture direct juniors via the legacy senior: me._id index (fast lookup)
-    const directJuniorLinks = await EmployeeHierarchy.find({
-      owner: me.owner,
-      senior: me._id,
-    }).select("junior").lean();
     const directJuniorIds = directJuniorLinks.map(l => String(l.junior));
-
-    // Also include employees whose supervisor field points to me
-    const supervisorFieldJuniors = await Employee.find({
-      owner: me.owner,
-      supervisor: me._id,
-    }).select("_id").lean();
     const supervisorFieldIds = supervisorFieldJuniors.map(e => String(e._id));
 
     // Combine: full descendant tree + direct juniors + supervisor-field reports
     const juniorIds = [...new Set([...allDescendantIds, ...directJuniorIds, ...supervisorFieldIds])];
     const isSenior = juniorIds.length > 0;
-    // Top senior = has juniors AND is not a junior to any other employee in EmployeeHierarchy
-    const isJuniorInHierarchy = isSenior
-      ? !!(await EmployeeHierarchy.exists({ owner: me.owner, junior: me._id }))
-      : false;
-    const isTopSenior = isSenior && !isJuniorInHierarchy;
-
-    // Build juniorMap: tracks which juniors have supervision enabled on their clients
-    const supervisedClients = await ClientInfo.find({
-      owner: me.owner,
-      assignedTo: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
-      supervisedBy: me._id,
-    }).select("assignedTo").lean();
-
-    const supervisedJuniorIds = new Set();
-    supervisedClients.forEach(c => {
-      (c.assignedTo || []).forEach(aId => {
-        const idStr = String(aId);
-        if (juniorIds.includes(idStr)) supervisedJuniorIds.add(idStr);
-      });
-    });
-
-    const juniorMap = new Map();
-    juniorIds.forEach(jid => {
-      juniorMap.set(jid, supervisedJuniorIds.has(jid));
-    });
+    const juniorObjIds = juniorIds.map(id => new mongoose.Types.ObjectId(id));
 
     const canSeeManagementTabs = isManager || isTeamLead || isSenior;
     const isEmployee = !isManager && !isTeamLead; // but could be a senior staff
@@ -96,20 +72,13 @@ exports.getRoster = async (req, res) => {
       { role: { $in: ["Employee", "Manager", "Team Lead"] } },
     ];
 
-    const employees = await Employee.find(employeeQuery)
-      .select(
-        "_id name email companyEmail role department designation supervisionMode supervisor supervisorMode photographUrl"
-      )
-      .populate("supervisor", "_id name companyEmail")
-      .sort({ name: 1 });
-
     /* ------------------ CLIENT FILTER ------------------ */
     let clientQuery = { owner: me.owner };
 
     // If it's NOT a manager or team lead, only show clients they're directly assigned to (or their juniors)
     if (!isManager && !isTeamLead) {
       const myId = new mongoose.Types.ObjectId(me._id);
-      const targetIds = [myId, ...juniorIds.map(id => new mongoose.Types.ObjectId(id))];
+      const targetIds = [myId, ...juniorObjIds];
 
       if (isSenior) {
         // Seniors see: own clients, juniors' clients, AND unassigned clients
@@ -129,13 +98,61 @@ exports.getRoster = async (req, res) => {
       }
     }
 
-    const clients = await ClientInfo.find(clientQuery)
-      .select(
-        "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail photographUrl createdAt updatedAt"
-      )
-      .populate("assignedTo", "_id name companyEmail role")
-      .populate("owner", "_id name companyEmail")
-      .sort({ isActive: -1, createdAt: -1 });
+    // Everything below depends only on juniorIds — run all of it in parallel
+    const [
+      isJuniorInHierarchyExists,
+      supervisedClients,
+      employees,
+      clients,
+      juniorAsseniorLinks,
+    ] = await Promise.all([
+      isSenior
+        ? EmployeeHierarchy.exists({ owner: me.owner, junior: me._id })
+        : Promise.resolve(null),
+      ClientInfo.find({
+        owner: me.owner,
+        assignedTo: { $in: juniorObjIds },
+        supervisedBy: me._id,
+      }).select("assignedTo").lean(),
+      Employee.find(employeeQuery)
+        .select(
+          "_id name email companyEmail role department designation supervisionMode supervisor supervisorMode photographUrl"
+        )
+        .populate("supervisor", "_id name companyEmail")
+        .sort({ name: 1 }),
+      ClientInfo.find(clientQuery)
+        .select(
+          "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail photographUrl createdAt updatedAt"
+        )
+        .populate("assignedTo", "_id name companyEmail role")
+        .populate("owner", "_id name companyEmail")
+        .sort({ isActive: -1, createdAt: -1 }),
+      juniorIds.length > 0
+        ? EmployeeHierarchy.find({
+            owner: me.owner,
+            senior: { $in: juniorObjIds },
+            junior: { $in: juniorObjIds },
+          }).select("senior junior").lean()
+        : Promise.resolve([]),
+    ]);
+
+    // Top senior = has juniors AND is not a junior to any other employee in EmployeeHierarchy
+    const isJuniorInHierarchy = isSenior ? !!isJuniorInHierarchyExists : false;
+    const isTopSenior = isSenior && !isJuniorInHierarchy;
+
+    // Build juniorMap: tracks which juniors have supervision enabled on their clients
+    const supervisedJuniorIds = new Set();
+    supervisedClients.forEach(c => {
+      (c.assignedTo || []).forEach(aId => {
+        const idStr = String(aId);
+        if (juniorIds.includes(idStr)) supervisedJuniorIds.add(idStr);
+      });
+    });
+
+    const juniorMap = new Map();
+    juniorIds.forEach(jid => {
+      juniorMap.set(jid, supervisedJuniorIds.has(jid));
+    });
 
     // **auto-apply supervision marks based on hierarchy and self-assignments**
     // Add the current user for clients they should supervise even if the DB
@@ -162,22 +179,25 @@ exports.getRoster = async (req, res) => {
 
     // persist any added supervision back to the database so that subsequent
     // requests (or other services) see the updated state without relying on
-    // the login sync job.
-    try {
+    // the login sync job. The response already reflects these marks (applied
+    // in-memory above), so the write runs after the response is sent.
+    {
       const meObjId = new mongoose.Types.ObjectId(me._id);
-      const juniorObjIds = juniorIds.map(id => new mongoose.Types.ObjectId(id));
-      await ClientInfo.updateMany(
-        {
-          owner: me.owner,
-          assignedTo: { $in: [...juniorObjIds, meObjId] }
-        },
-        {
-          $addToSet: { supervisedBy: meObjId },
-          $set: { supervision: "needs_approval" }
-        }
-      );
-    } catch (dbErr) {
-      console.error("getRoster supervision persistence error:", dbErr);
+      const writeJuniorObjIds = juniorObjIds.slice();
+      setImmediate(() => {
+        ClientInfo.updateMany(
+          {
+            owner: me.owner,
+            assignedTo: { $in: [...writeJuniorObjIds, meObjId] }
+          },
+          {
+            $addToSet: { supervisedBy: meObjId },
+            $set: { supervision: "needs_approval" }
+          }
+        ).catch((dbErr) =>
+          console.error("getRoster supervision persistence error:", dbErr),
+        );
+      });
     }
 
     // Add readBy tracking for employees
@@ -229,25 +249,16 @@ exports.getRoster = async (req, res) => {
     });
 
     /* ------------------ DIRECT JUNIOR MAP (for ContactsPanel supervised count) ----------- */
-    // Fetch all hierarchy links where any of our juniors is a senior themselves.
-    // This gives us the direct-junior relationships for the full descendant tree
-    // so the frontend can BFS without relying on the Employee.supervisor field
-    // (which may be out of sync with EmployeeHierarchy).
+    // Direct-junior relationships for the full descendant tree (prefetched in
+    // parallel above) so the frontend can BFS without relying on the
+    // Employee.supervisor field (which may be out of sync with EmployeeHierarchy).
     const seniorToDirectJuniors = {};
-    if (juniorIds.length > 0) {
-      const juniorAsseniorLinks = await EmployeeHierarchy.find({
-        owner: me.owner,
-        senior: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
-        junior: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) },
-      }).select("senior junior").lean();
-
-      for (const link of juniorAsseniorLinks) {
-        const sid = String(link.senior);
-        if (!seniorToDirectJuniors[sid]) seniorToDirectJuniors[sid] = [];
-        const jid = String(link.junior);
-        if (!seniorToDirectJuniors[sid].includes(jid)) {
-          seniorToDirectJuniors[sid].push(jid);
-        }
+    for (const link of juniorAsseniorLinks) {
+      const sid = String(link.senior);
+      if (!seniorToDirectJuniors[sid]) seniorToDirectJuniors[sid] = [];
+      const jid = String(link.junior);
+      if (!seniorToDirectJuniors[sid].includes(jid)) {
+        seniorToDirectJuniors[sid].push(jid);
       }
     }
 
