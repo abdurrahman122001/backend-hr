@@ -149,6 +149,8 @@ const ClientInfoSchema = new Schema(
 // Create index for efficient assignment queries
 ClientInfoSchema.index({ assignedTo: 1 });
 ClientInfoSchema.index({ owner: 1, assignedTo: 1 });
+// Supports the $or supervisedBy branch in getChatList (was a collection scan)
+ClientInfoSchema.index({ owner: 1, supervisedBy: 1 });
 ClientInfoSchema.index({ owner: 1, "lastWhatsAppMessage.at": -1 });
 
 module.exports = model("ClientInfo", ClientInfoSchema);

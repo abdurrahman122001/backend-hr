@@ -4211,169 +4211,279 @@ exports.createMessage = async function createMessage(req, res) {
 };
 
 /**
+ * Background repair of denormalized `lastWhatsAppMessage` on ClientInfo.
+ * Runs the expensive last-message-per-client aggregation OUTSIDE the request
+ * path (throttled per employee) so the chat-list response never waits for it.
+ */
+const _chatListRepairAt = new Map(); // employeeId -> last repair timestamp
+const CHAT_LIST_REPAIR_INTERVAL_MS = 2 * 60 * 1000;
+
+async function repairLastWhatsAppMessages(ownerObjId, clients) {
+  const ClientInfo = require("../models/ClientInfo");
+  const ids = clients.map((c) => c._id);
+  if (ids.length === 0) return;
+
+  const latest = await WhatsAppMessage.aggregate([
+    {
+      $match: {
+        owner: ownerObjId,
+        client: { $in: ids },
+        isGroupMessage: { $ne: true },
+        isClientEmployeeMessage: { $ne: true },
+        status: { $ne: "draft" },
+        $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+      },
+    },
+    // Slim each doc BEFORE sort/group — full messages carry embedded comments,
+    // attachments, edit history etc. and make the sort stage very slow.
+    {
+      $project: {
+        client: 1,
+        createdAt: 1,
+        sender: 1,
+        note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
+        hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+      },
+    },
+    { $sort: { createdAt: -1 } },
+    {
+      $group: {
+        _id: "$client",
+        note: { $first: "$note" },
+        at: { $first: "$createdAt" },
+        senderId: { $first: "$sender" },
+        hasAtt: { $first: "$hasAtt" },
+      },
+    },
+  ]);
+
+  const byId = new Map(clients.map((c) => [String(c._id), c]));
+  const ops = [];
+  for (const row of latest) {
+    const cached = byId.get(String(row._id));
+    const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
+    if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
+      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      ops.push({
+        updateOne: {
+          filter: { _id: row._id },
+          update: {
+            $set: {
+              "lastWhatsAppMessage.text": text,
+              "lastWhatsAppMessage.at": row.at,
+              "lastWhatsAppMessage.senderId": row.senderId,
+              "lastWhatsAppMessage.hasAttachments": row.hasAtt,
+            },
+          },
+        },
+      });
+    }
+  }
+  if (ops.length > 0) {
+    await ClientInfo.bulkWrite(ops, { ordered: false });
+    console.log(`🔧 [chat-list-repair] refreshed lastWhatsAppMessage for ${ops.length} client(s)`);
+  }
+}
+
+/**
  * GET /whatsApp-messages/chat-list
  *
  * Fast sidebar chat list — O(clients + groups) instead of O(messages).
  *
  * Uses denormalized `lastWhatsAppMessage` on ClientInfo (updated on every send/approve)
- * so this becomes two simple find() queries + one small unread aggregation, all parallel.
+ * so this becomes two simple find() queries + two small aggregations, all parallel.
+ * The heavy per-client last-message recomputation runs in the background AFTER
+ * the response is sent (throttled), never blocking the sidebar.
  */
 exports.getChatList = async function getChatList(req, res) {
   try {
+    const t0 = Date.now();
     const owner = req.employee?.owner || req.employee?._id;
     const meId = new mongoose.Types.ObjectId(String(req.employee._id));
     const ownerObjId = typeof owner === "string" ? new mongoose.Types.ObjectId(owner) : owner;
     const ClientInfo = require("../models/ClientInfo");
 
-    // ── Step 1: Get all clients assigned/supervised to me ──────────────────
-    const allMyClients = await ClientInfo.find({
+    // ── Kick off groups + unread queries immediately — they don't depend on
+    // the client list, so they run in parallel with steps 1 and 2 below.
+    const groupsPromise = WhatsAppGroup.find({
+      owner: ownerObjId,
+      isActive: true,
+      "members.memberId": String(meId),
+    })
+      .select("_id name avatar lastMessage lastMessageAt members")
+      .sort({ lastMessageAt: -1 })
+      .limit(60)
+      .lean();
+
+    // Unread per chat — scoped to receiver=me only (fast with index)
+    // Client-employee messages use a composite key so their unread badges
+    // are tracked independently from the parent client chat.
+    const unreadPromise = WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          receiver: meId,
+          status: { $ne: "draft" },
+          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          "seenBy.employee": { $ne: meId },
+        },
+      },
+      // Keep only the fields used to build the group key
+      {
+        $project: {
+          isGroupMessage: 1,
+          groupId: 1,
+          isClientEmployeeMessage: 1,
+          client: 1,
+          clientEmployeeId: 1,
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              "$isGroupMessage",
+              { $toString: "$groupId" },
+              {
+                $cond: [
+                  { $eq: ["$isClientEmployeeMessage", true] },
+                  {
+                    $concat: [
+                      "client_employee_",
+                      { $toString: "$client" },
+                      "_",
+                      { $toString: "$clientEmployeeId" },
+                    ],
+                  },
+                  { $toString: "$client" },
+                ],
+              },
+            ],
+          },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // ── Pending-approval counts per chat (same composite key as unread) ────
+    const pendingPromise = WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          receiver: meId,
+          sender: { $ne: meId },
+          approvalStatus: "pending",
+        },
+      },
+      {
+        $project: {
+          isGroupMessage: 1,
+          groupId: 1,
+          isClientEmployeeMessage: 1,
+          client: 1,
+          clientEmployeeId: 1,
+        },
+      },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              "$isGroupMessage",
+              { $toString: "$groupId" },
+              {
+                $cond: [
+                  { $eq: ["$isClientEmployeeMessage", true] },
+                  {
+                    $concat: [
+                      "client_employee_",
+                      { $toString: "$client" },
+                      "_",
+                      { $toString: "$clientEmployeeId" },
+                    ],
+                  },
+                  { $toString: "$client" },
+                ],
+              },
+            ],
+          },
+          count: { $sum: 1 },
+        },
+      },
+    ]);
+
+    // ── Clients assigned/supervised to me ──────────────────────────────────
+    // Select only the companyEmployees subfields needed for the photo lookup —
+    // the full embedded array can be large and slows the query + transfer.
+    const clientsPromise = ClientInfo.find({
       owner: ownerObjId,
       $or: [{ assignedTo: meId }, { supervisedBy: meId }],
     })
-      .select("_id clientName dba lastWhatsAppMessage photographUrl companyEmployees")
+      .select(
+        "_id clientName dba lastWhatsAppMessage photographUrl companyEmployees._id companyEmployees.name companyEmployees.photographUrl"
+      )
       .lean();
 
-    const myClientIds = allMyClients.map((c) => c._id);
-
-    // ── Step 2: Last NON-PENDING message for every client + every client-employee ──
-    // Run both in parallel. Employee messages are excluded from the client grouping
-    // so they don't bleed through as the "last message" for the parent client chat.
-    const [latestPerClient, latestPerClientEmployee] = await Promise.all([
-      WhatsAppMessage.aggregate([
-        {
-          $match: {
-            owner: ownerObjId,
-            client: { $in: myClientIds },
-            isGroupMessage: { $ne: true },
-            isClientEmployeeMessage: { $ne: true }, // exclude client-employee messages
-            status: { $ne: "draft" },
-            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
-          },
+    // ── Last message per client-employee conversation ───────────────────────
+    // Owner-scoped (no client $in) so it can run in parallel with the clients
+    // query; results are filtered to my clients in JS below. This subset is
+    // typically small compared to the full message collection.
+    const empAggPromise = WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          isClientEmployeeMessage: true,
+          isGroupMessage: { $ne: true },
+          status: { $ne: "draft" },
+          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
         },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: "$client",
-            note: { $first: "$note" },
-            at: { $first: "$createdAt" },
-            senderId: { $first: "$sender" },
-            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
-          },
+      },
+      {
+        $project: {
+          client: 1,
+          createdAt: 1,
+          sender: 1,
+          clientEmployeeId: 1,
+          clientEmployeeData: 1,
+          note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
+          hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
         },
-      ]),
-
-      // Separate aggregation for client-employee conversations
-      WhatsAppMessage.aggregate([
-        {
-          $match: {
-            owner: ownerObjId,
-            client: { $in: myClientIds },
-            isClientEmployeeMessage: true,
-            isGroupMessage: { $ne: true },
-            status: { $ne: "draft" },
-            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
-          },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: { client: "$client", clientEmployeeId: "$clientEmployeeId" },
+          note: { $first: "$note" },
+          at: { $first: "$createdAt" },
+          senderId: { $first: "$sender" },
+          hasAtt: { $first: "$hasAtt" },
+          clientEmployeeData: { $first: "$clientEmployeeData" },
+          clientEmployeeId: { $first: "$clientEmployeeId" },
         },
-        { $sort: { createdAt: -1 } },
-        {
-          $group: {
-            _id: { client: "$client", clientEmployeeId: "$clientEmployeeId" },
-            note: { $first: "$note" },
-            at: { $first: "$createdAt" },
-            senderId: { $first: "$sender" },
-            hasAtt: { $first: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] } },
-            clientEmployeeData: { $first: "$clientEmployeeData" },
-            clientEmployeeId: { $first: "$clientEmployeeId" },
-          },
-        },
-      ]),
+      },
     ]);
 
-    // Build preview map and repair any stale lastWhatsAppMessage in the DB (fire-and-forget)
-    const migratedMap = new Map();
-    for (const row of latestPerClient) {
-      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
-      migratedMap.set(String(row._id), { text, at: row.at, senderId: row.senderId, hasAttachments: row.hasAtt });
-
-      // Repair ClientInfo if the cached value is missing or stale (e.g. set by old pending msg)
-      const cached = allMyClients.find((c) => String(c._id) === String(row._id));
-      const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
-      if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
-        ClientInfo.findByIdAndUpdate(row._id, {
-          $set: {
-            "lastWhatsAppMessage.text": text,
-            "lastWhatsAppMessage.at": row.at,
-            "lastWhatsAppMessage.senderId": row.senderId,
-            "lastWhatsAppMessage.hasAttachments": row.hasAtt,
-          },
-        }, { timestamps: false }).catch(() => {});
-      }
-    }
-
-    // ── Step 3: Groups + Unread counts — in parallel ────────────────────────
-    const [groups, unreadRows] = await Promise.all([
-      WhatsAppGroup.find({
-        owner: ownerObjId,
-        isActive: true,
-        "members.memberId": String(meId),
-      })
-        .select("_id name avatar lastMessage lastMessageAt members")
-        .sort({ lastMessageAt: -1 })
-        .limit(60)
-        .lean(),
-
-      // Unread per chat — scoped to receiver=me only (fast with index)
-      // Client-employee messages use a composite key so their unread badges
-      // are tracked independently from the parent client chat.
-      WhatsAppMessage.aggregate([
-        {
-          $match: {
-            owner: ownerObjId,
-            receiver: meId,
-            status: { $ne: "draft" },
-            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
-            "seenBy.employee": { $ne: meId },
-          },
-        },
-        {
-          $group: {
-            _id: {
-              $cond: [
-                "$isGroupMessage",
-                { $toString: "$groupId" },
-                {
-                  $cond: [
-                    { $eq: ["$isClientEmployeeMessage", true] },
-                    {
-                      $concat: [
-                        "client_employee_",
-                        { $toString: "$client" },
-                        "_",
-                        { $toString: "$clientEmployeeId" },
-                      ],
-                    },
-                    { $toString: "$client" },
-                  ],
-                },
-              ],
-            },
-            count: { $sum: 1 },
-          },
-        },
-      ]),
+    // ── Run EVERYTHING in parallel — total latency = slowest single query ──
+    const [allMyClients, latestPerClientEmployee, groups, unreadRows, pendingRows] = await Promise.all([
+      clientsPromise,
+      empAggPromise,
+      groupsPromise,
+      unreadPromise,
+      pendingPromise,
     ]);
+
+    const clientById = new Map(allMyClients.map((c) => [String(c._id), c]));
+    const pendingMap = new Map(pendingRows.map((r) => [String(r._id), r.count]));
 
     const unreadMap = new Map(unreadRows.map((r) => [String(r._id), r.count]));
 
-    // ── Step 4: Build sidebar list — ONLY clients with messages ────────────
+    // ── Build sidebar list — ONLY clients with messages ────────────────────
     const chats = [];
 
     for (const c of allMyClients) {
       const cid = String(c._id);
-      // Prefer the freshly-queried non-pending last message.
-      // Fall back to cached lastWhatsAppMessage only if no messages were found
-      // by the aggregation (client truly has no approved/null messages yet).
-      const lastMsg = migratedMap.get(cid) || (c.lastWhatsAppMessage?.at ? c.lastWhatsAppMessage : null);
+      // Read the denormalized last message directly — it is maintained on every
+      // send/approve and self-heals via the throttled background repair below.
+      const lastMsg = c.lastWhatsAppMessage?.at ? c.lastWhatsAppMessage : null;
 
       // Skip clients with NO messages at all
       if (!lastMsg?.at) continue;
@@ -4393,20 +4503,22 @@ exports.getChatList = async function getChatList(req, res) {
         hasAttachments: lastMsg.hasAttachments || false,
         unreadCount: unreadMap.get(cid) || 0,
         hasUnreadMessages: !!(unreadMap.get(cid)),
+        pendingApprovalCount: pendingMap.get(cid) || 0,
         isGroupMessage: false,
         isClientEmployeeMessage: false,
       });
     }
 
     // ── Client-employee conversations — one entry per employee ────────────────
-    const clientMap = new Map(allMyClients.map((c) => [String(c._id), c]));
     for (const row of latestPerClientEmployee) {
       const clientId = String(row._id.client);
       const empId = row.clientEmployeeId ? String(row.clientEmployeeId) : String(row._id.clientEmployeeId);
       if (!clientId || !empId || empId === "null" || empId === "undefined") continue;
 
       const chatId = `client_employee_${clientId}_${empId}`;
-      const clientInfo = clientMap.get(clientId);
+      const clientInfo = clientById.get(clientId);
+      // Aggregation is owner-scoped — keep only conversations for MY clients
+      if (!clientInfo) continue;
 
       const empName =
         row.clientEmployeeData?.clientEmployeeName ||
@@ -4443,6 +4555,7 @@ exports.getChatList = async function getChatList(req, res) {
         hasAttachments: row.hasAtt || false,
         unreadCount: unreadMap.get(chatId) || 0,
         hasUnreadMessages: !!(unreadMap.get(chatId)),
+        pendingApprovalCount: pendingMap.get(chatId) || 0,
         isGroupMessage: false,
         isClientEmployeeMessage: true,
       });
@@ -4462,6 +4575,7 @@ exports.getChatList = async function getChatList(req, res) {
         lastMessageAt: g.lastMessageAt || null,
         unreadCount: unreadMap.get(gid) || 0,
         hasUnreadMessages: !!(unreadMap.get(gid)),
+        pendingApprovalCount: pendingMap.get(gid) || 0,
         isGroupMessage: true,
         isClientEmployeeMessage: false,
       });
@@ -4475,6 +4589,20 @@ exports.getChatList = async function getChatList(req, res) {
     });
 
     res.json({ chats, total: chats.length });
+    console.log(`📋 [chat-list] ${chats.length} chats served in ${Date.now() - t0}ms`);
+
+    // ── AFTER responding: refresh stale lastWhatsAppMessage in the background
+    // (heavy aggregation, throttled to once per employee per interval)
+    const repairKey = String(meId);
+    const lastRepair = _chatListRepairAt.get(repairKey) || 0;
+    if (Date.now() - lastRepair > CHAT_LIST_REPAIR_INTERVAL_MS) {
+      _chatListRepairAt.set(repairKey, Date.now());
+      setImmediate(() => {
+        repairLastWhatsAppMessages(ownerObjId, allMyClients).catch((e) =>
+          console.error("❌ [chat-list-repair] error:", e.message),
+        );
+      });
+    }
   } catch (err) {
     console.error("❌ getChatList error:", err);
     res.status(500).json({ error: "Failed to load chat list" });

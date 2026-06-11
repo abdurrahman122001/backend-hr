@@ -1307,8 +1307,9 @@ router.post("/logout", requireAuth, async (req, res) => {
     let updated = null;
 
     // ✅ Only mark as Half Day for MANUAL logout (not auto-logout) and NOT cross-midnight
-    // If they logout before 9 PM on the same day they logged in
-    const shouldMarkHalfDay = !isAutoLogout && !isCrossMidnightLogout && logoutTotalMinutes < (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60) && finalStatus !== "Half Day";
+    // If they logout BEFORE 9 PM (not after) on the same day they logged in
+    const isAfter9PM = logoutTotalMinutes >= (HALF_DAY_LOGOUT_THRESHOLD_HOUR * 60);
+    const shouldMarkHalfDay = !isAutoLogout && !isCrossMidnightLogout && !isAfter9PM && finalStatus !== "Half Day";
 
     if (shouldMarkHalfDay) {
       finalStatus = "Half Day";

@@ -260,6 +260,8 @@ WhatsAppMessageSchema.index({ owner: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ owner: 1, status: 1, createdAt: -1 });
 // Receiver-based unread count inside aggregation
 WhatsAppMessageSchema.index({ owner: 1, receiver: 1, createdAt: -1 });
+// getChatList per-client last-message aggregations: match owner+client, sort by createdAt
+WhatsAppMessageSchema.index({ owner: 1, client: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ client: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ sender: 1, createdAt: -1 });
 WhatsAppMessageSchema.index({ receiver: 1, createdAt: -1 });

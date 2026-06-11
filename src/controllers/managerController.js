@@ -512,22 +512,6 @@ exports.assignClient = async (req, res) => {
     if (!clientId)
       return res.status(400).json({ error: "clientId is required" });
 
-    // Allow if: Manager/Team Lead role OR is a senior in EmployeeHierarchy for any of the target employees
-    const isManagerRole = isManagerLike(me.role);
-    let isHierarchySenior = false;
-    if (!isManagerRole && Array.isArray(employeeIds) && employeeIds.length > 0) {
-      const seniorLink = await EmployeeHierarchy.exists({
-        owner: me.owner,
-        senior: me._id,
-        junior: { $in: employeeIds },
-      });
-      isHierarchySenior = !!seniorLink;
-    }
-
-    if (!isManagerRole && !isHierarchySenior) {
-      return res.status(403).json({ error: "Unauthorized: you are not a manager/team lead and do not supervise any of the target employees" });
-    }
-
     // Get the client before update
     const clientBeforeUpdate = await ClientInfo.findOne({
       _id: clientId,
@@ -538,6 +522,29 @@ exports.assignClient = async (req, res) => {
       return res
         .status(404)
         .json({ error: "Client not found or not under your owner" });
+
+    // Allow if: Manager/Team Lead role OR is a senior in EmployeeHierarchy for the target employees
+    // For unassign (empty employeeIds), check if user is senior for currently assigned employees
+    const isManagerRole = isManagerLike(me.role);
+    let isHierarchySenior = false;
+    if (!isManagerRole) {
+      const targetIds = employeeIds.length > 0
+        ? employeeIds
+        : (clientBeforeUpdate.assignedTo?.map((emp) => (emp._id || emp).toString()) || []);
+
+      if (Array.isArray(targetIds) && targetIds.length > 0) {
+        const seniorLink = await EmployeeHierarchy.exists({
+          owner: me.owner,
+          senior: me._id,
+          junior: { $in: targetIds },
+        });
+        isHierarchySenior = !!seniorLink;
+      }
+    }
+
+    if (!isManagerRole && !isHierarchySenior) {
+      return res.status(403).json({ error: "Unauthorized: you are not a manager/team lead and do not supervise any of the target employees" });
+    }
 
     const previousEmployeeIds = clientBeforeUpdate.assignedTo
       ? clientBeforeUpdate.assignedTo.map((emp) => (emp._id || emp).toString())

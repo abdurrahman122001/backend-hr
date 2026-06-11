@@ -586,6 +586,68 @@ exports.getWhatsAppFlags = async (req, res) => {
   }
 };
 
+// Bulk WhatsApp flags — one request returns flags for ALL my clients + groups,
+// replacing the per-chat /:id/whatsapp-flags fan-out in the chat sidebar.
+exports.getWhatsAppFlagsBulk = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("_id role owner");
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const role = String(emp.role || "").trim().toLowerCase();
+    const isPrivileged =
+      role === "owner" ||
+      ["manager", "team lead", "team_lead", "teamlead"].includes(role);
+
+    const clientQuery = { owner: emp.owner };
+    if (!isPrivileged) {
+      clientQuery.$or = [{ assignedTo: emp._id }, { supervisedBy: emp._id }];
+    }
+
+    const WhatsAppGroup = require("../models/WhatsAppGroup");
+    const [clients, groups] = await Promise.all([
+      ClientInfo.find(clientQuery)
+        .select("_id whatsappPinned whatsappRead whatsappFavourite whatsappMuted whatsappArchived photographUrl")
+        .lean(),
+      WhatsAppGroup.find({
+        owner: emp.owner,
+        isActive: true,
+        "members.memberId": String(emp._id),
+      })
+        .select("_id memberFlags")
+        .lean(),
+    ]);
+
+    const flags = {};
+    for (const c of clients) {
+      flags[String(c._id)] = {
+        isPinned: !!c.whatsappPinned,
+        isRead: !!c.whatsappRead,
+        isFavourite: !!c.whatsappFavourite,
+        isMuted: !!c.whatsappMuted,
+        isArchived: !!c.whatsappArchived,
+        photographUrl: c.photographUrl || null,
+      };
+    }
+    for (const g of groups) {
+      const mf = g.memberFlags || {};
+      const f =
+        (mf instanceof Map ? mf.get(String(emp._id)) : mf[String(emp._id)]) || {};
+      flags[`group_${g._id}`] = {
+        isPinned: !!f.whatsappPinned,
+        isRead: true,
+        isFavourite: !!f.whatsappFavourite,
+        isMuted: !!f.whatsappMuted,
+        isArchived: !!f.whatsappArchived,
+      };
+    }
+
+    res.json({ flags });
+  } catch (err) {
+    console.error("getWhatsAppFlagsBulk error:", err);
+    res.status(500).json({ error: "Failed to fetch WhatsApp flags" });
+  }
+};
+
 exports.markClientRead = async (req, res) => {
   try {
     const employeeId = req.employee._id;
