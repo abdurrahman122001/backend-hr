@@ -1146,14 +1146,14 @@ exports.approveLeave = async (req, res) => {
       await revertLeaveSalaryDeduction(leave.employee._id, actualApprovedDays, leave.startDate);
     }
 
-    // APPLY SALARY DEDUCTION IF UNPAID (early_leave = present, no deduction)
-    if (!finalIsPaid && leave.leaveType !== "early_leave") {
+    // APPLY SALARY DEDUCTION IF UNPAID (early_leave and late = no deduction on approval)
+    if (!finalIsPaid && leave.leaveType !== "early_leave" && leave.leaveType !== "late") {
       await deductLeaveFromSalary(leave.employee._id, actualApprovedDays, leave.startDate);
     }
 
     // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
-    // early_leave = employee was present and just left early — no leave day consumed
-    if (leave.leaveType !== "early_leave") try {
+    // early_leave and late = employee was present; approval does not consume leave days
+    if (leave.leaveType !== "early_leave" && leave.leaveType !== "late") try {
       const leaveYear = getLeaveYear(leave.startDate);
       const employeeId = leave.employee._id;
       const ownerId = leave.employee.owner;
@@ -1237,8 +1237,8 @@ exports.approveLeave = async (req, res) => {
     }
 
     // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
-    // early_leave = employee was present and left early — attendance stays unchanged
-    if (leave.leaveType !== "early_leave") try {
+    // early_leave and late = employee was physically present; attendance status stays unchanged
+    if (leave.leaveType !== "early_leave" && leave.leaveType !== "late") try {
       const Attendance = require("../models/Attendance");
 
       for (const dateObj of leave.dates) {
@@ -1455,6 +1455,23 @@ exports.rejectLeave = async (req, res) => {
     });
 
     await leave.save();
+
+    // For early_leave and late: the event already happened regardless of approval.
+    // Rejection means no approved cover — deduct salary for the missed hours.
+    if (leave.leaveType === "early_leave" || leave.leaveType === "late") {
+      try {
+        const daysToDeduct = leave.totalDays || (leave.totalHours ? leave.totalHours / 8 : 0);
+        if (daysToDeduct > 0) {
+          await deductLeaveFromSalary(
+            leave.employee._id || leave.employee,
+            daysToDeduct,
+            leave.startDate
+          );
+        }
+      } catch (salaryErr) {
+        console.error("⚠️ Error deducting salary on early_leave/late rejection:", salaryErr);
+      }
+    }
 
     // 🔥 NEW: Real-time notification for rejection
     if (req.app.get("io")) {
