@@ -1,9 +1,23 @@
 // backend/src/controllers/salarySettingsController.js
 
 const SalarySettings = require("../models/SalarySettings");
+const User = require("../models/Users");
 
 // Utility to determine which owner's settings to use for this user
-function getSettingsOwner(req) {
+async function getSettingsOwner(req) {
+  // Employee logged in with an employee token (e.g. employee-admin opening
+  // the admin dashboard): resolve settings through their company owner,
+  // applying the same admin -> createdBy mapping the owner himself gets.
+  if (req.user.isEmployeeFallback || req.user.isEmployee) {
+    const ownerId = req.user.owner;
+    if (ownerId) {
+      const ownerUser = await User.findById(ownerId).select("role createdBy").lean();
+      if (ownerUser?.role === "admin" && ownerUser.createdBy) {
+        return ownerUser.createdBy;
+      }
+      return ownerId;
+    }
+  }
   // Super admin uses their own _id
   // Admin uses createdBy (the main super-admin who created them)
   // All others use their own _id
@@ -16,7 +30,7 @@ function getSettingsOwner(req) {
 // GET /salary-settings
 exports.getForLoggedInUser = async (req, res) => {
   try {
-    const owner = getSettingsOwner(req);
+    const owner = await getSettingsOwner(req);
     const doc = await SalarySettings.findOne({ owner })
       .lean()
       .select(
@@ -37,7 +51,7 @@ exports.getForLoggedInUser = async (req, res) => {
 // POST /salary-settings
 exports.updateForLoggedInUser = async (req, res) => {
   try {
-    const owner = getSettingsOwner(req);
+    const owner = await getSettingsOwner(req);
     const {
       enabledPersonalFields,
       enabledEmploymentFields,

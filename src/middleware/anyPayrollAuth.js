@@ -62,12 +62,26 @@ module.exports = async function anyPayrollAuth(req, res, next) {
             return next();
         }        // 2. Check if it's an Employee
         const employee = await Employee.findById(userId).select(
-            "_id role owner name companyEmail"
+            "_id role owner name companyEmail isAdmin"
         );
 
         if (employee) {
             const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
-            
+
+            // Employee granted admin rights (isAdmin): full admin access, same as a User admin
+            if (employee.isAdmin) {
+                req.user = {
+                    _id: finalOwner,
+                    employeeId: employee._id,
+                    owner: finalOwner,
+                    role: "admin",
+                    isAdmin: true,
+                    isEmployee: true,
+                    accessType: "edit",
+                };
+                return next();
+            }
+
             // Allow GET for all employees (viewing basic context)
             if (["GET", "HEAD", "OPTIONS"].includes(req.method)) {
                 req.user = {

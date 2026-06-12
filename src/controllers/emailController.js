@@ -103,7 +103,7 @@ exports.getClientEmails = async function(req, res) {
         .populate([
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" }
+          { path: "client", select: "_id clientName legalBusinessName dba" }
         ])
         .lean(),
       AssignmentMessage.countDocuments(query)
