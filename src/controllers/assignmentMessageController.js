@@ -3502,23 +3502,11 @@ exports.deleteThread = async function deleteThread(req, res) {
     const currentUser = req.employee._id;
     const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all messages for this thread where user is involved
-    const threadMessages = await AssignmentMessage.find({
-      $and: [
-        {
-          $or: isIdValidObject
-            ? [{ threadId: threadId }, { client: threadId }]
-            : [{ threadId: threadId }],
-        },
-        {
-          $or: [
-            { sender: currentUser },
-            { receiver: currentUser },
-            { receiver: { $in: [currentUser] } },
-          ],
-        },
-      ],
-    });
+    const threadQuery = isIdValidObject
+      ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
+      : { threadId: threadId };
+
+    const threadMessages = await AssignmentMessage.find(threadQuery);
 
     if (threadMessages.length === 0) {
       return res.status(404).json({ error: "No thread found" });
@@ -3595,28 +3583,13 @@ exports.permanentlyDeleteThread = async function permanentlyDeleteThread(
     const currentUser = req.employee._id;
     const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all trashed/spam messages for this thread where user is involved
+    const threadQuery = isIdValidObject
+      ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
+      : { threadId: threadId };
+
     const trashedMessages = await AssignmentMessage.find({
-      $and: [
-        {
-          $or: isIdValidObject
-            ? [{ threadId: threadId }, { client: threadId }]
-            : [{ threadId: threadId }],
-        },
-        {
-          $or: [
-            { sender: currentUser },
-            { receiver: currentUser },
-            { receiver: { $in: [currentUser] } },
-          ],
-        },
-        {
-          $or: [
-            { isTrashed: true },
-            { isSpam: true }
-          ]
-        }
-      ]
+      ...threadQuery,
+      $or: [{ isTrashed: true }, { isSpam: true }],
     });
 
     if (trashedMessages.length === 0) {
@@ -3691,23 +3664,13 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
     const currentUser = req.employee._id;
     const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all messages for this thread where user is involved
+    const threadQuery = isIdValidObject
+      ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
+      : { threadId: threadId };
+
     const threadMessages = await AssignmentMessage.find({
-      $and: [
-        {
-          $or: isIdValidObject
-            ? [{ threadId: threadId }, { client: threadId }]
-            : [{ threadId: threadId }],
-        },
-        {
-          $or: [
-            { sender: currentUser },
-            { receiver: currentUser },
-            { receiver: { $in: [currentUser] } },
-          ],
-        },
-      ],
-      isTrashed: false, // Only non-trashed messages
+      ...threadQuery,
+      isTrashed: { $ne: true },
     });
 
     if (threadMessages.length === 0) {

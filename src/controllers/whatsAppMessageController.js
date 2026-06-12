@@ -4419,7 +4419,7 @@ exports.getChatList = async function getChatList(req, res) {
       $or: [{ assignedTo: meId }, { supervisedBy: meId }],
     })
       .select(
-        "_id clientName dba lastWhatsAppMessage photographUrl companyEmployees._id companyEmployees.name companyEmployees.photographUrl"
+        "_id clientName dba legalBusinessName lastWhatsAppMessage photographUrl companyEmployees._id companyEmployees.name companyEmployees.photographUrl"
       )
       .lean();
 
@@ -4496,6 +4496,7 @@ exports.getChatList = async function getChatList(req, res) {
         clientId: cid,
         clientName: c.clientName,
         dba: c.dba,
+        legalBusinessName: c.legalBusinessName || null,
         photographUrl: c.photographUrl || null,
         lastMessage: cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : ""),
         lastMessageAt: lastMsg.at,
@@ -4545,6 +4546,8 @@ exports.getChatList = async function getChatList(req, res) {
         chatId,
         clientId,
         clientName: clientInfo?.clientName || "",
+        legalBusinessName: clientInfo?.legalBusinessName || null,
+        dba: clientInfo?.dba || null,
         clientPhotographUrl: clientInfo?.photographUrl || null,
         clientEmployeeId: empId,
         clientEmployeeData: row.clientEmployeeData || null,
