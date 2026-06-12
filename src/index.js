@@ -151,6 +151,7 @@ const ALLOWED_ORIGINS = [
   "http://localhost:8081",
   "http://localhost:8082",
   "http://localhost:8083",
+  "http://localhost:8084",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
@@ -196,13 +197,22 @@ app.use(
     },
   }),
 );
-app.use("/upload", express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS));
-app.use("/uploads", express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS));
+app.use(
+  "/upload",
+  express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS),
+);
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS),
+);
 // If you want a separate mount for chat‐attachments you can,
 // but it isn't necessary if they're inside uploads/chat-attachments/
 app.use(
   "/uploads/chat-attachments",
-  express.static(path.join(__dirname, "../uploads/chat-attachments"), STATIC_CACHE_OPTS),
+  express.static(
+    path.join(__dirname, "../uploads/chat-attachments"),
+    STATIC_CACHE_OPTS,
+  ),
 );
 
 app.use(
@@ -248,8 +258,16 @@ app.use("/api/attendance-config", anyPayrollAuth, attendanceConfigRouter);
 app.use("/api/admin/attendance-config", anyPayrollAuth, attendanceConfigRouter);
 app.use("/api/attendance-flags", anyPayrollAuth, attendanceFlagRoutes);
 app.use("/api/admin/attendance-flags", anyPayrollAuth, attendanceFlagRoutes);
-app.use("/api/specific-non-working-days", anyPayrollAuth, specificNonWorkingDayRouter);
-app.use("/api/admin/specific-non-working-days", anyPayrollAuth, specificNonWorkingDayRouter);
+app.use(
+  "/api/specific-non-working-days",
+  anyPayrollAuth,
+  specificNonWorkingDayRouter,
+);
+app.use(
+  "/api/admin/specific-non-working-days",
+  anyPayrollAuth,
+  specificNonWorkingDayRouter,
+);
 app.use("/api/hr", hrAuthRoutes);
 app.use("/api/employee", employeeCompleteRouter);
 app.use("/api/company-profile", unifiedAuth, companyProfile);
@@ -265,8 +283,16 @@ app.use("/api/onboarding", anyPayrollAuth, onboardingRouter);
 app.use("/api/employee-docs", employeeDocsRouter);
 // Mount at /api so /api/leave-summary-history works
 // Mount leave-related summary routes under /api/attendance
-app.use("/api/leave-summary-history", unifiedAuth, attendanceLeaveSummaryRouter);
-app.use("/api/admin/leave-summary-history", anyPayrollAuth, attendanceLeaveSummaryRouter);
+app.use(
+  "/api/leave-summary-history",
+  unifiedAuth,
+  attendanceLeaveSummaryRouter,
+);
+app.use(
+  "/api/admin/leave-summary-history",
+  anyPayrollAuth,
+  attendanceLeaveSummaryRouter,
+);
 app.use("/api", employeeLeaveSummary);
 // Intentionally expose both /api/loans and /api/loan to the same router?
 // Keeping both since your code mounted both. If unintentional, remove one.
@@ -343,7 +369,11 @@ app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
 app.use("/api/promotion", anyPayrollAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
-app.use("/api/probation-leave-approvals", anyPayrollAuth, probationLeaveApprovalsRouter);
+app.use(
+  "/api/probation-leave-approvals",
+  anyPayrollAuth,
+  probationLeaveApprovalsRouter,
+);
 app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/chat-threads", chatThreadRoutes);
@@ -414,7 +444,7 @@ function setupEmployeeChangeStream() {
       );
       try {
         changeStream.close();
-      } catch { }
+      } catch {}
     });
   } catch (e) {
     console.warn(
@@ -488,7 +518,7 @@ if (
     if (ENABLE_HTTPS) {
       console.warn(
         "⚠️ HTTPS requested but cert files were not found. Running on HTTP only. " +
-        "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
+          "Set ENABLE_HTTPS=false to silence this warning, or provide CERT_FULLCHAIN & CERT_PRIVKEY.",
       );
     }
   });
@@ -545,7 +575,9 @@ io.on("connection", (socket) => {
       const payload = jwt.verify(token, JWT_SECRET);
       const userId = payload.id || payload._id;
       const User = require("./models/Users");
-      const user = await User.findById(userId).select("owner createdBy role _id").lean();
+      const user = await User.findById(userId)
+        .select("owner createdBy role _id")
+        .lean();
       if (user) {
         const ownerId = user.owner || user.createdBy || user._id;
         const finalOwnerId = Array.isArray(ownerId) ? ownerId[0] : ownerId;
@@ -1108,9 +1140,10 @@ io.on("connection", (socket) => {
       const chainMemberIds = Array.isArray(populatedMessage.approvalChain)
         ? populatedMessage.approvalChain
             .map((step) => {
-              const id = typeof step === "object"
-                ? (step?.approver?._id || step?.approver || step?._id)
-                : step;
+              const id =
+                typeof step === "object"
+                  ? step?.approver?._id || step?.approver || step?._id
+                  : step;
               return id ? String(id) : null;
             })
             .filter(Boolean)
@@ -1467,8 +1500,8 @@ io.on("connection", (socket) => {
     socket.join(`thread_chat_${threadId}`);
   });
   /**
-     * Request previous chat context for a thread
-     */
+   * Request previous chat context for a thread
+   */
   socket.on("get_thread_context", async (data, callback) => {
     try {
       const { threadId, limit = 50, beforeTimestamp, userId } = data;
@@ -1572,8 +1605,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Send a new message in thread chat
-     */
+   * Send a new message in thread chat
+   */
   socket.on("send_thread_message", async (data, callback) => {
     try {
       const {
@@ -1685,8 +1718,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Mark thread messages as read
-     */
+   * Mark thread messages as read
+   */
   socket.on("mark_thread_read", async (data) => {
     try {
       const { threadId, userId, messageIds = [] } = data;
@@ -1754,8 +1787,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Edit a thread message
-     */
+   * Edit a thread message
+   */
   socket.on("edit_thread_message", async (data, callback) => {
     try {
       const { messageId, threadId, content, editedBy, attachments = [] } = data;
@@ -1812,8 +1845,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Delete a thread message (soft delete)
-     */
+   * Delete a thread message (soft delete)
+   */
   socket.on("delete_thread_message", async (data, callback) => {
     try {
       const { messageId, threadId, deletedBy, reason = "User deleted" } = data;
@@ -1865,8 +1898,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Get thread summary/context for AI/assistants
-     */
+   * Get thread summary/context for AI/assistants
+   */
   socket.on("get_thread_summary", async (data, callback) => {
     try {
       const { threadId, maxMessages = 100, forAI = false } = data;
@@ -1945,8 +1978,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Search within thread messages
-     */
+   * Search within thread messages
+   */
   socket.on("search_thread_messages", async (data, callback) => {
     try {
       const { threadId, query, userId, limit = 20 } = data;
@@ -1997,8 +2030,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Add reaction to thread message
-     */
+   * Add reaction to thread message
+   */
   socket.on("add_thread_reaction", async (data, callback) => {
     try {
       const { messageId, threadId, userId, emoji } = data;
@@ -2048,8 +2081,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Remove reaction from thread message
-     */
+   * Remove reaction from thread message
+   */
   socket.on("remove_thread_reaction", async (data, callback) => {
     try {
       const { messageId, threadId, userId } = data;
@@ -2098,8 +2131,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Upload attachments for thread message
-     */
+   * Upload attachments for thread message
+   */
   socket.on("upload_thread_attachments", async (data, callback) => {
     try {
       const { threadId, messageId, attachments, userId } = data;
@@ -2175,8 +2208,8 @@ io.on("connection", (socket) => {
     }
   });
   /**
-     * Get thread participants
-     */
+   * Get thread participants
+   */
   socket.on("get_thread_participants", async (data, callback) => {
     try {
       const { threadId } = data;
@@ -2215,8 +2248,8 @@ io.on("connection", (socket) => {
   });
   // =============== HELPER FUNCTIONS ===============
   /**
-     * Extract key topics from messages
-     */
+   * Extract key topics from messages
+   */
   function extractKeyTopics(messages) {
     const topics = new Map();
     const commonWords = new Set([
@@ -2798,21 +2831,31 @@ cron.schedule(
   async () => {
     try {
       // Email (AssignmentMessage) scheduled messages
-      const emailResults = await assignmentMessageController.sendScheduledMessages(io);
+      const emailResults =
+        await assignmentMessageController.sendScheduledMessages(io);
       if (emailResults.sent > 0) {
-        console.log(`[cron] Sent ${emailResults.sent} scheduled email messages`);
+        console.log(
+          `[cron] Sent ${emailResults.sent} scheduled email messages`,
+        );
       }
       if (emailResults.failed > 0) {
-        console.error(`[cron] Failed to send ${emailResults.failed} scheduled email messages`);
+        console.error(
+          `[cron] Failed to send ${emailResults.failed} scheduled email messages`,
+        );
       }
 
       // WhatsApp scheduled messages
-      const waResults = await whatsAppMessageController.sendScheduledMessages(io);
+      const waResults =
+        await whatsAppMessageController.sendScheduledMessages(io);
       if (waResults.sent > 0) {
-        console.log(`[cron] Sent ${waResults.sent} scheduled WhatsApp messages`);
+        console.log(
+          `[cron] Sent ${waResults.sent} scheduled WhatsApp messages`,
+        );
       }
       if (waResults.failed > 0) {
-        console.error(`[cron] Failed to send ${waResults.failed} scheduled WhatsApp messages`);
+        console.error(
+          `[cron] Failed to send ${waResults.failed} scheduled WhatsApp messages`,
+        );
       }
     } catch (err) {
       console.error("[cron] Error sending scheduled messages:", err);
@@ -2874,8 +2917,10 @@ cron.schedule(
           leaveYearEnd.setHours(0, 0, 0, 0);
           const leaveYearStart = new Date(leaveYear - 1, 11, 26);
           leaveYearStart.setHours(0, 0, 0, 0);
-          const totalDaysInYear = (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
-          const remainingDays = (leaveYearEnd - probationEnd) / (1000 * 60 * 60 * 24) + 1;
+          const totalDaysInYear =
+            (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
+          const remainingDays =
+            (leaveYearEnd - probationEnd) / (1000 * 60 * 60 * 24) + 1;
           const dailyRate = 22 / totalDaysInYear;
           function customRound(value) {
             const decimal = value - Math.floor(value);
@@ -2883,7 +2928,10 @@ cron.schedule(
             if (decimal < 0.5) return Math.floor(value);
             return value;
           }
-          const proratedLeaves = Math.max(0, customRound(dailyRate * remainingDays));
+          const proratedLeaves = Math.max(
+            0,
+            customRound(dailyRate * remainingDays),
+          );
           if (proratedLeaves <= 0) continue;
           // ✅ Create pending approval instead of auto-crediting
           await ProbationLeaveApproval.create({
@@ -2906,7 +2954,9 @@ cron.schedule(
               },
             ],
           });
-          console.log(`[cron][probation] ✅ Created pending approval for ${emp.name || emp._id} (${proratedLeaves} leaves)`);
+          console.log(
+            `[cron][probation] ✅ Created pending approval for ${emp.name || emp._id} (${proratedLeaves} leaves)`,
+          );
         }
       }
       // ── PART 2: Check extended probations whose new end date has passed ──
@@ -2923,8 +2973,10 @@ cron.schedule(
         leaveYearEnd.setHours(0, 0, 0, 0);
         const leaveYearStart = new Date(leaveYear - 1, 11, 26);
         leaveYearStart.setHours(0, 0, 0, 0);
-        const totalDaysInYear = (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
-        const remainingDays = (leaveYearEnd - effectiveEnd) / (1000 * 60 * 60 * 24) + 1;
+        const totalDaysInYear =
+          (leaveYearEnd - leaveYearStart) / (1000 * 60 * 60 * 24) + 1;
+        const remainingDays =
+          (leaveYearEnd - effectiveEnd) / (1000 * 60 * 60 * 24) + 1;
         const dailyRate = 22 / totalDaysInYear;
         function customRound2(value) {
           const decimal = value - Math.floor(value);
@@ -2932,7 +2984,10 @@ cron.schedule(
           if (decimal < 0.5) return Math.floor(value);
           return value;
         }
-        const recalculatedLeaves = Math.max(0, customRound2(dailyRate * remainingDays));
+        const recalculatedLeaves = Math.max(
+          0,
+          customRound2(dailyRate * remainingDays),
+        );
         approval.status = "pending";
         approval.calculatedLeaves = recalculatedLeaves;
         approval.leaveYear = leaveYear;
@@ -2944,7 +2999,9 @@ cron.schedule(
           data: { recalculatedLeaves, leaveYear },
         });
         await approval.save();
-        console.log(`[cron][probation] 🔄 Re-queued extended approval for employee ${approval.employee} (${recalculatedLeaves} leaves)`);
+        console.log(
+          `[cron][probation] 🔄 Re-queued extended approval for employee ${approval.employee} (${recalculatedLeaves} leaves)`,
+        );
       }
     } catch (err) {
       console.error("[cron][leave] ❌ error:", err);
@@ -3052,11 +3109,13 @@ cron.schedule(
       for (const ownerId of owners) {
         try {
           // ✅ Check config for this owner
-          const config = await AttendanceConfig.findOne({ owner: ownerId }).lean();
+          const config = await AttendanceConfig.findOne({
+            owner: ownerId,
+          }).lean();
           // 👉 If config exists AND manual marking is enabled → skip
           if (config && config.markAbsentManually === true) {
             console.log(
-              `[CRON-ABSENT] ⏭ Skipped owner ${ownerId} (manual mode enabled)`
+              `[CRON-ABSENT] ⏭ Skipped owner ${ownerId} (manual mode enabled)`,
             );
             continue;
           }
@@ -3064,23 +3123,23 @@ cron.schedule(
           const count = await backfillForDate(dateStr, ownerId);
           totalInserted += count;
           console.log(
-            `[CRON-ABSENT] Owner ${ownerId} → ${count} absents marked for ${dateStr}`
+            `[CRON-ABSENT] Owner ${ownerId} → ${count} absents marked for ${dateStr}`,
           );
         } catch (err) {
           console.error(
             `[CRON-ABSENT] ❌ Failed for owner ${ownerId}:`,
-            err.message
+            err.message,
           );
         }
       }
       console.log(
-        `[CRON-ABSENT] ✅ Completed. Total absents marked: ${totalInserted} for ${dateStr}`
+        `[CRON-ABSENT] ✅ Completed. Total absents marked: ${totalInserted} for ${dateStr}`,
       );
     } catch (err) {
       console.error("[CRON-ABSENT] ❌ Fatal Error:", err);
     }
   },
-  { timezone: "Asia/Karachi" }
+  { timezone: "Asia/Karachi" },
 );
 // ---------- Optional root route ----------
 app.get("/", (_req, res) => {
