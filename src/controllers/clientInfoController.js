@@ -857,7 +857,7 @@ exports.searchTeamMembers = async (req, res) => {
     // no extra restriction based on role here to allow messaging colleagues
 
     const employees = await Employee.find(employeesQuery)
-      .select("_id name email companyEmail role designation")
+      .select("_id name email companyEmail role designation employeeId")
       .limit(10);
 
     res.json(employees);

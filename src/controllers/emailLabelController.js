@@ -580,7 +580,7 @@ exports.getMessagesByLabel = async (req, res) => {
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         { path: "labels.label", select: "_id name color textColor" },
       ])

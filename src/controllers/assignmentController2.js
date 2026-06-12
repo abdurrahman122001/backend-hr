@@ -430,7 +430,7 @@ exports.getScheduledMessagesForClient =
             { path: "owner", select: "_id name companyEmail" },
             { path: "sender", select: "_id name companyEmail role" },
             { path: "receiver", select: "_id name companyEmail role" },
-            { path: "client", select: "_id clientName" },
+            { path: "client", select: "_id clientName legalBusinessName dba" },
             { path: "scheduledBy", select: "_id name companyEmail" },
           ])
           .lean(),
@@ -619,7 +619,7 @@ exports.listMessages = async function listMessages(req, res) {
             select: "_id name companyEmail role supervisionMode",
           }, // 🔥 ADDED supervisionMode
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "trashedBy", select: "_id name companyEmail" },
@@ -746,7 +746,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       ])
       .lean();
@@ -1458,7 +1458,7 @@ exports.getMessage = async function getMessage(req, res) {
     const msg = await AssignmentMessage.findById(messageId).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       {
         path: "receiver",
@@ -1553,7 +1553,7 @@ exports.scheduleMessage = async function scheduleMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
@@ -1614,7 +1614,7 @@ exports.unscheduleMessage = async function unscheduleMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
@@ -1663,7 +1663,7 @@ exports.getScheduledMessages = async function getScheduledMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
         .lean(),
@@ -1719,7 +1719,7 @@ exports.rescheduleMessage = async function rescheduleMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
@@ -2229,7 +2229,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "disapprovedBy", select: "_id name companyEmail role" },
     ]);
 
@@ -2377,7 +2377,7 @@ exports.getMessage = async function getMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
@@ -2573,7 +2573,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
@@ -2677,7 +2677,7 @@ exports.createDraft = async function createDraft(req, res) {
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
       ...(client && isObjId(client)
-        ? [{ path: "client", select: "_id clientName" }]
+        ? [{ path: "client", select: "_id clientName legalBusinessName dba" }]
         : []),
     ]);
 
@@ -2750,7 +2750,7 @@ exports.updateMessage = async function updateMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
@@ -2811,7 +2811,7 @@ exports.listDrafts = async function listDrafts(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         ])
         .lean(),
@@ -2910,7 +2910,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
@@ -3174,7 +3174,7 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         {
           path: "lastEditedBy",
@@ -3322,7 +3322,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
         .populate([
           { path: "sender", select: "name supervisionMode" },
           { path: "receiver", select: "name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "name companyEmail" },
         ])
         .lean(),
@@ -3405,7 +3405,7 @@ exports.getStarredMessages = async function getStarredMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" }, // Populate who starred it
@@ -3474,7 +3474,7 @@ exports.starMessage = async function starMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "starredBy", select: "_id name companyEmail" },
     ]);
@@ -3551,7 +3551,7 @@ exports.moveToTrash = async function (req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "trashedBy", select: "_id name companyEmail" },
     ]);
 
@@ -3602,7 +3602,7 @@ exports.restoreFromTrash = async function (req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
     ]);
 
     // Emit socket event
@@ -3644,7 +3644,7 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "trashedBy", select: "_id name companyEmail" },
     ];
 
@@ -4017,7 +4017,7 @@ exports.reportSpam = async function reportSpam(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "spamReportedBy", select: "_id name companyEmail" },
       { path: "spamReporters", select: "_id name companyEmail" },
     ]);
@@ -4067,7 +4067,7 @@ exports.removeFromSpam = async function removeFromSpam(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
     ]);
 
     // EMIT REAL-TIME EVENT
@@ -4128,7 +4128,7 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
             { path: "owner", select: "_id name companyEmail" },
             { path: "sender", select: "_id name companyEmail role" },
             { path: "receiver", select: "_id name companyEmail role" },
-            { path: "client", select: "_id clientName" },
+            { path: "client", select: "_id clientName legalBusinessName dba" },
             { path: "attachments.uploadedBy", select: "_id name companyEmail" },
             { path: "spamReportedBy", select: "_id name companyEmail" },
             { path: "spamReporters", select: "_id name companyEmail" },
@@ -4344,7 +4344,7 @@ exports.searchMessages = async function searchMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" },
@@ -4446,7 +4446,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
     const populatedThreads = await AssignmentMessage.populate(itemsRaw, [
       { path: "latestMessage.sender", select: "_id name companyEmail" },
       { path: "latestMessage.receiver", select: "_id name companyEmail" },
-      { path: "latestMessage.client", select: "_id clientName" },
+      { path: "latestMessage.client", select: "_id clientName legalBusinessName dba" },
     ]);
 
     res.json({
@@ -4490,7 +4490,7 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
         ])
@@ -4806,7 +4806,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role" },
         { path: "receiver", select: "_id name companyEmail role" },
-        { path: "client", select: "_id clientName" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         { path: "lastEditedBy", select: "_id name companyEmail role" },
       ]

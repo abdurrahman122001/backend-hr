@@ -130,7 +130,7 @@ async function getImmediateThreadParticipants(threadId, req) {
       .populate([
         { path: "sender", select: "_id name companyEmail role photographUrl" },
         { path: "receiver", select: "_id name companyEmail role photographUrl" },
-        { path: "client", select: "_id clientName" }
+        { path: "client", select: "_id clientName legalBusinessName dba" }
       ]);
 
     if (!assignmentMessage) {
@@ -305,7 +305,7 @@ exports.createThreadChatMessage = async function (req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role photographUrl" },
       { path: "receiver", select: "_id name companyEmail role" },
-      { path: "client", select: "_id clientName" },
+      { path: "client", select: "_id clientName legalBusinessName dba" },
       { path: "replyTo", select: "_id content sender" },
       { path: "replyTo.sender", select: "_id name companyEmail" },
     ]);
@@ -392,7 +392,7 @@ exports.getThreadMessages = async function (req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role photographUrl" },
           { path: "receiver", select: "_id name companyEmail role" },
-          { path: "client", select: "_id clientName" },
+          { path: "client", select: "_id clientName legalBusinessName dba" },
           { path: "replyTo", select: "_id content sender createdAt" },
           { path: "replyTo.sender", select: "_id name companyEmail" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
@@ -463,7 +463,7 @@ exports.getThreadInfo = async function (req, res) {
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role photographUrl" },
         { path: "receiver", select: "_id name companyEmail role photographUrl" },
-        { path: "client", select: "_id clientName" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
       ]);
 
     if (!thread) {

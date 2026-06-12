@@ -1,12 +1,21 @@
 // backend/src/controllers/salarylipFieldsController.js
 
 const SalarySlipFields = require("../models/SalarySlipFields");
+const User = require("../models/Users");
 
 // Utility to get correct owner for settings (super-admin for admins, else self)
-function getFieldsOwner(req) {
-  // If it's an employee (unifiedAuth), they already have the owner ID attached
-  if (req.user.isEmployee) {
-    return req.user.owner;
+async function getFieldsOwner(req) {
+  // If it's an employee (unifiedAuth or employee-token fallback), resolve through
+  // their company owner, applying the same admin -> createdBy mapping the owner gets
+  if (req.user.isEmployee || req.user.isEmployeeFallback) {
+    const ownerId = req.user.owner;
+    if (ownerId) {
+      const ownerUser = await User.findById(ownerId).select("role createdBy").lean();
+      if (ownerUser?.role === "admin" && ownerUser.createdBy) {
+        return ownerUser.createdBy;
+      }
+      return ownerId;
+    }
   }
   // Admin logic
   if (req.user.role === "admin" && req.user.createdBy) {
@@ -17,7 +26,7 @@ function getFieldsOwner(req) {
 
 exports.getForLoggedInUser = async (req, res) => {
   try {
-    const owner = getFieldsOwner(req);
+    const owner = await getFieldsOwner(req);
     const doc = await SalarySlipFields.findOne({ owner })
       .lean()
       .select(
@@ -46,7 +55,7 @@ exports.getForLoggedInUser = async (req, res) => {
 
 exports.updateForLoggedInUser = async (req, res) => {
   try {
-    const owner = getFieldsOwner(req);
+    const owner = await getFieldsOwner(req);
     const {
       enabledPersonalFields,
       enabledEmploymentFields,

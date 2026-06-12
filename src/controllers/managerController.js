@@ -116,7 +116,7 @@ exports.getRoster = async (req, res) => {
       }).select("assignedTo").lean(),
       Employee.find(employeeQuery)
         .select(
-          "_id name email companyEmail role department designation supervisionMode supervisor supervisorMode photographUrl"
+          "_id name email companyEmail role department designation employeeId supervisionMode supervisor supervisorMode photographUrl"
         )
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
@@ -333,7 +333,7 @@ exports.getEmployeeRoster = async (req, res) => {
       ],
     })
       .select(
-        "_id name email companyEmail role department designation supervisionMode supervisor photographUrl",
+        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });
@@ -406,7 +406,7 @@ exports.getMentionedEmployees = async (req, res) => {
 
     const employees = await Employee.find(employeeQuery)
       .select(
-        "_id name email companyEmail role department designation supervisionMode supervisor photographUrl",
+        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });
@@ -670,7 +670,7 @@ exports.assignClient = async (req, res) => {
                 { path: "owner", select: "_id name companyEmail" },
                 { path: "sender", select: "_id name companyEmail role" },
                 { path: "receiver", select: "_id name companyEmail role" },
-                { path: "client", select: "_id clientName" },
+                { path: "client", select: "_id clientName legalBusinessName dba" },
               ])
               .sort({ createdAt: -1 })
               .limit(50);
