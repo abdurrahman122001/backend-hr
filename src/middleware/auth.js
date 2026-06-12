@@ -94,6 +94,7 @@ module.exports = async function requireAuth(req, res, next) {
       userRole: user.role, // Preserve the original user role
       createdBy: user.createdBy,
       owner: finalOwnerId,
+      isEmployeeFallback: !!user.isEmployeeFallback,
       // Add employee info if found
       ...(employee && {
         employeeId: employee._id,

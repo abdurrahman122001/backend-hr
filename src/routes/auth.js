@@ -338,13 +338,40 @@ router.post("/2fa/disable", requireAuth, async (req, res) => {
 // ── 2FA: Status ──────────────────────────────────────────────────
 router.get("/2fa/status", requireAuth, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("twoFactorEnabled");
+    // Employee-fallback tokens: look up the owner admin User
+    const lookupId = req.user.isEmployeeFallback ? req.user.owner : req.user._id;
+    const user = await User.findById(lookupId).select("twoFactorEnabled");
     if (!user) return res.status(404).json({ message: "User not found" });
     return res.json({ twoFactorEnabled: user.twoFactorEnabled });
   } catch (err) {
     return res.status(500).json({ message: "Server error" });
   }
 });
+// ── 2FA: Verify TOTP for an already-authenticated session (token URL login) ──
+router.post("/2fa/verify-session", requireAuth, async (req, res) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ message: "Code is required" });
+  try {
+    // Employee-fallback tokens: verify against the owner admin User's TOTP
+    const lookupId = req.user.isEmployeeFallback ? req.user.owner : req.user._id;
+    const user = await User.findById(lookupId).select("+twoFactorSecret +twoFactorEnabled");
+    if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
+      return res.json({ verified: true });
+    }
+    const isValid = speakeasy.totp.verify({
+      secret: user.twoFactorSecret,
+      encoding: "base32",
+      token: String(code).replace(/\s/g, ""),
+      window: 1,
+    });
+    if (!isValid) return res.status(401).json({ message: "Invalid code. Please try again." });
+    return res.json({ verified: true });
+  } catch (err) {
+    console.error("[2fa/verify-session]", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 // POST /auth/refresh
 router.post("/refresh", async (req, res) => {
   const { refreshToken } = req.body;

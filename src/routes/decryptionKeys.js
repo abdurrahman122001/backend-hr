@@ -373,7 +373,9 @@ async function reencryptCollection(
 // Get Key Info (show only your key)
 router.get("/list", requireAuth, async (req, res) => {
   try {
-    const key = await DecryptionKey.findOne({ owner: req.user._id }).select(
+    // Employee-fallback tokens: key belongs to the owner admin User
+    const ownerId = req.user.isEmployeeFallback ? req.user.owner : req.user._id;
+    const key = await DecryptionKey.findOne({ owner: ownerId }).select(
       "_id keyVersion currentAesKey previousAesKey createdAt active"
     );
     res.json({ success: true, keys: key ? [key] : [] });
