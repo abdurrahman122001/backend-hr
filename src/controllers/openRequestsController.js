@@ -181,7 +181,18 @@ exports.getLeaveApprovals = async (req, res) => {
       if (approverId === empIdStr) yourAction = "approved";
       else if (rejecterId === empIdStr) yourAction = "rejected";
 
-      return { ...leave, _yourAction: yourAction };
+      const actedApprovalIndex = Array.isArray(leave.approvalChain)
+        ? leave.approvalChain.findIndex((approver) => {
+            const id = approver?._id ? String(approver._id) : String(approver);
+            return id === empIdStr;
+          })
+        : -1;
+
+      return {
+        ...leave,
+        _yourAction: yourAction,
+        _actedApprovalIndex: actedApprovalIndex >= 0 ? actedApprovalIndex : undefined,
+      };
     });
 
     // Admin employees also see pending attendance challenges from their org
