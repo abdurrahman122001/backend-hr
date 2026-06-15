@@ -668,17 +668,32 @@ async function calculateHierarchyReceiver(owner, sender, clientDoc) {
       approvalStatus: "pending",
       targetSupervisor
     };
-  } else {
-    // No hierarchy senior configured — route to managers/CRM but keep pending
-    const { managers, crm } = await findTLsAndManagersByOwner(owner);
-    const crmIds = Array.isArray(crm) ? crm : [];
-    const fallbackReceivers = Array.from(new Set([...managers, ...crmIds]));
+  }
+
+  // No senior above the sender. Two distinct cases:
+  //  1. Sender is the TOP of the hierarchy (they have juniors below them) →
+  //     nobody outranks them, so the message needs no approval. Auto-approve
+  //     and deliver directly (do NOT route to CRM/managers).
+  //  2. Sender is not part of the hierarchy at all → fall back to managers/CRM.
+  const juniors = await getAllJuniorsRecursively(owner, sender);
+  if (juniors.length > 0) {
     return {
-      receivers: fallbackReceivers,
-      approvalStatus: "pending",
-      targetSupervisor: null
+      receivers: null, // keep the original intended recipients
+      approvalStatus: "approved",
+      targetSupervisor: null,
+      autoApprove: true,
     };
   }
+
+  // Sender has no hierarchy relationship — route to managers/CRM but keep pending
+  const { managers, crm } = await findTLsAndManagersByOwner(owner);
+  const crmIds = Array.isArray(crm) ? crm : [];
+  const fallbackReceivers = Array.from(new Set([...managers, ...crmIds]));
+  return {
+    receivers: fallbackReceivers,
+    approvalStatus: "pending",
+    targetSupervisor: null
+  };
 }
 
 /** ---------- helpers: find TLs and Managers for an owner (no supervisor chain) ---------- **/
@@ -1182,9 +1197,15 @@ exports.createMessage = async function createMessage(req, res) {
     if (client && isObjId(client) && approvalStatus === "pending") {
       if (senderRole === "employee" || senderRole === "team_lead" || senderRole === "manager") {
         const hierarchyResult = await calculateHierarchyReceiver(owner, sender, clientDoc);
-        receivers = hierarchyResult.receivers;
-        approvalStatus = hierarchyResult.approvalStatus;
-        targetSupervisor = hierarchyResult.targetSupervisor;
+        if (hierarchyResult.autoApprove) {
+          // Sender is top of hierarchy — no approval needed, keep intended recipients
+          approvalStatus = "approved";
+          targetSupervisor = null;
+        } else {
+          receivers = hierarchyResult.receivers;
+          approvalStatus = hierarchyResult.approvalStatus;
+          targetSupervisor = hierarchyResult.targetSupervisor;
+        }
 
         // Update thread history
         if (targetSupervisor && threadMessages.length > 0 && !threadHasTeamLead) {
@@ -1763,9 +1784,15 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
               message.intendedRecipients = message.receiver.map(r => r._id || r);
             }
 
-            message.receiver = hierarchyResult.receivers;
-            message.approvalStatus = hierarchyResult.approvalStatus;
-            targetSupervisor = hierarchyResult.targetSupervisor;
+            if (hierarchyResult.autoApprove) {
+              // Sender is top of hierarchy — no approval needed, keep intended recipients
+              message.approvalStatus = "approved";
+              targetSupervisor = null;
+            } else {
+              message.receiver = hierarchyResult.receivers;
+              message.approvalStatus = hierarchyResult.approvalStatus;
+              targetSupervisor = hierarchyResult.targetSupervisor;
+            }
           } else {
             message.approvalStatus = "approved";
           }
@@ -2948,13 +2975,19 @@ exports.sendDraft = async function sendDraft(req, res) {
             msg.sender,
             clientDoc
           );
-          msg.receiver = hierarchyResult.receivers;
-          msg.approvalStatus = hierarchyResult.approvalStatus;
-          targetSupervisor = hierarchyResult.targetSupervisor;
+          if (hierarchyResult.autoApprove) {
+            // Sender is top of hierarchy — no approval needed, keep intended recipients
+            msg.approvalStatus = "approved";
+            targetSupervisor = null;
+          } else {
+            msg.receiver = hierarchyResult.receivers;
+            msg.approvalStatus = hierarchyResult.approvalStatus;
+            targetSupervisor = hierarchyResult.targetSupervisor;
 
-          // If it’s pending, store the original intended receivers
-          if (msg.approvalStatus === "pending") {
-            msg.intendedRecipients = receivers;
+            // If it’s pending, store the original intended receivers
+            if (msg.approvalStatus === "pending") {
+              msg.intendedRecipients = receivers;
+            }
           }
         } else {
           msg.approvalStatus = "approved";
@@ -3190,8 +3223,16 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
       if (clientDoc) {
         const hierarchyFrom = isSender ? msg.sender : currentUserId;
         const hierarchyResult = await calculateHierarchyReceiver(msg.owner, hierarchyFrom, clientDoc);
-        updateData.receiver = hierarchyResult.receivers;
-        updateData.approvalStatus = hierarchyResult.approvalStatus;
+        if (hierarchyResult.autoApprove) {
+          // Resubmitter is top of hierarchy — no approval needed, deliver to intended recipients
+          updateData.approvalStatus = "approved";
+          if (Array.isArray(msg.intendedRecipients) && msg.intendedRecipients.length > 0) {
+            updateData.receiver = msg.intendedRecipients;
+          }
+        } else {
+          updateData.receiver = hierarchyResult.receivers;
+          updateData.approvalStatus = hierarchyResult.approvalStatus;
+        }
       }
     }
 
