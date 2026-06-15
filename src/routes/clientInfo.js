@@ -14,6 +14,15 @@ router.get("/", requireAuth, clientInfoCtrl.getClientInfo);
 // Fetch only the logged-in employee's assigned clients
 router.get("/my", requireAuth, clientInfoCtrl.getMyClients);
 
+// Clients the employee can compose to: own assigned clients + clients they
+// supervise down the hierarchy (ClientInfo.supervisedBy). Must be registered
+// before "/:id" so it isn't captured as an id.
+router.get("/my-assigned-clients", requireAuth, clientInfoCtrl.getMyAssignedClients);
+
+// CRM (manager) recipient(s) to route a downline client's email to.
+// Must be registered before "/:id" so it isn't captured as an id.
+router.get("/crm-recipients", requireAuth, clientInfoCtrl.getCrmRecipients);
+
 // Bulk WhatsApp flags for ALL my clients + groups in one request
 // (must be registered before "/:id" so it isn't captured as an id)
 router.get("/whatsapp-flags-bulk", requireAuth, clientInfoCtrl.getWhatsAppFlagsBulk);

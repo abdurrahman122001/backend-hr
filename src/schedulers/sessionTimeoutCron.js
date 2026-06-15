@@ -116,13 +116,19 @@ cron.schedule("*/10 * * * * *", async () => {
         const nowDate = now.format("YYYY-MM-DD");
         const isRetroactiveProcessing = nowDate !== attendanceDate;
 
-        // ✅ Mark as Half Day ONLY IF: same-day session, cron ran on the same date, and BEFORE 9 PM (not after)
+        // ✅ Mark as Half Day ONLY IF: same-day session, cron ran on the same date,
+        //    the last heartbeat was before 9 PM, AND it is still before 9 PM right now.
+        //    Once the wall clock passes 9 PM we never NEWLY apply a Half-Day penalty:
+        //    the working window is over, so a stale/closed session is just cleaned up.
         const halfDayLogoutThreshold = 21 * 60; // 9:00 PM
         const isAfter9PM = logoutTotalMinutes >= halfDayLogoutThreshold;
+        const nowTotalMinutes = now.hours() * 60 + now.minutes();
+        const isNowAfter9PM = nowTotalMinutes >= halfDayLogoutThreshold;
         const shouldMarkHalfDay =
           !isCrossMidnightLogout &&
           !isRetroactiveProcessing &&
           !isAfter9PM &&
+          !isNowAfter9PM &&
           finalStatus !== "Half Day";
 
         if (shouldMarkHalfDay) {
@@ -178,8 +184,13 @@ cron.schedule("*/10 * * * * *", async () => {
           // but still record the checkOut below so the session closes cleanly.
           console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} — retroactive processing (attendance ${attendanceDate}, today ${nowDate}), keeping status "${finalStatus}"`);
         } else {
-          // lastSeen was at or after 9 PM — employee was present, status unchanged
-          console.log(`📊 [SESSION-TIMEOUT-CRON] ${employeeName} auto-logged out at ${actualLogoutTime} (at/after 9 PM), status remains "${finalStatus}"`);
+          // Either lastSeen was at/after 9 PM, or the cron is running after 9 PM —
+          // the working window is over, so the status is left unchanged (no Half Day).
+          const reason =
+            isNowAfter9PM && !isAfter9PM
+              ? `processed after 9 PM (lastSeen ${actualLogoutTime})`
+              : "at/after 9 PM";
+          console.log(`📊 [SESSION-TIMEOUT-CRON] ${employeeName} auto-logged out at ${actualLogoutTime} (${reason}), status remains "${finalStatus}"`);
         }
 
         // Update attendance record

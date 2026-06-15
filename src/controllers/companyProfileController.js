@@ -1,4 +1,5 @@
 const CompanyProfile = require('../models/CompanyProfile');
+const { ensureCompanyOwnerIndex } = require('../utils/companyEmployeeId');
 
 // Get company profile
 exports.getMyProfile = async (req, res) => {
@@ -57,6 +58,8 @@ exports.upsertProfile = async (req, res) => {
       { $set: data },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    profile.ownerIndex = await ensureCompanyOwnerIndex(profile);
 
     res.json({ profile });
   } catch (err) {

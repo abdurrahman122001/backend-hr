@@ -15,9 +15,12 @@ const CompanyProfileSchema = new Schema({
   email:   { type: String, required: true },
   website: { type: String, default: "" },
   logo:    { type: String, default: "" },
-  // Sequential counter for auto-generated employee IDs (e.g. ABC-000001)
+  // Sequential counter for employee IDs inside this company.
   employeeIdSequence: { type: Number, default: 0 },
+  // Permanent company code for employee IDs, e.g. 20251, 20252, 202610.
   ownerIndex: { type: Number }
 }, { timestamps: true });
+
+CompanyProfileSchema.index({ ownerIndex: 1 }, { unique: true, sparse: true });
 
 module.exports = model('CompanyProfile', CompanyProfileSchema);

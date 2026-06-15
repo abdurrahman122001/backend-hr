@@ -1,6 +1,8 @@
 // controllers/whatsAppCommentsController.js
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
+const ClientInfo = require("../models/ClientInfo");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 // Helper to get io instance safely
 function getIo(req) {
@@ -228,6 +230,84 @@ exports.getComments = async (req, res) => {
       success: false,
       error: "Server error",
     });
+  }
+};
+
+// @desc    Get the users that can be mentioned in a comment for this message.
+//          Hierarchy-based: only the client's assigned employee(s), their
+//          seniors up the chain, and the CRM/managers — NOT every employee.
+// @route   GET /api/whatsapp-messages/:messageId/mentionable
+// @access  Private
+exports.getMentionableUsers = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+
+    const message = await WhatsAppMessage.findById(messageId)
+      .select("client owner")
+      .lean();
+
+    if (!message) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Message not found" });
+    }
+
+    const ownerId = message.owner;
+    const ids = new Set(); // collected employee ids (as strings)
+
+    // 1. Assigned employee(s) of the client — "him"
+    let assignedIds = [];
+    if (message.client) {
+      const client = await ClientInfo.findById(message.client)
+        .select("assignedTo")
+        .lean();
+      assignedIds = (client?.assignedTo || []).map((id) => String(id));
+    }
+    assignedIds.forEach((id) => ids.add(id));
+
+    // 2. The seniors of each assigned employee — walk up the hierarchy chain
+    for (const empId of assignedIds) {
+      let current = empId;
+      const visited = new Set();
+      for (let i = 0; i < 10; i++) {
+        if (visited.has(current)) break;
+        visited.add(current);
+        const link = await EmployeeHierarchy.findOne({
+          owner: ownerId,
+          junior: current,
+        })
+          .select("senior")
+          .sort({ hierarchyLevel: -1 })
+          .lean();
+        if (!link || !link.senior) break;
+        const seniorId = String(link.senior);
+        ids.add(seniorId);
+        current = seniorId;
+      }
+    }
+
+    // 3. CRM / managers for this organization
+    const managers = await Employee.find({
+      owner: ownerId,
+      $or: [{ role: /manager/i }, { role: /crm/i }],
+    })
+      .select("_id")
+      .lean();
+    managers.forEach((m) => ids.add(String(m._id)));
+
+    // Exclude the requesting user — you can't mention yourself
+    if (req.employee?._id) ids.delete(String(req.employee._id));
+
+    const employees = await Employee.find({
+      _id: { $in: Array.from(ids) },
+    })
+      .select("name companyEmail email role designation photographUrl avatar")
+      .lean();
+
+    res.json({ success: true, employees });
+  } catch (error) {
+    console.error("Error fetching mentionable users:", error);
+    res.status(500).json({ success: false, error: "Server error" });
   }
 };
 

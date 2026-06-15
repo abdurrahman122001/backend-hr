@@ -4302,14 +4302,19 @@ exports.getChatList = async function getChatList(req, res) {
     const meId = new mongoose.Types.ObjectId(String(req.employee._id));
     const ownerObjId = typeof owner === "string" ? new mongoose.Types.ObjectId(owner) : owner;
     const ClientInfo = require("../models/ClientInfo");
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const isManager = currentUserRole.includes("manager");
+    const groupQuery = {
+      owner: ownerObjId,
+      isActive: true,
+    };
+    if (!isManager) {
+      groupQuery["members.memberId"] = String(meId);
+    }
 
     // ── Kick off groups + unread queries immediately — they don't depend on
     // the client list, so they run in parallel with steps 1 and 2 below.
-    const groupsPromise = WhatsAppGroup.find({
-      owner: ownerObjId,
-      isActive: true,
-      "members.memberId": String(meId),
-    })
+    const groupsPromise = WhatsAppGroup.find(groupQuery)
       .select("_id name avatar lastMessage lastMessageAt members")
       .sort({ lastMessageAt: -1 })
       .limit(60)

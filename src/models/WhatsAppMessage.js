@@ -464,8 +464,9 @@ WhatsAppMessageSchema.methods.deleteComment = async function (
         deleteCommentAndReplies(reply._id);
       });
 
-      // Delete the comment itself
-      commentToDelete.remove();
+      // Delete the comment itself.
+      // Mongoose 6+ removed subdoc.remove(); pull from the array instead.
+      this.comments.pull(commentId);
     }
   };
 
