@@ -119,6 +119,121 @@ exports.getMyClients = async (req, res) => {
   }
 };
 
+// Walk the EmployeeHierarchy senior→junior edges breadth-first to collect every
+// descendant (junior, sub-junior, …) of an employee. Edges are stored one per
+// direct relationship, so the subtree must be traversed level by level rather
+// than read from a single field. Employee.supervisor is consulted too, in case
+// a link was never mirrored into EmployeeHierarchy. A visited set prevents loops.
+async function getDescendantEmployeeIds(ownerId, rootId) {
+  const descendants = new Set();
+  const visited = new Set([String(rootId)]);
+  let frontier = [String(rootId)];
+
+  for (let depth = 0; depth < 25 && frontier.length > 0; depth++) {
+    const frontierObjIds = frontier
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    const hierFilter = { senior: { $in: frontierObjIds } };
+    const repFilter = { supervisor: { $in: frontierObjIds } };
+    if (ownerId) {
+      hierFilter.owner = ownerId;
+      repFilter.owner = ownerId;
+    }
+
+    const [links, reports] = await Promise.all([
+      EmployeeHierarchy.find(hierFilter).select("junior").lean(),
+      Employee.find(repFilter).select("_id").lean(),
+    ]);
+
+    const next = [];
+    const consider = (id) => {
+      const s = String(id || "");
+      if (s && !visited.has(s)) {
+        visited.add(s);
+        descendants.add(s);
+        next.push(s);
+      }
+    };
+    links.forEach((l) => consider(l.junior));
+    reports.forEach((r) => consider(r._id));
+    frontier = next;
+  }
+
+  return [...descendants];
+}
+
+// The set of employee IDs whose assigned clients a given employee may act on:
+// themselves PLUS their entire downline (juniors, sub-juniors, …). Returns
+// ObjectIds ready to drop into an { assignedTo: { $in: [...] } } query so that
+// client searches respect the same hierarchy as getMyAssignedClients.
+async function getAssignableSubtreeIds(emp) {
+  const ownerId = emp.owner || null;
+  const descendantIds = await getDescendantEmployeeIds(ownerId, emp._id);
+  return [
+    new mongoose.Types.ObjectId(emp._id),
+    ...descendantIds
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id)),
+  ];
+}
+
+// Clients the logged-in employee can act on in Compose: their own assigned
+// clients PLUS every client assigned to someone below them in the hierarchy
+// (juniors, sub-juniors, … — the whole subtree). This lets a senior compose to
+// their entire downline while strictly following the hierarchy. Computed live
+// from EmployeeHierarchy so it never goes stale between logins. Shape
+// ({ clients: [...] }) matches what ComposeDialog expects.
+exports.getMyAssignedClients = async (req, res) => {
+  try {
+    const ownerId = req.employee.owner || null;
+    const meId = new mongoose.Types.ObjectId(req.employee._id);
+
+    const descendantIds = await getDescendantEmployeeIds(ownerId, req.employee._id);
+    const subtreeIds = [
+      meId,
+      ...descendantIds
+        .filter((id) => mongoose.isValidObjectId(id))
+        .map((id) => new mongoose.Types.ObjectId(id)),
+    ];
+
+    const clients = await ClientInfo.find({ assignedTo: { $in: subtreeIds } })
+      .sort({ createdAt: -1 })
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role");
+
+    res.json({ clients });
+  } catch (err) {
+    console.error("getMyAssignedClients error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
+// The CRM (manager) recipient(s) a senior should route a client's email to,
+// instead of the assigned junior/sub-junior. Resolved server-side so it does
+// NOT depend on the roster's role casing/filters: every ACTIVE employee under
+// the same owner whose role is "manager" (case-insensitive), excluding the
+// caller. For a single-CRM org this is exactly that one manager.
+exports.getCrmRecipients = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id).select("_id owner role");
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+    if (!me.owner) return res.status(400).json({ error: "Owner ID missing in profile" });
+
+    const managers = await Employee.find({
+      owner: me.owner,
+      status: "active",
+      _id: { $ne: me._id },
+      role: { $regex: /^\s*manager\s*$/i },
+    }).select("_id name email companyEmail role designation employeeId empId");
+
+    res.json({ managers });
+  } catch (err) {
+    console.error("getCrmRecipients error:", err);
+    res.status(500).json({ error: "Failed to fetch CRM recipients" });
+  }
+};
+
 exports.updateClientInfo = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id);
@@ -511,9 +626,12 @@ exports.searchClientByName = async (req, res) => {
       ],
     };
 
-    // 🔒 Non-managers can ONLY search their assigned clients
+    // 🔒 Non-managers search their own assigned clients PLUS every client
+    // assigned to their downline (juniors, sub-juniors, …), matching the
+    // hierarchy used by getMyAssignedClients.
     if (role !== "manager") {
-      query.assignedTo = emp._id;
+      const subtreeIds = await getAssignableSubtreeIds(emp);
+      query.assignedTo = { $in: subtreeIds };
     }
 
     const clients = await ClientInfo.find(query)
@@ -748,9 +866,10 @@ exports.searchClientByEmail = async (req, res) => {
     // Build query based on role
     let query = { owner: emp.owner, isActive: { $ne: false } };
 
-    // For non-managers, only search assigned clients
+    // For non-managers, search assigned clients plus their downline's clients
     if (emp.role?.toLowerCase() !== "manager") {
-      query.assignedTo = emp._id;
+      const subtreeIds = await getAssignableSubtreeIds(emp);
+      query.assignedTo = { $in: subtreeIds };
     }
 
     // Add email search
@@ -782,9 +901,10 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
     // Build query based on role
     let query = { owner: emp.owner, isActive: { $ne: false } };
 
-    // For non-managers, only search within assigned clients
+    // For non-managers, search within assigned clients plus downline clients
     if (emp.role?.toLowerCase() !== "manager") {
-      query.assignedTo = emp._id;
+      const subtreeIds = await getAssignableSubtreeIds(emp);
+      query.assignedTo = { $in: subtreeIds };
     }
 
     // Add email search for company employees

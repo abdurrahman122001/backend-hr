@@ -68,6 +68,10 @@ router.patch("/:id/seen", ctrl.markAsSeen);
 
 router.post("/:messageId/reactions", ctrl.toggleMessageReaction);
 
+router.get(
+  "/:messageId/mentionable",
+  commentController.getMentionableUsers
+);
 router.post("/:messageId/comments", commentController.addComment);
 router.get("/:messageId/comments", commentController.getComments);
 router.put("/:messageId/comments/:commentId", commentController.editComment);

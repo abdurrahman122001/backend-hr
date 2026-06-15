@@ -1140,12 +1140,30 @@ exports.createMessage = async function createMessage(req, res) {
 
         isSenderAssigned = assignedToIds.includes(String(sender));
 
-        // Automatically add all assigned team members as receivers if they aren't the sender
-        assignedToIds.forEach(id => {
-          if (!receivers.includes(id) && id !== String(sender)) {
-            receivers.push(id);
-          }
-        });
+        // 🔥 SENIOR → CRM ROUTING: if the sender is NOT the assigned employee
+        // (a senior composing to a downline client), the message must be
+        // delivered to the CRM (manager) — NOT the assigned junior/sub-junior.
+        // Only when the sender IS assigned (their own client), or is themselves
+        // the sole/top CRM, do we keep adding the assigned team members.
+        const { managers: ownerManagerIds } = await findTLsAndManagersByOwner(owner);
+        const otherManagerIds = ownerManagerIds.filter((id) => id !== String(sender));
+        const senderIsTopCrm = senderRole === "manager" && otherManagerIds.length === 0;
+
+        if (!isSenderAssigned && !senderIsTopCrm && otherManagerIds.length > 0) {
+          // Route to the CRM (manager); do NOT add the assigned junior.
+          otherManagerIds.forEach((id) => {
+            if (!receivers.includes(id) && id !== String(sender)) {
+              receivers.push(id);
+            }
+          });
+        } else {
+          // Own client, or sender is the top CRM: add assigned team members.
+          assignedToIds.forEach((id) => {
+            if (!receivers.includes(id) && id !== String(sender)) {
+              receivers.push(id);
+            }
+          });
+        }
       }
 
       if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
@@ -2899,6 +2917,47 @@ exports.sendDraft = async function sendDraft(req, res) {
     receivers = Array.from(new Set(receivers.map((id) => String(id)))).filter(
       (id) => id !== String(msg.sender)
     );
+
+    // 🔥 SENIOR → CRM ROUTING (mirror of createMessage): if the sender is NOT
+    // the assigned employee for this client, the message must go to the CRM
+    // (manager), NOT the assigned junior/sub-junior. Strip any assigned junior
+    // that may have been saved on the draft and add the CRM instead.
+    try {
+      const clientId = msg.client;
+      if (clientId && isObjId(String(clientId))) {
+        const clientDoc = await ClientInfo.findById(clientId)
+          .select("assignedTo")
+          .lean();
+        const assignedToIds = (
+          Array.isArray(clientDoc?.assignedTo)
+            ? clientDoc.assignedTo
+            : [clientDoc?.assignedTo]
+        )
+          .filter(Boolean)
+          .map((e) => String(e._id || e));
+        const isSenderAssigned = assignedToIds.includes(String(msg.sender));
+        const { managers: ownerManagerIds } = await findTLsAndManagersByOwner(
+          msg.owner,
+        );
+        const otherManagerIds = ownerManagerIds.filter(
+          (mid) => mid !== String(msg.sender),
+        );
+        const senderIsTopCrm =
+          senderRole === "manager" && otherManagerIds.length === 0;
+
+        if (!isSenderAssigned && !senderIsTopCrm && otherManagerIds.length > 0) {
+          // Remove the assigned junior(s) and add the CRM (manager).
+          receivers = receivers.filter((id) => !assignedToIds.includes(id));
+          otherManagerIds.forEach((mid) => {
+            if (!receivers.includes(mid) && mid !== String(msg.sender)) {
+              receivers.push(mid);
+            }
+          });
+        }
+      }
+    } catch (e) {
+      console.error("sendDraft CRM routing error:", e);
+    }
 
     if (receivers.length > 0) {
       msg.receiver = receivers;
