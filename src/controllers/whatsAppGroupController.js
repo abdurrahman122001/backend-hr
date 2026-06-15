@@ -348,50 +348,41 @@ exports.sendGroupMessage = async function (req, res) {
     let approvalStatus = null;
 
     if (needsApproval) {
-      // Find first immediate supervisor who: (a) has supervision ON for this client, (b) is in this group
-      const immediateSupervisors = await findSupervisorsInHierarchy(
-        owner,
-        senderId
-      );
-      const activeSupervisors = immediateSupervisors.filter(
-        (id) =>
-          supervisedByList.includes(id) && allMemberIds.includes(id)
-      );
+      // Approval must follow THIS CLIENT'S designated approver chain
+      // (ClientInfo.supervisedBy) — NOT the global org hierarchy. Walk up from
+      // the sender and route to the nearest designated approver who is also a
+      // member of this group. A senior who outranks the sender in the org but
+      // is not a supervisedBy approver for this client (e.g. CRM) must NOT
+      // receive the message for approval.
+      let nextApprover = null;
+      let currentId = String(senderId);
+      const visited = new Set();
+      for (let i = 0; i < 10; i++) {
+        if (visited.has(currentId)) break;
+        visited.add(currentId);
 
-      if (activeSupervisors.length > 0) {
-        // One-by-one approval chain: only route to the FIRST active supervisor
-        receiverIds = [oid(activeSupervisors[0])];
+        const seniors = await findSupervisorsInHierarchy(owner, currentId);
+        if (!seniors || seniors.length === 0) break;
+
+        const approverInGroup = seniors.find(
+          (id) => supervisedByList.includes(id) && allMemberIds.includes(id)
+        );
+        if (approverInGroup) {
+          nextApprover = approverInGroup;
+          break;
+        }
+        // Climb past non-approver seniors to look for a higher designated approver
+        currentId = seniors[0];
+      }
+
+      if (nextApprover) {
+        // One-by-one approval chain: route to the next designated approver up the chain
+        receiverIds = [oid(nextApprover)];
         approvalStatus = "pending";
       } else {
-        // No active supervisor in group – walk full hierarchy to find TL/manager in group
-        const fullChain = await getManagementChain(owner, String(senderId));
-        const managerInGroup = fullChain.find((id) =>
-          allMemberIds.includes(id)
-        );
-        if (managerInGroup) {
-          receiverIds = [oid(managerInGroup)];
-          approvalStatus = "pending";
-        } else {
-          // Fallback: find any manager/TL among group members
-          for (const memberId of allMemberIds) {
-            const memberDoc = await Employee.findById(memberId)
-              .select("role")
-              .lean();
-            const mRole = normalizeRole(memberDoc?.role || "");
-            if (mRole === "manager" || mRole === "team_lead") {
-              receiverIds = [oid(memberId)];
-              approvalStatus = "pending";
-              break;
-            }
-          }
-          // Absolute fallback: no supervisor found → send directly with no approval
-          if (receiverIds.length === 0) {
-            receiverIds = allMemberIds
-              .filter(isObjId)
-              .map((id) => oid(String(id)));
-            approvalStatus = null;
-          }
-        }
+        // Sender is at the top of this client's approval chain (no higher
+        // designated approver is in the group) → send directly, no approval.
+        approvalStatus = null;
       }
     }
 
@@ -407,10 +398,10 @@ exports.sendGroupMessage = async function (req, res) {
     
     intendedReceiverIds = Array.from(fullIntendedSet).filter(isObjId).map(id => oid(id));
 
-    if (!needsApproval) {
-      // Send to everyone immediately
+    if (approvalStatus === null) {
+      // No approval required, OR the sender is the top of this client's approval
+      // chain → deliver to everyone in the group immediately.
       receiverIds = intendedReceiverIds;
-      approvalStatus = null;
     }
 
     // ── Build & save message document ─────────────────────────────
