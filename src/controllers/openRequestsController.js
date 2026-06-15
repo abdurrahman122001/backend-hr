@@ -13,7 +13,38 @@ const OvertimeRequest = require("../models/OvertimeRequest");
 const ProfileRevision = require("../models/ProfileRevision");
 const ApplyLeave = require("../models/ApplyLeave");
 const AttendanceChallenge = require("../models/AttendanceChallenge");
+const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const mongoose = require("mongoose");
+
+async function getAllJuniorIds(ownerId, seniorId) {
+  const visited = new Set();
+  const result = [];
+  let queue = [String(seniorId)];
+
+  while (queue.length > 0) {
+    const links = await EmployeeHierarchy.find({
+      owner: ownerId,
+      senior: { $in: queue.map((id) => new mongoose.Types.ObjectId(id)) },
+    })
+      .select("junior")
+      .lean();
+
+    queue = [];
+
+    for (const link of links) {
+      const juniorId = String(link.junior);
+      if (visited.has(juniorId)) continue;
+      visited.add(juniorId);
+      result.push(new mongoose.Types.ObjectId(juniorId));
+      queue.push(juniorId);
+    }
+  }
+
+  return result;
+}
+
+const tagRequests = (items, type, category) =>
+  items.map((item) => ({ ...item, _type: type, _category: category }));
 
 exports.getMyOpenRequests = async (req, res) => {
   try {
@@ -66,26 +97,23 @@ exports.getMyOpenRequests = async (req, res) => {
       AttendanceChallenge.find({ employee: employeeId }).lean(),
     ]);
 
-    const tag = (items, type, category) =>
-      items.map((item) => ({ ...item, _type: type, _category: category }));
-
     const all = [
-      ...tag(loans,                "loan",                  "payroll"),
-      ...tag(bonuses,              "bonus",                 "payroll"),
-      ...tag(reimbursements,       "reimbursement",         "payroll"),
-      ...tag(advances,             "advance",               "payroll"),
-      ...tag(salaryChanges,        "salary",                "payroll"),
-      ...tag(commissions,          "commission",            "payroll"),
-      ...tag(taxAdjustments,       "tax-adjustment",        "payroll"),
-      ...tag(leaveEncashments,     "leave-encashment",      "payroll"),
-      ...tag(leaveCarryForwards,   "leave-carry-forward",   "attendance"),
-      ...tag(salarySlips,          "salary-slip",           "documents"),
-      ...tag(salaryCerts,          "salary-certificate",    "documents"),
-      ...tag(whistleBlowing,       "whistle-blowing",       "compliance"),
-      ...tag(overtime,             "overtime-request",      "attendance"),
-      ...tag(profileRevisions,     "profile",               "profile"),
-      ...tag(leaves,               "leave",                 "attendance"),
-      ...tag(attendanceChallenges, "attendance-challenge",  "attendance"),
+      ...tagRequests(loans,                "loan",                  "payroll"),
+      ...tagRequests(bonuses,              "bonus",                 "payroll"),
+      ...tagRequests(reimbursements,       "reimbursement",         "payroll"),
+      ...tagRequests(advances,             "advance",               "payroll"),
+      ...tagRequests(salaryChanges,        "salary",                "payroll"),
+      ...tagRequests(commissions,          "commission",            "payroll"),
+      ...tagRequests(taxAdjustments,       "tax-adjustment",        "payroll"),
+      ...tagRequests(leaveEncashments,     "leave-encashment",      "payroll"),
+      ...tagRequests(leaveCarryForwards,   "leave-carry-forward",   "attendance"),
+      ...tagRequests(salarySlips,          "salary-slip",           "documents"),
+      ...tagRequests(salaryCerts,          "salary-certificate",    "documents"),
+      ...tagRequests(whistleBlowing,       "whistle-blowing",       "compliance"),
+      ...tagRequests(overtime,             "overtime-request",      "attendance"),
+      ...tagRequests(profileRevisions,     "profile",               "profile"),
+      ...tagRequests(leaves,               "leave",                 "attendance"),
+      ...tagRequests(attendanceChallenges, "attendance-challenge",  "attendance"),
     ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({ data: all, total: all.length });
@@ -238,7 +266,35 @@ exports.getLeaveApprovals = async (req, res) => {
       }));
     }
 
+    const ownerId = req.employee.owner;
+    const juniorIds = ownerId ? await getAllJuniorIds(ownerId, employeeId) : [];
+    let preApprovals = [];
+
+    if (juniorIds.length > 0) {
+      const preLeaves = await ApplyLeave.find({
+        status: "pending",
+        approvalChain: { $in: juniorIds },
+        isTrashed: { $ne: true },
+        $expr: {
+          $in: [
+            { $arrayElemAt: ["$approvalChain", "$currentApprovalIndex"] },
+            juniorIds,
+          ],
+        },
+      })
+        .populate("employee", populateEmp)
+        .populate(populateChain)
+        .populate(populateApprovedBy)
+        .populate(populateRejectedBy)
+        .populate(populateAppliedBy)
+        .sort({ createdAt: -1 })
+        .lean();
+
+      preApprovals = tagRequests(preLeaves, "leave", "attendance");
+    }
+
     return res.status(200).json({
+      preApprovals,
       forApproval: [...forApproval, ...pendingChallenges, ...pendingDocRequests],
       escalated: annotatedEscalated,
     });

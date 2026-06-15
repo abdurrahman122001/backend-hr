@@ -3,7 +3,6 @@ const router = express.Router();
 const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
-const CompanyProfile = require("../models/CompanyProfile");
 const {
   getUpcomingBirthdays,
   updateEmployeeRole,
@@ -18,34 +17,6 @@ const upload = require("../middleware/upload");
 const unifiedAuth = require("../middleware/unifiedAuth"); // Changed from auth
 const requireAuth = unifiedAuth; // Alias for backward compatibility
 const attendanceAuth = require("../middleware/attendanceAuth");
-
-
-function getCompanyShortcut(companyName) {
-  if (!companyName) return "EMP";
-  const cleaned = companyName.replace(/[.,\/#!$%\^&*;:{}=\-_`~()]/g, "");
-  const words = cleaned.trim().split(/\s+/);
-  if (words.length >= 3) return (words[0][0] + words[1][0] + words[2][0]).toUpperCase();
-  if (words.length === 2) return (words[0][0] + words[1][0] + (words[1][1] || "")).toUpperCase();
-  if (words.length === 1) return words[0].substring(0, 3).toUpperCase();
-  return "EMP";
-}
-
-async function getNextEmployeeNumber(ownerId) {
-  const next = await CompanyProfile.findOneAndUpdate(
-    { owner: ownerId },
-    { $inc: { employeeIdSequence: 1 } },
-    { new: true, upsert: true, projection: { employeeIdSequence: 1 } }
-  ).lean();
-  return (next?.employeeIdSequence ?? 1).toString().padStart(3, '0');
-}
-
-async function generateEmployeeId(employeeName, ownerId) {
-  const company = await CompanyProfile.findOne({ owner: ownerId }).lean();
-  const companyShortcut = getCompanyShortcut(company?.name);
-  const seq = await getNextEmployeeNumber(ownerId);
-  const year = new Date().getFullYear();
-  return `${companyShortcut}-${year}-${seq}`;
-}
 
 function getEffectiveOwnerId(user) {
   if (!user) return null;
@@ -328,15 +299,6 @@ router.get("/:id", requireAuth, async (req, res) => {
       .lean();
 
     if (!emp) return res.status(404).json({ error: "Employee not found" });
-
-    // Generate employeeId if missing
-    if (!emp.employeeId) {
-      const ownerId = getEffectiveOwnerId(req.user);
-      const generatedId = await generateEmployeeId(emp.name, ownerId);
-      // Update employee document
-      await Employee.updateOne({ _id: emp._id }, { $set: { employeeId: generatedId } });
-      emp.employeeId = generatedId;
-    }
 
     res.json({ status: "success", employee: emp });
   } catch (err) {

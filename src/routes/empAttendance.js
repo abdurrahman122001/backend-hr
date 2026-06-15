@@ -238,6 +238,26 @@ function formatTo12Hour(time24) {
   return `${hours12}:${String(minutes).padStart(2, '0')} ${ampm}`;
 }
 
+function appendAttendanceNote(existingNotes, note) {
+  const cleanExisting = String(existingNotes || "").trim();
+  const cleanNote = String(note || "").trim();
+  if (!cleanNote) return cleanExisting;
+  return cleanExisting ? `${cleanExisting}\n${cleanNote}` : cleanNote;
+}
+
+function formatAttendanceTime(time) {
+  return time ? formatTo12Hour(time) : "not provided";
+}
+
+function buildAttendanceRequestNote(employeeName, requestedCheckIn, requestedCheckOut) {
+  const checkoutPart = requestedCheckOut ? `; check-out: ${formatAttendanceTime(requestedCheckOut)}` : "";
+  return `- ${employeeName || "Employee"} requested a change to check-in: ${formatAttendanceTime(requestedCheckIn)}${checkoutPart}.`;
+}
+
+function buildAttendanceReviewNote(action) {
+  return `- Request ${String(action || "").toLowerCase()}.`;
+}
+
 // POST /api/emp-attendance/challenge
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
@@ -289,12 +309,12 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     attendance.requestedCheckOut = requestedCheckOut || null;
     attendance.challengeAt = new Date();
 
-    // Add note describing the challenge request
-    const previousCheckInTime = attendance.checkIn ? formatTo12Hour(attendance.checkIn) : 'Not recorded';
-    const challengeNote = `Challenge requested: Employee requested status change to '${requestedStatus || 'Present'}' with reason: "${reason}". Previous check-in: ${previousCheckInTime}`;
-    attendance.notes = attendance.notes
-      ? `${attendance.notes}; ${challengeNote}`
-      : challengeNote;
+    const challengeNote = buildAttendanceRequestNote(
+      req.employee.name,
+      requestedCheckIn,
+      requestedCheckOut
+    );
+    attendance.notes = appendAttendanceNote(attendance.notes, challengeNote);
 
     await attendance.save();
 
@@ -490,8 +510,8 @@ router.patch('/challenge/:id/review', async (req, res) => {
       if (challenge.requestedStatus) attendance.status = challenge.requestedStatus;
     }
 
-    const note = `Challenge ${action.toLowerCase()} by employee-admin.${notes ? ` Notes: ${notes}` : ""}`;
-    attendance.notes = attendance.notes ? `${attendance.notes}; ${note}` : note;
+    const note = buildAttendanceReviewNote(action);
+    attendance.notes = appendAttendanceNote(attendance.notes, note);
     await attendance.save();
 
     // Notify employee via socket

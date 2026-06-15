@@ -9,6 +9,7 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
+const { generateEmployeeIdForCompany } = require("../utils/companyEmployeeId");
 
 // --- Company Info ---
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -301,48 +302,23 @@ router.put("/set-password", async (req, res) => {
         .json({ error: "Invalid or expired set password link." });
     }
 
-    // Generate Employee ID if not already generated
-    // Format: [YYYY][OwnerIndex][Sequence] (e.g., 20261001, 20261002, ..., 20269999, then 20271001)
+    // Generate Employee ID from CompanyProfile.ownerIndex + employeeIdSequence.
+    // Example: ownerIndex 20261 + employee sequence 001 = 20261001.
     if (!emp.employeeId) {
       const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
-      if (ownerId) {
-        const company = await CompanyProfile.findOne({ owner: ownerId });
-        if (company) {
-          // Assign owner index if not already assigned
-          let ownerIndex = company.ownerIndex;
-          if (!ownerIndex) {
-            // Find max ownerIndex globally across all companies
-            const maxCompany = await CompanyProfile.findOne().sort({ ownerIndex: -1 }).lean();
-            ownerIndex = (maxCompany && maxCompany.ownerIndex ? maxCompany.ownerIndex : 0) + 1;
-            company.ownerIndex = ownerIndex;
-            await company.save();
-          }
-
-          // Fixed base prefix for employee ID format
-          const basePrefix = 2025;
-          let targetPrefix = basePrefix;
-
-          // Get next sequence number (001-999) for this owner
-          let sequence = (company.employeeIdSequence || 0) + 1;
-
-          // If sequence exceeds 999, move to next prefix and reset sequence to 001
-          if (sequence > 999) {
-            // Calculate how many prefixes to advance
-            const prefixIncrement = Math.floor(sequence / 1000);
-            targetPrefix = basePrefix + prefixIncrement;
-            sequence = sequence % 1000;
-            if (sequence === 0) sequence = 1; // Handle edge case
-          }
-
-          // Update sequence in company profile
-          company.employeeIdSequence = sequence;
-          await company.save();
-
-          // Format: [Prefix][OwnerIndex][Sequence] (e.g., 20251001, 20261001, 20271001, etc.)
-          const sequenceStr = String(sequence).padStart(3, '0');
-          emp.employeeId = `${targetPrefix}${ownerIndex}${sequenceStr}`;
-        }
+      if (!ownerId) {
+        return res.status(400).json({ error: "Company owner not found for employee ID generation." });
       }
+
+      const company = await CompanyProfile.findOne({ owner: ownerId });
+      if (!company) {
+        return res.status(400).json({ error: "Company profile not found for employee ID generation." });
+      }
+      if (!company.ownerIndex) {
+        return res.status(400).json({ error: "Company ownerIndex not found for employee ID generation." });
+      }
+
+      emp.employeeId = await generateEmployeeIdForCompany(company);
     }
 
     // Hash password and update
