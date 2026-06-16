@@ -4337,6 +4337,63 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
   }
 };
 
+// GET /:id/read-by — employees who have READ this email/message (for the
+// "Read by" dialog in EmailDetail). Owner-scoped, excludes the sender,
+// de-duplicated per employee (keep earliest read time).
+exports.getReadBy = async function getReadBy(req, res) {
+  try {
+    const { id } = req.params;
+    if (!isObjId(id)) return res.status(400).json({ error: "Invalid message id" });
+
+    const ownerId = req.employee?.owner;
+    const msg = await AssignmentMessage.findOne({ _id: id, owner: ownerId })
+      .select("readBy sender")
+      .populate({
+        path: "readBy.employee",
+        select: "_id name companyEmail role designation photographUrl",
+      })
+      .lean();
+
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const senderId = String(msg.sender || "");
+    const byEmployee = new Map();
+    for (const r of msg.readBy || []) {
+      if (!r.employee || !r.employee._id) continue;
+      const eid = String(r.employee._id);
+      if (eid === senderId) continue; // exclude the sender
+      const seenAt = r.readAt || null;
+      const existing = byEmployee.get(eid);
+      if (!existing) {
+        byEmployee.set(eid, {
+          _id: r.employee._id,
+          name: r.employee.name,
+          companyEmail: r.employee.companyEmail,
+          role: r.employee.role,
+          designation: r.employee.designation,
+          photographUrl: r.employee.photographUrl || null,
+          seenAt, // keep field name `seenAt` so the frontend dialog is shared
+        });
+      } else if (
+        seenAt &&
+        (!existing.seenAt || new Date(seenAt) < new Date(existing.seenAt))
+      ) {
+        existing.seenAt = seenAt;
+      }
+    }
+
+    const readers = Array.from(byEmployee.values()).sort(
+      (a, b) =>
+        new Date(a.seenAt || 0).getTime() - new Date(b.seenAt || 0).getTime(),
+    );
+
+    return res.json({ count: readers.length, readers });
+  } catch (e) {
+    console.error("Error fetching read-by:", e);
+    return res.status(500).json({ error: "Failed to fetch read receipts" });
+  }
+};
+
 exports.markAsRead = async function markAsRead(req, res) {
   try {
     const { id } = req.params;

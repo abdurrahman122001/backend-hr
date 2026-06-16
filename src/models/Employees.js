@@ -204,6 +204,15 @@ const EmployeeSchema = new Schema(
       type: [{ emoji: String, count: { type: Number, default: 1 } }],
       default: [],
     },
+
+    // Per-employee browser-notification preference for CRM (manager) messages.
+    //   "supervision" – only notify when a message needs my approval
+    //   "both"        – also notify for CRM messages on clients I supervise
+    crmNotifyMode: {
+      type: String,
+      enum: ["supervision", "both"],
+      default: "supervision",
+    },
   },
   {
     timestamps: true,

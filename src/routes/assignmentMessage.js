@@ -99,6 +99,8 @@ router.patch(
 );
 
 router.post("/:id/read", ctrl.markAsRead);
+// Read receipts — which employees have read this message (for the "Read by" dialog)
+router.get("/:id/read-by", ctrl.getReadBy);
 router.post("/:id/unread", ctrl.markAsUnread);
 router.post("/read-multiple", ctrl.markMultipleAsRead);
 router.post("/read-all", ctrl.markAllMessagesRead);

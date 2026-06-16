@@ -79,12 +79,31 @@ exports.addComment = async (req, res) => {
 
     const io = getIo(req);
     if (io) {
+      // Chat context lets the client build a deep-link to this exact message
+      // without needing it loaded in local state.
+      const chatContext = {
+        clientId: message.client ? String(message.client) : null,
+        groupId: message.groupId ? String(message.groupId) : null,
+        isGroupMessage: !!message.isGroupMessage,
+        isClientEmployeeMessage: !!message.isClientEmployeeMessage,
+        clientEmployeeId:
+          message.clientEmployeeId ||
+          message.clientEmployeeData?.clientEmployeeId ||
+          null,
+        parentClientId: message.parentClientId
+          ? String(message.parentClientId)
+          : message.clientEmployeeData?.parentClientId
+            ? String(message.clientEmployeeData.parentClientId)
+            : null,
+      };
+
       const payload = {
         comment: newComment,
         messageId,
         commentCount: message.commentCount,
         lastCommentAt: message.lastCommentAt,
         commenters: message.commenters,
+        ...chatContext,
       };
 
       // 1) Realtime update to everyone in the message room (side panel)
@@ -123,6 +142,7 @@ exports.addComment = async (req, res) => {
             message: `${employeeFromDb.name} mentioned you in a comment`,
             commentId: newComment._id,
             messageId,
+            ...chatContext,
             timestamp: new Date(),
           });
         });

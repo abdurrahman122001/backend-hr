@@ -23,6 +23,23 @@ const { getLeaveYear } = require("../utils/leaveEntitlement");
 
 const attendanceAuth = require('../middleware/attendanceAuth');
 
+// GET /api/admin/attendances/holidays — holiday records for the owner.
+// Behind anyPayrollAuth, so it resolves owner for both admin Users and
+// admin-power employees (the admin dashboard Calendar uses this).
+router.get('/holidays', async (req, res) => {
+  try {
+    const ownerId = req.user.owner || req.user._id;
+    const holidayRecords = await Attendance.find({
+      isHoliday: true,
+      owner: ownerId,
+    }).sort({ date: 1 });
+    res.json(holidayRecords);
+  } catch (err) {
+    console.error("Fetch holidays failed:", err);
+    res.status(500).json({ error: "Failed to fetch holiday records" });
+  }
+});
+
 router.get('/challenges', async (req, res) => {
   try {
     const ownerId = req.user.owner || req.user._id;
