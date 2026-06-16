@@ -2893,6 +2893,40 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   }
 };
 
+// GET /api/whatsApp-messages/notify-prefs
+// Returns the current employee's CRM browser-notification preference.
+exports.getNotifyPrefs = async function getNotifyPrefs(req, res) {
+  try {
+    const emp = await Employee.findById(req.employee._id)
+      .select("crmNotifyMode")
+      .lean();
+    const crmNotifyMode = emp?.crmNotifyMode === "both" ? "both" : "supervision";
+    return res.json({ crmNotifyMode });
+  } catch (e) {
+    console.error("getNotifyPrefs error:", e);
+    return res.status(500).json({ error: "Failed to load notification preferences" });
+  }
+};
+
+// PUT /api/whatsApp-messages/notify-prefs  { crmNotifyMode: "supervision" | "both" }
+// Persists the current employee's CRM browser-notification preference.
+exports.updateNotifyPrefs = async function updateNotifyPrefs(req, res) {
+  try {
+    const mode = req.body?.crmNotifyMode;
+    if (mode !== "supervision" && mode !== "both") {
+      return res.status(400).json({ error: "Invalid crmNotifyMode" });
+    }
+    await Employee.updateOne(
+      { _id: req.employee._id },
+      { $set: { crmNotifyMode: mode } },
+    );
+    return res.json({ crmNotifyMode: mode });
+  } catch (e) {
+    console.error("updateNotifyPrefs error:", e);
+    return res.status(500).json({ error: "Failed to save notification preferences" });
+  }
+};
+
 // DELETE /api/whatsApp-messages/chats/:clientId?clientEmployeeId=...
 // Deletes an entire chat (client chat or client-employee sub-chat) and
 // notifies every employee who can see it so their chat list updates live.
