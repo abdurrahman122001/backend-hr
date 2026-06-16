@@ -5,14 +5,36 @@ const crypto = require('crypto');
 // /api/auth/me
 exports.getMe = async (req, res) => {
   try {
+    // Employee-admin tokens (opened from the Employee/Connect header via ?token=)
+    // carry the employee's id in req.user._id — not a User. Return the employee's
+    // identity so the dashboard greets them by name instead of a generic "Admin".
+    if (req.user.isEmployeeFallback || req.user.isEmployee) {
+      const Employee = require('../models/Employees');
+      const emp = await Employee.findById(req.user.employeeId || req.user._id)
+        .select('name companyEmail role photographUrl');
+      if (emp) {
+        return res.json({
+          _id: emp._id,
+          name: emp.name,
+          username: emp.name,
+          email: emp.companyEmail,
+          role: req.user.role || emp.role,
+          photographUrl: emp.photographUrl || null,
+          isEmployee: true,
+        });
+      }
+    }
+
     // req.user is set by your requireAuth middleware
-    const user = await User.findById(req.user._id).select('username email role');
+    const user = await User.findById(req.user._id).select('username name email role');
     if (!user) return res.status(404).json({ error: 'User not found' });
     res.json({
       _id: user._id,
       username: user.username,
+      name: user.name || user.username,
       email: user.email,
-      role: user.role
+      role: user.role,
+      isEmployee: false,
     });
   } catch (err) {
     res.status(500).json({ error: 'Server error' });

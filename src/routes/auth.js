@@ -17,6 +17,21 @@ const ACCESS_TTL = process.env.ACCESS_TTL || "30m";
 const REFRESH_TTL = process.env.REFRESH_TTL || "7d";
 const TWO_FA_PENDING_TTL = "5m"; // short-lived token during 2FA verification step
 const APP_NAME = process.env.APP_NAME || "HR Dashboard";
+
+// Resolve the account that owns 2FA for the current request. Employees granted
+// admin power SHARE the owner admin's 2FA — that owner User is the identity whose
+// TOTP gates the owner-scoped salary decryption key, so the dashboard can decrypt
+// salary after the gate. For these tokens req.user._id is the EMPLOYEE id (which
+// is not a User → old "User not found"), so we target req.user.owner instead.
+async function resolve2faSubject(req, selectStr) {
+  const id =
+    (req.user.isEmployeeFallback || req.user.isEmployee)
+      ? req.user.owner
+      : req.user._id;
+  const doc = await User.findById(id).select(selectStr);
+  return { doc, Model: User, label: doc?.username || "Admin" };
+}
+
 // ————— Sign-up —————
 router.post("/signup", async (req, res) => {
   try {
@@ -223,8 +238,8 @@ router.post("/2fa/verify", async (req, res) => {
 // ── 2FA: Begin setup — generate secret + QR code ─────────────────
 router.post("/2fa/setup", requireAuth, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select("+twoFactorEnabled +twoFactorPendingSecret");
-    if (!user) return res.status(404).json({ message: "User not found" });
+    const { doc: user, Model, label } = await resolve2faSubject(req, "+twoFactorEnabled +twoFactorPendingSecret");
+    if (!user) return res.status(404).json({ message: "Account not found" });
 
     if (user.twoFactorEnabled) {
       return res.status(400).json({ message: "2FA is already enabled on this account" });
@@ -232,12 +247,12 @@ router.post("/2fa/setup", requireAuth, async (req, res) => {
 
     // Generate a new TOTP secret
     const secret = speakeasy.generateSecret({
-      name: `${APP_NAME} (${user.username})`,
+      name: `${APP_NAME} (${label})`,
       length: 20,
     });
 
     // Save as pending (not yet confirmed)
-    await User.findByIdAndUpdate(user._id, { twoFactorPendingSecret: secret.base32 });
+    await Model.findByIdAndUpdate(user._id, { twoFactorPendingSecret: secret.base32 });
 
     // Generate QR code data URL
     const qrDataUrl = await QRCode.toDataURL(secret.otpauth_url);
@@ -259,8 +274,8 @@ router.post("/2fa/confirm", requireAuth, async (req, res) => {
   if (!code) return res.status(400).json({ message: "OTP code is required" });
 
   try {
-    const user = await User.findById(req.user._id).select("+twoFactorEnabled +twoFactorPendingSecret +twoFactorSecret");
-    if (!user) return res.status(404).json({ message: "User not found" });
+    const { doc: user, Model } = await resolve2faSubject(req, "+twoFactorEnabled +twoFactorPendingSecret +twoFactorSecret");
+    if (!user) return res.status(404).json({ message: "Account not found" });
 
     if (!user.twoFactorPendingSecret) {
       return res.status(400).json({ message: "No pending 2FA setup found. Start setup first." });
@@ -278,7 +293,7 @@ router.post("/2fa/confirm", requireAuth, async (req, res) => {
     }
 
     // Activate 2FA
-    await User.findByIdAndUpdate(user._id, {
+    await Model.findByIdAndUpdate(user._id, {
       twoFactorSecret: user.twoFactorPendingSecret,
       twoFactorEnabled: true,
       twoFactorPendingSecret: undefined,
@@ -299,8 +314,8 @@ router.post("/2fa/disable", requireAuth, async (req, res) => {
   }
 
   try {
-    const user = await User.findById(req.user._id).select("+twoFactorSecret +twoFactorEnabled +password");
-    if (!user) return res.status(404).json({ message: "User not found" });
+    const { doc: user, Model } = await resolve2faSubject(req, "+twoFactorSecret +twoFactorEnabled +password");
+    if (!user) return res.status(404).json({ message: "Account not found" });
 
     if (!user.twoFactorEnabled) {
       return res.status(400).json({ message: "2FA is not enabled on this account" });
@@ -322,7 +337,7 @@ router.post("/2fa/disable", requireAuth, async (req, res) => {
       return res.status(401).json({ message: "Invalid authenticator code" });
     }
 
-    await User.findByIdAndUpdate(user._id, {
+    await Model.findByIdAndUpdate(user._id, {
       twoFactorEnabled: false,
       twoFactorSecret: undefined,
       twoFactorPendingSecret: undefined,
@@ -338,11 +353,12 @@ router.post("/2fa/disable", requireAuth, async (req, res) => {
 // ── 2FA: Status ──────────────────────────────────────────────────
 router.get("/2fa/status", requireAuth, async (req, res) => {
   try {
-    // Employee-fallback tokens: look up the owner admin User
-    const lookupId = req.user.isEmployeeFallback ? req.user.owner : req.user._id;
-    const user = await User.findById(lookupId).select("twoFactorEnabled");
-    if (!user) return res.status(404).json({ message: "User not found" });
-    return res.json({ twoFactorEnabled: user.twoFactorEnabled });
+    // Employee-admins manage their OWN 2FA (on the Employee record), never the
+    // owner admin's. So report the EMPLOYEE's own status — if they haven't set up
+    // 2FA it's simply disabled, and the dashboard loads without a gate.
+    const { doc } = await resolve2faSubject(req, "+twoFactorEnabled");
+    if (!doc) return res.status(404).json({ message: "Account not found" });
+    return res.json({ twoFactorEnabled: !!doc.twoFactorEnabled });
   } catch (err) {
     return res.status(500).json({ message: "Server error" });
   }
@@ -352,9 +368,9 @@ router.post("/2fa/verify-session", requireAuth, async (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ message: "Code is required" });
   try {
-    // Employee-fallback tokens: verify against the owner admin User's TOTP
-    const lookupId = req.user.isEmployeeFallback ? req.user.owner : req.user._id;
-    const user = await User.findById(lookupId).select("+twoFactorSecret +twoFactorEnabled");
+    // Verify against the authenticating account's OWN TOTP (employee-admins use
+    // their own Employee 2FA, not the owner admin's).
+    const { doc: user } = await resolve2faSubject(req, "+twoFactorSecret +twoFactorEnabled");
     if (!user || !user.twoFactorEnabled || !user.twoFactorSecret) {
       return res.json({ verified: true });
     }
