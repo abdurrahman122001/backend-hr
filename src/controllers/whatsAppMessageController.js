@@ -3292,6 +3292,65 @@ exports.markAsSeen = async function markAsSeen(req, res) {
   }
 };
 
+// GET /:id/seen-by — list the employees who have READ this message (for the
+// message-info dialog). Excludes the sender; sorted by when they read it.
+exports.getSeenBy = async function getSeenBy(req, res) {
+  try {
+    const { id } = req.params;
+    if (!isObjId(id)) return res.status(400).json({ error: "Invalid message id" });
+
+    const ownerId = req.employee?.owner;
+    const msg = await WhatsAppMessage.findOne({ _id: id, owner: ownerId })
+      .select("seenBy sender")
+      .populate({
+        path: "seenBy.employee",
+        select: "_id name companyEmail role designation photographUrl",
+      })
+      .lean();
+
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const senderId = String(msg.sender || "");
+    // De-duplicate: the same employee can appear multiple times in seenBy
+    // (e.g. seen on multiple devices/sessions). Keep one entry per employee
+    // with their EARLIEST read time.
+    const byEmployee = new Map();
+    for (const s of msg.seenBy || []) {
+      if (!s.employee || !s.employee._id) continue;
+      const id = String(s.employee._id);
+      if (id === senderId) continue; // exclude the sender
+      const seenAt = s.seenAt || null;
+      const existing = byEmployee.get(id);
+      if (!existing) {
+        byEmployee.set(id, {
+          _id: s.employee._id,
+          name: s.employee.name,
+          companyEmail: s.employee.companyEmail,
+          role: s.employee.role,
+          designation: s.employee.designation,
+          photographUrl: s.employee.photographUrl || null,
+          seenAt,
+        });
+      } else if (
+        seenAt &&
+        (!existing.seenAt || new Date(seenAt) < new Date(existing.seenAt))
+      ) {
+        existing.seenAt = seenAt; // keep the earliest timestamp
+      }
+    }
+
+    const readers = Array.from(byEmployee.values()).sort(
+      (a, b) =>
+        new Date(a.seenAt || 0).getTime() - new Date(b.seenAt || 0).getTime(),
+    );
+
+    return res.json({ count: readers.length, readers });
+  } catch (e) {
+    console.error("Error fetching seen-by:", e);
+    return res.status(500).json({ error: "Failed to fetch read receipts" });
+  }
+};
+
 exports.getUnreadCounts = async function getUnreadCounts(req, res) {
   try {
     const currentUserId = req.employee._id;
@@ -3804,15 +3863,10 @@ exports.createMessage = async function createMessage(req, res) {
                 receivers = [immediateSups[0]];
                 approvalStatus = "pending";
               } else {
-                approvalStatus = "pending";
-                const managerInChain = await findFirstManagerOrTeamLeadInChain(owner, String(sender));
-                if (managerInChain) {
-                  receivers = [managerInChain];
-                } else if (tls.length > 0) {
-                  receivers = [tls[0]];
-                } else if (managers.length > 0) {
-                  receivers = [managers[0]];
-                }
+                // Sender is top of the hierarchy (no one's junior) — there is no
+                // senior to approve, so send directly instead of forcing pending.
+                // Mirrors the non-reply path's "top of hierarchy" handling below.
+                approvalStatus = null;
               }
             } else if (isDirect) {
               if (originalSenderId && !receivers.includes(originalSenderId)) {

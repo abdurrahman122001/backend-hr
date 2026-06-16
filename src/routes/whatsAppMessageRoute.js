@@ -70,6 +70,9 @@ router.patch("/:id/edit", ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 router.patch("/:id/seen", ctrl.markAsSeen);
 
+// Read receipts — which employees have read this message (for the info dialog)
+router.get("/:id/seen-by", ctrl.getSeenBy);
+
 router.post("/:messageId/reactions", ctrl.toggleMessageReaction);
 
 router.get(
