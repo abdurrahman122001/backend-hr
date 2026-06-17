@@ -1668,6 +1668,10 @@ exports.getLeaves = async (req, res) => {
       .lean();
 
     // Process employee data
+    const role = (req.user.role || "").toLowerCase();
+    const isAdminUser = req.user.isAdmin || role === "admin" || role === "hr";
+    const myIdStr = String(req.user.employeeId || req.user._id);
+
     const processedLeaves = leaves.map((leave) => {
       let isAwaitingSenior = false;
       if (leave.approvalChain && leave.approvalChain.length > 0) {
@@ -1676,10 +1680,23 @@ exports.getLeaves = async (req, res) => {
         isAwaitingSenior = (leave.currentApprovalIndex || 0) === 0;
       }
 
+      // Whether the requesting user may act on this leave RIGHT NOW:
+      //  • they are the approver the chain is currently waiting on (e.g. an
+      //    admin-power employee who is a senior mid-chain), or
+      //  • the chain is exhausted (final step) and they are an admin/HR.
+      const idx = leave.currentApprovalIndex || 0;
+      const currentApprover = Array.isArray(leave.approvalChain) ? leave.approvalChain[idx] : null;
+      const isCurrentApprover =
+        !!currentApprover && String(currentApprover._id || currentApprover) === myIdStr;
+      const canAct =
+        leave.status === "pending" &&
+        (isCurrentApprover || (isAdminUser && !isAwaitingSenior));
+
       return {
         ...leave,
         employee: processEmployeeWithPhoto(leave.employee, req),
         awaitingSenior: isAwaitingSenior,
+        canAct,
       };
     });
 

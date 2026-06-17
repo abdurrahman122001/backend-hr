@@ -163,57 +163,6 @@ async function findNextActiveSupervisors(ownerId, employeeId, supervisedByList) 
 }
 
 /**
- * 🔥 NEW: Find the first manager/team lead in the hierarchy chain (skip employees)
- * For pending approval messages, we don't send to junior employees - 
- * we send directly to their manager/team lead
- * @param {string} ownerId - The owner ID (organization)
- * @param {string} employeeId - The employee whose senior we're looking for
- * @returns {Promise<string|null>} - The ID of the first manager/team lead found, or null
- */
-async function findFirstManagerOrTeamLeadInChain(ownerId, employeeId) {
-  if (!isObjId(ownerId) || !isObjId(employeeId)) return null;
-
-  try {
-    let currentEmployeeId = employeeId;
-    const visited = new Set();
-
-    // Traverse up the hierarchy (limit to 10 levels)
-    for (let i = 0; i < 10; i++) {
-      if (visited.has(currentEmployeeId)) break;
-      visited.add(currentEmployeeId);
-
-      // Find immediate seniors
-      const seniors = await findSupervisorsFromHierarchy(ownerId, currentEmployeeId);
-      if (!seniors || seniors.length === 0) break;
-
-      // Check each senior's role
-      for (const seniorId of seniors) {
-        const seniorDoc = await Employee.findById(seniorId)
-          .select("role")
-          .lean();
-
-        if (!seniorDoc) continue;
-
-        const role = normalizeRole(seniorDoc.role || "");
-
-        // If we find a manager or team lead, return it
-        if (role === "manager" || role === "team_lead") {
-          return seniorId;
-        }
-      }
-
-      // No manager/TL found at this level - move up to first senior
-      currentEmployeeId = seniors[0];
-    }
-
-    return null;
-  } catch (error) {
-    console.error("Error finding manager/team lead in chain:", error);
-    return null;
-  }
-}
-
-/**
  * Get the full management chain for an employee (all seniors up to root).
  * This traverses the hierarchy tree upward.
  * @param {string} ownerId - The owner ID (organization)
@@ -2893,40 +2842,6 @@ exports.deleteMessage = async function deleteMessage(req, res) {
   }
 };
 
-// GET /api/whatsApp-messages/notify-prefs
-// Returns the current employee's CRM browser-notification preference.
-exports.getNotifyPrefs = async function getNotifyPrefs(req, res) {
-  try {
-    const emp = await Employee.findById(req.employee._id)
-      .select("crmNotifyMode")
-      .lean();
-    const crmNotifyMode = emp?.crmNotifyMode === "both" ? "both" : "supervision";
-    return res.json({ crmNotifyMode });
-  } catch (e) {
-    console.error("getNotifyPrefs error:", e);
-    return res.status(500).json({ error: "Failed to load notification preferences" });
-  }
-};
-
-// PUT /api/whatsApp-messages/notify-prefs  { crmNotifyMode: "supervision" | "both" }
-// Persists the current employee's CRM browser-notification preference.
-exports.updateNotifyPrefs = async function updateNotifyPrefs(req, res) {
-  try {
-    const mode = req.body?.crmNotifyMode;
-    if (mode !== "supervision" && mode !== "both") {
-      return res.status(400).json({ error: "Invalid crmNotifyMode" });
-    }
-    await Employee.updateOne(
-      { _id: req.employee._id },
-      { $set: { crmNotifyMode: mode } },
-    );
-    return res.json({ crmNotifyMode: mode });
-  } catch (e) {
-    console.error("updateNotifyPrefs error:", e);
-    return res.status(500).json({ error: "Failed to save notification preferences" });
-  }
-};
-
 // DELETE /api/whatsApp-messages/chats/:clientId?clientEmployeeId=...
 // Deletes an entire chat (client chat or client-employee sub-chat) and
 // notifies every employee who can see it so their chat list updates live.
@@ -3492,26 +3407,23 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       }
     }
 
-    // Find all unread messages for this client/employee where current user is a receiver
-    const unreadMessages = await WhatsAppMessage.find(q);
+    // Find all unread messages for this client/employee where current user is a
+    // receiver. Only the fields needed for the real-time emit are selected — the
+    // actual seen-write is done atomically below.
+    const unreadMessages = await WhatsAppMessage.find(q).select("_id sender receiver");
 
-    // Mark each message as seen
-    const updatePromises = unreadMessages.map(async (message) => {
-      // Check if user already seen this message (double check)
-      const alreadySeen = message.seenBy.some(
-        (seen) => String(seen.employee) === String(currentUserId),
-      );
-
-      if (!alreadySeen) {
-        message.seenBy.push({
-          employee: currentUserId,
-          // NO seenAt - only employee field as per your schema
-        });
-        return message.save();
-      }
-    });
-
-    await Promise.all(updatePromises);
+    // Mark them as seen with a single atomic write. We deliberately use
+    // updateMany($push) instead of loading each doc and calling .save():
+    // .save() revalidates the ENTIRE document, so a single legacy/forwarded
+    // message that violates schema validation (e.g. a stray/empty value in the
+    // `required` receiver array) would throw, reject Promise.all, and abandon
+    // the whole batch — leaving messages unread again after a refresh.
+    // $push touches only seenBy and skips full-document validation.
+    if (unreadMessages.length > 0) {
+      await WhatsAppMessage.updateMany(q, {
+        $push: { seenBy: { employee: currentUserId, seenAt: new Date() } },
+      });
+    }
 
     // Emit real-time event for all updated messages
     if (req.app.get("io")) {
@@ -4416,8 +4328,17 @@ exports.getChatList = async function getChatList(req, res) {
         $match: {
           owner: ownerObjId,
           receiver: meId,
+          sender: { $ne: meId }, // never count my own messages as unread
           status: { $ne: "draft" },
-          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          // Count pending too: `receiver: meId` already scopes to the message's
+          // CURRENT approver, so a pending message contributes to the green
+          // unread badge only while it awaits this user — i.e. at each step of
+          // the approval hierarchy, matching the per-chat seen-status endpoint.
+          $or: [
+            { approvalStatus: null },
+            { approvalStatus: "approved" },
+            { approvalStatus: "pending" },
+          ],
           "seenBy.employee": { $ne: meId },
         },
       },

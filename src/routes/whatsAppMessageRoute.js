@@ -9,10 +9,6 @@ const groupCtrl = require("../controllers/whatsAppGroupController");
 // All routes require employee authentication
 router.use(empAuth);
 
-// ── Per-employee notification preferences (literal path; before /:id) ───────
-router.get("/notify-prefs", ctrl.getNotifyPrefs);
-router.put("/notify-prefs", ctrl.updateNotifyPrefs);
-
 // ── Group routes (must come BEFORE /:id wildcards) ──────────────────────────
 // chatType differentiation: isGroupMessage=true on group messages
 router.get("/groups", groupCtrl.getGroups);

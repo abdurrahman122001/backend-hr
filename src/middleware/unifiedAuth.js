@@ -32,7 +32,7 @@ module.exports = async function unifiedAuth(req, res, next) {
 
     // Try to find as employee first
     employee = await Employee.findById(userId).select(
-      "_id role companyEmail name owner department permissions userAccount status"
+      "_id role companyEmail name owner department permissions userAccount status isAdmin"
     );
 
     if (employee) {
@@ -55,6 +55,10 @@ module.exports = async function unifiedAuth(req, res, next) {
       // When employee logs in, req.user._id should be the COMPANY OWNER ID
       // not the employee's personal ID
       const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
+      // Employees granted admin rights (isAdmin) are treated as admins on
+      // UnifiedAuth routes too — mirroring anyPayrollAuth — so admin-only
+      // listings (e.g. getLeaves returning all org leaves) work for them.
+      const isAdminEmployee = employee.isAdmin === true;
       req.user = {
         _id: finalOwner, // COMPANY ID - for database queries
         employeeId: employee._id, // Employee's personal ID
@@ -65,7 +69,7 @@ module.exports = async function unifiedAuth(req, res, next) {
         department: employee.department,
         permissions: employee.permissions || {},
         isEmployee: true,
-        isAdmin: false,
+        isAdmin: isAdminEmployee,
         userAccount: employee.userAccount,
         status: employee.status,
       };
