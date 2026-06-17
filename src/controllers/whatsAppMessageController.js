@@ -3492,26 +3492,23 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       }
     }
 
-    // Find all unread messages for this client/employee where current user is a receiver
-    const unreadMessages = await WhatsAppMessage.find(q);
+    // Find all unread messages for this client/employee where current user is a
+    // receiver. Only the fields needed for the real-time emit are selected — the
+    // actual seen-write is done atomically below.
+    const unreadMessages = await WhatsAppMessage.find(q).select("_id sender receiver");
 
-    // Mark each message as seen
-    const updatePromises = unreadMessages.map(async (message) => {
-      // Check if user already seen this message (double check)
-      const alreadySeen = message.seenBy.some(
-        (seen) => String(seen.employee) === String(currentUserId),
-      );
-
-      if (!alreadySeen) {
-        message.seenBy.push({
-          employee: currentUserId,
-          // NO seenAt - only employee field as per your schema
-        });
-        return message.save();
-      }
-    });
-
-    await Promise.all(updatePromises);
+    // Mark them as seen with a single atomic write. We deliberately use
+    // updateMany($push) instead of loading each doc and calling .save():
+    // .save() revalidates the ENTIRE document, so a single legacy/forwarded
+    // message that violates schema validation (e.g. a stray/empty value in the
+    // `required` receiver array) would throw, reject Promise.all, and abandon
+    // the whole batch — leaving messages unread again after a refresh.
+    // $push touches only seenBy and skips full-document validation.
+    if (unreadMessages.length > 0) {
+      await WhatsAppMessage.updateMany(q, {
+        $push: { seenBy: { employee: currentUserId, seenAt: new Date() } },
+      });
+    }
 
     // Emit real-time event for all updated messages
     if (req.app.get("io")) {
@@ -4416,6 +4413,7 @@ exports.getChatList = async function getChatList(req, res) {
         $match: {
           owner: ownerObjId,
           receiver: meId,
+          sender: { $ne: meId }, // never count my own messages as unread
           status: { $ne: "draft" },
           $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
           "seenBy.employee": { $ne: meId },

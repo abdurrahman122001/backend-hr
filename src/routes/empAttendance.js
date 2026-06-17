@@ -479,6 +479,9 @@ router.patch('/challenge/:id/review', async (req, res) => {
       return res.status(400).json({ error: "Invalid challenge ID" });
     }
 
+    // Security pre-check: ensure the challenge exists and belongs to this
+    // admin-employee's owner before we hand off to the shared resolver
+    // (updateChallengeStatus finds by id without owner-scoping).
     const challenge = await AttendanceChallenge.findOne({
       $or: [{ _id: id }, { attendance: id }],
       challengeStatus: "Pending",
@@ -489,43 +492,29 @@ router.patch('/challenge/:id/review', async (req, res) => {
       return res.status(404).json({ error: "Pending attendance challenge not found" });
     }
 
-    const Attendance = require("../models/Attendance");
-    const attendance = await Attendance.findById(challenge.attendance);
-    if (!attendance) {
-      return res.status(404).json({ error: "Linked attendance record not found" });
-    }
+    // Delegate to the same controller the admin dashboard uses so that
+    // approval reverses & recomputes all downstream side-effects (leave
+    // restoration, bonuses, late deductions, change logs). Previously this
+    // route mutated the Attendance record directly and skipped that pipeline,
+    // so nothing reverted when an admin-power employee approved a challenge.
+    const attendanceController = require("../controllers/attendanceController");
+    const finalOwner = Array.isArray(req.employee.owner)
+      ? req.employee.owner[0]
+      : req.employee.owner;
 
-    challenge.challengeStatus = action;
-    challenge.challengeAdminNotes = notes || "";
-    challenge.challengeAt = new Date();
-    await challenge.save();
+    // markAttendance keys all lookups/writes off req.user — mirror what
+    // anyPayrollAuth sets for an isAdmin employee (identity = the owner).
+    req.user = {
+      _id: finalOwner,
+      owner: finalOwner,
+      role: "admin",
+      isAdmin: true,
+      isEmployee: true,
+    };
+    req.body.challengeStatus = action;
+    req.body.challengeAdminNotes = notes || "";
 
-    attendance.challengeStatus = action;
-    attendance.challengeAdminNotes = notes || "";
-    attendance.challengeAt = new Date();
-
-    if (action === "Approved") {
-      if (challenge.requestedCheckIn) attendance.checkIn = challenge.requestedCheckIn;
-      if (challenge.requestedCheckOut) attendance.checkOut = challenge.requestedCheckOut;
-      if (challenge.requestedStatus) attendance.status = challenge.requestedStatus;
-    }
-
-    const note = buildAttendanceReviewNote(action);
-    attendance.notes = appendAttendanceNote(attendance.notes, note);
-    await attendance.save();
-
-    // Notify employee via socket
-    if (req.app.get("io")) {
-      req.app.get("io")
-        .to(`employee_${challenge.employee}`)
-        .emit("attendance_query_changed", {
-          attendance,
-          action: action.toLowerCase(),
-          message: `Your attendance challenge for ${attendance.date} has been ${action.toLowerCase()}.`,
-        });
-    }
-
-    return res.json({ success: true, challengeStatus: action, attendance });
+    return attendanceController.updateChallengeStatus(req, res);
   } catch (err) {
     console.error("❌ Review attendance challenge failed:", err);
     res.status(500).json({ error: "Failed to review attendance challenge" });
