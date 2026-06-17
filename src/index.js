@@ -147,6 +147,7 @@ const ALLOWED_ORIGINS = [
   "http://attendance.virsme.com",
   "https://connect.virsme.com",
   "https://people.virsme.com",
+  "https://task.virsme.com",
   "http://localhost:8080",
   "http://localhost:8081",
   "http://localhost:8082",
