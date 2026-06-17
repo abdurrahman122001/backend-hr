@@ -1,22 +1,26 @@
 const router = require("express").Router();
 const requireAuth = require("../middleware/auth");
+const requireAdmin = require("../middleware/requireAdmin");
 const admin = require("../controllers/adminWorkSpaceManagementContoller");
 
+// All workspace/space management is admin-only (company admin or employee-admin)
+router.use(requireAuth, requireAdmin);
+
 // Workspace
-router.post("/workspace", requireAuth, admin.createWorkspace);
-router.get("/workspace", requireAuth, admin.getWorkspaces);
-router.put("/workspace/:id", requireAuth, admin.updateWorkspace);
-router.delete("/workspace/:id", requireAuth, admin.deleteWorkspace);
-router.post("/workspace/member", requireAuth, admin.updateWorkspaceMember);
+router.post("/workspace", admin.createWorkspace);
+router.get("/workspace", admin.getWorkspaces);
+router.put("/workspace/:id", admin.updateWorkspace);
+router.delete("/workspace/:id", admin.deleteWorkspace);
+router.post("/workspace/member", admin.updateWorkspaceMember);
 
 // Space
-router.post("/space", requireAuth, admin.createSpace);
-router.get("/space/:workspaceId", requireAuth, admin.getSpaces);
-router.put("/space/:id", requireAuth, admin.updateSpace);
-router.delete("/space/:id", requireAuth, admin.deleteSpace);
-router.post("/space/visibility", requireAuth, admin.updateSpaceVisibility);
+router.post("/space", admin.createSpace);
+router.get("/space/:workspaceId", admin.getSpaces);
+router.put("/space/:id", admin.updateSpace);
+router.delete("/space/:id", admin.deleteSpace);
+router.post("/space/visibility", admin.updateSpaceVisibility);
 
 // Employees
-router.get("/employees", requireAuth, admin.getEmployees);
+router.get("/employees", admin.getEmployees);
 
 module.exports = router;

@@ -258,6 +258,7 @@ exports.sendGroupMessage = async function (req, res) {
       isReply,
       repliedTo,
       replyContent,
+      mentions,
     } = req.body;
 
     if (!isObjId(groupId))
@@ -414,6 +415,17 @@ exports.sendGroupMessage = async function (req, res) {
         intendedReceiverIds.length > 0 ? intendedReceiverIds : receiverIds,
       note: noteContent,
       subject: subject || `Group: ${group.name}`,
+      mentions: Array.isArray(mentions)
+        ? mentions
+            .filter((m) => m && m.refId && m.name)
+            .map((m) => ({
+              refId: String(m.refId),
+              name: String(m.name),
+              type: ["client_employee", "client"].includes(m.type)
+                ? m.type
+                : "employee",
+            }))
+        : [],
       status: "sent",
       isGroupMessage: true,
       groupId: oid(groupId),
@@ -488,6 +500,28 @@ exports.sendGroupMessage = async function (req, res) {
           approvalStatus,
         });
       });
+
+      // 🔔 Notify @mentioned employees
+      if (Array.isArray(msgDoc.mentions) && msgDoc.mentions.length) {
+        const mentionSenderName = populated.sender?.name || "Someone";
+        const mentionPreview = noteContent.replace(/<[^>]*>/g, "").slice(0, 120);
+        msgDoc.mentions
+          .filter(
+            (m) =>
+              m.type === "employee" &&
+              isObjId(m.refId) &&
+              String(m.refId) !== String(senderId),
+          )
+          .forEach((m) => {
+            io.to(`employee_${m.refId}`).emit("whatsapp_mention", {
+              messageId: String(message._id),
+              groupId: String(groupId),
+              isGroupMessage: true,
+              senderName: mentionSenderName,
+              preview: mentionPreview,
+            });
+          });
+      }
     }
 
     res.status(201).json(populated);

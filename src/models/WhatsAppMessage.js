@@ -191,6 +191,20 @@ const WhatsAppMessageSchema = new Schema(
         seenAt: { type: Date, default: Date.now },
       },
     ],
+    // @mentions — people referenced with @ in the message text. `refId` is the
+    // Employee _id or the client-employee id; `type` distinguishes them.
+    mentions: [
+      {
+        refId: { type: String },
+        name: { type: String },
+        type: {
+          type: String,
+          enum: ["employee", "client_employee", "client"],
+          default: "employee",
+        },
+        _id: false,
+      },
+    ],
     isReply: { type: Boolean, default: false },
     repliedTo: {
       type: Schema.Types.ObjectId,

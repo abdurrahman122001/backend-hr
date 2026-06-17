@@ -1716,6 +1716,37 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
+    // ── Per-category unread (for the Gmail-style sidebar badges) ───────────
+    // external = client mail, internal = no client, review = activity from my
+    // hierarchy juniors. "unread" = I'm a receiver and haven't read it.
+    const currentUserRole = normalizeRole(req.employee?.role || "");
+    const isOwner = currentUserRole === "owner";
+    const juniorIdStrings = await getCachedJuniors(
+      oid(String(owner)),
+      oid(String(currentUser)),
+    );
+    const juniorIds = juniorIdStrings.filter(isObjId).map((id) => oid(id));
+
+    const baseUnread = {
+      status: "sent",
+      isTrashed: false,
+      isSpam: false,
+      "readBy.employee": { $ne: currentUser },
+    };
+    const receiverOr = [
+      { receiver: currentUser },
+      { receiver: { $in: [currentUser] } },
+    ];
+
+    // Review (All Activity): unread messages authored by my juniors (owners see
+    // the whole org). Excludes my own messages.
+    let reviewQuery = { _id: null };
+    if (isOwner) {
+      reviewQuery = { owner, sender: { $ne: currentUser }, ...baseUnread };
+    } else if (juniorIds.length > 0) {
+      reviewQuery = { sender: { $in: juniorIds }, ...baseUnread };
+    }
+
     // Get counts for different categories
     const [
       inboxCount,
@@ -1726,6 +1757,9 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       scheduledCount,
       spamCount,
       trashCount,
+      externalUnread,
+      internalUnread,
+      reviewUnread,
     ] = await Promise.all([
       // Inbox: messages where user is receiver, not trashed, not spam, status sent
       AssignmentMessage.countDocuments({
@@ -1787,6 +1821,25 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         ],
         isTrashed: true,
       }),
+
+      // External Inbox unread: client mail I'm a receiver of and haven't read
+      AssignmentMessage.countDocuments({
+        $or: receiverOr,
+        client: { $exists: true, $ne: null },
+        ...baseUnread,
+      }),
+
+      // TeamBox (internal) unread: non-client mail I'm a receiver of, unread
+      AssignmentMessage.countDocuments({
+        $and: [
+          { $or: receiverOr },
+          { $or: [{ client: { $exists: false } }, { client: null }] },
+        ],
+        ...baseUnread,
+      }),
+
+      // All Activity (review) unread
+      AssignmentMessage.countDocuments(reviewQuery),
     ]);
 
     res.json({
@@ -1799,6 +1852,9 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       spam: spamCount,
       trash: trashCount,
       archive: 0,
+      external: externalUnread,
+      internal: internalUnread,
+      review: reviewUnread,
     });
   } catch (e) {
     console.error("Error in getMessageCounts:", e);

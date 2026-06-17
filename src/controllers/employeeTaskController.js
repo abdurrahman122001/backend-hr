@@ -4,15 +4,50 @@ const TaskSpace = require("../models/TaskSpace");
 const Task = require("../models/Task");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
+
+/* =========================
+   ADMIN ACCESS HELPERS
+   Admins (isAdmin employees or admin/HR users) bypass membership and
+   space-visibility restrictions and can see/manage every workspace, space and
+   task within their company (still scoped by owner). Regular employees remain
+   restricted to workspaces they belong to and spaces shared with them.
+========================= */
+
+// Workspace membership clause — empty for admins so they match every workspace.
+function workspaceMemberClause(req) {
+  return req.employee.isAdmin ? {} : { "members.employee": req.employee._id };
+}
+
+// Space visibility clause — empty for admins so they match every space.
+function spaceVisibilityClause(req) {
+  return req.employee.isAdmin
+    ? {}
+    : { $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }] };
+}
+
 /* =========================
    WORKSPACES
 ========================= */
 
 exports.getMyWorkspaces = async (req, res) => {
   try {
+    // Admins are auto-enrolled as a member of every company workspace, so they
+    // show up as an assignable member of every space without manual adding.
+    if (req.employee.isAdmin) {
+      await Workspace.updateMany(
+        {
+          owner: req.employee.owner,
+          "members.employee": { $ne: req.employee._id },
+        },
+        {
+          $push: { members: { employee: req.employee._id, role: "admin" } },
+        }
+      );
+    }
+
     const workspaces = await Workspace.find({
       owner: req.employee.owner,
-      "members.employee": req.employee._id,
+      ...workspaceMemberClause(req),
       isArchived: false,
     }).select("_id name");
 
@@ -35,21 +70,18 @@ exports.getMySpaces = async (req, res) => {
     const workspace = await Workspace.findOne({
       _id: workspaceId,
       owner: req.employee.owner,
-      "members.employee": req.employee._id,
+      ...workspaceMemberClause(req),
     });
 
     if (!workspace) {
       return res.status(403).json({ message: "Access denied to workspace" });
     }
 
-    // Get spaces visible to the employee in this workspace
+    // Get spaces visible to the employee in this workspace (admins see all)
     const spaces = await TaskSpace.find({
       workspace: workspaceId,
       owner: req.employee.owner,
-      $or: [
-        { visibleTo: req.employee._id },
-        { visibleTo: { $size: 0 } }, // Also include spaces with no specific visibility (visible to all)
-      ],
+      ...spaceVisibilityClause(req),
       isArchived: false,
     }).select("_id name status isArchived createdAt updatedAt");
 
@@ -73,7 +105,7 @@ exports.getMyTasks = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
+      ...spaceVisibilityClause(req),
       isArchived: false,
     });
 
@@ -114,7 +146,7 @@ exports.createTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
+      ...spaceVisibilityClause(req),
       isArchived: false,
     });
 
@@ -337,7 +369,7 @@ exports.updateTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: task.space,
       owner: req.employee.owner,
-      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
+      ...spaceVisibilityClause(req),
     });
 
     if (!space) {
@@ -405,7 +437,7 @@ exports.deleteTask = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: task.space,
       owner: req.employee.owner,
-      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
+      ...spaceVisibilityClause(req),
     });
 
     if (!space) {
@@ -439,7 +471,7 @@ exports.getTaskStats = async (req, res) => {
     const space = await TaskSpace.findOne({
       _id: spaceId,
       owner: req.employee.owner,
-      $or: [{ visibleTo: req.employee._id }, { visibleTo: { $size: 0 } }],
+      ...spaceVisibilityClause(req),
       isArchived: false,
     });
 
@@ -494,11 +526,11 @@ exports.createSpace = async (req, res) => {
   const { workspaceId, name, visibleTo } = req.body;
 
   try {
-    // Verify workspace access
+    // Verify workspace access (admins can add spaces to any workspace)
     const workspace = await Workspace.findOne({
       _id: workspaceId,
       owner: req.employee.owner,
-      "members.employee": req.employee._id,
+      ...workspaceMemberClause(req),
     });
 
     if (!workspace) {

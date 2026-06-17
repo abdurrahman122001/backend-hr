@@ -108,7 +108,7 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
       designation: emp.designation,
       permissions: emp.permissions || {},
       joiningDate: emp.joiningDate,
-      isAdmin: !!emp.isAdmin,
+      isAdmin: !!emp.isAdmin || isAdminUser,
     };
 
     next();

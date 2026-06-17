@@ -3549,6 +3549,95 @@ exports.searchMessages = async function searchMessages(req, res) {
     });
   }
 };
+// GET /api/whatsApp-messages/mentionables?groupId=...|clientId=...
+// Returns the people who can be @mentioned in a chat: every group member for a
+// group, or (for a client / client-employee chat) the client's employees plus
+// the internal employees assigned to / supervising that client.
+exports.getMentionables = async function getMentionables(req, res) {
+  try {
+    const { groupId, clientId } = req.query;
+    const owner = req.employee?.owner;
+    if (!owner) return res.status(401).json({ error: "Unauthorized" });
+
+    const out = [];
+    const seen = new Set();
+    const push = (refId, name, type, avatar) => {
+      const id = refId ? String(refId) : "";
+      const nm = (name || "").trim();
+      if (!id || !nm) return;
+      const key = `${type}:${id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ refId: id, name: nm, type, avatar: avatar || null });
+    };
+
+    if (groupId && isObjId(groupId)) {
+      const group = await WhatsAppGroup.findOne({ _id: groupId, owner }).lean();
+      if (group) {
+        const members = group.members || [];
+        // Resolve employee members' name + photo from the Employee collection.
+        const empMemberIds = members
+          .filter((m) => m.memberType === "employee" && isObjId(m.memberId))
+          .map((m) => m.memberId);
+        let empMap = {};
+        if (empMemberIds.length) {
+          const emps = await Employee.find({ _id: { $in: empMemberIds } })
+            .select("_id name photographUrl")
+            .lean();
+          empMap = Object.fromEntries(emps.map((e) => [String(e._id), e]));
+        }
+        for (const m of members) {
+          if (m.memberType === "employee") {
+            const e = empMap[String(m.memberId)];
+            push(m.memberId, m.memberName || e?.name, "employee", e?.photographUrl);
+          } else if (m.memberType === "client_employee") {
+            push(m.memberId, m.memberName, "client_employee", m.memberAvatar);
+          }
+        }
+      }
+    } else if (clientId && isObjId(clientId)) {
+      const { clientEmployeeId } = req.query;
+      const ClientInfo = require("../models/ClientInfo");
+      const client = await ClientInfo.findOne({ _id: clientId, owner })
+        .populate("assignedTo", "_id name photographUrl")
+        .populate("supervisedBy", "_id name photographUrl")
+        .select("clientName photographUrl companyEmployees assignedTo supervisedBy")
+        .lean();
+      if (client) {
+        if (clientEmployeeId) {
+          // Client-employee sub-chat → the client side is the client's
+          // employees (a "client employee" IS a companyEmployees entry). List
+          // them all so the one being chatted with is always available, without
+          // relying on a possibly-legacy clientEmployeeId matching the subdoc _id.
+          (client.companyEmployees || []).forEach((ce) =>
+            push(ce._id, ce.name, "client_employee", ce.photographUrl),
+          );
+        } else {
+          // Parent client chat → the client side is the CLIENT itself, not its
+          // individual employees (each of those has its own sub-chat).
+          push(client._id, client.clientName, "client", client.photographUrl);
+        }
+        // Internal team on this client is mentionable in either case.
+        (client.assignedTo || []).forEach((e) =>
+          push(e._id, e.name, "employee", e.photographUrl),
+        );
+        (client.supervisedBy || []).forEach((e) =>
+          push(e._id, e.name, "employee", e.photographUrl),
+        );
+      }
+    }
+
+    // Never include the requester themselves.
+    const meId = String(req.employee._id);
+    return res.json({
+      mentionables: out.filter((m) => !(m.type === "employee" && m.refId === meId)),
+    });
+  } catch (e) {
+    console.error("getMentionables error:", e);
+    return res.status(500).json({ error: "Failed to load mentionables" });
+  }
+};
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -3574,6 +3663,8 @@ exports.createMessage = async function createMessage(req, res) {
       isGroupMessage,
       groupId,
       chatType,
+      // @mentions referenced in the message text
+      mentions,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -3776,9 +3867,9 @@ exports.createMessage = async function createMessage(req, res) {
                 approvalStatus = "pending";
               } else {
                 // Sender is top of the hierarchy (no one's junior) — there is no
-                // senior to approve, so send directly instead of forcing pending.
+                // senior to approve, so the message is auto-APPROVED (green tick).
                 // Mirrors the non-reply path's "top of hierarchy" handling below.
-                approvalStatus = null;
+                approvalStatus = "approved";
               }
             } else if (isDirect) {
               if (originalSenderId && !receivers.includes(originalSenderId)) {
@@ -3806,7 +3897,8 @@ exports.createMessage = async function createMessage(req, res) {
             senderRole === "manager" &&
             originalSenderRole === "employee"
           ) {
-            approvalStatus = null;
+            // Manager (top senior) reply → auto-approved on supervised clients.
+            approvalStatus = needsApproval ? "approved" : null;
             if (assignedEmployeeIds.length > 0) {
               assignedEmployeeIds.forEach((employeeId) => {
                 if (employeeId && !receivers.includes(employeeId)) {
@@ -3859,7 +3951,10 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔥 CORRECTED Approval status logic
     if (approvalStatus === undefined) {
       if (senderRole === "manager") {
-        approvalStatus = null;
+        // Manager sits at the top of the hierarchy — on a supervised
+        // (needs_approval) client their message is automatically APPROVED (no
+        // senior above to approve it); on a direct client it's a plain send.
+        approvalStatus = needsApproval ? "approved" : null;
       } else if (needsApproval) {
         // Route to the immediate senior in the hierarchy — regardless of role.
         // The full hierarchy chain is followed: e.g. Abdur Rahman New → Ali →
@@ -3873,10 +3968,11 @@ exports.createMessage = async function createMessage(req, res) {
           receivers = [immediateSupervisors[0]];
           console.log("✅ [createMessage] Routing to immediate hierarchy supervisor:", immediateSupervisors[0]);
         } else {
-          // Sender is the highest-level person in the hierarchy (no one above them).
-          // Approve directly — there is no senior to route to.
-          console.log("✅ [createMessage] Sender is top of hierarchy, approving directly:", String(sender));
-          approvalStatus = null;
+          // Sender is the highest-level person in the hierarchy (no one above
+          // them). There is no senior to approve, so the message is
+          // automatically APPROVED (shows the green tick).
+          console.log("✅ [createMessage] Sender is top of hierarchy — auto-approving:", String(sender));
+          approvalStatus = "approved";
         }
       } else if (isDirect) {
         approvalStatus = "approved";
@@ -3945,6 +4041,17 @@ exports.createMessage = async function createMessage(req, res) {
       subject: subject || "",
       note: note || "",
       approvalStatus: approvalStatus,
+      mentions: Array.isArray(mentions)
+        ? mentions
+            .filter((m) => m && m.refId && m.name)
+            .map((m) => ({
+              refId: String(m.refId),
+              name: String(m.name),
+              type: ["client_employee", "client"].includes(m.type)
+                ? m.type
+                : "employee",
+            }))
+        : [],
       isScheduled,
       status,
       scheduledFor: isScheduled ? new Date(scheduledFor) : undefined,
@@ -4009,7 +4116,41 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
       { path: "repliedTo", select: "_id note message sender attachments" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
+      // Populate the full planned approval chain so the message-info dialog can
+      // immediately list every senior the message will route through.
+      { path: "plannedApprovalChain", select: "_id name role designation" },
     ]);
+
+    // 🔔 Notify @mentioned employees in real time (client-employee mentions
+    // have no app account to notify).
+    try {
+      const ioM = req.app.get("io");
+      if (ioM && !isScheduled && Array.isArray(msgData.mentions) && msgData.mentions.length) {
+        const mentionSenderName = populated.sender?.name || "Someone";
+        const mentionPreview = (note || "").replace(/<[^>]*>/g, "").slice(0, 120);
+        msgData.mentions
+          .filter(
+            (m) =>
+              m.type === "employee" &&
+              isObjId(m.refId) &&
+              String(m.refId) !== String(sender),
+          )
+          .forEach((m) => {
+            ioM.to(`employee_${m.refId}`).emit("whatsapp_mention", {
+              messageId: String(msg._id),
+              clientId: String(actualClientId),
+              isGroupMessage: !!isGroupMessage,
+              groupId: groupId || null,
+              isClientEmployeeMessage: isClientEmployeeChat,
+              clientEmployeeId: isClientEmployeeChat ? clientEmployeeId : null,
+              senderName: mentionSenderName,
+              preview: mentionPreview,
+            });
+          });
+      }
+    } catch (e) {
+      console.warn("mention notify failed:", e.message);
+    }
 
     // Get assigned employees info
     const assignedEmployeesInfo =
