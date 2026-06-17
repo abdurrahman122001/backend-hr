@@ -679,14 +679,17 @@ exports.applyLeave = async (req, res) => {
       employee.owner,
     );
 
-    // Build approval chain based on hierarchy
-    const approvalChain = await buildApprovalChain(employeeId, employee.owner, employee.supervisor);
+    const isEmployeeAdmin = req.user?.isEmployee === true && req.user?.isAdmin === true;
+
+    // Build approval chain based on hierarchy. Employee-admin requests are final immediately.
+    const approvalChain = isEmployeeAdmin
+      ? []
+      : await buildApprovalChain(employeeId, employee.owner, employee.supervisor);
     
     // Set first supervisor from the chain
     let supervisor = approvalChain[0];
 
-    // ALWAYS set status to "pending" - NO AUTO-APPROVAL/REJECTION
-    const status = "pending";
+    const status = isEmployeeAdmin ? "approved" : "pending";
 
     // Create leave request
     const leave = new Leave({
@@ -702,12 +705,15 @@ exports.applyLeave = async (req, res) => {
       startDate,
       endDate,
       appliedDate: new Date(),
-      status: status, // Always pending
+      status,
       isPaid: policyAnalysis.isPaid, // Initial payment status based on analysis
       policyAnalysis: policyAnalysis,
       approvalChain: approvalChain,
       currentApprovalIndex: 0,
       isAbsenceJustification,
+      approvedBy: isEmployeeAdmin ? employeeId : undefined,
+      approvedDate: isEmployeeAdmin ? new Date() : undefined,
+      approvalNotes: isEmployeeAdmin ? "Auto-approved because requester has admin access" : undefined,
     });
 
     // IMPORTANT: Use "submitted" instead of "applied" to match your enum
@@ -719,6 +725,16 @@ exports.applyLeave = async (req, res) => {
       notes: "Leave request submitted",
       timestamp: new Date(),
     });
+
+    if (isEmployeeAdmin) {
+      leave.workflowHistory.push({
+        action: "approved",
+        performedBy: employeeId,
+        performedByName: employee.name || "Admin",
+        notes: "Auto-approved because requester has admin access",
+        timestamp: new Date(),
+      });
+    }
 
     // If policy analysis suggests unpaid, add a system note
     if (!policyAnalysis.isPaid && policyAnalysis.violations.length > 0) {
@@ -739,7 +755,7 @@ exports.applyLeave = async (req, res) => {
     await leave.save();
 
     // 🔥 NEW: Real-time notification for all seniors in the hierarchy
-    if (req.app.get("io") && approvalChain && approvalChain.length > 0) {
+    if (!isEmployeeAdmin && req.app.get("io") && approvalChain && approvalChain.length > 0) {
       const io = req.app.get("io");
       const populatedLeave = await Leave.findById(leave._id)
         .populate("employee", "name email department photographUrl")
@@ -778,7 +794,9 @@ exports.applyLeave = async (req, res) => {
     }
 
     // Prepare response message based on analysis
-    let message = "Leave request submitted for approval";
+    let message = isEmployeeAdmin
+      ? "Leave request approved"
+      : "Leave request submitted for approval";
     let warning = null;
 
     if (policyAnalysis.violations.length > 0) {
@@ -800,8 +818,8 @@ exports.applyLeave = async (req, res) => {
       },
       message: message,
       warning: warning,
-      isAutoDecision: false, // Always false now
-      requiresManualApproval: true, // Always true
+      isAutoDecision: isEmployeeAdmin,
+      requiresManualApproval: !isEmployeeAdmin,
       analysisSummary: {
         violations: policyAnalysis.violations.length,
         recommendation: policyAnalysis.recommendation,
