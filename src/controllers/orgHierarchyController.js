@@ -27,6 +27,29 @@ async function checkForCircularReference(ownerId, seniorId, juniorId) {
 }
 
 /**
+ * Sync admin access from the hierarchy.
+ * The top senior(s) — i.e. the root manager(s) of each chain — get isAdmin=true.
+ * Every other employee for this owner gets isAdmin=false, so the hierarchy fully
+ * drives admin-dashboard access (manual grants on non-roots are intentionally
+ * cleared). Called from rebuildHierarchy after roots are recomputed.
+ */
+async function syncTopSeniorAdmin(ownerId, rootIds) {
+  const rootObjectIds = rootIds.map((id) => new mongoose.Types.ObjectId(id));
+
+  await Employee.updateMany(
+    { owner: ownerId, _id: { $nin: rootObjectIds } },
+    { $set: { isAdmin: false } }
+  );
+
+  if (rootObjectIds.length) {
+    await Employee.updateMany(
+      { owner: ownerId, _id: { $in: rootObjectIds } },
+      { $set: { isAdmin: true } }
+    );
+  }
+}
+
+/**
  * Rebuild enterprise hierarchy metadata (hierarchyLevel, path, rootManager)
  * based on currently saved relationships (owner-scoped).
  *
@@ -63,6 +86,9 @@ async function rebuildHierarchy(ownerId) {
   const allJuniors = new Set(links.map(l => String(l.junior)));
 
   const roots = [...allSeniors].filter(sid => !allJuniors.has(sid));
+
+  // Top senior(s) become admins; everyone else loses admin access.
+  await syncTopSeniorAdmin(ownerId, roots);
 
   // If there are no roots (shouldn't happen unless cycle or empty), stop
   if (!roots.length) return;

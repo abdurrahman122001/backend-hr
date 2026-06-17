@@ -13,7 +13,7 @@ const OvertimeRequest = require("../models/OvertimeRequest");
 const ProfileRevision = require("../models/ProfileRevision");
 const ApplyLeave = require("../models/ApplyLeave");
 const AttendanceChallenge = require("../models/AttendanceChallenge");
-const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const EmployeeHierarchy = require("../models/OrgHierarchy");
 const mongoose = require("mongoose");
 
 async function getAllJuniorIds(ownerId, seniorId) {
@@ -223,10 +223,58 @@ exports.getLeaveApprovals = async (req, res) => {
       };
     });
 
+    let pendingAdminRequests = [];
+    const ownerIds = req.employee?.isAdmin
+      ? [req.employee.owner, req.employee._id].filter(Boolean)
+      : [];
+
+    // Admin employees also see pending payroll/profile requests from their org
+    if (req.employee?.isAdmin) {
+      const adminBase = { owner: { $in: ownerIds }, status: "pending" };
+      const [
+        loans,
+        bonuses,
+        reimbursements,
+        advances,
+        salaryChanges,
+        commissions,
+        taxAdjustments,
+        leaveEncashments,
+        leaveCarryForwards,
+        overtime,
+        profileRevisions,
+      ] = await Promise.all([
+        LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        BonusRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        ReimbursementRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        AdvanceSalaryRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        SalaryChangeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        CommissionRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        TaxAdjustmentRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        LeaveEncashmentRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        LeaveCarryForwardRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        OvertimeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        ProfileRevision.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+      ]);
+
+      pendingAdminRequests = [
+        ...tagRequests(loans, "loan", "payroll"),
+        ...tagRequests(bonuses, "bonus", "payroll"),
+        ...tagRequests(reimbursements, "reimbursement", "payroll"),
+        ...tagRequests(advances, "advance", "payroll"),
+        ...tagRequests(salaryChanges, "salary", "payroll"),
+        ...tagRequests(commissions, "commission", "payroll"),
+        ...tagRequests(taxAdjustments, "tax-adjustment", "payroll"),
+        ...tagRequests(leaveEncashments, "leave-encashment", "payroll"),
+        ...tagRequests(leaveCarryForwards, "leave-carry-forward", "attendance"),
+        ...tagRequests(overtime, "overtime-request", "attendance"),
+        ...tagRequests(profileRevisions, "profile", "profile"),
+      ];
+    }
+
     // Admin employees also see pending attendance challenges from their org
     let pendingChallenges = [];
     if (req.employee?.isAdmin) {
-      const ownerIds = [req.employee.owner, req.employee._id].filter(Boolean);
       pendingChallenges = await AttendanceChallenge.find({
         owner: { $in: ownerIds },
         challengeStatus: "Pending",
@@ -250,7 +298,6 @@ exports.getLeaveApprovals = async (req, res) => {
     // Admin employees also see pending document requests from their org
     let pendingDocRequests = [];
     if (req.employee?.isAdmin) {
-      const ownerIds = [req.employee.owner, req.employee._id].filter(Boolean);
       const docs = await DocumentRequest.find({
         owner: { $in: ownerIds },
         status: "pending",
@@ -295,7 +342,7 @@ exports.getLeaveApprovals = async (req, res) => {
 
     return res.status(200).json({
       preApprovals,
-      forApproval: [...forApproval, ...pendingChallenges, ...pendingDocRequests],
+      forApproval: [...forApproval, ...pendingAdminRequests, ...pendingChallenges, ...pendingDocRequests],
       escalated: annotatedEscalated,
     });
   } catch (error) {
