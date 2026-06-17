@@ -51,13 +51,7 @@ module.exports = async function unifiedAuth(req, res, next) {
 
     // BUILD THE UNIFIED USER OBJECT
     if (isEmployee) {
-      // This is CRITICAL FIX:
-      // When employee logs in, req.user._id should be the COMPANY OWNER ID
-      // not the employee's personal ID
       const finalOwner = Array.isArray(employee.owner) ? employee.owner[0] : employee.owner;
-      // Employees granted admin rights (isAdmin) are treated as admins on
-      // UnifiedAuth routes too — mirroring anyPayrollAuth — so admin-only
-      // listings (e.g. getLeaves returning all org leaves) work for them.
       const isAdminEmployee = employee.isAdmin === true;
       req.user = {
         _id: finalOwner, // COMPANY ID - for database queries
