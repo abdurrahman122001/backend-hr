@@ -446,9 +446,13 @@ exports.sendGroupMessage = async function (req, res) {
     });
 
     const populated = await WhatsAppMessage.findById(message._id)
-      .populate("sender", "_id name companyEmail role")
+      // `designation` + `assignedTo` are needed by the browser-notification
+      // gate (crmNotify): CRM group messages on a client/client-employee should
+      // only notify the client's ASSIGNED employees, and isCrmSender checks the
+      // sender's role/designation.
+      .populate("sender", "_id name companyEmail role designation")
       .populate("receiver", "_id name companyEmail role")
-      .populate("client", "_id clientName")
+      .populate("client", "_id clientName assignedTo")
       .lean();
 
     // ── Real-time socket notifications ────────────────────────────

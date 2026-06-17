@@ -2311,6 +2311,16 @@ io.on("connection", (socket) => {
     }
     socket.join(`conversation_${conversationId}`);
   });
+  // Join WhatsApp group room. Group messages (esp. approved ones) are
+  // broadcast to `group_<id>`, so members must be in this room to receive
+  // them in real time even when another chat is open.
+  socket.on("join_group", (groupId) => {
+    if (!groupId) {
+      console.error("❌ join_group: groupId is required");
+      return;
+    }
+    socket.join(`group_${groupId}`);
+  });
   // 🔥 FIXED: Join client employee room - KEEP ONLY THIS ONE
   socket.on("join_client_employee", (employeeId) => {
     if (!employeeId) {
