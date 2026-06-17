@@ -32,7 +32,7 @@ module.exports = async function unifiedAuth(req, res, next) {
 
     // Try to find as employee first
     employee = await Employee.findById(userId).select(
-      "_id role companyEmail name owner department permissions userAccount status"
+      "_id role companyEmail name owner department permissions userAccount status isAdmin"
     );
 
     if (employee) {
@@ -65,7 +65,7 @@ module.exports = async function unifiedAuth(req, res, next) {
         department: employee.department,
         permissions: employee.permissions || {},
         isEmployee: true,
-        isAdmin: false,
+        isAdmin: !!employee.isAdmin,
         userAccount: employee.userAccount,
         status: employee.status,
       };
