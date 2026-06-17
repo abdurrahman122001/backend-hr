@@ -9,7 +9,7 @@ const Employee = require("../models/Employees");
 // Create
 exports.createWorkspace = async (req, res) => {
   const workspace = await Workspace.create({
-    owner: req.user._id,
+    owner: req.user.owner,
     name: req.body.name,
     description: req.body.description || "",
     members: [],
@@ -20,7 +20,7 @@ exports.createWorkspace = async (req, res) => {
 
 // Read
 exports.getWorkspaces = async (req, res) => {
-  const workspaces = await Workspace.find({ owner: req.user._id });
+  const workspaces = await Workspace.find({ owner: req.user.owner });
   res.json(workspaces);
 };
 
@@ -29,7 +29,7 @@ exports.updateWorkspace = async (req, res) => {
   const { id } = req.params;
 
   const workspace = await Workspace.findOneAndUpdate(
-    { _id: id, owner: req.user._id },
+    { _id: id, owner: req.user.owner },
     { $set: req.body },
     { new: true }
   );
@@ -41,8 +41,8 @@ exports.updateWorkspace = async (req, res) => {
 exports.deleteWorkspace = async (req, res) => {
   const { id } = req.params;
 
-  await Workspace.deleteOne({ _id: id, owner: req.user._id });
-  await TaskSpace.deleteMany({ workspace: id, owner: req.user._id });
+  await Workspace.deleteOne({ _id: id, owner: req.user.owner });
+  await TaskSpace.deleteMany({ workspace: id, owner: req.user.owner });
 
   res.json({ message: "Workspace deleted" });
 };
@@ -57,7 +57,7 @@ exports.updateWorkspaceMember = async (req, res) => {
       : { $pull: { members: { employee: employeeId } } };
 
   await Workspace.updateOne(
-    { _id: workspaceId, owner: req.user._id },
+    { _id: workspaceId, owner: req.user.owner },
     update
   );
 
@@ -71,7 +71,7 @@ exports.updateWorkspaceMember = async (req, res) => {
 // Create
 exports.createSpace = async (req, res) => {
   const space = await TaskSpace.create({
-    owner: req.user._id,
+    owner: req.user.owner,
     workspace: req.body.workspaceId,
     name: req.body.name,
     visibleTo: [],
@@ -83,7 +83,7 @@ exports.createSpace = async (req, res) => {
 // Read
 exports.getSpaces = async (req, res) => {
   const spaces = await TaskSpace.find({
-    owner: req.user._id,
+    owner: req.user.owner,
     workspace: req.params.workspaceId,
   });
 
@@ -95,7 +95,7 @@ exports.updateSpace = async (req, res) => {
   const { id } = req.params;
 
   const space = await TaskSpace.findOneAndUpdate(
-    { _id: id, owner: req.user._id },
+    { _id: id, owner: req.user.owner },
     { $set: req.body },
     { new: true }
   );
@@ -107,7 +107,7 @@ exports.updateSpace = async (req, res) => {
 exports.deleteSpace = async (req, res) => {
   const { id } = req.params;
 
-  await TaskSpace.deleteOne({ _id: id, owner: req.user._id });
+  await TaskSpace.deleteOne({ _id: id, owner: req.user.owner });
   res.json({ message: "Space deleted" });
 };
 
@@ -116,7 +116,7 @@ exports.updateSpaceVisibility = async (req, res) => {
   const { spaceId, employeeIds } = req.body;
 
   await TaskSpace.updateOne(
-    { _id: spaceId, owner: req.user._id },
+    { _id: spaceId, owner: req.user.owner },
     { $set: { visibleTo: employeeIds } }
   );
 
@@ -126,7 +126,7 @@ exports.updateSpaceVisibility = async (req, res) => {
 // Employees
 exports.getEmployees = async (req, res) => {
   const employees = await Employee.find({
-    owner: req.user._id,
+    owner: req.user.owner,
     isTrashed: false,
   }).select("_id name email");
 

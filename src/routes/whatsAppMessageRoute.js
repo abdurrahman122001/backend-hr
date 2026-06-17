@@ -42,6 +42,7 @@ router.get("/search", ctrl.searchMessages);
 
 router.get("/frequent-emojis", ctrl.getFrequentEmojis);
 
+router.get("/mentionables", ctrl.getMentionables);
 router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
 router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
 
