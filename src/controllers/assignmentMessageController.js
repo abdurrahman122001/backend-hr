@@ -3768,9 +3768,10 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
       ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
       : { threadId: threadId };
 
+    // PER USER: find thread messages this user hasn't already binned.
     const threadMessages = await AssignmentMessage.find({
       ...threadQuery,
-      isTrashed: { $ne: true },
+      trashedBy: { $ne: currentUser },
     });
 
     if (threadMessages.length === 0) {
@@ -3779,15 +3780,14 @@ exports.moveThreadToTrash = async function moveThreadToTrash(req, res) {
         .json({ error: "No active thread found with this thread ID" });
     }
 
-    // Move all messages to trash
+    // Move all messages to THIS user's Bin only (other employees still see them).
     await AssignmentMessage.updateMany(
       {
         _id: { $in: threadMessages.map((msg) => msg._id) },
       },
       {
-        isTrashed: true,
-        trashedAt: new Date(),
-        trashedBy: currentUser,
+        $addToSet: { trashedBy: currentUser },
+        $set: { isTrashed: true, trashedAt: new Date() },
       }
     );
 
@@ -3858,10 +3858,10 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
       ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
       : { threadId: threadId };
 
-    // Find all trashed messages for this thread
+    // PER USER: find messages THIS user has in their Bin for this thread.
     const trashedMessages = await AssignmentMessage.find({
       ...threadQuery,
-      isTrashed: true,
+      trashedBy: currentUser,
     });
 
     if (trashedMessages.length === 0) {
@@ -3870,16 +3870,29 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
         .json({ error: "No trashed thread found with this thread ID" });
     }
 
-    // Restore all messages from trash
+    // Restore from THIS user's Bin only; isTrashed stays true while any other
+    // user still has it binned.
     await AssignmentMessage.updateMany(
       {
         _id: { $in: trashedMessages.map((msg) => msg._id) },
       },
-      {
-        isTrashed: false,
-        trashedAt: undefined,
-        trashedBy: undefined,
-      }
+      [
+        {
+          $set: {
+            trashedBy: {
+              $filter: {
+                input: { $ifNull: ["$trashedBy", []] },
+                cond: { $ne: ["$$this", currentUser] },
+              },
+            },
+          },
+        },
+        {
+          $set: {
+            isTrashed: { $gt: [{ $size: "$trashedBy" }, 0] },
+          },
+        },
+      ]
     );
 
     // EMIT REAL-TIME EVENT
@@ -3940,28 +3953,20 @@ exports.reportSpam = async function reportSpam(req, res) {
       return res.status(404).json({ error: "Message not found" });
     }
 
-    // Check if user has already reported this message
-    const alreadyReported = msg.spamReporters.includes(currentUser);
-    if (alreadyReported) {
-      return res
-        .status(400)
-        .json({ error: "You have already reported this message as spam" });
-    }
-
-    // Update spam fields
-    msg.isSpam = true;
-    msg.spamReportCount += 1;
-    msg.spamReporters.push(currentUser);
-
-    // Set initial spam report time if this is the first report
-    if (msg.spamReportCount === 1) {
-      msg.spamReportedAt = new Date();
-      msg.spamReportedBy = currentUser;
-    }
-
+    // PER USER, PER MESSAGE: the list shows each message as its own row, so spam
+    // must apply to ONLY this message (thread-wide would drag every sibling
+    // message of the conversation into spam).
+    const already = (msg.spamReporters || []).some(
+      (uid) => String(uid) === String(currentUser)
+    );
+    if (!already) msg.spamReporters.push(currentUser);
+    msg.isSpam = msg.spamReporters.length > 0;
+    msg.spamReportCount = msg.spamReporters.length;
+    msg.spamReportedAt = new Date();
+    msg.spamReportedBy = currentUser;
     await msg.save();
 
-    const populated = await msg.populate([
+    const populated = await AssignmentMessage.findById(id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },
@@ -4002,16 +4007,21 @@ exports.removeFromSpam = async function removeFromSpam(req, res) {
       return res.status(404).json({ error: "Message not found" });
     }
 
-    // Reset spam fields
-    msg.isSpam = false;
-    msg.spamReportCount = 0;
-    msg.spamReporters = [];
-    msg.spamReportedAt = undefined;
-    msg.spamReportedBy = undefined;
-
+    // PER USER, PER MESSAGE: remove THIS user from spamReporters on ONLY this
+    // message (matches the per-message report above). Others who flagged it keep
+    // it in their own Spam tab.
+    msg.spamReporters = (msg.spamReporters || []).filter(
+      (uid) => String(uid) !== String(currentUser)
+    );
+    msg.isSpam = msg.spamReporters.length > 0;
+    msg.spamReportCount = msg.spamReporters.length;
+    if (msg.spamReporters.length === 0) {
+      msg.spamReportedAt = undefined;
+      msg.spamReportedBy = undefined;
+    }
     await msg.save();
 
-    const populated = await msg.populate([
+    const populated = await AssignmentMessage.findById(id).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },

@@ -117,7 +117,9 @@ const AssignmentMessageSchema = new Schema(
 
     isTrashed: { type: Boolean, default: false },
     trashedAt: { type: Date },
-    trashedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
+    // PER-USER trash: the employees who moved this message to their Bin. Only
+    // they see it in the Bin tab; everyone else still sees it normally.
+    trashedBy: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
     readBy: [
       {
         employee: {
