@@ -1,5 +1,6 @@
 const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -25,10 +26,11 @@ exports.applyLeaveCarryForward = async (req, res) => {
       days,
       year,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
-    res.status(201).json({ message: "Leave carry forward request submitted successfully", data: newRequest });
+    res.status(201).json({ message: "Leave carry forward request approved successfully", data: newRequest });
   } catch (error) {
     console.error("Leave Carry Forward Apply Error:", error);
     res.status(500).json({ message: error.message });

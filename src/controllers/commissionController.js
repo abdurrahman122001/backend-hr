@@ -1,4 +1,5 @@
 const CommissionRequest = require("../models/CommissionRequest");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 exports.applyCommission = async (req, res) => {
   try {
@@ -16,11 +17,12 @@ exports.applyCommission = async (req, res) => {
       amount,
       month,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
     res.status(201).json({
-      message: "Commission request submitted successfully",
+      message: "Commission request approved successfully",
       data: newRequest,
     });
   } catch (error) {

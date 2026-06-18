@@ -1737,6 +1737,14 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       { receiver: currentUser },
       { receiver: { $in: [currentUser] } },
     ];
+    const countUnreadThreads = async (query) => {
+      const result = await AssignmentMessage.aggregate([
+        { $match: query },
+        { $group: { _id: { $ifNull: ["$threadId", { $toString: "$_id" }] } } },
+        { $count: "count" },
+      ]);
+      return result[0]?.count || 0;
+    };
 
     // Review (All Activity): unread messages authored by my juniors (owners see
     // the whole org). Excludes my own messages.
@@ -1769,8 +1777,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         isSpam: false,
       }),
 
-      // Unread: inbox messages the current user hasn't read yet
-      AssignmentMessage.countDocuments({
+      // Unread: inbox threads where the current user has at least one unread message
+      countUnreadThreads({
         $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
         status: "sent",
         isTrashed: false,
@@ -1822,15 +1830,15 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         isTrashed: true,
       }),
 
-      // External Inbox unread: client mail I'm a receiver of and haven't read
-      AssignmentMessage.countDocuments({
+      // External Inbox unread: client threads where I'm a receiver and haven't read
+      countUnreadThreads({
         $or: receiverOr,
         client: { $exists: true, $ne: null },
         ...baseUnread,
       }),
 
-      // TeamBox (internal) unread: non-client mail I'm a receiver of, unread
-      AssignmentMessage.countDocuments({
+      // TeamBox (internal) unread: non-client threads where I'm a receiver, unread
+      countUnreadThreads({
         $and: [
           { $or: receiverOr },
           { $or: [{ client: { $exists: false } }, { client: null }] },
@@ -1838,8 +1846,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         ...baseUnread,
       }),
 
-      // All Activity (review) unread
-      AssignmentMessage.countDocuments(reviewQuery),
+      // All Activity (review) unread threads
+      countUnreadThreads(reviewQuery),
     ]);
 
     res.json({

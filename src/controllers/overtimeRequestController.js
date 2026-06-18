@@ -1,10 +1,45 @@
 const OvertimeRequest = require("../models/OvertimeRequest");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 const getEmployeeId = (req) => req.employee?._id;
 const getOwnerId = (req) => req.employee?.owner || req.user?.owner || req.user?._id;
 const getUserId = (req) => req.user?._id;
 const resolveOwner = (req) => req.user?.owner || req.user?._id;
+
+async function creditOvertimeBonusHours(request, ownerId) {
+  const attendanceYear = new Date(request.date).getFullYear();
+
+  let balance = await LeaveYearBalance.findOne({
+    owner: ownerId,
+    employee: request.employee,
+    year: attendanceYear,
+  });
+
+  if (!balance) {
+    balance = new LeaveYearBalance({
+      owner: ownerId,
+      employee: request.employee,
+      year: attendanceYear,
+      total: 0,
+      bonus: 0,
+      bonusHoursAccumulated: 0,
+      usedPaid: 0,
+      usedUnpaid: 0,
+      remainingPaid: 0,
+    });
+  }
+
+  balance.bonusHoursAccumulated = (balance.bonusHoursAccumulated || 0) + request.hours;
+
+  while (balance.bonusHoursAccumulated >= 9) {
+    balance.bonusHoursAccumulated -= 9;
+    balance.bonus = (balance.bonus || 0) + 1;
+  }
+
+  await balance.save();
+  return balance;
+}
 
 /* ─────────────────────────────────────────────────────────────────────────
  * EMPLOYEE: Submit an overtime request
@@ -28,9 +63,12 @@ exports.applyOvertimeRequest = async (req, res) => {
       date,
       hours: Number(hours),
       reason,
+      ...approvedFields(req),
     });
 
-    res.status(201).json({ message: "Overtime request submitted successfully", data: newRequest });
+    await creditOvertimeBonusHours(newRequest, ownerId);
+
+    res.status(201).json({ message: "Overtime request approved successfully", data: newRequest });
   } catch (error) {
     console.error("Overtime Apply Error:", error);
     res.status(500).json({ message: error.message });
