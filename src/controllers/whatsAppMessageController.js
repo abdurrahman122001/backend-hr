@@ -1567,8 +1567,8 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
 
         const msgObj = populated.toObject();
 
-        // Update lastWhatsAppMessage cache on ClientInfo
-        if (msgObj.client && !msgObj.isGroupMessage) {
+        // Update lastWhatsAppMessage cache on ClientInfo (parent client chats only)
+        if (msgObj.client && !msgObj.isGroupMessage && !msgObj.isClientEmployeeMessage) {
           const ClientInfo = require("../models/ClientInfo");
           ClientInfo.findByIdAndUpdate(
             msgObj.client._id || msgObj.client,
@@ -1577,6 +1577,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
               "lastWhatsAppMessage.at": msgObj.sentAt || now,
               "lastWhatsAppMessage.senderId": msgObj.sender?._id || msgObj.sender,
               "lastWhatsAppMessage.hasAttachments": Array.isArray(msgObj.attachments) && msgObj.attachments.length > 0,
+              "lastWhatsAppMessage.deleted": false,
             }},
             { timestamps: false }
           ).catch(() => {});
@@ -1926,7 +1927,8 @@ exports.approveMessage = async function approveMessage(req, res) {
     }
 
     // Denormalize onto ClientInfo when approval is finalized so the sidebar refreshes
-    if (approvalFinalized && msg.client && !msg.isGroupMessage) {
+    // (parent client chats only — CE sub-chats are separate conversations).
+    if (approvalFinalized && msg.client && !msg.isGroupMessage && !msg.isClientEmployeeMessage) {
       const ClientInfo = require("../models/ClientInfo");
       ClientInfo.findByIdAndUpdate(msg.client, {
         $set: {
@@ -1934,6 +1936,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           "lastWhatsAppMessage.at": msg.approvedAt || new Date(),
           "lastWhatsAppMessage.senderId": msg.sender?._id || msg.sender,
           "lastWhatsAppMessage.hasAttachments": Array.isArray(msg.attachments) && msg.attachments.length > 0,
+          "lastWhatsAppMessage.deleted": false,
         },
       }, { timestamps: false }).catch(() => {});
     }
@@ -2808,6 +2811,52 @@ exports.deleteMessage = async function deleteMessage(req, res) {
         { path: "client", select: "_id clientName assignedTo" },
       ]);
 
+      // If this message is the chat's current sidebar preview, mark it deleted so
+      // the chat list shows the "This message was deleted" placeholder (WhatsApp).
+      // A client-employee sub-chat and its PARENT client chat are separate rows,
+      // so a CE deletion must only affect the CE row — never the parent client.
+      let previewDeleted = false;
+      if (msg.client && !msg.isGroupMessage) {
+        const clientId = msg.client?._id || msg.client;
+
+        if (msg.isClientEmployeeMessage) {
+          // CE sub-chat: its sidebar preview is the latest CE message for this
+          // employee (computed live in getChatList), so just decide whether the
+          // deleted message was that latest one.
+          const latestCE = await WhatsAppMessage.findOne({
+            client: clientId,
+            isClientEmployeeMessage: true,
+            clientEmployeeId: msg.clientEmployeeId,
+            status: { $ne: "draft" },
+            $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          })
+            .sort({ createdAt: -1 })
+            .select("_id")
+            .lean()
+            .catch(() => null);
+          previewDeleted = !!latestCE && String(latestCE._id) === String(msg._id);
+        } else {
+          // Parent client chat: compare against the denormalized preview timestamp.
+          const ClientInfo = require("../models/ClientInfo");
+          const clientDoc = await ClientInfo.findById(clientId)
+            .select("lastWhatsAppMessage.at")
+            .lean()
+            .catch(() => null);
+          const previewAt = clientDoc?.lastWhatsAppMessage?.at
+            ? new Date(clientDoc.lastWhatsAppMessage.at).getTime()
+            : 0;
+          const msgAt = msg.createdAt ? new Date(msg.createdAt).getTime() : 0;
+          if (previewAt && msgAt && Math.abs(previewAt - msgAt) < 1000) {
+            previewDeleted = true;
+            await ClientInfo.findByIdAndUpdate(
+              clientId,
+              { $set: { "lastWhatsAppMessage.text": "", "lastWhatsAppMessage.deleted": true, "lastWhatsAppMessage.hasAttachments": false } },
+              { timestamps: false }
+            ).catch(() => {});
+          }
+        }
+      }
+
       // Notify ALL participants in real-time
       if (io) {
         const participants = new Set([senderId]);
@@ -2818,6 +2867,8 @@ exports.deleteMessage = async function deleteMessage(req, res) {
           io.to(`employee_${uid}`).emit("new_message", {
             message: populated,
             type: "message_deleted_for_everyone",
+            // tells the client whether to update the sidebar last-message preview
+            previewDeleted,
           });
         });
       }
@@ -3586,12 +3637,27 @@ exports.getMentionables = async function getMentionables(req, res) {
             .lean();
           empMap = Object.fromEntries(emps.map((e) => [String(e._id), e]));
         }
+        // Resolve client members' name + photo from the ClientInfo collection.
+        const clientMemberIds = members
+          .filter((m) => m.memberType === "client" && isObjId(m.memberId))
+          .map((m) => m.memberId);
+        let clientMap = {};
+        if (clientMemberIds.length) {
+          const ClientInfo = require("../models/ClientInfo");
+          const clients = await ClientInfo.find({ _id: { $in: clientMemberIds } })
+            .select("_id clientName photographUrl")
+            .lean();
+          clientMap = Object.fromEntries(clients.map((c) => [String(c._id), c]));
+        }
         for (const m of members) {
           if (m.memberType === "employee") {
             const e = empMap[String(m.memberId)];
             push(m.memberId, m.memberName || e?.name, "employee", e?.photographUrl);
           } else if (m.memberType === "client_employee") {
             push(m.memberId, m.memberName, "client_employee", m.memberAvatar);
+          } else if (m.memberType === "client") {
+            const c = clientMap[String(m.memberId)];
+            push(m.memberId, m.memberName || c?.clientName, "client", c?.photographUrl);
           }
         }
       }
@@ -3686,11 +3752,27 @@ exports.createMessage = async function createMessage(req, res) {
       isClientEmployeeChat = true;
       actualClientId = parentClientId; // Use parent client ID for storage
 
+      // The client employee name/designation may arrive as top-level fields OR
+      // nested inside a clientEmployeeData object (the frontend sends the latter).
+      // Read both so the stored name isn't lost → otherwise the sidebar shows
+      // the generic "Employee (Client)" fallback.
+      const bodyCED = req.body.clientEmployeeData || {};
+      const resolvedName =
+        clientEmployeeName ||
+        bodyCED.clientEmployeeName ||
+        bodyCED.name ||
+        null;
+      const resolvedDesignation =
+        clientEmployeeDesignation ||
+        bodyCED.clientEmployeeDesignation ||
+        bodyCED.designation ||
+        "";
+
       // Store client employee info in message metadata
       clientEmployeeData = {
         clientEmployeeId,
-        clientEmployeeName,
-        clientEmployeeDesignation,
+        clientEmployeeName: resolvedName,
+        clientEmployeeDesignation: resolvedDesignation,
         parentClientId,
         parentClientName: null, // Will be populated below
       };
@@ -4327,6 +4409,9 @@ exports.createMessage = async function createMessage(req, res) {
     if (
       responseWithSupervision.client &&
       !responseWithSupervision.isGroupMessage &&
+      // A client-employee sub-chat is a SEPARATE conversation — its messages must
+      // not overwrite the parent client row's preview in the sidebar.
+      !responseWithSupervision.isClientEmployeeMessage &&
       responseWithSupervision.approvalStatus !== "pending" &&
       !isScheduled
     ) {
@@ -4339,6 +4424,7 @@ exports.createMessage = async function createMessage(req, res) {
             "lastWhatsAppMessage.at": responseWithSupervision.createdAt || new Date(),
             "lastWhatsAppMessage.senderId": responseWithSupervision.sender?._id || responseWithSupervision.sender,
             "lastWhatsAppMessage.hasAttachments": Array.isArray(responseWithSupervision.attachments) && responseWithSupervision.attachments.length > 0,
+            "lastWhatsAppMessage.deleted": false,
           },
         }, { timestamps: false }).catch(() => {}); // fire-and-forget, non-blocking
       }
@@ -4384,6 +4470,7 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
         sender: 1,
         note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
         hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+        deleted: { $eq: ["$deletedForEveryone", true] },
       },
     },
     { $sort: { createdAt: -1 } },
@@ -4394,6 +4481,7 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
         at: { $first: "$createdAt" },
         senderId: { $first: "$sender" },
         hasAtt: { $first: "$hasAtt" },
+        deleted: { $first: "$deleted" },
       },
     },
   ]);
@@ -4404,7 +4492,7 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
     const cached = byId.get(String(row._id));
     const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
     if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
-      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      const text = row.deleted ? "" : (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
       ops.push({
         updateOne: {
           filter: { _id: row._id },
@@ -4413,7 +4501,8 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
               "lastWhatsAppMessage.text": text,
               "lastWhatsAppMessage.at": row.at,
               "lastWhatsAppMessage.senderId": row.senderId,
-              "lastWhatsAppMessage.hasAttachments": row.hasAtt,
+              "lastWhatsAppMessage.hasAttachments": row.deleted ? false : row.hasAtt,
+              "lastWhatsAppMessage.deleted": !!row.deleted,
             },
           },
         },
@@ -4601,6 +4690,7 @@ exports.getChatList = async function getChatList(req, res) {
           clientEmployeeData: 1,
           note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
           hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+          deleted: { $eq: ["$deletedForEveryone", true] },
         },
       },
       { $sort: { createdAt: -1 } },
@@ -4611,6 +4701,7 @@ exports.getChatList = async function getChatList(req, res) {
           at: { $first: "$createdAt" },
           senderId: { $first: "$sender" },
           hasAtt: { $first: "$hasAtt" },
+          deleted: { $first: "$deleted" },
           clientEmployeeData: { $first: "$clientEmployeeData" },
           clientEmployeeId: { $first: "$clientEmployeeId" },
         },
@@ -4645,6 +4736,7 @@ exports.getChatList = async function getChatList(req, res) {
 
       const rawText = lastMsg.text || "";
       const cleanText = rawText.replace(/<[^>]*>/g, "").trim();
+      const lastDeleted = !!lastMsg.deleted;
 
       chats.push({
         chatId: cid,
@@ -4653,7 +4745,8 @@ exports.getChatList = async function getChatList(req, res) {
         dba: c.dba,
         legalBusinessName: c.legalBusinessName || null,
         photographUrl: c.photographUrl || null,
-        lastMessage: cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : ""),
+        lastMessage: lastDeleted ? "" : (cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : "")),
+        lastMessageDeleted: lastDeleted,
         lastMessageAt: lastMsg.at,
         senderId: lastMsg.senderId || null,
         hasAttachments: lastMsg.hasAttachments || false,
@@ -4676,26 +4769,41 @@ exports.getChatList = async function getChatList(req, res) {
       // Aggregation is owner-scoped — keep only conversations for MY clients
       if (!clientInfo) continue;
 
+      // Resolve the actual employee from the client's companyEmployees so the
+      // name + photo come from a single reliable source. Match by _id first, then
+      // by the name carried on the message's clientEmployeeData.
+      const matchedEmp = (() => {
+        const emps = clientInfo?.companyEmployees || [];
+        let found = emps.find((e) => String(e._id) === empId);
+        if (!found) {
+          const nm = (
+            row.clientEmployeeData?.clientEmployeeName ||
+            row.clientEmployeeData?.name ||
+            ""
+          )
+            .trim()
+            .toLowerCase();
+          if (nm) {
+            found = emps.find(
+              (e) => e.name && e.name.trim().toLowerCase() === nm
+            );
+          }
+        }
+        return found || null;
+      })();
+
+      // Prefer the message's stored name, then the real companyEmployees name,
+      // and only fall back to a generic label if neither is available.
       const empName =
         row.clientEmployeeData?.clientEmployeeName ||
         row.clientEmployeeData?.name ||
+        matchedEmp?.name ||
         `Employee (${clientInfo?.clientName || "Client"})`;
 
+      const ceDeleted = !!row.deleted;
       const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
 
-      // Find employee's own photo from companyEmployees array
-      const empPhotoUrl = (() => {
-        const emps = clientInfo?.companyEmployees || [];
-        // Primary: match by MongoDB _id
-        let found = emps.find((e) => String(e._id) === empId);
-        // Fallback: match by name (for old messages that stored synthetic clientEmployeeId)
-        if (!found && empName) {
-          found = emps.find(
-            (e) => e.name && e.name.trim().toLowerCase() === empName.trim().toLowerCase()
-          );
-        }
-        return found?.photographUrl || null;
-      })();
+      const empPhotoUrl = matchedEmp?.photographUrl || null;
 
       chats.push({
         chatId,
@@ -4705,9 +4813,20 @@ exports.getChatList = async function getChatList(req, res) {
         dba: clientInfo?.dba || null,
         clientPhotographUrl: clientInfo?.photographUrl || null,
         clientEmployeeId: empId,
-        clientEmployeeData: row.clientEmployeeData || null,
+        // Send the RESOLVED employee name (from the message or companyEmployees)
+        // both as a top-level field and inside clientEmployeeData, so the frontend
+        // never has to fall back to a generic "Employee (Client)" label.
+        clientEmployeeName: empName,
+        clientEmployeeData: {
+          ...(row.clientEmployeeData || {}),
+          clientEmployeeId: empId,
+          clientEmployeeName: empName,
+          parentClientId: clientId,
+          parentClientName: clientInfo?.clientName || "",
+        },
         employeePhotographUrl: empPhotoUrl,
-        lastMessage: text || (row.hasAtt ? "📎 Attachment" : ""),
+        lastMessage: ceDeleted ? "" : (text || (row.hasAtt ? "📎 Attachment" : "")),
+        lastMessageDeleted: ceDeleted,
         lastMessageAt: row.at,
         senderId: row.senderId || null,
         hasAttachments: row.hasAtt || false,
