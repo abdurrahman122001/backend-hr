@@ -130,6 +130,9 @@ const ClientInfoSchema = new Schema(
       at:        { type: Date,   default: null },
       senderId:  { type: Schema.Types.ObjectId, ref: "Employee", default: null },
       hasAttachments: { type: Boolean, default: false },
+      // true when the latest message was "deleted for everyone" — the sidebar
+      // shows the "This message was deleted" placeholder, like WhatsApp.
+      deleted:   { type: Boolean, default: false },
     },
 
     // Client photo
