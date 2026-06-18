@@ -3849,22 +3849,18 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
     const currentUser = req.employee._id;
     const isIdValidObject = mongoose.isValidObjectId(threadId);
 
-    // Find all trashed messages for this thread where user is involved
+    // Mirror moveThreadToTrash's lookup exactly (match by threadId, client, or
+    // the thread-root message _id). Restoring must be able to find anything that
+    // could be trashed — the frontend passes the thread-root message _id here,
+    // so omitting the _id branch (and over-constraining by sender/receiver)
+    // caused every restore to 404.
+    const threadQuery = isIdValidObject
+      ? { $or: [{ threadId: threadId }, { client: threadId }, { _id: threadId }] }
+      : { threadId: threadId };
+
+    // Find all trashed messages for this thread
     const trashedMessages = await AssignmentMessage.find({
-      $and: [
-        {
-          $or: isIdValidObject
-            ? [{ threadId: threadId }, { client: threadId }]
-            : [{ threadId: threadId }],
-        },
-        {
-          $or: [
-            { sender: currentUser },
-            { receiver: currentUser },
-            { receiver: { $in: [currentUser] } },
-          ],
-        },
-      ],
+      ...threadQuery,
       isTrashed: true,
     });
 
