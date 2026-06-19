@@ -157,15 +157,17 @@ async function applyVisibility(q, req, filterParam) {
   const allJuniorIdStrings = await getCachedJuniors(ownerId, me);
   const juniorIds = allJuniorIdStrings.filter(isObjId).map((id) => oid(id));
 
-  // Activity filter: show ALL messages (any status) from every junior in the hierarchy
+  // Activity filter: show ALL messages (any status) from every junior in the
+  // hierarchy — but EXTERNAL (client) mail only, never internal/team messages.
   if (filterParam === "review") {
     const isOwner = currentUserRole === "owner";
+    const externalOnly = { client: { $exists: true, $ne: null } };
     // Owners see everything in their org; everyone else is limited to their hierarchy juniors
     if (isOwner) {
-      return { $and: [q, { owner: ownerId }] };
+      return { $and: [q, { owner: ownerId }, externalOnly] };
     }
     if (juniorIds.length === 0) return { _id: null };
-    return { $and: [q, { sender: { $in: juniorIds } }] };
+    return { $and: [q, { sender: { $in: juniorIds } }, externalOnly] };
   }
 
   const roleHierarchyFilters = [];
@@ -935,11 +937,14 @@ exports.getExternalCommunications = async function getExternalCommunications(
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    if (isTrashed === "true") q.isTrashed = true;
-    else if (isSpam === "true") q.isSpam = true;
+    // Trash + Spam are PER USER: the Bin/Spam tabs show only what THIS user
+    // binned/marked, and the inbox hides only what THIS user binned/marked
+    // (other employees still see the message).
+    if (isTrashed === "true") q.trashedBy = currentUser;
+    else if (isSpam === "true") q.spamReporters = currentUser;
     else {
-      q.isTrashed = { $ne: true };
-      q.isSpam = { $ne: true };
+      q.trashedBy = { $ne: currentUser };
+      q.spamReporters = { $ne: currentUser };
     }
 
     if (filter !== "review" && approvalStatus === "pending") {
@@ -1214,11 +1219,12 @@ exports.getInternalCommunications = async function getInternalCommunications(
       q.status = { $in: ["sent", "scheduled"] };
     }
 
-    if (isTrashed === "true") q.isTrashed = true;
-    else if (isSpam === "true") q.isSpam = true;
+    // Trash + Spam are PER USER (see listMessages): scope tabs + inbox by user.
+    if (isTrashed === "true") q.trashedBy = req.employee._id;
+    else if (isSpam === "true") q.spamReporters = req.employee._id;
     else {
-      q.isTrashed = { $ne: true };
-      q.isSpam = { $ne: true };
+      q.trashedBy = { $ne: req.employee._id };
+      q.spamReporters = { $ne: req.employee._id };
     }
 
     if (approvalStatus) q.approvalStatus = approvalStatus;
@@ -1541,8 +1547,8 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
     const unreadCount = await AssignmentMessage.countDocuments({
       receiver: userId, // Only count messages where user is receiver
       "readBy.employee": { $ne: userId },
-      isTrashed: false,
-      isSpam: false,
+      trashedBy: { $ne: userId },
+      spamReporters: { $ne: userId },
       status: "sent",
       // 🔥 FIX: Include pending messages in unread count for supervisors
       // approvalStatus: { $ne: "pending" }, 
@@ -1729,8 +1735,9 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 
     const baseUnread = {
       status: "sent",
-      isTrashed: false,
-      isSpam: false,
+      // PER USER: exclude only what THIS user binned / marked as spam.
+      trashedBy: { $ne: currentUser },
+      spamReporters: { $ne: currentUser },
       "readBy.employee": { $ne: currentUser },
     };
     const receiverOr = [
@@ -1746,13 +1753,14 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       return result[0]?.count || 0;
     };
 
-    // Review (All Activity): unread messages authored by my juniors (owners see
-    // the whole org). Excludes my own messages.
+    // Review (All Activity): unread EXTERNAL (client) messages authored by my
+    // juniors (owners see the whole org). Excludes my own messages.
+    const externalOnly = { client: { $exists: true, $ne: null } };
     let reviewQuery = { _id: null };
     if (isOwner) {
-      reviewQuery = { owner, sender: { $ne: currentUser }, ...baseUnread };
+      reviewQuery = { owner, sender: { $ne: currentUser }, ...externalOnly, ...baseUnread };
     } else if (juniorIds.length > 0) {
-      reviewQuery = { sender: { $in: juniorIds }, ...baseUnread };
+      reviewQuery = { sender: { $in: juniorIds }, ...externalOnly, ...baseUnread };
     }
 
     // Get counts for different categories
@@ -1769,65 +1777,58 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       internalUnread,
       reviewUnread,
     ] = await Promise.all([
-      // Inbox: messages where user is receiver, not trashed, not spam, status sent
+      // Inbox: messages where user is receiver, not in THEIR bin/spam, status sent
       AssignmentMessage.countDocuments({
         $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
         status: "sent",
-        isTrashed: false,
-        isSpam: false,
+        trashedBy: { $ne: currentUser },
+        spamReporters: { $ne: currentUser },
       }),
 
       // Unread: inbox threads where the current user has at least one unread message
       countUnreadThreads({
         $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
         status: "sent",
-        isTrashed: false,
-        isSpam: false,
+        trashedBy: { $ne: currentUser },
+        spamReporters: { $ne: currentUser },
         "readBy.employee": { $ne: currentUser },
       }),
 
       // Starred: messages starred by current user
       AssignmentMessage.countDocuments({
         starredBy: currentUser,
-        isTrashed: false,
+        trashedBy: { $ne: currentUser },
       }),
 
       // Sent: messages where user is sender, status sent
       AssignmentMessage.countDocuments({
         sender: currentUser,
         status: "sent",
-        isTrashed: false,
+        trashedBy: { $ne: currentUser },
       }),
 
       // Drafts: draft messages by current user
       AssignmentMessage.countDocuments({
         sender: currentUser,
         status: "draft",
-        isTrashed: false,
+        trashedBy: { $ne: currentUser },
       }),
 
       // Scheduled: scheduled messages by current user
       AssignmentMessage.countDocuments({
         sender: currentUser,
         status: "scheduled",
-        isTrashed: false,
+        trashedBy: { $ne: currentUser },
       }),
 
-      // Spam: spam messages where user is receiver
+      // Spam: messages THIS user marked as spam
       AssignmentMessage.countDocuments({
-        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
-        isSpam: true,
-        isTrashed: false,
+        spamReporters: currentUser,
       }),
 
-      // Trash: trashed messages where user is involved
+      // Trash: messages THIS user moved to their Bin
       AssignmentMessage.countDocuments({
-        $or: [
-          { sender: currentUser },
-          { receiver: currentUser },
-          { receiver: { $in: [currentUser] } },
-        ],
-        isTrashed: true,
+        trashedBy: currentUser,
       }),
 
       // External Inbox unread: client threads where I'm a receiver and haven't read
@@ -2046,14 +2047,10 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // CRITICAL: Only show messages where current user is involved AND message is trashed
+    // PER USER: only show messages THIS user moved to the Bin (others who can
+    // see the message keep it in their normal inbox).
     const q = {
-      isTrashed: true,
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } },
-      ],
+      trashedBy: currentUser,
     };
 
     // Add client filter if provided
@@ -2112,9 +2109,10 @@ exports.getSpamMessages = async function getSpamMessages(req, res) {
       return res.status(401).json({ error: "Unauthorized" });
     }
 
-    // Build base query for spam messages
+    // Build base query for spam messages — PER USER: only show messages that
+    // THIS user reported as spam (not every employee who can see the message).
     const q = {
-      isSpam: true,
+      spamReporters: currentUser,
     };
 
     // Apply other filters if provided
@@ -2235,15 +2233,16 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.approvalStatus = approvalStatus;
     }
 
-    // ✅ Trash/Spam filters
+    // ✅ Trash/Spam filters — PER USER (only what THIS user binned / marked spam)
+    const _meSearch = req.employee?._id;
     if (isTrashed === "true" || isTrashed === true) {
-      q.isTrashed = true;
+      q.trashedBy = _meSearch;
     } else if (isSpam === "true" || isSpam === true) {
-      q.isSpam = true;
+      q.spamReporters = _meSearch;
     } else if (isTrashed === "false" && isSpam === "false") {
-      // Default: exclude both trash and spam from normal searches
-      q.isTrashed = { $ne: true };
-      q.isSpam = { $ne: true };
+      // Default: exclude this user's own trash and spam from normal searches
+      q.trashedBy = { $ne: _meSearch };
+      q.spamReporters = { $ne: _meSearch };
     }
 
     // ✅ Starred filter
@@ -2526,8 +2525,8 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
       owner: ownerId,
       sender: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) }, // Messages from juniors
       approvalStatus: "pending", // 🔥 Only pending messages
-      isTrashed: false,
-      isSpam: false,
+      trashedBy: { $ne: currentUserId },
+      spamReporters: { $ne: currentUserId },
     };
 
     // Apply client filter if provided
@@ -2634,8 +2633,8 @@ exports.getTeamLeadPendingApprovals =
       const query = {
         owner: ownerId,
         approvalStatus: "pending",
-        isTrashed: false,
-        isSpam: false,
+        trashedBy: { $ne: currentUserId },
+        spamReporters: { $ne: currentUserId },
       };
 
       if (!isManager) {
