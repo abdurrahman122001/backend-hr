@@ -375,22 +375,20 @@ async function applyVisibility(q, req) {
   }).select("_id").lean();
   const assignedClientIds = assignedClients.map(c => oid(c._id));
 
-  // Hierarchy lookup for junior-based visibility
-  const juniorLinks = await EmployeeHierarchy.find({
-    owner: ownerId,
-    senior: me,
-  })
-    .select("junior")
-    .lean();
-  const juniorIds = juniorLinks.map((link) => oid(link.junior));
+  // Hierarchy lookup for junior-based visibility — RECURSIVE (full subtree),
+  // so a senior sees the messages of every junior beneath them, not just their
+  // direct reports.
+  const juniorIdStrings = await getAllJuniorsRecursively(ownerId, me);
+  const juniorIds = juniorIdStrings.map((id) => oid(String(id)));
 
-  // 👁️ ROLE/HIERARCHY VISIBILITY
-  // Team Leads, Managers, Owners, and Seniors see messages based on role/hierarchy
+  // 👁️ HIERARCHY VISIBILITY (role-independent for seniority)
   const roleHierarchyFilter = {
     $or: [
-      // Managers/Owners/Team Leads see all messages for their organization
-      ...(currentUserRole === "manager" || currentUserRole === "owner" || currentUserRole === "team_lead" ? [{ owner: ownerId }] : []),
-      // Seniors see messages from their juniors
+      // Only Managers/Owners (top of the hierarchy) see all org messages.
+      // Team leads are NOT special-cased — they see their juniors via the
+      // recursive junior filter below, so visibility is purely seniority-based.
+      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      // Seniors see messages from their juniors (entire subtree)
       ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
     ]
   };
@@ -1252,11 +1250,14 @@ exports.createMessage = async function createMessage(req, res) {
           const isAssignedTeamMember = assignedToIds.includes(receiverId);
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
+          // Keep fellow managers (e.g. the client's CRM) — the SENIOR→CRM
+          // routing above adds them and they must not be filtered out.
+          const isManagerRecipient = managers.includes(receiverId);
 
           // For new threads, team leads are ONLY included if explicitly specified
           const includeTeamLead = isTeamLead && isExplicitReceiver;
 
-          return (isExplicitReceiver || isAssignedTeamMember || isClientEmployee || includeTeamLead) && !(isTeamLead && !isExplicitReceiver);
+          return (isExplicitReceiver || isAssignedTeamMember || isClientEmployee || includeTeamLead || isManagerRecipient) && !(isTeamLead && !isExplicitReceiver);
         });
       } else {
         // For existing threads, only include team leads if they're already in the thread
@@ -1267,13 +1268,16 @@ exports.createMessage = async function createMessage(req, res) {
           const isAssignedTeamMember = assignedToIds.includes(receiverId);
           const isClientEmployee = clientEmployees.includes(receiverId);
           const isTeamLead = tls.includes(receiverId);
+          // Keep fellow managers (e.g. the client's CRM) — the SENIOR→CRM
+          // routing above adds them and they must not be filtered out.
+          const isManagerRecipient = managers.includes(receiverId);
 
           // For existing threads, team leads are included if:
           // 1. They're explicitly specified OR
           // 2. They're already in the thread
           const includeTeamLead = isTeamLead && (isExplicitReceiver || threadHasTeamLead);
 
-          return isExplicitReceiver || isAssignedTeamMember || isClientEmployee || includeTeamLead;
+          return isExplicitReceiver || isAssignedTeamMember || isClientEmployee || includeTeamLead || isManagerRecipient;
         });
       }
 
@@ -3214,9 +3218,6 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
     }
 
     const isSender = messageSenderId === String(currentUserId);
-    const userRole = req.employee?.role?.toLowerCase() || "";
-    const isTeamLead = userRole.includes("team") && userRole.includes("lead");
-    const isManager = userRole.includes("manager");
 
     // Allow any senior who previously approved the message to also edit & resubmit
     const isInApprovalChain =
@@ -3227,13 +3228,26 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         return aid === String(currentUserId);
       });
 
-    if (!isSender && !isTeamLead && !isManager && !isInApprovalChain) {
+    // Permission is hierarchy-based (not role-based): the sender, anyone who
+    // already approved this message, OR any senior of the sender in the
+    // EmployeeHierarchy chain can edit & resubmit a disapproved message.
+    let isSeniorOfSender = false;
+    if (!isSender && !isInApprovalChain) {
+      const seniorChain = await getManagementChainFromHierarchy(
+        msg.owner,
+        msg.sender
+      );
+      isSeniorOfSender = seniorChain.some(
+        (id) => String(id) === String(currentUserId)
+      );
+    }
+
+    if (!isSender && !isInApprovalChain && !isSeniorOfSender) {
       return res.status(403).json({
         error: "You don't have permission to edit this message",
         messageOwner: messageSenderId,
         currentUser: currentUserId,
-        userRole: req.employee?.role || "unknown",
-        allowedRoles: ["sender", "team_lead", "manager", "previous_approver"],
+        allowedRoles: ["sender", "senior_in_hierarchy", "previous_approver"],
       });
     }
 
@@ -4132,35 +4146,29 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
 
     const currentUser = req.employee;
     const currentUserId = String(currentUser._id);
-    const currentUserRole = normalizeRole(currentUser.role || "");
-    const isTeamLead = currentUserRole === "team_lead";
-    const isManager = currentUserRole === "manager" || currentUserRole === "owner";
 
-    // Check permissions: either sender OR team lead OR manager can edit pending messages
+    // Check permissions: either the sender OR ANY senior of the sender in the
+    // hierarchy chain can edit a pending message. Role (team lead / manager) is
+    // no longer used — seniority is determined purely by the EmployeeHierarchy
+    // chain, so every senior can edit their junior's pending messages.
     const isSender = String(msg.sender) === currentUserId;
 
-    if (!isSender && !isTeamLead && !isManager) {
-      return res.status(403).json({
-        error:
-          "You don't have permission to edit this pending message. Only the sender, team leads or managers can edit pending messages.",
-        messageOwner: msg.sender,
-        currentUser: currentUserId,
-        userRole: currentUserRole,
-      });
+    let isSeniorOfSender = false;
+    if (!isSender) {
+      const seniorChain = await getManagementChainFromHierarchy(
+        msg.owner,
+        msg.sender
+      );
+      isSeniorOfSender = seniorChain.some((id) => String(id) === currentUserId);
     }
 
-    // Team lead validation: ensure team lead belongs to the same owner
-    if (isTeamLead && !isSender) {
-      const messageOwner = String(msg.owner);
-      const teamLeadOwner = String(currentUser.owner);
-
-      if (messageOwner !== teamLeadOwner) {
-        return res.status(403).json({
-          error: "You can only edit pending messages within your organization",
-          messageOwner: messageOwner,
-          yourOrganization: teamLeadOwner,
-        });
-      }
+    if (!isSender && !isSeniorOfSender) {
+      return res.status(403).json({
+        error:
+          "You don't have permission to edit this pending message. Only the sender or a senior in their hierarchy can edit it.",
+        messageOwner: msg.sender,
+        currentUser: currentUserId,
+      });
     }
 
     // Update message fields
@@ -4279,7 +4287,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
             role: currentUser.role,
           },
           timestamp: new Date(),
-          editedByTeamLead: isTeamLead && !isSender,
+          editedByTeamLead: isSeniorOfSender,
         };
 
         authorizedParticipants.forEach((participantId) => {
@@ -4289,7 +4297,7 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
           );
         });
 
-        if (isTeamLead && !isSender) {
+        if (isSeniorOfSender) {
           io.to(`employee_${senderId}`).emit("team_lead_edited_your_message", {
             message: populated,
             editedBy: notificationData.editedBy,
@@ -4309,11 +4317,11 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     res.json({
       success: true,
       message:
-        isTeamLead && !isSender
-          ? "Pending message updated by team lead"
+        isSeniorOfSender
+          ? "Pending message updated by senior"
           : "Pending message updated successfully",
       data: populated,
-      editedByTeamLead: isTeamLead && !isSender,
+      editedByTeamLead: isSeniorOfSender,
       timestamp: new Date(),
     });
   } catch (e) {

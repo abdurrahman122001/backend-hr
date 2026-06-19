@@ -175,10 +175,10 @@ async function applyVisibility(q, req, filterParam) {
     roleHierarchyFilters.push({ owner: ownerId });
   }
 
+  // Team leads are NOT given org-wide visibility by role — they see their
+  // juniors (entire subtree) via the hierarchy filter below, so visibility is
+  // purely seniority-based.
   const nonManagerFilters = [];
-  if (currentUserRole === "team_lead") {
-    nonManagerFilters.push({ owner: ownerId });
-  }
   if (juniorIds.length > 0) {
     nonManagerFilters.push({ sender: { $in: juniorIds } });
     nonManagerFilters.push({ receiver: { $in: juniorIds } });
@@ -397,10 +397,13 @@ exports.getMessage = async function getMessage(req, res) {
     // Check basic participant access
     let hasAccess = userId === senderId || receiverIds.includes(userId);
 
-    // Check Manager/Owner/Team Lead access
-    if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
+    // Manager/Owner org-wide view (they sit at the top of the hierarchy).
+    // Team leads are NOT special-cased here — they get access via the
+    // hierarchy path below (senior-of-sender), so visibility is purely
+    // seniority-based.
+    if (!hasAccess && ["manager", "owner"].includes(currentUserRole)) {
       if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
-        // Managers, Owners, and Team Leads can view organization mail ONLY if it is not pending
+        // Managers and Owners can view organization mail ONLY if it is not pending
         if (msg.approvalStatus !== "pending") {
           hasAccess = true;
         }
@@ -2283,23 +2286,27 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
     }
 
-    // 🔥 EMPLOYEE SEARCH FIX: Only regular employees see their own emails
-    // Team Leads, Managers, and Owners can see all search results
+    // 🔥 HIERARCHY-BASED SEARCH VISIBILITY:
+    // Managers/Owners (top of hierarchy) see all search results.
+    // Everyone else sees their own messages PLUS those of their juniors
+    // (recursively), so seniority is determined by the hierarchy, not role.
     const currentEmployeeId = req.employee?._id;
     const currentUserRole = normalizeRole(req.employee?.role || "");
-    const isTeamLeadOrAbove = ["team_lead", "manager", "owner"].includes(currentUserRole);
-    
-    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isTeamLeadOrAbove) {
+    const ownerForJuniors = req.employee?.owner;
+    const isManagerOrOwner = ["manager", "owner"].includes(currentUserRole);
+
+    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isManagerOrOwner) {
       const me = oid(String(currentEmployeeId));
-      // Add participant filter: employee must be sender OR receiver
+      // Juniors of the current user (their subtree in the hierarchy)
+      const juniorIds = await getCachedJuniors(ownerForJuniors, currentEmployeeId);
+      const seniorScopeIds = [me, ...juniorIds.map((id) => oid(String(id)))];
+      // Add participant filter: employee (or any of their juniors) is sender OR receiver
       q.$or = q.$or || [];
       const participantFilter = {
         $or: [
-          { sender: me },
-          { receiver: me },
-          { receiver: { $in: [me] } },
-          { isFromClient: true, receiver: me }, // Include client emails to this employee
-          { isFromClient: true, receiver: { $in: [me] } }
+          { sender: { $in: seniorScopeIds } },
+          { receiver: { $in: seniorScopeIds } },
+          { isFromClient: true, receiver: { $in: seniorScopeIds } } // client emails to the user/their juniors
         ]
       };
       
@@ -2598,16 +2605,9 @@ exports.getTeamLeadPendingApprovals =
         showThread = "true",
       } = req.query;
 
-      // Verify team lead or manager
+      // Managers/owners see all org pending approvals (they are senior to all).
       const currentUserRole = normalizeRole(req.employee?.role || "");
       const isManager = currentUserRole === "manager" || currentUserRole === "owner";
-      const isTeamLead = currentUserRole === "team_lead";
-
-      if (!isTeamLead && !isManager) {
-        return res.status(403).json({
-          error: "Access denied. Only team leads and managers can view pending approvals.",
-        });
-      }
 
       const currentUserId = req.employee?._id;
       const ownerId = req.employee?.owner;
@@ -2618,6 +2618,16 @@ exports.getTeamLeadPendingApprovals =
 
       // 🔥 HIERARCHY-BASED: Get all juniors recursively for this supervisor
       const supervisedEmployeeIds = await getCachedJuniors(ownerId, currentUserId);
+
+      // Access is hierarchy-based (not role-based): anyone who is a senior to at
+      // least one other employee can view pending approvals for their juniors.
+      // Managers/owners always qualify (they sit above everyone).
+      const isSenior = Array.isArray(supervisedEmployeeIds) && supervisedEmployeeIds.length > 0;
+      if (!isManager && !isSenior) {
+        return res.status(403).json({
+          error: "Access denied. Only seniors can view pending approvals of their juniors.",
+        });
+      }
 
       // Base query: Get pending messages
       // Managers see everything for their owner
