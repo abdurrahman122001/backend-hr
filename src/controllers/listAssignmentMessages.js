@@ -596,8 +596,10 @@ exports.listMessages = async function listMessages(req, res) {
     const isSpamVal = isSpam === "true" || isSpam === true;
     const isParticipantView = !!req.query.participant;
 
-    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity
-    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && !["review", "all", "inbox", "external", "internal"].includes(filter);
+    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity.
+    // "inbox" is treated as incoming-only here too: it must show messages
+    // RECEIVED by the user, never the ones they sent.
+    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && !["review", "all", "external", "internal"].includes(filter);
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
@@ -680,8 +682,9 @@ exports.listMessages = async function listMessages(req, res) {
       ];
 
       // Only restrict to received threads if we are strictly filtering for incoming-only inboxes.
-      // For 'all' or 'inbox' (which acts as All Inbox), we want to show all threads, including newly started ones.
-      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+      // 'all'/'allMail' show every thread (including ones I started); 'inbox'
+      // is incoming-only, so it DOES require the thread to have received something.
+      if (filter !== "all" && filter !== "allMail") {
         pipeline.push({ $match: { receivedSomething: true } });
       }
 
@@ -722,10 +725,10 @@ exports.listMessages = async function listMessages(req, res) {
           }
       ];
 
-      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+      if (filter !== "all" && filter !== "allMail") {
         totalPipeline.push({ $match: { receivedSomething: true } });
       }
-      
+
       totalPipeline.push({ $count: "total" });
 
       const [messages, totalThreadsResult] = await Promise.all([
@@ -2096,6 +2099,19 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
   }
 };
 exports.getSpamMessages = async function getSpamMessages(req, res) {
+  // ⛔ SPAM FEATURE DISABLED — always return an empty list.
+  const { limit = 50, page = 1 } = req.query;
+  return res.json({
+    items: [],
+    total: 0,
+    page: Number(page) || 1,
+    pages: 0,
+    limit: Number(limit) || 50,
+  });
+};
+
+// eslint-disable-next-line no-unused-vars
+async function _getSpamMessages_disabled(req, res) {
   try {
     const { client, owner, limit = 50, page = 1 } = req.query;
 

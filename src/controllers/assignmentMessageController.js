@@ -4047,110 +4047,24 @@ exports.restoreThreadFromTrash = async function restoreThreadFromTrash(
   }
 };
 // Report message as spam
+// ⛔ SPAM FEATURE DISABLED — neutralized no-op.
+// The spam feature was removed from the product. This endpoint no longer flags
+// anything; it returns success so any lingering caller doesn't error.
 exports.reportSpam = async function reportSpam(req, res) {
-  try {
-    const { id } = req.params;
-    const currentUser = req.employee?._id;
-
-    if (!isObjId(currentUser)) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const msg = await AssignmentMessage.findById(id);
-    if (!msg) {
-      return res.status(404).json({ error: "Message not found" });
-    }
-
-    // PER USER, PER MESSAGE: the list shows each message as its own row, so spam
-    // must apply to ONLY this message (thread-wide would drag every sibling
-    // message of the conversation into spam).
-    const already = (msg.spamReporters || []).some(
-      (uid) => String(uid) === String(currentUser)
-    );
-    if (!already) msg.spamReporters.push(currentUser);
-    msg.isSpam = msg.spamReporters.length > 0;
-    msg.spamReportCount = msg.spamReporters.length;
-    msg.spamReportedAt = new Date();
-    msg.spamReportedBy = currentUser;
-    await msg.save();
-
-    const populated = await AssignmentMessage.findById(id).populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role designation" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
-      { path: "spamReportedBy", select: "_id name companyEmail" },
-      { path: "spamReporters", select: "_id name companyEmail" },
-    ]);
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "reported_as_spam");
-    }
-
-    res.json({
-      success: true,
-      message: "Message reported as spam successfully",
-      data: populated,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to report message as spam" });
-  }
+  return res.json({
+    success: true,
+    message: "Spam feature is disabled",
+    disabled: true,
+  });
 };
 
-// Remove from spam (for admins/moderators)
+// ⛔ SPAM FEATURE DISABLED — neutralized no-op.
 exports.removeFromSpam = async function removeFromSpam(req, res) {
-  try {
-    const { id } = req.params;
-    const currentUser = req.employee?._id;
-
-    if (!isObjId(currentUser)) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const msg = await AssignmentMessage.findById(id);
-    if (!msg) {
-      return res.status(404).json({ error: "Message not found" });
-    }
-
-    // PER USER, PER MESSAGE: remove THIS user from spamReporters on ONLY this
-    // message (matches the per-message report above). Others who flagged it keep
-    // it in their own Spam tab.
-    msg.spamReporters = (msg.spamReporters || []).filter(
-      (uid) => String(uid) !== String(currentUser)
-    );
-    msg.isSpam = msg.spamReporters.length > 0;
-    msg.spamReportCount = msg.spamReporters.length;
-    if (msg.spamReporters.length === 0) {
-      msg.spamReportedAt = undefined;
-      msg.spamReportedBy = undefined;
-    }
-    await msg.save();
-
-    const populated = await AssignmentMessage.findById(id).populate([
-      { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role designation" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
-    ]);
-
-    // EMIT REAL-TIME EVENT
-    const io = getIO(req);
-    if (io) {
-      await emitMessageUpdate(io, msg, "removed_from_spam");
-    }
-
-    res.json({
-      success: true,
-      message: "Message removed from spam successfully",
-      data: populated,
-    });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Failed to remove message from spam" });
-  }
+  return res.json({
+    success: true,
+    message: "Spam feature is disabled",
+    disabled: true,
+  });
 };
 
 exports.editPendingMessage = async function editPendingMessage(req, res) {
