@@ -1049,19 +1049,29 @@ exports.createMessage = async function createMessage(req, res) {
         inheritedClientName = clientName || null;
       }
       else if (threadMessages.length > 0) {
-        const threadWithCompanyEmployee = threadMessages.find(
-          (msg) => msg.isFromCompanyEmployee || msg.isFromClient
-        );
+        // Prefer inheriting from a company-employee message so the employee's
+        // name is preserved. Only fall back to a plain client message if the
+        // thread has no company-employee message. (Previously this grabbed the
+        // newest message that was EITHER client OR company-employee, so a client
+        // message could win and the reply would show the client name instead of
+        // the company employee.)
+        const threadCompanyEmployeeMsg =
+          threadMessages.find(
+            (msg) => msg.isFromCompanyEmployee && msg.clientEmployeeName
+          ) || threadMessages.find((msg) => msg.isFromCompanyEmployee);
+        const threadExternalMsg =
+          threadCompanyEmployeeMsg ||
+          threadMessages.find((msg) => msg.isFromClient);
 
-        if (threadWithCompanyEmployee) {
-          inheritedIsFromClient = threadWithCompanyEmployee.isFromClient;
+        if (threadExternalMsg) {
+          inheritedIsFromClient = threadExternalMsg.isFromClient;
           inheritedIsFromCompanyEmployee =
-            threadWithCompanyEmployee.isFromCompanyEmployee;
+            threadExternalMsg.isFromCompanyEmployee;
           inheritedClientEmployeeName =
-            threadWithCompanyEmployee.clientEmployeeName;
+            threadExternalMsg.clientEmployeeName;
           inheritedClientEmployeeEmail =
-            threadWithCompanyEmployee.clientEmployeeEmail;
-          inheritedClientName = threadWithCompanyEmployee.clientName;
+            threadExternalMsg.clientEmployeeEmail;
+          inheritedClientName = threadExternalMsg.clientName;
         }
       }
     } else {
@@ -1864,7 +1874,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
-    const msg = await AssignmentMessage.findById(id).populate([
+    let msg = await AssignmentMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName legalBusinessName dba" },
@@ -1888,6 +1898,22 @@ exports.approveMessage = async function approveMessage(req, res) {
     // Prevent double approval
     if (msg.approvalStatus === "approved") {
       return res.status(400).json({ error: "Message already approved" });
+    }
+
+    // Idempotency guard: if this approver already recorded an approval for this
+    // message, a duplicate/retried request arrived (the UI can fire approve more
+    // than once, plus polling). Return success without re-saving — this avoids
+    // the Mongoose VersionError caused by concurrent saves on the same document.
+    const alreadyApprovedByMe = (msg.approvalChain || []).some(
+      (entry) => String(entry.approver?._id || entry.approver) === currentUserId
+    );
+    if (alreadyApprovedByMe) {
+      return res.json({
+        success: true,
+        message: "Message already approved by you",
+        data: msg,
+        alreadyProcessed: true,
+      });
     }
 
     // 🔥 HIERARCHY-BASED 1-LEVEL ESCALATION
@@ -1928,24 +1954,6 @@ exports.approveMessage = async function approveMessage(req, res) {
     console.log("   [DB] immediate seniors of approver:", immediateSeniors);
     console.log("════════════════════════════════════════════════");
 
-    // Record this approval step
-    if (!msg.approvalChain) msg.approvalChain = [];
-    msg.approvalChain.push({
-      approver: req.employee._id,
-      approvedAt: new Date(),
-      hierarchyLevel: currentHierarchyLevel,
-    });
-
-    // The approver has reviewed this message — mark it as read so it doesn't
-    // appear as an unread message in their email badge count after approving
-    if (!msg.readBy) msg.readBy = [];
-    const alreadyRead = msg.readBy.some(
-      (r) => String(r.employee?._id || r.employee) === String(req.employee._id)
-    );
-    if (!alreadyRead) {
-      msg.readBy.push({ employee: req.employee._id, readAt: new Date() });
-    }
-
     const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;
     const nextSupervisors = targetSupervisor ? [targetSupervisor] : [];
@@ -1953,87 +1961,142 @@ exports.approveMessage = async function approveMessage(req, res) {
     let approvalFinalized = false;
     let responseStatusMessage = "Message approved successfully";
 
-    if (targetSupervisor) {
-      // Escalate to the next immediate senior in the hierarchy.
-      // Keep the current approver in the receiver list so the message
-      // remains visible in their email inbox after they approve.
-      msg.approvalStatus = "pending";
-      const previousApprovers = (msg.approvalChain || []).map(
-        (entry) => String(entry.approver?._id || entry.approver)
-      );
-      msg.receiver = Array.from(
-        new Set([targetSupervisor, ...previousApprovers])
-      );
+    // Apply the approval to a (possibly reloaded) document. Mutates `doc` and
+    // sets approvalFinalized/responseStatusMessage in the outer scope.
+    const applyApproval = async (doc) => {
+      approvalFinalized = false;
+      responseStatusMessage = "Message approved successfully";
 
-      // Reset read status for the next supervisor so it appears as new (bold) for them
-      if (msg.readBy && msg.readBy.length > 0) {
-        msg.readBy = msg.readBy.filter(
-          (r) => String(r.employee?._id || r.employee) !== String(targetSupervisor)
+      // Record this approval step
+      if (!doc.approvalChain) doc.approvalChain = [];
+      doc.approvalChain.push({
+        approver: req.employee._id,
+        approvedAt: new Date(),
+        hierarchyLevel: currentHierarchyLevel,
+      });
+
+      // The approver has reviewed this message — mark it as read so it doesn't
+      // appear as an unread message in their email badge count after approving
+      if (!doc.readBy) doc.readBy = [];
+      const alreadyRead = doc.readBy.some(
+        (r) => String(r.employee?._id || r.employee) === String(req.employee._id)
+      );
+      if (!alreadyRead) {
+        doc.readBy.push({ employee: req.employee._id, readAt: new Date() });
+      }
+
+      if (targetSupervisor) {
+        // Escalate to the next immediate senior in the hierarchy.
+        // Keep the current approver in the receiver list so the message
+        // remains visible in their email inbox after they approve.
+        doc.approvalStatus = "pending";
+        const previousApprovers = (doc.approvalChain || []).map(
+          (entry) => String(entry.approver?._id || entry.approver)
         );
-      }
-      responseStatusMessage = "Message approved and escalated to next-level supervisor";
-      console.log("⬆️ [assignment approveMessage] Escalating to next senior:", targetSupervisor);
-    } else {
-      // At top of hierarchy or no active supervisors found up-chain -> Finalize
-      // Get managers and CRM for the owner
-      const { managers, crm } = await findTLsAndManagersByOwner(ownerId);
-      const crmIds = Array.isArray(crm) ? crm : [];
+        doc.receiver = Array.from(
+          new Set([targetSupervisor, ...previousApprovers])
+        );
 
-      // RESTORE INTENDED RECIPIENTS
-      const intendedRecipients = Array.isArray(msg.intendedRecipients)
-        ? msg.intendedRecipients.map((r) => String(r._id || r))
-        : [];
+        // Reset read status for the next supervisor so it appears as new (bold) for them
+        if (doc.readBy && doc.readBy.length > 0) {
+          doc.readBy = doc.readBy.filter(
+            (r) => String(r.employee?._id || r.employee) !== String(targetSupervisor)
+          );
+        }
+        responseStatusMessage = "Message approved and escalated to next-level supervisor";
+        console.log("⬆️ [assignment approveMessage] Escalating to next senior:", targetSupervisor);
+      } else {
+        // At top of hierarchy or no active supervisors found up-chain -> Finalize
+        // Get managers and CRM for the owner
+        const { managers, crm } = await findTLsAndManagersByOwner(ownerId);
+        const crmIds = Array.isArray(crm) ? crm : [];
 
-      const currentReceivers = Array.isArray(msg.receiver)
-        ? msg.receiver.map((r) => String(r._id || r))
-        : [];
+        // RESTORE INTENDED RECIPIENTS
+        const intendedRecipients = Array.isArray(doc.intendedRecipients)
+          ? doc.intendedRecipients.map((r) => String(r._id || r))
+          : [];
 
-      // Include all approvers from the chain so the message stays in their inbox
-      const chainApprovers = (msg.approvalChain || []).map(
-        (entry) => String(entry.approver?._id || entry.approver)
-      );
+        const currentReceivers = Array.isArray(doc.receiver)
+          ? doc.receiver.map((r) => String(r._id || r))
+          : [];
 
-      const finalReceivers = Array.from(
-        new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients, ...chainApprovers])
-      ).filter((rid) => rid !== String(msg.sender?._id || msg.sender));
+        // Include all approvers from the chain so the message stays in their inbox
+        const chainApprovers = (doc.approvalChain || []).map(
+          (entry) => String(entry.approver?._id || entry.approver)
+        );
 
-      msg.receiver = finalReceivers;
+        const finalReceivers = Array.from(
+          new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients, ...chainApprovers])
+        ).filter((rid) => rid !== String(doc.sender?._id || doc.sender));
 
-      // Filter CCs on approval to ensure Managers/CRM are not in the CC header
-      if (msg.cc && msg.cc.length > 0) {
-        const ccEmailAddresses = msg.cc.map((c) => c.email);
-        const matchingEmployees = await findEmployeesByEmails(msg.owner, ccEmailAddresses);
+        doc.receiver = finalReceivers;
 
-        matchingEmployees.forEach((employee) => {
-          const role = (employee.role || "").toLowerCase();
-          if (role.includes("manager") || role.includes("crm")) {
-            const index = msg.cc.findIndex((c) => {
-              const ccEmail = (c.email || "").toLowerCase();
-              return (
-                ccEmail === (employee.email || "").toLowerCase() ||
-                ccEmail === (employee.companyEmail || "").toLowerCase()
-              );
-            });
-            if (index > -1) {
-              msg.cc.splice(index, 1);
+        // Filter CCs on approval to ensure Managers/CRM are not in the CC header
+        if (doc.cc && doc.cc.length > 0) {
+          const ccEmailAddresses = doc.cc.map((c) => c.email);
+          const matchingEmployees = await findEmployeesByEmails(doc.owner, ccEmailAddresses);
+
+          matchingEmployees.forEach((employee) => {
+            const role = (employee.role || "").toLowerCase();
+            if (role.includes("manager") || role.includes("crm")) {
+              const index = doc.cc.findIndex((c) => {
+                const ccEmail = (c.email || "").toLowerCase();
+                return (
+                  ccEmail === (employee.email || "").toLowerCase() ||
+                  ccEmail === (employee.companyEmail || "").toLowerCase()
+                );
+              });
+              if (index > -1) {
+                doc.cc.splice(index, 1);
+              }
             }
-          }
-        });
+          });
+        }
+
+        doc.approvalStatus = "approved";
+        doc.approvedAt = new Date();
+        doc.approvedBy = req.employee._id;
+
+        doc.readBy = [{
+          employee: req.employee._id,
+          readAt: new Date()
+        }];
+
+        approvalFinalized = true;
       }
+    };
 
-      msg.approvalStatus = "approved";
-      msg.approvedAt = new Date();
-      msg.approvedBy = req.employee._id;
-
-      msg.readBy = [{
-        employee: req.employee._id,
-        readAt: new Date()
-      }];
-
-      approvalFinalized = true;
+    // Apply + save with a bounded retry to survive concurrent saves (duplicate
+    // approve clicks / polling firing the same action). On a Mongoose version
+    // conflict we reload the latest document, re-check idempotency, and re-apply.
+    for (let attempt = 0; ; attempt++) {
+      await applyApproval(msg);
+      try {
+        await msg.save();
+        break;
+      } catch (saveErr) {
+        if (saveErr?.name === "VersionError" && attempt < 3) {
+          const fresh = await AssignmentMessage.findById(id).populate([
+            { path: "sender", select: "_id name companyEmail role designation" },
+            { path: "receiver", select: "_id name companyEmail role designation" },
+            { path: "client", select: "_id clientName legalBusinessName dba" },
+          ]);
+          if (!fresh) return res.status(404).json({ error: "Message not found" });
+          if (fresh.approvalStatus === "approved") {
+            return res.json({ success: true, message: "Message already approved", data: fresh, alreadyProcessed: true });
+          }
+          const mineNow = (fresh.approvalChain || []).some(
+            (entry) => String(entry.approver?._id || entry.approver) === currentUserId
+          );
+          if (mineNow) {
+            return res.json({ success: true, message: "Message already approved by you", data: fresh, alreadyProcessed: true });
+          }
+          msg = fresh;
+          continue;
+        }
+        throw saveErr;
+      }
     }
-
-    await msg.save();
 
     let approvedClientEmployeeMessages = [];
     if (approvalFinalized && msg.threadId) {
@@ -2186,7 +2249,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     // ✅ FIX: Safely handle optional disapprovalNote
     const disapprovalNote = req.body?.disapprovalNote || null;
 
-    const msg = await AssignmentMessage.findById(id);
+    let msg = await AssignmentMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
@@ -2201,27 +2264,39 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         .json({ error: "Only designated supervisors or managers can disapprove messages" });
     }
 
-
-    // ✅ ONLY update the existing message - NO new message creation
-    msg.approvalStatus = "disapproved";
-
-    // 🔥 NEW: Reset read status so participants see the disapproval as a new unread (bold) message
-    msg.readBy = [{
-      employee: req.employee._id,
-      readAt: new Date()
-    }];
-
-    // Store disapproval note if provided
-    if (disapprovalNote && disapprovalNote.trim() !== "") {
-      msg.disapprovalNote = disapprovalNote.trim();
-    } else {
-      msg.disapprovalNote = "Message requires revisions before resubmission.";
+    // Idempotency guard: a duplicate/retried request (the UI can fire disapprove
+    // more than once, plus polling). Return success without re-saving to avoid
+    // the Mongoose VersionError from concurrent saves on the same document.
+    if (msg.approvalStatus === "disapproved") {
+      return res.json({
+        success: true,
+        message: "Message already disapproved",
+        data: msg,
+        alreadyProcessed: true,
+      });
     }
 
-    // Route disapproved message to the previous approver in the chain (not directly to sender).
-    // If the disapprover was themselves in the chain (further-reject), remove them first.
-    {
-      const workingChain = Array.isArray(msg.approvalChain) ? [...msg.approvalChain] : [];
+    // Apply the disapproval to a (possibly reloaded) document.
+    const applyDisapproval = (doc) => {
+      // ✅ ONLY update the existing message - NO new message creation
+      doc.approvalStatus = "disapproved";
+
+      // 🔥 NEW: Reset read status so participants see the disapproval as a new unread (bold) message
+      doc.readBy = [{
+        employee: req.employee._id,
+        readAt: new Date()
+      }];
+
+      // Store disapproval note if provided
+      if (disapprovalNote && disapprovalNote.trim() !== "") {
+        doc.disapprovalNote = disapprovalNote.trim();
+      } else {
+        doc.disapprovalNote = "Message requires revisions before resubmission.";
+      }
+
+      // Route disapproved message to the previous approver in the chain (not directly to sender).
+      // If the disapprover was themselves in the chain (further-reject), remove them first.
+      const workingChain = Array.isArray(doc.approvalChain) ? [...doc.approvalChain] : [];
       let disapproverIdx = -1;
       for (let i = workingChain.length - 1; i >= 0; i--) {
         const aid = String(workingChain[i].approver?._id || workingChain[i].approver);
@@ -2229,18 +2304,37 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       }
       if (disapproverIdx >= 0) {
         workingChain.splice(disapproverIdx, 1);
-        msg.approvalChain = workingChain;
+        doc.approvalChain = workingChain;
       }
       if (workingChain.length > 0) {
         const lastApprover = workingChain[workingChain.length - 1];
-        msg.receiver = [String(lastApprover.approver?._id || lastApprover.approver)];
+        doc.receiver = [String(lastApprover.approver?._id || lastApprover.approver)];
       } else {
-        msg.receiver = [String(msg.sender?._id || msg.sender)];
+        doc.receiver = [String(doc.sender?._id || doc.sender)];
+      }
+
+      doc.updatedAt = new Date();
+    };
+
+    // Apply + save with a bounded retry to survive concurrent saves.
+    for (let attempt = 0; ; attempt++) {
+      applyDisapproval(msg);
+      try {
+        await msg.save();
+        break;
+      } catch (saveErr) {
+        if (saveErr?.name === "VersionError" && attempt < 3) {
+          const fresh = await AssignmentMessage.findById(id);
+          if (!fresh) return res.status(404).json({ error: "Message not found" });
+          if (fresh.approvalStatus === "disapproved") {
+            return res.json({ success: true, message: "Message already disapproved", data: fresh, alreadyProcessed: true });
+          }
+          msg = fresh;
+          continue;
+        }
+        throw saveErr;
       }
     }
-
-    msg.updatedAt = new Date();
-    await msg.save();
 
     // Populate the updated message for response — include approvalChain so
     // previous approvers are identifiable both here and in the frontend
