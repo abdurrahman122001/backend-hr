@@ -175,10 +175,10 @@ async function applyVisibility(q, req, filterParam) {
     roleHierarchyFilters.push({ owner: ownerId });
   }
 
+  // Team leads are NOT given org-wide visibility by role — they see their
+  // juniors (entire subtree) via the hierarchy filter below, so visibility is
+  // purely seniority-based.
   const nonManagerFilters = [];
-  if (currentUserRole === "team_lead") {
-    nonManagerFilters.push({ owner: ownerId });
-  }
   if (juniorIds.length > 0) {
     nonManagerFilters.push({ sender: { $in: juniorIds } });
     nonManagerFilters.push({ receiver: { $in: juniorIds } });
@@ -397,10 +397,13 @@ exports.getMessage = async function getMessage(req, res) {
     // Check basic participant access
     let hasAccess = userId === senderId || receiverIds.includes(userId);
 
-    // Check Manager/Owner/Team Lead access
-    if (!hasAccess && ["manager", "owner", "team_lead"].includes(currentUserRole)) {
+    // Manager/Owner org-wide view (they sit at the top of the hierarchy).
+    // Team leads are NOT special-cased here — they get access via the
+    // hierarchy path below (senior-of-sender), so visibility is purely
+    // seniority-based.
+    if (!hasAccess && ["manager", "owner"].includes(currentUserRole)) {
       if (String(msg.owner?._id || msg.owner) === String(ownerId)) {
-        // Managers, Owners, and Team Leads can view organization mail ONLY if it is not pending
+        // Managers and Owners can view organization mail ONLY if it is not pending
         if (msg.approvalStatus !== "pending") {
           hasAccess = true;
         }
@@ -593,8 +596,10 @@ exports.listMessages = async function listMessages(req, res) {
     const isSpamVal = isSpam === "true" || isSpam === true;
     const isParticipantView = !!req.query.participant;
 
-    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity
-    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && !["review", "all", "inbox", "external", "internal"].includes(filter);
+    // Unified inbox view (incoming only) applies ONLY if we aren't in Sent, Draft, Scheduled, Trash, Spam, participant view, or Activity.
+    // "inbox" is treated as incoming-only here too: it must show messages
+    // RECEIVED by the user, never the ones they sent.
+    const isInboxView = !isSentView && !isDraftView && !isScheduledView && !isTrashedVal && !isSpamVal && !isParticipantView && !["review", "all", "external", "internal"].includes(filter);
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
@@ -677,8 +682,9 @@ exports.listMessages = async function listMessages(req, res) {
       ];
 
       // Only restrict to received threads if we are strictly filtering for incoming-only inboxes.
-      // For 'all' or 'inbox' (which acts as All Inbox), we want to show all threads, including newly started ones.
-      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+      // 'all'/'allMail' show every thread (including ones I started); 'inbox'
+      // is incoming-only, so it DOES require the thread to have received something.
+      if (filter !== "all" && filter !== "allMail") {
         pipeline.push({ $match: { receivedSomething: true } });
       }
 
@@ -719,10 +725,10 @@ exports.listMessages = async function listMessages(req, res) {
           }
       ];
 
-      if (filter !== "all" && filter !== "inbox" && filter !== "allMail") {
+      if (filter !== "all" && filter !== "allMail") {
         totalPipeline.push({ $match: { receivedSomething: true } });
       }
-      
+
       totalPipeline.push({ $count: "total" });
 
       const [messages, totalThreadsResult] = await Promise.all([
@@ -2101,6 +2107,19 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
   }
 };
 exports.getSpamMessages = async function getSpamMessages(req, res) {
+  // ⛔ SPAM FEATURE DISABLED — always return an empty list.
+  const { limit = 50, page = 1 } = req.query;
+  return res.json({
+    items: [],
+    total: 0,
+    page: Number(page) || 1,
+    pages: 0,
+    limit: Number(limit) || 50,
+  });
+};
+
+// eslint-disable-next-line no-unused-vars
+async function _getSpamMessages_disabled(req, res) {
   try {
     const { client, owner, limit = 50, page = 1 } = req.query;
 
@@ -2291,23 +2310,27 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
     }
 
-    // 🔥 EMPLOYEE SEARCH FIX: Only regular employees see their own emails
-    // Team Leads, Managers, and Owners can see all search results
+    // 🔥 HIERARCHY-BASED SEARCH VISIBILITY:
+    // Managers/Owners (top of hierarchy) see all search results.
+    // Everyone else sees their own messages PLUS those of their juniors
+    // (recursively), so seniority is determined by the hierarchy, not role.
     const currentEmployeeId = req.employee?._id;
     const currentUserRole = normalizeRole(req.employee?.role || "");
-    const isTeamLeadOrAbove = ["team_lead", "manager", "owner"].includes(currentUserRole);
-    
-    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isTeamLeadOrAbove) {
+    const ownerForJuniors = req.employee?.owner;
+    const isManagerOrOwner = ["manager", "owner"].includes(currentUserRole);
+
+    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isManagerOrOwner) {
       const me = oid(String(currentEmployeeId));
-      // Add participant filter: employee must be sender OR receiver
+      // Juniors of the current user (their subtree in the hierarchy)
+      const juniorIds = await getCachedJuniors(ownerForJuniors, currentEmployeeId);
+      const seniorScopeIds = [me, ...juniorIds.map((id) => oid(String(id)))];
+      // Add participant filter: employee (or any of their juniors) is sender OR receiver
       q.$or = q.$or || [];
       const participantFilter = {
         $or: [
-          { sender: me },
-          { receiver: me },
-          { receiver: { $in: [me] } },
-          { isFromClient: true, receiver: me }, // Include client emails to this employee
-          { isFromClient: true, receiver: { $in: [me] } }
+          { sender: { $in: seniorScopeIds } },
+          { receiver: { $in: seniorScopeIds } },
+          { isFromClient: true, receiver: { $in: seniorScopeIds } } // client emails to the user/their juniors
         ]
       };
       
@@ -2606,16 +2629,9 @@ exports.getTeamLeadPendingApprovals =
         showThread = "true",
       } = req.query;
 
-      // Verify team lead or manager
+      // Managers/owners see all org pending approvals (they are senior to all).
       const currentUserRole = normalizeRole(req.employee?.role || "");
       const isManager = currentUserRole === "manager" || currentUserRole === "owner";
-      const isTeamLead = currentUserRole === "team_lead";
-
-      if (!isTeamLead && !isManager) {
-        return res.status(403).json({
-          error: "Access denied. Only team leads and managers can view pending approvals.",
-        });
-      }
 
       const currentUserId = req.employee?._id;
       const ownerId = req.employee?.owner;
@@ -2626,6 +2642,16 @@ exports.getTeamLeadPendingApprovals =
 
       // 🔥 HIERARCHY-BASED: Get all juniors recursively for this supervisor
       const supervisedEmployeeIds = await getCachedJuniors(ownerId, currentUserId);
+
+      // Access is hierarchy-based (not role-based): anyone who is a senior to at
+      // least one other employee can view pending approvals for their juniors.
+      // Managers/owners always qualify (they sit above everyone).
+      const isSenior = Array.isArray(supervisedEmployeeIds) && supervisedEmployeeIds.length > 0;
+      if (!isManager && !isSenior) {
+        return res.status(403).json({
+          error: "Access denied. Only seniors can view pending approvals of their juniors.",
+        });
+      }
 
       // Base query: Get pending messages
       // Managers see everything for their owner
