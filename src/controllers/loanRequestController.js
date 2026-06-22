@@ -1,4 +1,5 @@
 const LoanRequest = require("../models/LoanRequest");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 exports.applyLoan = async (req, res) => {
   try {
@@ -19,7 +20,7 @@ exports.applyLoan = async (req, res) => {
       period,
       reason,
       loanAllowanceField: loanAllowanceField || null,
-      status: "pending"
+      ...approvedFields(req),
     });
 
     await newRequest.save();

@@ -1,5 +1,6 @@
 const ReimbursementRequest = require("../models/ReimbursementRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 exports.applyReimbursement = async (req, res) => {
   try {
@@ -18,11 +19,12 @@ exports.applyReimbursement = async (req, res) => {
       month,
       reason,
       receiptUrl: req.file ? req.file.filename : undefined,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
     res.status(201).json({
-      message: "Reimbursement request submitted successfully",
+      message: "Reimbursement request approved successfully",
       data: newRequest,
     });
   } catch (error) {

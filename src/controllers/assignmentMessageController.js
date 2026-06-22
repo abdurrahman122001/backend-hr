@@ -6,6 +6,11 @@ const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
 
+function readByEmployeeId(readEntry) {
+  const employee = readEntry?.employee ?? readEntry;
+  return employee?._id ? String(employee._id) : employee ? String(employee) : "";
+}
+
 /** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
 
 /**
@@ -4433,8 +4438,8 @@ exports.markAsRead = async function markAsRead(req, res) {
     }
 
     // Check if user has already read this message
-    const alreadyRead = message.readBy.some(
-      (read) => read.employee.toString() === userId.toString()
+    const alreadyRead = (message.readBy || []).some(
+      (read) => readByEmployeeId(read) === userId.toString()
     );
 
     if (!alreadyRead) {
@@ -4612,8 +4617,8 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     // 🔥 FIX: Mark ALL messages in thread as read (not just unread ones)
     const updatePromises = threadMessages.map((msg) => {
       // Check if user already marked this message as read
-      const alreadyRead = msg.readBy.some(
-        (read) => read.employee.toString() === userId.toString()
+      const alreadyRead = (msg.readBy || []).some(
+        (read) => readByEmployeeId(read) === userId.toString()
       );
 
       if (!alreadyRead) {
@@ -4696,12 +4701,20 @@ exports.markAsUnread = async function markAsUnread(req, res) {
       });
     }
 
-    // Check if user is authorized
-    const isAuthorized =
+    // Check if user is authorized. Participants can always toggle unread.
+    // Seniors/managers may also see messages through the same visibility rules
+    // used by the email list, so allow unread for those visible messages too.
+    let isAuthorized =
       message.sender.toString() === userId.toString() ||
       message.receiver.some(
         (receiver) => receiver.toString() === userId.toString()
       );
+
+    if (!isAuthorized) {
+      const visibleQuery = await applyVisibility({ _id: message._id }, req);
+      const visibleMessage = await AssignmentMessage.exists(visibleQuery);
+      isAuthorized = !!visibleMessage;
+    }
 
     if (!isAuthorized) {
       return res.status(403).json({
@@ -4711,8 +4724,8 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     }
 
     // Remove user from readBy array
-    message.readBy = message.readBy.filter(
-      (read) => read.employee.toString() !== userId.toString()
+    message.readBy = (message.readBy || []).filter(
+      (read) => readByEmployeeId(read) !== userId.toString()
     );
 
     await message.save();

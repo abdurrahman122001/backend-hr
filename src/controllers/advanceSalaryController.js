@@ -1,5 +1,6 @@
 const AdvanceSalaryRequest = require("../models/AdvanceSalaryRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 exports.applyAdvanceSalary = async (req, res) => {
   try {
@@ -17,11 +18,12 @@ exports.applyAdvanceSalary = async (req, res) => {
       amount,
       month,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
     res.status(201).json({
-      message: "Advance salary request submitted successfully",
+      message: "Advance salary request approved successfully",
       data: newRequest,
     });
   } catch (error) {

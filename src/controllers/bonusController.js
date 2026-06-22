@@ -1,5 +1,6 @@
 const BonusRequest = require("../models/BonusRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -18,10 +19,13 @@ exports.applyBonus = async (req, res) => {
       amount,
       month,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
-    res.status(201).json({ message: "Bonus request submitted successfully", data: newRequest });
+    await Employee.findByIdAndUpdate(employeeId, { $inc: { bonusCash: Number(amount) || 0 } });
+
+    res.status(201).json({ message: "Bonus request approved successfully", data: newRequest });
   } catch (error) {
     console.error("Bonus Apply Error:", error);
     res.status(500).json({ message: error.message });
