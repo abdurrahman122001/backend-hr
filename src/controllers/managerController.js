@@ -4,7 +4,10 @@ const Employee = require("../models/Employees");
 const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess } = require("../utils/crmAccess");
 
+// ⚠️ DEPRECATED role check — CRM/manager powers are now access-based.
+// Use `await hasCrmAccess(req.employee)` instead of isManagerLike.
 const isManagerLike = (role) => {
   const r = String(role || "").toLowerCase();
   return /\bmanager\b/.test(r) || /team\s*lead/.test(r) || /\bcrm\b/.test(r);
@@ -22,7 +25,8 @@ exports.getRoster = async (req, res) => {
 
     const role = (me.role || "").trim().toLowerCase();
     const isTeamLead = role === "team lead" || role === "team_lead";
-    const isManager = role === "manager";
+    // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) act as managers here.
+    const isManager = role === "manager" || (await hasCrmAccess(req.employee));
 
     // Find ALL descendants in the hierarchy tree (any depth) using the path field.
     // path stores the full ancestry chain as "id1.id2.id3", so matching on me._id
@@ -308,7 +312,8 @@ exports.getEmployeeRoster = async (req, res) => {
       me.role?.toLowerCase() === "manager" ||
       me.role?.toLowerCase() === "team lead" ||
       me.role?.toLowerCase() === "team_lead" ||
-      me.role?.toLowerCase() === "teamlead";
+      me.role?.toLowerCase() === "teamlead" ||
+      (await hasCrmAccess(req.employee));
 
     // Get direct juniors from hierarchy
     let juniorIds = [];
@@ -387,7 +392,8 @@ exports.getMentionedEmployees = async (req, res) => {
       me.role?.toLowerCase() === "manager" ||
       me.role?.toLowerCase() === "team lead" ||
       me.role?.toLowerCase() === "team_lead" ||
-      me.role?.toLowerCase() === "teamlead";
+      me.role?.toLowerCase() === "teamlead" ||
+      (await hasCrmAccess(req.employee));
 
     // --- Employees Query ---
     const employeeQuery = {
@@ -480,7 +486,7 @@ exports.getEmployeeSupervisionStatus = async (req, res) => {
       "_id owner role",
     );
     if (!me) return res.status(404).json({ error: "Employee not found" });
-    if (!isManagerLike(me.role)) return res.status(403).json({ error: "" });
+    if (!(await hasCrmAccess(req.employee))) return res.status(403).json({ error: "" });
     if (!me.owner)
       return res
         .status(400)
@@ -536,7 +542,7 @@ exports.assignClient = async (req, res) => {
 
     // Allow if: Manager/Team Lead role OR is a senior in EmployeeHierarchy for the target employees
     // For unassign (empty employeeIds), check if user is senior for currently assigned employees
-    const isManagerRole = isManagerLike(me.role);
+    const isManagerRole = await hasCrmAccess(req.employee);
     let isHierarchySenior = false;
     if (!isManagerRole) {
       const targetIds = employeeIds.length > 0

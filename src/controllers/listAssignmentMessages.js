@@ -4,6 +4,7 @@ const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess } = require("../utils/crmAccess");
 
 async function findSupervisorsFromHierarchy(ownerId, employeeId) {
   if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
@@ -170,8 +171,10 @@ async function applyVisibility(q, req, filterParam) {
     return { $and: [q, { sender: { $in: juniorIds } }, externalOnly] };
   }
 
+  // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) get org-wide email view.
+  const isCrmUser = await hasCrmAccess(req.employee);
   const roleHierarchyFilters = [];
-  if (currentUserRole === "manager" || currentUserRole === "owner") {
+  if (isCrmUser || currentUserRole === "owner") {
     roleHierarchyFilters.push({ owner: ownerId });
   }
 

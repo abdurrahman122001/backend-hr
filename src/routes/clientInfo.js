@@ -1,12 +1,13 @@
 const express = require("express");
 const router = express.Router();
 const requireAuth = require("../middleware/empAuth");
+const requireCrmAccess = require("../middleware/requireCrmAccess");
 const clientInfoCtrl = require("../controllers/clientInfoController");
 const { upload } = require("../utils/multer");
 // Add to your routes
 
-// Manager/Team Lead creates client info
-router.post("/", requireAuth, clientInfoCtrl.createClientInfo);
+// 🔑 CRM-only: add a client (CRM app only)
+router.post("/", requireAuth, requireCrmAccess, clientInfoCtrl.createClientInfo);
 
 // Fetch client info (based on role: Owner, Manager/Team Lead, or Employee)
 router.get("/", requireAuth, clientInfoCtrl.getClientInfo);
@@ -27,13 +28,13 @@ router.get("/crm-recipients", requireAuth, clientInfoCtrl.getCrmRecipients);
 // (must be registered before "/:id" so it isn't captured as an id)
 router.get("/whatsapp-flags-bulk", requireAuth, clientInfoCtrl.getWhatsAppFlagsBulk);
 
-// Update specific client info (Owner/Manager/Team Lead/Assigned Employee)
-router.put("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
+// 🔑 CRM-only: update a client (CRM app only)
+router.put("/:id", requireAuth, requireCrmAccess, clientInfoCtrl.updateClientInfo);
 // Partial update — used by CRM for toggling isActive and other field-level patches
-router.patch("/:id", requireAuth, clientInfoCtrl.updateClientInfo);
+router.patch("/:id", requireAuth, requireCrmAccess, clientInfoCtrl.updateClientInfo);
 
-// Delete specific client info (Owner/Manager/Team Lead/Creator)
-router.delete("/:id", requireAuth, clientInfoCtrl.deleteClientInfo);
+// 🔑 CRM-only: delete a client (CRM app only)
+router.delete("/:id", requireAuth, requireCrmAccess, clientInfoCtrl.deleteClientInfo);
 
 router.get("/has-new-clients", requireAuth, clientInfoCtrl.hasNewClients);
 router.post("/:id/read", requireAuth, clientInfoCtrl.markClientRead);
@@ -52,10 +53,10 @@ router.get(
   requireAuth,
   clientInfoCtrl.searchTeamMembers
 );
-// Manage company employees
-router.post("/:id/company-employees", requireAuth, clientInfoCtrl.addCompanyEmployee);
-router.delete("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.removeCompanyEmployee);
-router.put("/:id/company-employees/:employeeIndex", requireAuth, clientInfoCtrl.updateCompanyEmployee);
+// Manage company employees — 🔑 CRM-only (CRM app only)
+router.post("/:id/company-employees", requireAuth, requireCrmAccess, clientInfoCtrl.addCompanyEmployee);
+router.delete("/:id/company-employees/:employeeIndex", requireAuth, requireCrmAccess, clientInfoCtrl.removeCompanyEmployee);
+router.put("/:id/company-employees/:employeeIndex", requireAuth, requireCrmAccess, clientInfoCtrl.updateCompanyEmployee);
 
 // Photo uploads
 router.post("/:id/upload-photo", requireAuth, upload.single("photo"), clientInfoCtrl.uploadClientPhoto);

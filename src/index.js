@@ -148,12 +148,14 @@ const ALLOWED_ORIGINS = [
   "https://connect.virsme.com",
   "https://people.virsme.com",
   "https://task.virsme.com",
+  "https://crm.virsme.com",
   "http://localhost:8080",
   "http://localhost:8081",
   "http://localhost:8082",
   "http://localhost:8083",
   "http://localhost:8085",
   "http://localhost:8084",
+  "http://localhost:8090",
   "http://localhost:3000",
   "http://127.0.0.1:3000",
 ];
@@ -378,6 +380,7 @@ app.use(
 );
 app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
+app.use("/api/crm-access", require("./routes/crmAccess"));
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);

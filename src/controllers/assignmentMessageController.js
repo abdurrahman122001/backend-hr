@@ -4,6 +4,7 @@ const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
 
 /** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
 
@@ -382,12 +383,14 @@ async function applyVisibility(q, req) {
   const juniorIds = juniorIdStrings.map((id) => oid(String(id)));
 
   // 👁️ HIERARCHY VISIBILITY (role-independent for seniority)
+  // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) see all org email.
+  const isCrmUser = await hasCrmAccess(req.employee);
   const roleHierarchyFilter = {
     $or: [
-      // Only Managers/Owners (top of the hierarchy) see all org messages.
+      // Only CRM users / Owners (top of the hierarchy) see all org messages.
       // Team leads are NOT special-cased — they see their juniors via the
       // recursive junior filter below, so visibility is purely seniority-based.
-      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      ...(isCrmUser || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
       // Seniors see messages from their juniors (entire subtree)
       ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
     ]
@@ -706,12 +709,10 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
-  const managers = await Employee.find({
-    owner: ownerId,
-    $or: [{ role: "Manager" }, { role: "manager" }],
-  })
-    .select("_id")
-    .lean();
+  // 🔑 ACCESS-BASED: "managers" and "crm" are now both the CRM-access holders
+  // + rootManager (was role-based: role /manager|crm/). The role field is kept
+  // for hierarchy/leave/payroll but no longer grants CRM/manager powers.
+  const crmUserIds = await getCrmUserIds(ownerId);
 
   const employees = await Employee.find({
     owner: ownerId,
@@ -720,24 +721,11 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
-  // Find CRM employees by role or email pattern
-  const crm = await Employee.find({
-    owner: ownerId,
-    $or: [
-      { role: /crm/i },
-      { role: /customer relationship/i },
-      { companyEmail: /crm/i },
-      { name: /CRM/i }
-    ],
-  })
-    .select("_id")
-    .lean();
-
   return {
     tls: tls.map((x) => String(x._id)),
-    managers: managers.map((x) => String(x._id)),
+    managers: crmUserIds,
     employees: employees.map((x) => String(x._id)),
-    crm: crm.map((x) => String(x._id)),
+    crm: crmUserIds,
   };
 }
 

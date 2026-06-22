@@ -15,6 +15,8 @@ router.get("/internal", filterCtrl.getInternalCommunications);
 // ✅ SPECIFIC ROUTES FIRST (without parameters)
 // =============================
 router.get("/drafts", filterCtrl.listDrafts);
+// Normal employees can also draft email — the "from" (on-behalf-of-client)
+// field is hidden from non-CRM users in ComposeDialog instead of gating here.
 router.post("/drafts", ctrl.createDraft);
 router.get("/drafts/count", filterCtrl.getDraftCount);
 
@@ -33,6 +35,8 @@ router.get("/supervision", filterCtrl.getSupervisionMessages);
 router.get("/has-juniors", filterCtrl.hasJuniors);
 router.get("/", filterCtrl.listMessages);
 
+// Normal employees can create/send email (normal approval flow). The
+// "from" (on-behalf-of-client) field is hidden from non-CRM users in the UI.
 router.post("/", ctrl.createMessage);
 router.get("/sent", ctrl.listMySentToClient);
 router.get("/review", filterCtrl.getReviewMessages);
@@ -78,11 +82,11 @@ router.patch("/:clientId/trash", ctrl.moveThreadToTrash);
 router.patch("/:clientId/restore", ctrl.restoreThreadFromTrash);
 router.patch("/:id/restore", ctrl.restoreFromTrash);
 
-// Approval Routes
+// Approval Routes — hierarchy/senior approval flow (controller authorizes)
 router.patch("/:id/approve", ctrl.approveMessage);
 router.patch("/:id/disapprove", ctrl.disapproveMessage);
 
-// Scheduling Actions
+// Scheduling Actions — normal employees may schedule their own messages
 router.patch("/:id/schedule", ctrl.scheduleMessage);
 router.patch("/:id/unschedule", ctrl.unscheduleMessage);
 router.patch("/:id/reschedule", ctrl.rescheduleMessage);

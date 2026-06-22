@@ -3,6 +3,7 @@ const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { getCrmUserIds } = require("../utils/crmAccess");
 
 // Helper to get io instance safely
 function getIo(req) {
@@ -306,14 +307,9 @@ exports.getMentionableUsers = async (req, res) => {
       }
     }
 
-    // 3. CRM / managers for this organization
-    const managers = await Employee.find({
-      owner: ownerId,
-      $or: [{ role: /manager/i }, { role: /crm/i }],
-    })
-      .select("_id")
-      .lean();
-    managers.forEach((m) => ids.add(String(m._id)));
+    // 3. CRM users for this organization (access-based: CRMAccess holders + rootManager)
+    const crmUserIds = await getCrmUserIds(ownerId);
+    crmUserIds.forEach((id) => ids.add(String(id)));
 
     // Exclude the requesting user — you can't mention yourself
     if (req.employee?._id) ids.delete(String(req.employee._id));

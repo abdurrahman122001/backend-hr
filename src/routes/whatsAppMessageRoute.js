@@ -22,6 +22,7 @@ router.post("/groups/:groupId/messages", groupCtrl.sendGroupMessage);
 
 // List / create / sent etc.
 router.get("/", ctrl.listMessages);
+// 🔑 CRM-only: composing/sending on behalf of a clie nt requires CRM access
 router.post("/", ctrl.createMessage);
 router.get("/sent", ctrl.listMySentToClient);
 
