@@ -560,6 +560,10 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0, sourceM
             date: new Date(),
             type: "PAID_LEAVE_REVERSED",
             value: daysToReverse,
+            sourceModel: "Attendance",
+            sourceId: record._id,
+            createdBy: record.createdBy || ownerId,
+            reason: `Reversed via attendance status change to ${status}`,
           });
         } else {
           // Unpaid
@@ -572,6 +576,10 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0, sourceM
             date: new Date(),
             type: "UNPAID_LEAVE_REVERSED",
             value: daysToReverse,
+            sourceModel: "Attendance",
+            sourceId: record._id,
+            createdBy: record.createdBy || ownerId,
+            reason: `Reversed via attendance status change to ${status}`,
           });
         }
         await balance.save();
