@@ -1,5 +1,26 @@
 const SalaryChangeRequest = require("../models/SalaryChangeRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
+
+const applySalaryChangeToEmployee = (employeeId, proposedSalary) =>
+  Employee.findByIdAndUpdate(employeeId, {
+    basic: proposedSalary.basic,
+    dearnessAllowance: proposedSalary.dearnessAllowance,
+    houseRentAllowance: proposedSalary.houseRentAllowance,
+    conveyanceAllowance: proposedSalary.conveyanceAllowance,
+    medicalAllowance: proposedSalary.medicalAllowance,
+    utilityAllowance: proposedSalary.utilityAllowance,
+    overtimeCompensation: proposedSalary.overtimeCompensation,
+    dislocationAllowance: proposedSalary.dislocationAllowance,
+    leaveEncashment: proposedSalary.leaveEncashment,
+    bonus: proposedSalary.bonus,
+    arrears: proposedSalary.arrears,
+    autoAllowance: proposedSalary.autoAllowance,
+    incentive: proposedSalary.incentive,
+    fuelAllowance: proposedSalary.fuelAllowance,
+    othersAllowances: proposedSalary.othersAllowances,
+    grossSalary: proposedSalary.grossSalary,
+  });
 
 // Employee submits a salary change request
 exports.submitSalaryChangeRequest = async (req, res) => {
@@ -46,11 +67,14 @@ exports.submitSalaryChangeRequest = async (req, res) => {
       effectiveDate,
       payrollPeriod,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
+    await applySalaryChangeToEmployee(employeeId, proposedSalary);
+
     res.status(201).json({
-      message: "Salary change request submitted successfully",
+      message: "Salary change request approved successfully",
       data: newRequest,
     });
   } catch (error) {
@@ -115,24 +139,7 @@ exports.updateSalaryChangeStatus = async (req, res) => {
 
     // If approved, update employee's salary
     if (status === "approved" && request.employee) {
-      await Employee.findByIdAndUpdate(request.employee._id, {
-        basic: request.proposedSalary.basic,
-        dearnessAllowance: request.proposedSalary.dearnessAllowance,
-        houseRentAllowance: request.proposedSalary.houseRentAllowance,
-        conveyanceAllowance: request.proposedSalary.conveyanceAllowance,
-        medicalAllowance: request.proposedSalary.medicalAllowance,
-        utilityAllowance: request.proposedSalary.utilityAllowance,
-        overtimeCompensation: request.proposedSalary.overtimeCompensation,
-        dislocationAllowance: request.proposedSalary.dislocationAllowance,
-        leaveEncashment: request.proposedSalary.leaveEncashment,
-        bonus: request.proposedSalary.bonus,
-        arrears: request.proposedSalary.arrears,
-        autoAllowance: request.proposedSalary.autoAllowance,
-        incentive: request.proposedSalary.incentive,
-        fuelAllowance: request.proposedSalary.fuelAllowance,
-        othersAllowances: request.proposedSalary.othersAllowances,
-        grossSalary: request.proposedSalary.grossSalary,
-      });
+      await applySalaryChangeToEmployee(request.employee._id, request.proposedSalary);
     }
 
     res.status(200).json({

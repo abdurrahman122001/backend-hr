@@ -2,7 +2,10 @@ const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
 
+// ⚠️ DEPRECATED role check — kept only for reference. CRM/manager powers are now
+// access-based: use `await hasCrmAccess(req.employee)` instead of isManagerLike.
 const isManagerLike = (role) => {
   const r = String(role || "").toLowerCase();
   return /\bmanager\b/.test(r) || /team\s*lead/.test(r) || /\bcrm\b/.test(r);
@@ -13,7 +16,7 @@ exports.createClientInfo = async (req, res) => {
     const emp = await Employee.findById(req.employee._id);
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
-    let authorized = isManagerLike(emp.role);
+    let authorized = await hasCrmAccess(req.employee);
     if (!authorized) {
       // Only the top-level senior (has juniors but is not a junior to anyone else) can create clients
       const isSenior = await EmployeeHierarchy.exists({ owner: emp.owner, senior: emp._id });
@@ -80,7 +83,7 @@ exports.getClientInfo = async (req, res) => {
       if (!emp.owner)
         return res.status(400).json({ error: "This owner record has no linked user id." });
       q = { owner: emp.owner };
-    } else if (isManagerLike(role)) {
+    } else if (await hasCrmAccess(req.employee)) {
       if (!emp.owner)
         return res.status(400).json({ error: "Your profile is missing owner id." });
       q = { owner: emp.owner };
@@ -220,11 +223,15 @@ exports.getCrmRecipients = async (req, res) => {
     if (!me) return res.status(404).json({ error: "Employee not found" });
     if (!me.owner) return res.status(400).json({ error: "Owner ID missing in profile" });
 
+    // 🔑 ACCESS-BASED: CRM recipients are the CRM-access holders + rootManager
+    // (was role: /manager/i), excluding the caller.
+    const crmIds = (await getCrmUserIds(me.owner)).filter(
+      (id) => String(id) !== String(me._id)
+    );
     const managers = await Employee.find({
       owner: me.owner,
       status: "active",
-      _id: { $ne: me._id },
-      role: { $regex: /^\s*manager\s*$/i },
+      _id: { $in: crmIds.map((id) => new mongoose.Types.ObjectId(id)) },
     }).select("_id name email companyEmail role designation employeeId empId");
 
     res.json({ managers });
@@ -249,7 +256,7 @@ exports.updateClientInfo = async (req, res) => {
     const role = String(emp.role || "").trim().toLowerCase();
     if (
       role !== "owner" &&
-      !isManagerLike(emp.role) &&
+      !(await hasCrmAccess(req.employee)) &&
       String(client.assignedTo) !== String(emp._id)
     ) {
       return res.status(403).json({ error: "Not authorized to update this client info" });
@@ -320,7 +327,7 @@ exports.addCompanyEmployee = async (req, res) => {
     const role = String(emp.role || "").trim().toLowerCase();
     if (
       role !== "owner" &&
-      !isManagerLike(emp.role) &&
+      !(await hasCrmAccess(req.employee)) &&
       String(client.assignedTo) !== String(emp._id)
     ) {
       return res.status(403).json({ error: "Not authorized to add employees to this client" });
@@ -366,7 +373,7 @@ exports.removeCompanyEmployee = async (req, res) => {
     const role = String(emp.role || "").trim().toLowerCase();
     if (
       role !== "owner" &&
-      !isManagerLike(emp.role) &&
+      !(await hasCrmAccess(req.employee)) &&
       String(client.assignedTo) !== String(emp._id)
     ) {
       return res.status(403).json({ error: "Not authorized to remove employees from this client" });
@@ -408,7 +415,7 @@ exports.updateCompanyEmployee = async (req, res) => {
     const role = String(emp.role || "").trim().toLowerCase();
     if (
       role !== "owner" &&
-      !isManagerLike(emp.role) &&
+      !(await hasCrmAccess(req.employee)) &&
       String(client.assignedTo) !== String(emp._id)
     ) {
       return res.status(403).json({ error: "Not authorized to update employees of this client" });
@@ -479,7 +486,7 @@ exports.getClientById = async (req, res) => {
     const isSupervised = Array.isArray(client.supervisedBy)
       ? client.supervisedBy.some((a) => String(a._id || a) === empIdStr)
       : false;
-    if (role !== "owner" && !isManagerLike(emp.role) && !isAssigned && !isSupervised) {
+    if (role !== "owner" && !(await hasCrmAccess(req.employee)) && !isAssigned && !isSupervised) {
       return res.status(403).json({ error: "Not authorized to view this client" });
     }
 
@@ -504,7 +511,7 @@ exports.deleteClientInfo = async (req, res) => {
     // Authorization: only Owner, Manager, Team Lead, or creator can delete
     if (
       role !== "owner" &&
-      !isManagerLike(emp.role) &&
+      !(await hasCrmAccess(req.employee)) &&
       String(client.createdBy) !== String(emp._id)
     ) {
       return res.status(403).json({ error: "Not authorized to delete this client info" });
@@ -626,10 +633,10 @@ exports.searchClientByName = async (req, res) => {
       ],
     };
 
-    // 🔒 Non-managers search their own assigned clients PLUS every client
-    // assigned to their downline (juniors, sub-juniors, …), matching the
-    // hierarchy used by getMyAssignedClients.
-    if (role !== "manager") {
+    // 🔑 ACCESS-BASED: non-CRM users search their own assigned clients PLUS every
+    // client assigned to their downline (juniors, sub-juniors, …), matching the
+    // hierarchy used by getMyAssignedClients. CRM users search all owner clients.
+    if (!(await hasCrmAccess(req.employee))) {
       const subtreeIds = await getAssignableSubtreeIds(emp);
       query.assignedTo = { $in: subtreeIds };
     }
@@ -805,8 +812,8 @@ exports.hasNewClients = async (req, res) => {
 
     const role = String(emp.role || "").trim().toLowerCase();
 
-    // 🚫 Managers never see new clients indicator
-    if (role === "manager") {
+    // 🚫 CRM users never see the new-clients indicator (they see all clients anyway)
+    if (await hasCrmAccess(req.employee)) {
       return res.json({ hasNewClients: false, unreadCount: 0 });
     }
 
@@ -1010,7 +1017,7 @@ exports.updateClientSupervision = async (req, res) => {
     let authorized = false;
 
     // managers and team leads always have permission
-    if (isManagerLike(me.role)) {
+    if (await hasCrmAccess(req.employee)) {
       authorized = true;
     }
 
@@ -1136,7 +1143,7 @@ exports.updateAllClientSupervisionForEmployee = async (req, res) => {
       junior: employeeId
     });
 
-    if (!isManagerLike(me.role) && !isSenior) {
+    if (!(await hasCrmAccess(req.employee)) && !isSenior) {
       return res.status(403).json({ error: "Unauthorized: You don't supervise this employee" });
     }
 

@@ -13,6 +13,7 @@ const OvertimeRequest = require("../models/OvertimeRequest");
 const ProfileRevision = require("../models/ProfileRevision");
 const ApplyLeave = require("../models/ApplyLeave");
 const AttendanceChallenge = require("../models/AttendanceChallenge");
+const Attendance = require("../models/Attendance");
 const EmployeeHierarchy = require("../models/OrgHierarchy");
 const mongoose = require("mongoose");
 
@@ -46,6 +47,47 @@ async function getAllJuniorIds(ownerId, seniorId) {
 const tagRequests = (items, type, category) =>
   items.map((item) => ({ ...item, _type: type, _category: category }));
 
+async function attachOvertimeAttendance(items = []) {
+  const overtimeItems = Array.isArray(items) ? items : [];
+  if (overtimeItems.length === 0) return overtimeItems;
+
+  const keys = overtimeItems
+    .map((item) => ({
+      employee: item.employee?._id || item.employee,
+      owner: item.owner,
+      date: item.date,
+    }))
+    .filter((key) => key.employee && key.owner && key.date);
+
+  if (keys.length === 0) return overtimeItems;
+
+  const attendanceRows = await Attendance.find({ $or: keys })
+    .select("employee owner date status checkIn checkOut totalHours")
+    .lean();
+
+  const attendanceByKey = new Map(
+    attendanceRows.map((row) => [
+      `${String(row.owner)}:${String(row.employee)}:${row.date}`,
+      row,
+    ])
+  );
+
+  return overtimeItems.map((item) => {
+    const employeeId = item.employee?._id || item.employee;
+    const attendance = attendanceByKey.get(`${String(item.owner)}:${String(employeeId)}:${item.date}`);
+    if (!attendance) return item;
+
+    return {
+      ...item,
+      attendanceId: attendance._id,
+      attendanceStatus: attendance.status,
+      checkIn: attendance.checkIn,
+      checkOut: attendance.checkOut,
+      attendanceTotalHours: attendance.totalHours,
+    };
+  });
+}
+
 exports.getMyOpenRequests = async (req, res) => {
   try {
     const employeeId = req.employee?._id;
@@ -66,7 +108,7 @@ exports.getMyOpenRequests = async (req, res) => {
       salarySlips,
       salaryCerts,
       whistleBlowing,
-      overtime,
+      overtimeRaw,
       profileRevisions,
       leaves,
       attendanceChallenges,
@@ -96,6 +138,8 @@ exports.getMyOpenRequests = async (req, res) => {
       // AttendanceChallenge - get all statuses
       AttendanceChallenge.find({ employee: employeeId }).lean(),
     ]);
+
+    const overtime = await attachOvertimeAttendance(overtimeRaw);
 
     const all = [
       ...tagRequests(loans,                "loan",                  "payroll"),
@@ -230,7 +274,7 @@ exports.getLeaveApprovals = async (req, res) => {
 
     // Admin employees also see pending payroll/profile requests from their org
     if (req.employee?.isAdmin) {
-      const adminBase = { owner: { $in: ownerIds }, status: "pending" };
+      const adminBase = { owner: { $in: ownerIds }, employee: { $ne: employeeId }, status: "pending" };
       const [
         loans,
         bonuses,
@@ -241,7 +285,7 @@ exports.getLeaveApprovals = async (req, res) => {
         taxAdjustments,
         leaveEncashments,
         leaveCarryForwards,
-        overtime,
+        overtimeRaw,
         profileRevisions,
       ] = await Promise.all([
         LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
@@ -256,6 +300,8 @@ exports.getLeaveApprovals = async (req, res) => {
         OvertimeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         ProfileRevision.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
       ]);
+
+      const overtime = await attachOvertimeAttendance(overtimeRaw);
 
       pendingAdminRequests = [
         ...tagRequests(loans, "loan", "payroll"),
@@ -277,6 +323,7 @@ exports.getLeaveApprovals = async (req, res) => {
     if (req.employee?.isAdmin) {
       pendingChallenges = await AttendanceChallenge.find({
         owner: { $in: ownerIds },
+        employee: { $ne: employeeId },
         challengeStatus: "Pending",
       })
         .populate("employee", populateEmp)
@@ -300,6 +347,7 @@ exports.getLeaveApprovals = async (req, res) => {
     if (req.employee?.isAdmin) {
       const docs = await DocumentRequest.find({
         owner: { $in: ownerIds },
+        employee: { $ne: employeeId },
         status: "pending",
       })
         .populate("employee", populateEmp)

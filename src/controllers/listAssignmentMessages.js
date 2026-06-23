@@ -4,6 +4,7 @@ const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess } = require("../utils/crmAccess");
 
 async function findSupervisorsFromHierarchy(ownerId, employeeId) {
   if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
@@ -170,8 +171,10 @@ async function applyVisibility(q, req, filterParam) {
     return { $and: [q, { sender: { $in: juniorIds } }, externalOnly] };
   }
 
+  // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) get org-wide email view.
+  const isCrmUser = await hasCrmAccess(req.employee);
   const roleHierarchyFilters = [];
-  if (currentUserRole === "manager" || currentUserRole === "owner") {
+  if (isCrmUser || currentUserRole === "owner") {
     roleHierarchyFilters.push({ owner: ownerId });
   }
 
@@ -1750,6 +1753,14 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       { receiver: currentUser },
       { receiver: { $in: [currentUser] } },
     ];
+    const countUnreadThreads = async (query) => {
+      const result = await AssignmentMessage.aggregate([
+        { $match: query },
+        { $group: { _id: { $ifNull: ["$threadId", { $toString: "$_id" }] } } },
+        { $count: "count" },
+      ]);
+      return result[0]?.count || 0;
+    };
 
     // Review (All Activity): unread EXTERNAL (client) messages authored by my
     // juniors (owners see the whole org). Excludes my own messages.
@@ -1783,8 +1794,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         spamReporters: { $ne: currentUser },
       }),
 
-      // Unread: inbox messages the current user hasn't read yet
-      AssignmentMessage.countDocuments({
+      // Unread: inbox threads where the current user has at least one unread message
+      countUnreadThreads({
         $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
         status: "sent",
         trashedBy: { $ne: currentUser },
@@ -1829,15 +1840,15 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         trashedBy: currentUser,
       }),
 
-      // External Inbox unread: client mail I'm a receiver of and haven't read
-      AssignmentMessage.countDocuments({
+      // External Inbox unread: client threads where I'm a receiver and haven't read
+      countUnreadThreads({
         $or: receiverOr,
         client: { $exists: true, $ne: null },
         ...baseUnread,
       }),
 
-      // TeamBox (internal) unread: non-client mail I'm a receiver of, unread
-      AssignmentMessage.countDocuments({
+      // TeamBox (internal) unread: non-client threads where I'm a receiver, unread
+      countUnreadThreads({
         $and: [
           { $or: receiverOr },
           { $or: [{ client: { $exists: false } }, { client: null }] },
@@ -1845,8 +1856,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         ...baseUnread,
       }),
 
-      // All Activity (review) unread
-      AssignmentMessage.countDocuments(reviewQuery),
+      // All Activity (review) unread threads
+      countUnreadThreads(reviewQuery),
     ]);
 
     res.json({
@@ -2539,9 +2550,21 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
     const query = {
       owner: ownerId,
       sender: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) }, // Messages from juniors
+      // 🔥 Only messages currently escalated to ME for approval. A pending
+      // message's receiver is the CURRENT approver in the chain (it escalates
+      // one level at a time), and pending messages are only visible to their
+      // participants (applyVisibility). Without this, a higher-up senior would
+      // see threads still pending at a lower level and, on opening them, get
+      // "No messages found" because they aren't a participant yet.
+      receiver: currentUserId,
       approvalStatus: "pending", // 🔥 Only pending messages
       trashedBy: { $ne: currentUserId },
       spamReporters: { $ne: currentUserId },
+      // 🔥 Hide messages this user has already approved. With a multi-level
+      // approval chain a message stays "pending" after I approve (it escalates
+      // to the next senior) — but it's no longer MY responsibility, so it must
+      // not keep showing in my for-approval list.
+      "approvalChain.approver": { $ne: currentUserId },
     };
 
     // Apply client filter if provided
@@ -2653,15 +2676,16 @@ exports.getTeamLeadPendingApprovals =
         approvalStatus: "pending",
         trashedBy: { $ne: currentUserId },
         spamReporters: { $ne: currentUserId },
+        // 🔥 Exclude messages I've already approved. They may still be "pending"
+        // for the next approver in the chain, but they should no longer count
+        // toward MY pending-approvals badge or list.
+        "approvalChain.approver": { $ne: currentUserId },
+        // 🔥 Only count messages currently escalated to ME (I'm the current
+        // approver/receiver). This keeps the badge in sync with the for-approval
+        // list, which is participant-scoped — a message still pending at a lower
+        // level in the chain isn't actionable (or even openable) by me yet.
+        receiver: currentUserId,
       };
-
-      if (!isManager) {
-        query.$or = [
-          { receiver: currentUserId },
-          { receiver: { $in: [currentUserId] } },
-          { sender: { $in: supervisedEmployeeIds } }
-        ];
-      }
 
       // Apply client filter
       if (isObjId(client)) {

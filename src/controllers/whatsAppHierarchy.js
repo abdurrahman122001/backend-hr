@@ -4,6 +4,7 @@ const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { getCrmUserIds } = require("../utils/crmAccess");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -57,17 +58,8 @@ async function findTLsAndManagersByOwner(ownerId) {
         .select("_id")
         .lean();
 
-    const managers = await Employee.find({
-        owner: ownerId,
-        $or: [
-            { role: "Manager" },
-            { role: "manager" },
-            { role: /crm/i },
-            { role: /customer.relationship/i },
-        ],
-    })
-        .select("_id")
-        .lean();
+    // 🔑 ACCESS-BASED: managers are now the CRM-access holders + rootManager.
+    const managers = await getCrmUserIds(ownerId);
 
     const employees = await Employee.find({
         owner: ownerId,
@@ -78,7 +70,7 @@ async function findTLsAndManagersByOwner(ownerId) {
 
     return {
         tls: tls.map((x) => String(x._id)),
-        managers: managers.map((x) => String(x._id)),
+        managers,
         employees: employees.map((x) => String(x._id)),
     };
 }

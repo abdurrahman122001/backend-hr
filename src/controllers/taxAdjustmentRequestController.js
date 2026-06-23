@@ -1,4 +1,5 @@
 const TaxAdjustmentRequest = require("../models/TaxAdjustmentRequest");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 exports.submitTaxAdjustmentRequest = async (req, res) => {
   try {
@@ -16,14 +17,14 @@ exports.submitTaxAdjustmentRequest = async (req, res) => {
       reason,
       payrollMonth,
       attachmentUrl: req.file ? req.file.filename : undefined,
-      status: "pending",
+      ...approvedFields(req),
     });
 
     await newRequest.save();
 
     res.status(201).json({
       success: true,
-      message: "Tax adjustment request submitted successfully",
+      message: "Tax adjustment request approved successfully",
       data: newRequest,
     });
   } catch (error) {

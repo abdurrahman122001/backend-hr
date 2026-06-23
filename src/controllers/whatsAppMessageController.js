@@ -3,6 +3,7 @@ const WhatsAppGroup = require("../models/WhatsAppGroup");
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
+const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -55,17 +56,10 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
-  const managers = await Employee.find({
-    owner: ownerId,
-    $or: [
-      { role: "Manager" },
-      { role: "manager" },
-      { role: /crm/i },
-      { role: /customer.relationship/i },
-    ],
-  })
-    .select("_id")
-    .lean();
+  // 🔑 ACCESS-BASED: "managers" are now the CRM-access holders + rootManager
+  // (was previously role-based: role matching /manager|crm/). The role field is
+  // kept for hierarchy/leave/payroll but no longer grants CRM/manager powers.
+  const managers = await getCrmUserIds(ownerId);
 
   const employees = await Employee.find({
     owner: ownerId,
@@ -76,7 +70,7 @@ async function findTLsAndManagersByOwner(ownerId) {
 
   return {
     tls: tls.map((x) => String(x._id)),
-    managers: managers.map((x) => String(x._id)),
+    managers, // already an array of id strings
     employees: employees.map((x) => String(x._id)),
   };
 }
@@ -260,9 +254,13 @@ async function applyVisibility(q, req) {
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
-  // 🧑‍💼 MANAGER / OWNER: can see all approved/null messages plus their own pending ones
+  // 🔑 ACCESS-BASED: CRM-access holders (and the rootManager) get the
+  // org-wide "manager" view. Admin/owner tokens keep their owner-level view.
+  const isCrmUser = await hasCrmAccess(req.employee);
+
+  // 🧑‍💼 CRM USER / OWNER: can see all approved/null messages plus their own pending ones
   if (
-    (currentUserRole === "manager" || currentUserRole === "owner") &&
+    (isCrmUser || currentUserRole === "owner") &&
     ownerId
   ) {
     return {
@@ -4918,12 +4916,20 @@ exports.toggleMessageReaction = async (req, res) => {
       await employee.save();
     }
 
-    // Emit real-time update to all participants via socket
+    // Emit real-time update to all participants via socket.
+    // ⚠️ Send plain strings, not Mongoose ObjectIds: socket.io serializes
+    // ObjectIds (which wrap a Buffer) as binary, so the client receives a
+    // non-string messageId and the `messageId === localMessage._id` check in
+    // ChatMessage.tsx fails — the sender never sees the reaction in realtime.
     const io = req.app.get("io");
     if (io) {
+      const plainReactions = (updatedReactions || []).map((r) => {
+        const obj = r && typeof r.toObject === "function" ? r.toObject() : r;
+        return { ...obj, userId: String(obj.userId) };
+      });
       io.emit("message:reaction", {
-        messageId: message._id,
-        reactions: updatedReactions,
+        messageId: String(message._id),
+        reactions: plainReactions,
       });
     }
 

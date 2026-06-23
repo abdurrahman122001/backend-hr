@@ -1,5 +1,6 @@
 const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const Employee = require("../models/Employees");
+const { approvedFields } = require("../utils/requestAutoApproval");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -20,10 +21,11 @@ exports.applyLeaveEncashment = async (req, res) => {
       days,
       encashmentRate,
       reason,
+      ...approvedFields(req),
     });
 
     await newRequest.save();
-    res.status(201).json({ message: "Leave encashment request submitted successfully", data: newRequest });
+    res.status(201).json({ message: "Leave encashment request approved successfully", data: newRequest });
   } catch (error) {
     console.error("Leave Encashment Apply Error:", error);
     res.status(500).json({ message: error.message });

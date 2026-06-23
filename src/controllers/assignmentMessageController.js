@@ -4,6 +4,12 @@ const path = require("path");
 const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
+
+function readByEmployeeId(readEntry) {
+  const employee = readEntry?.employee ?? readEntry;
+  return employee?._id ? String(employee._id) : employee ? String(employee) : "";
+}
 
 /** ---------- HIERARCHY-BASED SUPERVISOR LOOKUP ---------- **/
 
@@ -382,12 +388,14 @@ async function applyVisibility(q, req) {
   const juniorIds = juniorIdStrings.map((id) => oid(String(id)));
 
   // 👁️ HIERARCHY VISIBILITY (role-independent for seniority)
+  // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) see all org email.
+  const isCrmUser = await hasCrmAccess(req.employee);
   const roleHierarchyFilter = {
     $or: [
-      // Only Managers/Owners (top of the hierarchy) see all org messages.
+      // Only CRM users / Owners (top of the hierarchy) see all org messages.
       // Team leads are NOT special-cased — they see their juniors via the
       // recursive junior filter below, so visibility is purely seniority-based.
-      ...(currentUserRole === "manager" || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
+      ...(isCrmUser || currentUserRole === "owner" ? [{ owner: ownerId }] : []),
       // Seniors see messages from their juniors (entire subtree)
       ...(juniorIds.length > 0 ? [{ sender: { $in: juniorIds } }, { receiver: { $in: juniorIds } }] : []),
     ]
@@ -706,12 +714,10 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
-  const managers = await Employee.find({
-    owner: ownerId,
-    $or: [{ role: "Manager" }, { role: "manager" }],
-  })
-    .select("_id")
-    .lean();
+  // 🔑 ACCESS-BASED: "managers" and "crm" are now both the CRM-access holders
+  // + rootManager (was role-based: role /manager|crm/). The role field is kept
+  // for hierarchy/leave/payroll but no longer grants CRM/manager powers.
+  const crmUserIds = await getCrmUserIds(ownerId);
 
   const employees = await Employee.find({
     owner: ownerId,
@@ -720,24 +726,11 @@ async function findTLsAndManagersByOwner(ownerId) {
     .select("_id")
     .lean();
 
-  // Find CRM employees by role or email pattern
-  const crm = await Employee.find({
-    owner: ownerId,
-    $or: [
-      { role: /crm/i },
-      { role: /customer relationship/i },
-      { companyEmail: /crm/i },
-      { name: /CRM/i }
-    ],
-  })
-    .select("_id")
-    .lean();
-
   return {
     tls: tls.map((x) => String(x._id)),
-    managers: managers.map((x) => String(x._id)),
+    managers: crmUserIds,
     employees: employees.map((x) => String(x._id)),
-    crm: crm.map((x) => String(x._id)),
+    crm: crmUserIds,
   };
 }
 
@@ -4445,8 +4438,8 @@ exports.markAsRead = async function markAsRead(req, res) {
     }
 
     // Check if user has already read this message
-    const alreadyRead = message.readBy.some(
-      (read) => read.employee.toString() === userId.toString()
+    const alreadyRead = (message.readBy || []).some(
+      (read) => readByEmployeeId(read) === userId.toString()
     );
 
     if (!alreadyRead) {
@@ -4624,8 +4617,8 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
     // 🔥 FIX: Mark ALL messages in thread as read (not just unread ones)
     const updatePromises = threadMessages.map((msg) => {
       // Check if user already marked this message as read
-      const alreadyRead = msg.readBy.some(
-        (read) => read.employee.toString() === userId.toString()
+      const alreadyRead = (msg.readBy || []).some(
+        (read) => readByEmployeeId(read) === userId.toString()
       );
 
       if (!alreadyRead) {
@@ -4708,12 +4701,20 @@ exports.markAsUnread = async function markAsUnread(req, res) {
       });
     }
 
-    // Check if user is authorized
-    const isAuthorized =
+    // Check if user is authorized. Participants can always toggle unread.
+    // Seniors/managers may also see messages through the same visibility rules
+    // used by the email list, so allow unread for those visible messages too.
+    let isAuthorized =
       message.sender.toString() === userId.toString() ||
       message.receiver.some(
         (receiver) => receiver.toString() === userId.toString()
       );
+
+    if (!isAuthorized) {
+      const visibleQuery = await applyVisibility({ _id: message._id }, req);
+      const visibleMessage = await AssignmentMessage.exists(visibleQuery);
+      isAuthorized = !!visibleMessage;
+    }
 
     if (!isAuthorized) {
       return res.status(403).json({
@@ -4723,8 +4724,8 @@ exports.markAsUnread = async function markAsUnread(req, res) {
     }
 
     // Remove user from readBy array
-    message.readBy = message.readBy.filter(
-      (read) => read.employee.toString() !== userId.toString()
+    message.readBy = (message.readBy || []).filter(
+      (read) => readByEmployeeId(read) !== userId.toString()
     );
 
     await message.save();
