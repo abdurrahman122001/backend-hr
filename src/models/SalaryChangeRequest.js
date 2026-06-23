@@ -71,6 +71,10 @@ const SalaryChangeRequestSchema = new Schema(
     adminReason: {
       type: String,
     },
+    reviewedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+    },
     approvedBy: {
       type: Schema.Types.ObjectId,
       ref: "Employee",

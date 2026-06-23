@@ -18,6 +18,8 @@ const AttendanceChallengeSchema = new Schema({
   challengeReason: { type: String },
   challengeAt: { type: Date, default: Date.now },
   challengeAdminNotes: { type: String },
+  reviewedBy: { type: Schema.Types.ObjectId, ref: 'Employee' },
+  reviewedAt: { type: Date },
   challengeAttachment: { type: String },
 }, { timestamps: true });
 

@@ -1148,17 +1148,34 @@ exports.createMessage = async function createMessage(req, res) {
         // the sole/top CRM, do we keep adding the assigned team members.
         const { managers: ownerManagerIds } = await findTLsAndManagersByOwner(owner);
         const otherManagerIds = ownerManagerIds.filter((id) => id !== String(sender));
-        const senderIsTopCrm = senderRole === "manager" && otherManagerIds.length === 0;
+        // CRM authority is access-based, not role-based: the sender may hold CRM
+        // access (ownerManagerIds = CRM-access users + rootManager) without the
+        // literal "manager" role. A CRM sender addressing a client's assigned
+        // employee must reach them DIRECTLY — they must NOT be rerouted up to
+        // another (top) CRM. The old role-only `senderIsTopCrm` check failed for
+        // access-based CRM users, which is why a reply to the assigned employee
+        // also got delivered to the top CRM (rootManager).
+        const senderHasCrmAccess = ownerManagerIds.includes(String(sender));
+        const senderIsTopCrm =
+          (senderRole === "manager" || senderHasCrmAccess) &&
+          otherManagerIds.length === 0;
 
-        if (!isSenderAssigned && !senderIsTopCrm && otherManagerIds.length > 0) {
-          // Route to the CRM (manager); do NOT add the assigned junior.
+        if (
+          !isSenderAssigned &&
+          !senderIsTopCrm &&
+          !senderHasCrmAccess &&
+          otherManagerIds.length > 0
+        ) {
+          // Non-CRM senior composing to a downline client: route to the CRM
+          // (manager); do NOT add the assigned junior.
           otherManagerIds.forEach((id) => {
             if (!receivers.includes(id) && id !== String(sender)) {
               receivers.push(id);
             }
           });
         } else {
-          // Own client, or sender is the top CRM: add assigned team members.
+          // Own client, sender is the top CRM, or sender holds CRM access:
+          // add assigned team members (and never reroute to another CRM).
           assignedToIds.forEach((id) => {
             if (!receivers.includes(id) && id !== String(sender)) {
               receivers.push(id);

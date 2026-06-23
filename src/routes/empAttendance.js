@@ -258,6 +258,48 @@ function buildAttendanceReviewNote(action) {
   return `- Request ${String(action || "").toLowerCase()}.`;
 }
 
+async function reviewAttendanceChallenge(req, res, id, action, notes = "") {
+  if (!req.employee?.isAdmin) {
+    return res.status(403).json({ error: "Only admin employees can review attendance challenges" });
+  }
+
+  if (!["Approved", "Rejected"].includes(action)) {
+    return res.status(400).json({ error: "action must be 'Approved' or 'Rejected'" });
+  }
+
+  if (!mongoose.isValidObjectId(id)) {
+    return res.status(400).json({ error: "Invalid challenge ID" });
+  }
+
+  const challenge = await AttendanceChallenge.findOne({
+    $or: [{ _id: id }, { attendance: id }],
+    challengeStatus: "Pending",
+    owner: req.employee.owner,
+  });
+
+  if (!challenge) {
+    return res.status(404).json({ error: "Pending attendance challenge not found" });
+  }
+
+  const attendanceController = require("../controllers/attendanceController");
+  const finalOwner = Array.isArray(req.employee.owner)
+    ? req.employee.owner[0]
+    : req.employee.owner;
+
+  req.params.id = id;
+  req.user = {
+    _id: finalOwner,
+    owner: finalOwner,
+    role: "admin",
+    isAdmin: true,
+    isEmployee: true,
+  };
+  req.body.challengeStatus = action;
+  req.body.challengeAdminNotes = notes || "";
+
+  return attendanceController.updateChallengeStatus(req, res);
+}
+
 // POST /api/emp-attendance/challenge
 // Employee challenges an attendance record for a specific date
 router.post('/challenge', upload.single('attachment'), async (req, res) => {
@@ -333,6 +375,16 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
       challengeAt: new Date()
     });
     await challenge.save();
+
+    if (req.employee?.isAdmin) {
+      return reviewAttendanceChallenge(
+        req,
+        res,
+        String(challenge._id),
+        "Approved",
+        "Auto-approved by request center"
+      );
+    }
 
     // 5. Notify owner and supervisor via socket (merge fields for frontend compatibility)
     if (req.app.get("io")) {
@@ -470,6 +522,8 @@ router.patch('/challenge/:id/review', async (req, res) => {
 
     const { id } = req.params;
     const { action, notes } = req.body;
+
+    return reviewAttendanceChallenge(req, res, id, action, notes);
 
     if (!["Approved", "Rejected"].includes(action)) {
       return res.status(400).json({ error: "action must be 'Approved' or 'Rejected'" });

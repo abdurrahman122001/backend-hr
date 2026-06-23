@@ -92,12 +92,15 @@ exports.updateLoanRequestStatus = async (req, res) => {
       return res.status(403).json({ message: "Not authorized: Request does not belong to your company" });
     }
 
+    const reviewerId = req.employee?._id || req.user.employeeId || req.user?.employeeInfo?.employeeId || req.user._id;
+
     request.status = status;
+    request.reviewedBy = reviewerId;
     if (status === "rejected") {
       request.rejectionReason = rejectionReason;
     } else {
       request.approvedAt = new Date();
-      request.approvedBy = req.user.employeeId || req.user._id;
+      request.approvedBy = reviewerId;
     }
 
     await request.save();

@@ -40,6 +40,11 @@ const ProfileRevisionSchema = new Schema(
       ref: 'User',
       default: null,
     },
+    reviewedBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'Employee',
+      default: null,
+    },
     approvalDate: {
       type: Date,
       default: null,

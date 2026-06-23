@@ -30,7 +30,10 @@ exports.applyLeaveCarryForward = async (req, res) => {
     });
 
     await newRequest.save();
-    res.status(201).json({ message: "Leave carry forward request approved successfully", data: newRequest });
+    res.status(201).json({
+      message: newRequest.status === "approved" ? "Leave carry forward request approved successfully" : "Leave carry forward request submitted successfully",
+      data: newRequest,
+    });
   } catch (error) {
     console.error("Leave Carry Forward Apply Error:", error);
     res.status(500).json({ message: error.message });
@@ -76,7 +79,8 @@ exports.updateStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
-    const updateData = { status, adminReason };
+    const reviewerId = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || getUserId(req);
+    const updateData = { status, adminReason, reviewedBy: reviewerId };
     if (status === "approved") {
       updateData.approvedBy = getUserId(req);
       updateData.approvedAt = new Date();

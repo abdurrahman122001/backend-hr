@@ -23,7 +23,7 @@ exports.applyAdvanceSalary = async (req, res) => {
 
     await newRequest.save();
     res.status(201).json({
-      message: "Advance salary request approved successfully",
+      message: newRequest.status === "approved" ? "Advance salary request approved successfully" : "Advance salary request submitted successfully",
       data: newRequest,
     });
   } catch (error) {
@@ -67,9 +67,10 @@ exports.updateStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
+    const reviewerId = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || req.user.id || req.user._id;
     const request = await AdvanceSalaryRequest.findByIdAndUpdate(
       id,
-      { status, adminReason },
+      { status, adminReason, reviewedBy: reviewerId },
       { new: true }
     );
 

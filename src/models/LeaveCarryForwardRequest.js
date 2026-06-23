@@ -9,6 +9,7 @@ const leaveCarryForwardRequestSchema = new mongoose.Schema(
     reason: { type: String },
     status: { type: String, enum: ["pending", "approved", "rejected", "cancelled"], default: "pending" },
     adminReason: { type: String },
+    reviewedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Employee" },
     approvedAt: { type: Date },
   },

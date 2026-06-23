@@ -66,9 +66,14 @@ exports.applyOvertimeRequest = async (req, res) => {
       ...approvedFields(req),
     });
 
-    await creditOvertimeBonusHours(newRequest, ownerId);
+    if (newRequest.status === "approved") {
+      await creditOvertimeBonusHours(newRequest, ownerId);
+    }
 
-    res.status(201).json({ message: "Overtime request approved successfully", data: newRequest });
+    res.status(201).json({
+      message: newRequest.status === "approved" ? "Overtime request approved successfully" : "Overtime request submitted successfully",
+      data: newRequest,
+    });
   } catch (error) {
     console.error("Overtime Apply Error:", error);
     res.status(500).json({ message: error.message });
@@ -132,11 +137,13 @@ exports.updateStatus = async (req, res) => {
     if (!request) return res.status(404).json({ message: "Request not found" });
 
     const wasAlreadyApproved = request.status === "approved";
+    const reviewerId = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || getUserId(req);
 
     request.status = status;
     request.adminReason = adminReason || null;
+    request.reviewedBy = reviewerId;
     if (status === "approved") {
-      request.approvedBy = getUserId(req);
+      request.approvedBy = reviewerId;
       request.approvedAt = new Date();
     }
     await request.save();

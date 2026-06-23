@@ -32,6 +32,10 @@ const advanceSalaryRequestSchema = new mongoose.Schema(
     adminReason: {
       type: String,
     },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+    },
   },
   { timestamps: true }
 );

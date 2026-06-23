@@ -22,7 +22,7 @@ exports.applyCommission = async (req, res) => {
 
     await newRequest.save();
     res.status(201).json({
-      message: "Commission request approved successfully",
+      message: newRequest.status === "approved" ? "Commission request approved successfully" : "Commission request submitted successfully",
       data: newRequest,
     });
   } catch (error) {
@@ -70,7 +70,8 @@ exports.updateStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
-    const updateData = { status, adminReason };
+    const reviewerId = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || req.user.id || req.user._id;
+    const updateData = { status, adminReason, reviewedBy: reviewerId };
     if (status === "approved") {
       updateData.approvedBy = req.user.employeeId || req.user.id || req.user._id;
       updateData.approvedAt = new Date();
