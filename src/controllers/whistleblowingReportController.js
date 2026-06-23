@@ -1,4 +1,5 @@
 const WhistleblowingReport = require("../models/WhistleblowingReport");
+const { resolvedFields } = require("../utils/requestAutoApproval");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -34,10 +35,14 @@ exports.applyReport = async (req, res) => {
       witnessInfo,
       isAnonymous,
       attachmentUrl,
+      ...resolvedFields(req),
     });
 
     await newReport.save();
-    res.status(201).json({ message: "Whistleblowing report submitted successfully", data: newReport });
+    res.status(201).json({
+      message: newReport.status === "resolved" ? "Whistleblowing report resolved successfully" : "Whistleblowing report submitted successfully",
+      data: newReport,
+    });
   } catch (error) {
     console.error("Whistleblowing Apply Error:", error);
     res.status(500).json({ message: error.message });

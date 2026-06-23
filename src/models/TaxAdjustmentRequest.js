@@ -31,6 +31,10 @@ const taxAdjustmentRequestSchema = new mongoose.Schema(
     adminReason: {
       type: String,
     },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+    },
     approvedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Employee",

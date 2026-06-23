@@ -14,6 +14,8 @@ const ProfileRevision = require("../models/ProfileRevision");
 const ApplyLeave = require("../models/ApplyLeave");
 const AttendanceChallenge = require("../models/AttendanceChallenge");
 const Attendance = require("../models/Attendance");
+const Employee = require("../models/Employees");
+const User = require("../models/Users");
 const EmployeeHierarchy = require("../models/OrgHierarchy");
 const mongoose = require("mongoose");
 
@@ -46,6 +48,164 @@ async function getAllJuniorIds(ownerId, seniorId) {
 
 const tagRequests = (items, type, category) =>
   items.map((item) => ({ ...item, _type: type, _category: category }));
+
+const toIdString = (value) => {
+  if (!value) return null;
+  if (typeof value === "object") {
+    if (value._id) return String(value._id);
+    if (typeof value.toString === "function") {
+      const stringValue = value.toString();
+      return stringValue && stringValue !== "[object Object]" ? stringValue : null;
+    }
+    return null;
+  }
+  return String(value);
+};
+
+const getAdminComment = (item) =>
+  item.adminComment ||
+  item.challengeAdminNotes ||
+  item.adminReason ||
+  item.adminNote ||
+  item.adminResponse ||
+  item.approvalNotes ||
+  item.rejectionReason ||
+  "";
+
+const getAdminActorId = (item) => {
+  if (item.reviewedBy) return toIdString(item.reviewedBy);
+  if (String(item.status || item.challengeStatus || "").toLowerCase() === "rejected" && item.rejectedBy) {
+    return toIdString(item.rejectedBy);
+  }
+  if (item.approvedBy) return toIdString(item.approvedBy);
+  if (item.rejectedBy) return toIdString(item.rejectedBy);
+  return null;
+};
+
+const actorFromObject = (value) => {
+  if (!value || typeof value !== "object" || !(value.name || value.username || value.email || value.companyEmail)) return null;
+  return {
+    _id: value._id,
+    name: value.name || value.username || value.companyEmail || value.email,
+    email: value.email || value.companyEmail,
+    companyEmail: value.companyEmail,
+    designation: value.designation,
+    role: value.role,
+    photographUrl: value.photographUrl || value.photoUrl,
+    photoUrl: value.photoUrl,
+  };
+};
+
+const getOwnerId = (item) => {
+  const owner = item?.owner || item?.employee?.owner;
+  return toIdString(owner);
+};
+
+async function attachAdminCommentMeta(items = []) {
+  const commentItems = items.filter((item) => getAdminComment(item));
+  const actorIds = [
+    ...new Set(
+      commentItems
+        .map(getAdminActorId)
+        .filter((id) => id && mongoose.isValidObjectId(id))
+    ),
+  ];
+  const ownerIds = [
+    ...new Set(
+      commentItems
+        .map(getOwnerId)
+        .filter((id) => id && mongoose.isValidObjectId(id))
+    ),
+  ];
+
+  const [employees, users, ownerAdmins] = actorIds.length || ownerIds.length
+    ? await Promise.all([
+        actorIds.length
+          ? Employee.find({ _id: { $in: actorIds } })
+          .select("name companyEmail email designation role photographUrl photoUrl employeeId")
+              .lean()
+          : [],
+        actorIds.length
+          ? User.find({ _id: { $in: actorIds } })
+          .select("username email role owner")
+              .lean()
+          : [],
+        ownerIds.length
+          ? Employee.find({ owner: { $in: ownerIds }, isAdmin: true })
+              .select("name companyEmail email designation role photographUrl photoUrl employeeId owner isAdmin userAccount")
+              .lean()
+          : [],
+      ])
+    : [[], [], []];
+
+  const linkedEmployeeClauses = [];
+  for (const user of users) {
+    linkedEmployeeClauses.push({ userAccount: user._id });
+    linkedEmployeeClauses.push({ owner: user._id, isAdmin: true });
+    if (user.owner) linkedEmployeeClauses.push({ owner: user.owner, isAdmin: true });
+    if (user.email) {
+      linkedEmployeeClauses.push({ email: user.email });
+      linkedEmployeeClauses.push({ companyEmail: user.email });
+    }
+  }
+
+  const linkedEmployees = linkedEmployeeClauses.length
+    ? await Employee.find({ $or: linkedEmployeeClauses })
+        .select("name companyEmail email designation role photographUrl photoUrl employeeId userAccount owner isAdmin")
+        .lean()
+    : [];
+
+  const employeeMap = new Map(employees.map((emp) => [String(emp._id), emp]));
+  const linkedEmployeeByUser = new Map();
+  const linkedEmployeeByEmail = new Map();
+  const linkedAdminByOwner = new Map();
+  for (const emp of [...linkedEmployees, ...ownerAdmins]) {
+    if (emp.userAccount) linkedEmployeeByUser.set(String(emp.userAccount), emp);
+    if (emp.email) linkedEmployeeByEmail.set(String(emp.email).toLowerCase(), emp);
+    if (emp.companyEmail) linkedEmployeeByEmail.set(String(emp.companyEmail).toLowerCase(), emp);
+    if (emp.isAdmin && emp.owner && !linkedAdminByOwner.has(String(emp.owner))) {
+      linkedAdminByOwner.set(String(emp.owner), emp);
+    }
+  }
+  const userMap = new Map(users.map((user) => {
+    const username = String(user.username || "").trim();
+    const genericUsername = username.toLowerCase() === "admin";
+    return [String(user._id), {
+      _id: user._id,
+      name: genericUsername ? (user.email || "") : (username || user.email || ""),
+      email: user.email,
+      role: user.role,
+      owner: user.owner,
+    }];
+  }));
+
+  return items.map((item) => {
+    const adminComment = getAdminComment(item);
+    if (!adminComment) return item;
+
+    const actorId = getAdminActorId(item);
+    const ownerId = getOwnerId(item);
+    const userActor = actorId ? userMap.get(actorId) : null;
+    const adminActor =
+      actorFromObject(item.reviewedBy) ||
+      actorFromObject(item.approvedBy) ||
+      actorFromObject(item.rejectedBy) ||
+      (actorId ? employeeMap.get(actorId) || linkedEmployeeByUser.get(actorId) : null) ||
+      (userActor?.email ? linkedEmployeeByEmail.get(String(userActor.email).toLowerCase()) : null) ||
+      (userActor?._id ? linkedAdminByOwner.get(String(userActor._id)) : null) ||
+      (userActor?.owner ? linkedAdminByOwner.get(String(userActor.owner)) : null) ||
+      (ownerId ? linkedAdminByOwner.get(ownerId) : null) ||
+      userActor ||
+      null;
+
+    return {
+      ...item,
+      adminComment,
+      adminActor,
+      ownerAdmin: ownerId ? linkedAdminByOwner.get(ownerId) || null : null,
+    };
+  });
+}
 
 async function attachOvertimeAttendance(items = []) {
   const overtimeItems = Array.isArray(items) ? items : [];
@@ -94,6 +254,7 @@ exports.getMyOpenRequests = async (req, res) => {
     if (!employeeId) return res.status(401).json({ message: "Unauthorized" });
 
     const base = { employee: employeeId };
+    const populateEmp = "name companyEmail email designation department photographUrl photoUrl employeeId owner";
 
     const [
       loans,
@@ -113,35 +274,46 @@ exports.getMyOpenRequests = async (req, res) => {
       leaves,
       attendanceChallenges,
     ] = await Promise.all([
-      LoanRequest.find(base).lean(),
-      BonusRequest.find(base).lean(),
-      ReimbursementRequest.find(base).lean(),
-      AdvanceSalaryRequest.find(base).lean(),
-      SalaryChangeRequest.find(base).lean(),
-      CommissionRequest.find(base).lean(),
-      TaxAdjustmentRequest.find(base).lean(),
-      LeaveEncashmentRequest.find(base).lean(),
-      LeaveCarryForwardRequest.find(base).lean(),
-      DocumentRequest.find({ ...base, documentType: "salary-slip" }).lean(),
-      DocumentRequest.find({ ...base, documentType: "salary-certificate" }).lean(),
-      WhistleblowingReport.find({ employee: employeeId }).lean(),
-      OvertimeRequest.find(base).lean(),
-      ProfileRevision.find(base).lean(),
+      LoanRequest.find(base).populate("employee", populateEmp).lean(),
+      BonusRequest.find(base).populate("employee", populateEmp).lean(),
+      ReimbursementRequest.find(base).populate("employee", populateEmp).lean(),
+      AdvanceSalaryRequest.find(base).populate("employee", populateEmp).lean(),
+      SalaryChangeRequest.find(base).populate("employee", populateEmp).lean(),
+      CommissionRequest.find(base).populate("employee", populateEmp).lean(),
+      TaxAdjustmentRequest.find(base).populate("employee", populateEmp).lean(),
+      LeaveEncashmentRequest.find(base).populate("employee", populateEmp).lean(),
+      LeaveCarryForwardRequest.find(base).populate("employee", populateEmp).lean(),
+      DocumentRequest.find({ ...base, documentType: "salary-slip" }).populate("employee", populateEmp).lean(),
+      DocumentRequest.find({ ...base, documentType: "salary-certificate" }).populate("employee", populateEmp).lean(),
+      WhistleblowingReport.find({ employee: employeeId }).populate("employee", populateEmp).lean(),
+      OvertimeRequest.find(base).populate("employee", populateEmp).lean(),
+      ProfileRevision.find(base).populate("employee", populateEmp).lean(),
       // ApplyLeave - populate all fields needed for the detail modal
       ApplyLeave.find({ employee: employeeId, isTrashed: { $ne: true } })
-        .populate("employee", "name email role designation photographUrl photoUrl")
+        .populate("employee", "name email companyEmail role designation photographUrl photoUrl owner")
         .populate("approvalChain", "name role designation")
-        .populate("approvedBy", "name role designation")
-        .populate("rejectedBy", "name role designation")
+        .populate("approvedBy", "name companyEmail email role designation photographUrl photoUrl")
+        .populate("rejectedBy", "name companyEmail email role designation photographUrl photoUrl")
         .populate("appliedBy", "name role designation")
         .lean(),
       // AttendanceChallenge - get all statuses
-      AttendanceChallenge.find({ employee: employeeId }).lean(),
+      AttendanceChallenge.find({ employee: employeeId })
+        .populate("employee", populateEmp)
+        .populate("attendance", "status checkIn checkOut totalHours date")
+        .lean(),
     ]);
 
     const overtime = await attachOvertimeAttendance(overtimeRaw);
+    const enrichedAttendanceChallenges = attendanceChallenges.map((challenge) => ({
+      ...challenge,
+      status: challenge.attendance?.status || challenge.status,
+      checkIn: challenge.attendance?.checkIn || challenge.checkIn,
+      checkOut: challenge.attendance?.checkOut || challenge.checkOut,
+      attendanceTotalHours: challenge.attendance?.totalHours,
+      attendanceDate: challenge.attendance?.date || challenge.date,
+    }));
 
-    const all = [
+    const all = await attachAdminCommentMeta([
       ...tagRequests(loans,                "loan",                  "payroll"),
       ...tagRequests(bonuses,              "bonus",                 "payroll"),
       ...tagRequests(reimbursements,       "reimbursement",         "payroll"),
@@ -157,8 +329,10 @@ exports.getMyOpenRequests = async (req, res) => {
       ...tagRequests(overtime,             "overtime-request",      "attendance"),
       ...tagRequests(profileRevisions,     "profile",               "profile"),
       ...tagRequests(leaves,               "leave",                 "attendance"),
-      ...tagRequests(attendanceChallenges, "attendance-challenge",  "attendance"),
-    ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+      ...tagRequests(enrichedAttendanceChallenges, "attendance-challenge",  "attendance"),
+    ]);
+
+    all.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     return res.status(200).json({ data: all, total: all.length });
   } catch (error) {
@@ -174,12 +348,12 @@ exports.getLeaveApprovals = async (req, res) => {
 
     const empObjId = new mongoose.Types.ObjectId(String(employeeId));
     const empIdStr = String(empObjId);
-    const populateEmp = "name designation department photographUrl";
+    const populateEmp = "name companyEmail email designation department photographUrl photoUrl owner";
 
-    const populateChain = { path: "approvalChain", select: "name role designation" };
-    const populateApprovedBy = { path: "approvedBy", select: "name role designation" };
-    const populateRejectedBy = { path: "rejectedBy", select: "name role designation" };
-    const populateAppliedBy = { path: "appliedBy", select: "name role designation" };
+    const populateChain = { path: "approvalChain", select: "name companyEmail email role designation photographUrl photoUrl" };
+    const populateApprovedBy = { path: "approvedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
+    const populateRejectedBy = { path: "rejectedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
+    const populateAppliedBy = { path: "appliedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
 
     const [forApproval, escalated] = await Promise.all([
       // Pending leaves where it is THIS employee's turn to approve
@@ -268,13 +442,19 @@ exports.getLeaveApprovals = async (req, res) => {
     });
 
     let pendingAdminRequests = [];
+    let closedAdminRequests = [];
     const ownerIds = req.employee?.isAdmin
       ? [req.employee.owner, req.employee._id].filter(Boolean)
       : [];
 
-    // Admin employees also see pending payroll/profile requests from their org
+    // Admin employees also see pending and closed payroll/profile/document/attendance requests from their org.
     if (req.employee?.isAdmin) {
       const adminBase = { owner: { $in: ownerIds }, employee: { $ne: employeeId }, status: "pending" };
+      const closedAdminBase = {
+        owner: { $in: ownerIds },
+        employee: { $ne: employeeId },
+        status: { $in: ["approved", "rejected"] },
+      };
       const [
         loans,
         bonuses,
@@ -287,6 +467,17 @@ exports.getLeaveApprovals = async (req, res) => {
         leaveCarryForwards,
         overtimeRaw,
         profileRevisions,
+        closedLoans,
+        closedBonuses,
+        closedReimbursements,
+        closedAdvances,
+        closedSalaryChanges,
+        closedCommissions,
+        closedTaxAdjustments,
+        closedLeaveEncashments,
+        closedLeaveCarryForwards,
+        closedOvertimeRaw,
+        closedProfileRevisions,
       ] = await Promise.all([
         LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         BonusRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
@@ -299,9 +490,21 @@ exports.getLeaveApprovals = async (req, res) => {
         LeaveCarryForwardRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         OvertimeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         ProfileRevision.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        LoanRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        BonusRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        ReimbursementRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        AdvanceSalaryRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        SalaryChangeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        CommissionRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        TaxAdjustmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        LeaveEncashmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        LeaveCarryForwardRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        OvertimeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        ProfileRevision.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
       ]);
 
       const overtime = await attachOvertimeAttendance(overtimeRaw);
+      const closedOvertime = await attachOvertimeAttendance(closedOvertimeRaw);
 
       pendingAdminRequests = [
         ...tagRequests(loans, "loan", "payroll"),
@@ -316,10 +519,28 @@ exports.getLeaveApprovals = async (req, res) => {
         ...tagRequests(overtime, "overtime-request", "attendance"),
         ...tagRequests(profileRevisions, "profile", "profile"),
       ];
+
+      closedAdminRequests = [
+        ...tagRequests(closedLoans, "loan", "payroll"),
+        ...tagRequests(closedBonuses, "bonus", "payroll"),
+        ...tagRequests(closedReimbursements, "reimbursement", "payroll"),
+        ...tagRequests(closedAdvances, "advance", "payroll"),
+        ...tagRequests(closedSalaryChanges, "salary", "payroll"),
+        ...tagRequests(closedCommissions, "commission", "payroll"),
+        ...tagRequests(closedTaxAdjustments, "tax-adjustment", "payroll"),
+        ...tagRequests(closedLeaveEncashments, "leave-encashment", "payroll"),
+        ...tagRequests(closedLeaveCarryForwards, "leave-carry-forward", "attendance"),
+        ...tagRequests(closedOvertime, "overtime-request", "attendance"),
+        ...tagRequests(closedProfileRevisions, "profile", "profile"),
+      ].map((item) => ({
+        ...item,
+        _yourAction: String(item.status || "").toLowerCase() === "rejected" ? "rejected" : "approved",
+      }));
     }
 
     // Admin employees also see pending attendance challenges from their org
     let pendingChallenges = [];
+    let closedChallenges = [];
     if (req.employee?.isAdmin) {
       pendingChallenges = await AttendanceChallenge.find({
         owner: { $in: ownerIds },
@@ -340,10 +561,31 @@ exports.getLeaveApprovals = async (req, res) => {
         _type: "attendance-challenge",
         canAct: true,
       }));
+
+      closedChallenges = await AttendanceChallenge.find({
+        owner: { $in: ownerIds },
+        employee: { $ne: employeeId },
+        challengeStatus: { $in: ["Approved", "Rejected"] },
+      })
+        .populate("employee", populateEmp)
+        .populate("attendance", "status checkIn checkOut")
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      closedChallenges = closedChallenges.map((c) => ({
+        ...c,
+        status: c.attendance?.status || c.status,
+        checkIn: c.attendance?.checkIn || c.checkIn,
+        checkOut: c.attendance?.checkOut || c.checkOut,
+        _type: "attendance-challenge",
+        _yourAction: String(c.challengeStatus || "").toLowerCase() === "rejected" ? "rejected" : "approved",
+        canAct: false,
+      }));
     }
 
     // Admin employees also see pending document requests from their org
     let pendingDocRequests = [];
+    let closedDocRequests = [];
     if (req.employee?.isAdmin) {
       const docs = await DocumentRequest.find({
         owner: { $in: ownerIds },
@@ -358,6 +600,22 @@ exports.getLeaveApprovals = async (req, res) => {
         ...d,
         _type: d.documentType,
         canAct: true,
+      }));
+
+      const closedDocs = await DocumentRequest.find({
+        owner: { $in: ownerIds },
+        employee: { $ne: employeeId },
+        status: { $in: ["approved", "rejected"] },
+      })
+        .populate("employee", populateEmp)
+        .sort({ updatedAt: -1 })
+        .lean();
+
+      closedDocRequests = closedDocs.map((d) => ({
+        ...d,
+        _type: d.documentType,
+        _yourAction: String(d.status || "").toLowerCase() === "rejected" ? "rejected" : "approved",
+        canAct: false,
       }));
     }
 
@@ -388,10 +646,30 @@ exports.getLeaveApprovals = async (req, res) => {
       preApprovals = tagRequests(preLeaves, "leave", "attendance");
     }
 
+    const forApprovalWithMeta = await attachAdminCommentMeta([
+      ...forApproval,
+      ...pendingAdminRequests,
+      ...pendingChallenges,
+      ...pendingDocRequests,
+    ]);
+    const escalatedWithMeta = await attachAdminCommentMeta([
+      ...annotatedEscalated,
+      ...closedAdminRequests,
+      ...closedChallenges,
+      ...closedDocRequests,
+    ]);
+    const preApprovalsWithMeta = await attachAdminCommentMeta(preApprovals);
+
+    escalatedWithMeta.sort(
+      (a, b) =>
+        new Date(b.updatedAt || b.approvedAt || b.reviewedAt || b.createdAt || 0).getTime() -
+        new Date(a.updatedAt || a.approvedAt || a.reviewedAt || a.createdAt || 0).getTime()
+    );
+
     return res.status(200).json({
-      preApprovals,
-      forApproval: [...forApproval, ...pendingAdminRequests, ...pendingChallenges, ...pendingDocRequests],
-      escalated: annotatedEscalated,
+      preApprovals: preApprovalsWithMeta,
+      forApproval: forApprovalWithMeta,
+      escalated: escalatedWithMeta,
     });
   } catch (error) {
     console.error("Leave Approvals Error:", error);

@@ -2,6 +2,7 @@ const ProfileRevision = require('../models/ProfileRevision');
 const Employee = require('../models/Employees');
 const User = require('../models/Users');
 const mongoose = require('mongoose');
+const { autoApprovalNote, getRequestUserId, hasRequestAutoApproval } = require('../utils/requestAutoApproval');
 
 // List of editable fields (all non-salary fields from EmployeeEdit)
 const EDITABLE_FIELDS = [
@@ -53,6 +54,57 @@ const EDITABLE_FIELDS = [
   'graduateCertificateUrl',
   'mastersCertificateUrl',
 ];
+
+async function applyRevisionChanges(revision) {
+  const employeeUpdate = {};
+  const documentUpdate = {};
+  const certificateUpdates = [];
+
+  const DOCUMENT_FIELDS = ['cnicFrontUrl', 'cnicBackUrl', 'resumeUrl'];
+  const CERTIFICATE_FIELDS = {
+    matricCertificateUrl: 'matric',
+    interCertificateUrl: 'inter',
+    graduateCertificateUrl: 'graduate',
+    mastersCertificateUrl: 'masters',
+  };
+
+  revision.changes.forEach(change => {
+    if (DOCUMENT_FIELDS.includes(change.fieldName)) {
+      documentUpdate[change.fieldName] = change.newValue;
+    } else if (CERTIFICATE_FIELDS[change.fieldName]) {
+      certificateUpdates.push({
+        type: CERTIFICATE_FIELDS[change.fieldName],
+        fileUrl: change.newValue,
+      });
+    } else {
+      employeeUpdate[change.fieldName] = change.newValue;
+    }
+  });
+
+  if (Object.keys(employeeUpdate).length > 0) {
+    await Employee.findByIdAndUpdate(revision.employee, employeeUpdate);
+  }
+
+  if (Object.keys(documentUpdate).length > 0) {
+    const EmployeeDocument = require('../models/EmployeeDocument');
+    await EmployeeDocument.findOneAndUpdate(
+      { employee: revision.employee },
+      { $set: documentUpdate },
+      { upsert: true, new: true }
+    );
+  }
+
+  if (certificateUpdates.length > 0) {
+    const Certificate = require('../models/Certificate');
+    for (const cert of certificateUpdates) {
+      await Certificate.findOneAndUpdate(
+        { employee: revision.employee, type: cert.type },
+        { $set: { fileUrl: cert.fileUrl, uploadedAt: new Date() } },
+        { upsert: true, new: true }
+      );
+    }
+  }
+}
 
 /**
  * POST /emp-profile-revisions
@@ -109,21 +161,31 @@ async function createRevision(req, res) {
       };
     });
 
+    const shouldAutoApprove = hasRequestAutoApproval(req);
+
     // Create revision request
     const revision = new ProfileRevision({
       employee: employeeId,
       owner: ownerId,
       changes: processedChanges,
       reason: reason.trim(),
-      status: 'pending',
+      status: shouldAutoApprove ? 'approved' : 'pending',
+      approvedBy: shouldAutoApprove ? getRequestUserId(req) : null,
+      reviewedBy: shouldAutoApprove ? (req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || getRequestUserId(req)) : null,
+      approvalDate: shouldAutoApprove ? new Date() : null,
+      appliedAt: shouldAutoApprove ? new Date() : null,
+      adminResponse: shouldAutoApprove ? autoApprovalNote : null,
     });
 
     await revision.save();
+    if (shouldAutoApprove) {
+      await applyRevisionChanges(revision);
+    }
 
-    console.log(`📝 [PROFILE-REVISION] Created revision by ${employeeId}: ${revision._id}`);
+    console.log(`[PROFILE-REVISION] ${shouldAutoApprove ? "Auto-approved" : "Created"} revision by ${employeeId}: ${revision._id}`);
 
     return res.status(201).json({
-      message: 'Profile revision request submitted successfully',
+      message: shouldAutoApprove ? 'Profile revision request approved successfully' : 'Profile revision request submitted successfully',
       revision: {
         _id: revision._id,
         status: revision.status,
@@ -267,62 +329,12 @@ async function approveRevision(req, res) {
       return res.status(404).json({ error: 'Revision not found or already processed' });
     }
 
-    // Build update objects from changes
-    const employeeUpdate = {};
-    const documentUpdate = {};
-    const certificateUpdates = []; // [{ type, fileUrl }]
-
-    const DOCUMENT_FIELDS = ['cnicFrontUrl', 'cnicBackUrl', 'resumeUrl'];
-    const CERTIFICATE_FIELDS = {
-      matricCertificateUrl: 'matric',
-      interCertificateUrl: 'inter',
-      graduateCertificateUrl: 'graduate',
-      mastersCertificateUrl: 'masters',
-    };
-
-    revision.changes.forEach(change => {
-      if (DOCUMENT_FIELDS.includes(change.fieldName)) {
-        documentUpdate[change.fieldName] = change.newValue;
-      } else if (CERTIFICATE_FIELDS[change.fieldName]) {
-        certificateUpdates.push({
-          type: CERTIFICATE_FIELDS[change.fieldName],
-          fileUrl: change.newValue,
-        });
-      } else {
-        employeeUpdate[change.fieldName] = change.newValue;
-      }
-    });
-
-    // Apply changes to employee if any
-    if (Object.keys(employeeUpdate).length > 0) {
-      await Employee.findByIdAndUpdate(revision.employee, employeeUpdate);
-    }
-
-    // Apply changes to documents if any
-    if (Object.keys(documentUpdate).length > 0) {
-      const EmployeeDocument = require('../models/EmployeeDocument');
-      await EmployeeDocument.findOneAndUpdate(
-        { employee: revision.employee },
-        { $set: documentUpdate },
-        { upsert: true, new: true }
-      );
-    }
-
-    // Apply changes to certificates if any
-    if (certificateUpdates.length > 0) {
-      const Certificate = require('../models/Certificate');
-      for (const cert of certificateUpdates) {
-        await Certificate.findOneAndUpdate(
-          { employee: revision.employee, type: cert.type },
-          { $set: { fileUrl: cert.fileUrl, uploadedAt: new Date() } },
-          { upsert: true, new: true }
-        );
-      }
-    }
+    await applyRevisionChanges(revision);
 
     // Update revision status
     revision.status = 'approved';
     revision.approvedBy = adminId;
+    revision.reviewedBy = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || adminId;
     revision.approvalDate = new Date();
     revision.appliedAt = new Date();
     revision.adminResponse = adminNotes || null;
@@ -371,6 +383,7 @@ async function rejectRevision(req, res) {
 
     revision.status = 'rejected';
     revision.approvedBy = adminId;
+    revision.reviewedBy = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || adminId;
     revision.approvalDate = new Date();
     revision.adminResponse = rejectionReason.trim();
     await revision.save();

@@ -39,6 +39,28 @@ function buildAttendanceReviewNote(challengeStatus) {
   return `- Request ${String(challengeStatus || "").toLowerCase()}.`;
 }
 
+async function resolveReviewerEmployeeId(req) {
+  const accountId =
+    req.employee?._id ||
+    req.user?.employeeId ||
+    req.user?.employeeInfo?.employeeId ||
+    req.user?._id;
+  const email = req.employee?.companyEmail || req.user?.companyEmail || req.user?.email;
+  const clauses = [];
+
+  if (accountId && mongoose.isValidObjectId(accountId)) {
+    clauses.push({ _id: accountId }, { userAccount: accountId });
+  }
+  if (email) {
+    clauses.push({ companyEmail: email }, { email });
+  }
+
+  if (clauses.length === 0) return null;
+
+  const employee = await Employee.findOne({ $or: clauses }).select("_id").lean();
+  return employee?._id || null;
+}
+
 function getHoursDiff(checkIn, checkOut) {
   if (!checkIn || !checkOut) return 0;
   const [inH, inM] = checkIn.split(":").map(Number);
@@ -2047,6 +2069,13 @@ exports.updateChallengeStatus = async (req, res) => {
       // Update challenge record status
       challenge.challengeStatus = challengeStatus;
       challenge.challengeAdminNotes = challengeAdminNotes || "";
+      challenge.reviewedBy =
+        await resolveReviewerEmployeeId(req) ||
+        req.employee?._id ||
+        req.user?.employeeId ||
+        req.user?.employeeInfo?.employeeId ||
+        req.user?._id;
+      challenge.reviewedAt = new Date();
       challenge.challengeAt = new Date();
       await challenge.save();
 

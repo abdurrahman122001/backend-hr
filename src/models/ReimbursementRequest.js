@@ -32,6 +32,10 @@ const reimbursementRequestSchema = new mongoose.Schema(
     adminReason: {
       type: String,
     },
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+    },
     receiptUrl: {
       type: String,
     },

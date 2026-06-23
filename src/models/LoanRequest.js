@@ -33,6 +33,10 @@ const LoanRequestSchema = new Schema(
     rejectionReason: {
       type: String,
     },
+    reviewedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+    },
     approvedAt: {
       type: Date,
     },

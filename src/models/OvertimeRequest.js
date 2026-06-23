@@ -37,6 +37,11 @@ const OvertimeRequestSchema = new Schema(
       type: String,
       default: null,
     },
+    reviewedBy: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
     approvedBy: {
       type: Schema.Types.ObjectId,
       ref: "User",
