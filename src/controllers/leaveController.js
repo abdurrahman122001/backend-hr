@@ -526,7 +526,7 @@ async function revertLeaveEffects(leave, performedBy) {
       sourceModel: "ApplyLeave",
       sourceId: leave._id,
       createdBy: performedBy,
-      notes: `Reversal due to leave ${leave.status === "cancelled" ? "withdrawal" : "edit"}`
+      reason: `Reversal due to leave ${leave.status === "cancelled" ? "withdrawal" : "edit"}`
     });
 
     // 4. Revert salary deduction if it was an absence justification or unpaid

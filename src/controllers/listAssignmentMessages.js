@@ -2550,9 +2550,21 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
     const query = {
       owner: ownerId,
       sender: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) }, // Messages from juniors
+      // 🔥 Only messages currently escalated to ME for approval. A pending
+      // message's receiver is the CURRENT approver in the chain (it escalates
+      // one level at a time), and pending messages are only visible to their
+      // participants (applyVisibility). Without this, a higher-up senior would
+      // see threads still pending at a lower level and, on opening them, get
+      // "No messages found" because they aren't a participant yet.
+      receiver: currentUserId,
       approvalStatus: "pending", // 🔥 Only pending messages
       trashedBy: { $ne: currentUserId },
       spamReporters: { $ne: currentUserId },
+      // 🔥 Hide messages this user has already approved. With a multi-level
+      // approval chain a message stays "pending" after I approve (it escalates
+      // to the next senior) — but it's no longer MY responsibility, so it must
+      // not keep showing in my for-approval list.
+      "approvalChain.approver": { $ne: currentUserId },
     };
 
     // Apply client filter if provided
@@ -2664,15 +2676,16 @@ exports.getTeamLeadPendingApprovals =
         approvalStatus: "pending",
         trashedBy: { $ne: currentUserId },
         spamReporters: { $ne: currentUserId },
+        // 🔥 Exclude messages I've already approved. They may still be "pending"
+        // for the next approver in the chain, but they should no longer count
+        // toward MY pending-approvals badge or list.
+        "approvalChain.approver": { $ne: currentUserId },
+        // 🔥 Only count messages currently escalated to ME (I'm the current
+        // approver/receiver). This keeps the badge in sync with the for-approval
+        // list, which is participant-scoped — a message still pending at a lower
+        // level in the chain isn't actionable (or even openable) by me yet.
+        receiver: currentUserId,
       };
-
-      if (!isManager) {
-        query.$or = [
-          { receiver: currentUserId },
-          { receiver: { $in: [currentUserId] } },
-          { sender: { $in: supervisedEmployeeIds } }
-        ];
-      }
 
       // Apply client filter
       if (isObjId(client)) {
