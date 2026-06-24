@@ -695,6 +695,19 @@ router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
     }
 
     const scope = buildEmployeeScope(req.user);
+
+    // Capture the device being revoked BEFORE pulling it, so we know which
+    // deviceId to target for realtime logout.
+    const empBefore = await Employee.findOne({ _id: id, ...scope })
+      .select("trustedDevices")
+      .lean();
+    if (!empBefore) {
+      return res.status(404).json({ error: "Employee not found or unauthorized" });
+    }
+    const removedDevice = (empBefore.trustedDevices || []).find(
+      (d) => String(d._id) === String(deviceSubId)
+    );
+
     const emp = await Employee.findOneAndUpdate(
       { _id: id, ...scope },
       { $pull: { trustedDevices: { _id: deviceSubId } } },
@@ -703,6 +716,19 @@ router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
 
     if (!emp) {
       return res.status(404).json({ error: "Employee not found or unauthorized" });
+    }
+
+    // 🔒 Realtime logout: tell the revoked device to sign out immediately.
+    try {
+      const io = req.app.get("io");
+      if (io && removedDevice?.deviceId) {
+        io.to(`employee_${id}`).emit("device_revoked", {
+          deviceId: removedDevice.deviceId,
+          deviceName: removedDevice.deviceName || null,
+        });
+      }
+    } catch (emitErr) {
+      console.error("[device_revoked emit error]", emitErr);
     }
 
     res.json({ status: "success", message: "Device revoked", data: emp.trustedDevices });

@@ -2291,6 +2291,11 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       // ✅ ONLY update the existing message - NO new message creation
       doc.approvalStatus = "disapproved";
 
+      // Record WHO disapproved and WHEN so the Message Info / approval-hierarchy
+      // view can show the disapproval step (in red) to everyone viewing the message.
+      doc.disapprovedBy = req.employee._id;
+      doc.disapprovedAt = new Date();
+
       // 🔥 NEW: Reset read status so participants see the disapproval as a new unread (bold) message
       doc.readBy = [{
         employee: req.employee._id,
