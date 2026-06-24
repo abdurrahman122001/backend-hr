@@ -171,6 +171,7 @@ const EmployeeSchema = new Schema(
       {
         deviceId: { type: String, required: false }, // permanent token
         deviceFingerprint: { type: String },
+        deviceName: { type: String }, // friendly device name/model (best-effort)
         userAgent: { type: String },
         ip: { type: String },
         addedAt: { type: Date, default: Date.now },
