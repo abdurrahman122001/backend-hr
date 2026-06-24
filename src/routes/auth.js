@@ -401,7 +401,27 @@ router.post("/refresh", async (req, res) => {
 
     const user = await User.findById(payload.id);
     if (!user) {
-      return res.status(401).json({ message: "User not found" });
+      const emp = await Employee.findOne({ _id: payload.id, isAdmin: true }).select("_id isAdmin");
+      if (!emp) {
+        return res.status(401).json({ message: "User not found" });
+      }
+
+      const newAccessToken = jwt.sign(
+        { id: emp._id, isEmployeeAdmin: true },
+        JWT_SECRET,
+        { expiresIn: ACCESS_TTL }
+      );
+
+      const newRefreshToken = jwt.sign(
+        { id: emp._id, isEmployeeAdmin: true },
+        REFRESH_SECRET,
+        { expiresIn: REFRESH_TTL }
+      );
+
+      return res.json({
+        token: newAccessToken,
+        refreshToken: newRefreshToken,
+      });
     }
 
     // Re-issue new tokens

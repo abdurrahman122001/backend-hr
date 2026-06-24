@@ -49,6 +49,16 @@ async function getAllJuniorIds(ownerId, seniorId) {
 const tagRequests = (items, type, category) =>
   items.map((item) => ({ ...item, _type: type, _category: category }));
 
+const uniqueById = (items = []) => {
+  const seen = new Set();
+  return items.filter((item) => {
+    const id = toIdString(item?._id);
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+};
+
 const toIdString = (value) => {
   if (!value) return null;
   if (typeof value === "object") {
@@ -355,7 +365,7 @@ exports.getLeaveApprovals = async (req, res) => {
     const populateRejectedBy = { path: "rejectedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
     const populateAppliedBy = { path: "appliedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
 
-    const [forApproval, escalated] = await Promise.all([
+    const [forApprovalRaw, escalated] = await Promise.all([
       // Pending leaves where it is THIS employee's turn to approve
       ApplyLeave.find({
         status: "pending",
@@ -408,6 +418,13 @@ exports.getLeaveApprovals = async (req, res) => {
         .lean(),
     ]);
 
+    const forApproval = forApprovalRaw.map((leave) => ({
+      ...leave,
+      _type: "leave",
+      _category: "attendance",
+      canAct: true,
+    }));
+
     // Annotate each escalated item with what action the current employee took
     const annotatedEscalated = escalated.map((leave) => {
       let yourAction = "forwarded";
@@ -455,7 +472,16 @@ exports.getLeaveApprovals = async (req, res) => {
         employee: { $ne: employeeId },
         status: { $in: ["approved", "rejected"] },
       };
+      const adminEmployees = await Employee.find({
+        owner: { $in: ownerIds },
+        _id: { $ne: employeeId },
+      })
+        .select("_id")
+        .lean();
+      const adminEmployeeIds = adminEmployees.map((employee) => employee._id);
+
       const [
+        adminLeaves,
         loans,
         bonuses,
         reimbursements,
@@ -479,6 +505,18 @@ exports.getLeaveApprovals = async (req, res) => {
         closedOvertimeRaw,
         closedProfileRevisions,
       ] = await Promise.all([
+        ApplyLeave.find({
+          employee: { $in: adminEmployeeIds },
+          status: "pending",
+          isTrashed: { $ne: true },
+        })
+          .populate("employee", populateEmp)
+          .populate(populateChain)
+          .populate(populateApprovedBy)
+          .populate(populateRejectedBy)
+          .populate(populateAppliedBy)
+          .sort({ createdAt: -1 })
+          .lean(),
         LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         BonusRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         ReimbursementRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
@@ -507,6 +545,7 @@ exports.getLeaveApprovals = async (req, res) => {
       const closedOvertime = await attachOvertimeAttendance(closedOvertimeRaw);
 
       pendingAdminRequests = [
+        ...tagRequests(adminLeaves, "leave", "attendance").map((leave) => ({ ...leave, canAct: true })),
         ...tagRequests(loans, "loan", "payroll"),
         ...tagRequests(bonuses, "bonus", "payroll"),
         ...tagRequests(reimbursements, "reimbursement", "payroll"),
@@ -646,12 +685,12 @@ exports.getLeaveApprovals = async (req, res) => {
       preApprovals = tagRequests(preLeaves, "leave", "attendance");
     }
 
-    const forApprovalWithMeta = await attachAdminCommentMeta([
+    const forApprovalWithMeta = await attachAdminCommentMeta(uniqueById([
       ...forApproval,
       ...pendingAdminRequests,
       ...pendingChallenges,
       ...pendingDocRequests,
-    ]);
+    ]));
     const escalatedWithMeta = await attachAdminCommentMeta([
       ...annotatedEscalated,
       ...closedAdminRequests,

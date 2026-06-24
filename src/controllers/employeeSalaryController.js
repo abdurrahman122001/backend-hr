@@ -65,6 +65,34 @@ const safeNumber = (v, def = 0) => {
   return Number.isFinite(n) ? n : def;
 };
 
+const normalizeId = (value) => {
+  if (Array.isArray(value)) return value[0];
+  return value;
+};
+
+const idsEqual = (a, b) => {
+  if (!a || !b) return false;
+  return String(a) === String(b);
+};
+
+const getRequestOwnerId = (req) => normalizeId(req.user?.owner || req.user?._id);
+
+const canAccessEmployee = (req, employee) => {
+  const ownerId = getRequestOwnerId(req);
+  const employeeOwner = normalizeId(employee?.owner);
+  const employeeId = req.user?.employeeId;
+
+  if (req.user?.isEmployee && !req.user?.isAdmin && !req.user?.isDelegated) {
+    return employeeId && idsEqual(employee?._id, employeeId);
+  }
+
+  if (idsEqual(employeeOwner, ownerId)) return true;
+  if (employeeId && idsEqual(employee?._id, employeeId)) return true;
+  return false;
+};
+
+const getSalaryDecryptKey = (req) => req.query.key || req.body?.key || null;
+
 /* ---------------------------- Tax Calculation Logic ---------------------------- */
 
 const toNum = (v) => {
@@ -369,6 +397,9 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
     if (!employee) {
       return res.status(404).json({ error: "Employee not found" });
     }
+    if (!canAccessEmployee(req, employee)) {
+      return res.status(403).json({ error: "Employee not found or unauthorized" });
+    }
 
     // Auto-generate employeeId if missing
     // NOTE: ID generation is now handled during final onboarding step (password setup)
@@ -412,7 +443,7 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       for (const field of ALL_FIELDS) {
         if (decryptedSalarySlip[field]) {
           try {
-            const dv = await decrypt(decryptedSalarySlip[field], req.query.key);
+            const dv = await decrypt(decryptedSalarySlip[field], getSalaryDecryptKey(req));
             decryptedSalarySlip[field] = safeNumber(dv, 0);
           } catch (err) {
             console.warn(`Failed to decrypt ${field}:`, err);
@@ -468,6 +499,9 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     if (!existingEmployee) {
       return res.status(404).json({ error: "Employee not found" });
     }
+    if (!canAccessEmployee(req, existingEmployee)) {
+      return res.status(403).json({ error: "Employee not found or unauthorized" });
+    }
 
     // Fetch existing salary slip
     const existingSalarySlip = await SalarySlip.findOne({
@@ -479,7 +513,6 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
     const employeeSet = {};
     const shallowKeys = [
       "name",
-      "owner",
       "cnic",
       "email",
       "companyEmail",
@@ -506,8 +539,13 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       "nomineeRelation",
       "nomineeCnic",
       "nomineeNo",
+      "emergencyContactName",
+      "emergencyContactRelation",
+      "emergencyContactNumber",
+      "emergencyNo",
       "rt",
       "department",
+      "subDepartment",
       "designation",
       "joiningDate",
       "leavingDate",
@@ -521,6 +559,10 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
       "noticePeriodEndDate",
       "terminationDate",
       "resignationReason",
+      "noticePeriod",
+      "supervisionMode",
+      "supervisor",
+      "gratuityDaysPaid",
     ];
 
     for (const k of shallowKeys) {
@@ -558,7 +600,29 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
         0,
         safeNumber(le.usedUnpaid, 0)
       );
+      if ("bonus" in le) {
+        employeeSet["leaveEntitlement.bonus"] = Math.max(
+          0,
+          safeNumber(le.bonus, 0)
+        );
+      }
+      if ("bonusHoursAccumulated" in le) {
+        employeeSet["leaveEntitlement.bonusHoursAccumulated"] = Math.max(
+          0,
+          safeNumber(le.bonusHoursAccumulated, 0)
+        );
+      }
+      if ("bonusYear" in le && le.bonusYear !== undefined) {
+        employeeSet["leaveEntitlement.bonusYear"] = safeNumber(le.bonusYear, new Date().getFullYear());
+      }
       employeeSet["leaveEntitlement.manuallySet"] = !!le.manuallySet;
+    }
+
+    if ("providentFund" in employeeData && employeeData.providentFund) {
+      const pf = employeeData.providentFund || {};
+      if ("pfRate" in pf) employeeSet["providentFund.pfRate"] = safeNumber(pf.pfRate, 0);
+      if ("years" in pf) employeeSet["providentFund.years"] = safeNumber(pf.years, 0);
+      if ("override" in pf) employeeSet["providentFund.override"] = !!pf.override;
     }
 
     if ("compensation" in employeeData && employeeData.compensation) {
@@ -793,10 +857,10 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
       // REQUIRED FIELDS FIX
       const ownerId =
-        req.user?.owner ||
-        req.user?._id ||
-        employeeData?.owner ||
-        existingEmployee?.owner;
+        normalizeId(existingSalarySlip?.owner) ||
+        normalizeId(existingEmployee?.owner) ||
+        getRequestOwnerId(req) ||
+        normalizeId(employeeData?.owner);
 
       slipSet.owner = ownerId;
       slipSet.month =
@@ -838,7 +902,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
       for (const f of ALL_FIELDS) {
         try {
-          const dv = await decrypt(raw[f], req.query.key);
+          const dv = await decrypt(raw[f], getSalaryDecryptKey(req));
           decryptedSalarySlip[f] = safeNumber(dv, 0);
         } catch {
           decryptedSalarySlip[f] = 0;
@@ -1098,6 +1162,11 @@ exports.resendSetPasswordLink = async (req, res) => {
 exports.getSalaryHistory = async (req, res) => {
   try {
     const { id } = req.params;
+    const employee = await Employee.findById(id).select("_id owner");
+    if (!employee) return res.status(404).json({ error: "Employee not found" });
+    if (!canAccessEmployee(req, employee)) {
+      return res.status(403).json({ error: "Employee not found or unauthorized" });
+    }
     const history = await SalaryRevisionHistory.find({ employee: id }).sort({ revisionDate: -1 });
     res.json({
       status: "success",
