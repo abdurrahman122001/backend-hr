@@ -317,7 +317,13 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     const existingNewChallenge = await AttendanceChallenge.findOne({
       employee: employeeId,
       date: date,
-      challengeStatus: 'Pending'
+      challengeStatus: { $in: ['Pending', 'Approved', 'Rejected'] }
+    });
+
+    const withdrawnChallenge = await AttendanceChallenge.findOne({
+      employee: employeeId,
+      date: date,
+      challengeStatus: 'Withdrawn'
     });
 
     // Find the attendance record for this date
@@ -329,6 +335,10 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
 
     if (existingNewChallenge || (attendance && ['Pending', 'Approved', 'Rejected'].includes(attendance.challengeStatus))) {
       return res.status(400).json({ error: "An attendance query for this date already exists." });
+    }
+
+    if (withdrawnChallenge) {
+      await AttendanceChallenge.deleteOne({ _id: withdrawnChallenge._id });
     }
 
     // 2. Find or create the attendance record for this date
