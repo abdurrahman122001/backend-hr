@@ -136,17 +136,6 @@ const EmployeeSchema = new Schema(
       },
     ],
     noticePeriod: { type: Number, default: 0 },
-
-    // LEAVE ENTITLEMENT
-    leaveEntitlement: {
-      total: { type: Number, default: 22 },
-      bonus: { type: Number, default: 0 },
-      bonusHoursAccumulated: { type: Number, default: 0 },
-      bonusYear: { type: Number }, // required for yearly reset
-      usedPaid: { type: Number, default: 0 },
-      usedUnpaid: { type: Number, default: 0 },
-    },
-
     // User link (for future use)
     userAccount: {
       type: Schema.Types.ObjectId,
@@ -167,16 +156,8 @@ const EmployeeSchema = new Schema(
     ndaGenerated: { type: Boolean, default: false },
     ndaPath: { type: String },
     contractPath: { type: String },
-    trustedDevices: [
-      {
-        deviceId: { type: String, required: false }, // permanent token
-        deviceFingerprint: { type: String },
-        deviceName: { type: String }, // friendly device name/model (best-effort)
-        userAgent: { type: String },
-        ip: { type: String },
-        addedAt: { type: Date, default: Date.now },
-      },
-    ],
+    // NOTE: trusted devices were moved to their own `TrustedDevice` collection
+    // (models/TrustedDevice.js). Do not re-add them here.
     permissions: PermissionSchema,
     status: {
       type: String,

@@ -5,6 +5,8 @@ const mongoose = require("mongoose");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const Employee = require("../models/Employees");
+const TrustedDevice = require("../models/TrustedDevice");
+const { getGeoFromIp } = require("../utils/geoIp");
 const User = require("../models/Users");
 const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
@@ -861,14 +863,14 @@ router.post("/login", async (req, res) => {
 
     if (isEmail) {
       emp = await Employee.findOne({ companyEmail: rawIdentifier }).select(
-        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+        "_id companyEmail password role owner name department status rt shifts employeeId cnic"
       );
     } else {
       // Try employeeId first (exact match, case-insensitive)
       emp = await Employee.findOne({
         employeeId: { $regex: `^${rawIdentifier}$`, $options: "i" }
       }).select(
-        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+        "_id companyEmail password role owner name department status rt shifts employeeId cnic"
       );
 
       // If not found by employeeId, try CNIC (strip dashes from stored value and compare)
@@ -877,7 +879,7 @@ router.post("/login", async (req, res) => {
         const candidates = await Employee.find({
           cnic: { $exists: true, $ne: "" }
         }).select(
-          "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+          "_id companyEmail password role owner name department status rt shifts employeeId cnic"
         ).lean();
 
         emp = candidates.find(e => e.cnic && e.cnic.replace(/-/g, "") === normalizedInput) || null;
@@ -885,7 +887,7 @@ router.post("/login", async (req, res) => {
         if (emp) {
           // Re-fetch as Mongoose document so comparePassword works
           emp = await Employee.findById(emp._id).select(
-            "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+            "_id companyEmail password role owner name department status rt shifts employeeId cnic"
           );
         }
       }
@@ -957,11 +959,12 @@ router.post("/login", async (req, res) => {
     // ✅ DEV MODE BYPASSED: User wants to test 2FA flow
     const devModeAutoTrust = false;
 
-    const matchedDevice = emp.trustedDevices?.find(
-      (d) =>
-        (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
-        (deviceToken && d.deviceId === deviceToken)
-    );
+    const deviceOr = [];
+    if (deviceFingerprint) deviceOr.push({ deviceFingerprint });
+    if (deviceToken) deviceOr.push({ deviceId: deviceToken });
+    const matchedDevice = deviceOr.length
+      ? await TrustedDevice.findOne({ employee: emp._id, $or: deviceOr })
+      : null;
     const isTrusted = !!matchedDevice;
 
     // ✅ Keep the trust anchors fresh on every trusted login so they don't
@@ -974,8 +977,20 @@ router.post("/login", async (req, res) => {
         matchedDevice.deviceFingerprint = deviceFingerprint;
       }
       if (deviceName && !matchedDevice.deviceName) matchedDevice.deviceName = deviceName;
+      // Backfill geolocation once for trusted devices that don't have it yet.
+      if (!matchedDevice.location) {
+        const refreshIp =
+          req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "";
+        if (refreshIp && !matchedDevice.ip) matchedDevice.ip = refreshIp;
+        const geo = await getGeoFromIp(refreshIp || matchedDevice.ip);
+        if (geo) {
+          matchedDevice.city = geo.city;
+          matchedDevice.country = geo.country;
+          matchedDevice.location = geo.location;
+        }
+      }
       matchedDevice.addedAt = new Date();
-      await emp.save().catch((e) => console.error("trusted device refresh error", e));
+      await matchedDevice.save().catch((e) => console.error("trusted device refresh error", e));
     }
 
     // UNRECOGNIZED DEVICE (2FA flow)
@@ -1054,7 +1069,9 @@ router.post("/login", async (req, res) => {
       const userAgent = req.headers["user-agent"] || "unknown";
       const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
 
-      emp.trustedDevices.push({
+      await TrustedDevice.create({
+        employee: emp._id,
+        owner: emp.owner,
         deviceId,
         deviceFingerprint,
         deviceName,
@@ -1062,7 +1079,6 @@ router.post("/login", async (req, res) => {
         ip,
         addedAt: new Date(),
       });
-      await emp.save();
     }
 
     console.log(`🔐 [LOGIN] Employee: ${emp.companyEmail}, calling performAttendanceLogic...`);
@@ -1188,7 +1204,7 @@ router.post("/confirm-code", async (req, res) => {
     codes.delete(decoded.id);
 
     const emp = await Employee.findById(decoded.id).select(
-      "_id companyEmail role owner name trustedDevices rt shifts"
+      "_id companyEmail role owner name rt shifts"
     );
 
     const userAgent = req.headers["user-agent"] || "unknown";
@@ -1197,32 +1213,45 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
-    const deviceIndex = emp.trustedDevices.findIndex(
-      (d) => d.deviceFingerprint === deviceFingerprint
-    );
+    const existingDevice = await TrustedDevice.findOne({
+      employee: emp._id,
+      deviceFingerprint,
+    });
+
+    const geo = await getGeoFromIp(ip);
 
     let deviceId;
-    if (deviceIndex > -1) {
+    if (existingDevice) {
       // ✅ Device fingerprint already known — KEEP the existing deviceId so the
-      // browser cookie stays valid. Only refresh metadata (IP, userAgent).
-      deviceId = emp.trustedDevices[deviceIndex].deviceId;
-      emp.trustedDevices[deviceIndex].userAgent = userAgent;
-      emp.trustedDevices[deviceIndex].ip = ip;
-      if (deviceName) emp.trustedDevices[deviceIndex].deviceName = deviceName;
-      emp.trustedDevices[deviceIndex].addedAt = new Date();
+      // browser cookie stays valid. Only refresh metadata (IP, userAgent, geo).
+      deviceId = existingDevice.deviceId;
+      existingDevice.userAgent = userAgent;
+      existingDevice.ip = ip;
+      if (deviceName) existingDevice.deviceName = deviceName;
+      if (geo) {
+        existingDevice.city = geo.city;
+        existingDevice.country = geo.country;
+        existingDevice.location = geo.location;
+      }
+      existingDevice.addedAt = new Date();
+      await existingDevice.save();
     } else {
       // 🆕 Brand new device — generate a fresh permanent token
       deviceId = crypto.randomBytes(32).toString("hex");
-      emp.trustedDevices.push({
+      await TrustedDevice.create({
+        employee: emp._id,
+        owner: emp.owner,
         deviceId,
         deviceFingerprint,
         deviceName,
         userAgent,
         ip,
+        city: geo?.city,
+        country: geo?.country,
+        location: geo?.location,
         addedAt: new Date(),
       });
     }
-    await emp.save();
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,

@@ -1,4 +1,5 @@
 const Employee = require("../models/Employees");
+const TrustedDevice = require("../models/TrustedDevice");
 const SalarySlip = require("../models/Salaries");
 const SalaryRevisionHistory = require("../models/SalaryRevisionHistory");
 const Shift = require("../models/Shift");
@@ -434,6 +435,14 @@ exports.getEmployeeAndSalarySlip = async (req, res) => {
       }
     }
     employeeObj.providentFund.override = !!employeeObj.providentFund.override;
+
+    // Trusted devices now live in their own collection — attach them so the
+    // EmployeeEdit "Devices" tab keeps working unchanged.
+    employeeObj.trustedDevices = await TrustedDevice.find({
+      employee: employee._id,
+    })
+      .sort({ addedAt: -1 })
+      .lean();
 
     // salary slip -> decrypted view for FE (including tax fields)
     let decryptedSalarySlip = salarySlip ? { ...salarySlip.toObject() } : {};
