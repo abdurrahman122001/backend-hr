@@ -3,6 +3,7 @@ const router = express.Router();
 const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
+const TrustedDevice = require("../models/TrustedDevice");
 const {
   getUpcomingBirthdays,
   updateEmployeeRole,
@@ -696,27 +697,25 @@ router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
 
     const scope = buildEmployeeScope(req.user);
 
-    // Capture the device being revoked BEFORE pulling it, so we know which
-    // deviceId to target for realtime logout.
-    const empBefore = await Employee.findOne({ _id: id, ...scope })
-      .select("trustedDevices")
+    // Ensure the target employee is within the requester's scope (owner-scoped).
+    const emp = await Employee.findOne({ _id: id, ...scope })
+      .select("_id")
       .lean();
-    if (!empBefore) {
-      return res.status(404).json({ error: "Employee not found or unauthorized" });
-    }
-    const removedDevice = (empBefore.trustedDevices || []).find(
-      (d) => String(d._id) === String(deviceSubId)
-    );
-
-    const emp = await Employee.findOneAndUpdate(
-      { _id: id, ...scope },
-      { $pull: { trustedDevices: { _id: deviceSubId } } },
-      { new: true }
-    );
-
     if (!emp) {
       return res.status(404).json({ error: "Employee not found or unauthorized" });
     }
+
+    // Capture the device being revoked BEFORE deleting it, so we know which
+    // deviceId to target for realtime logout.
+    const removedDevice = await TrustedDevice.findOne({
+      _id: deviceSubId,
+      employee: id,
+    }).lean();
+    if (!removedDevice) {
+      return res.status(404).json({ error: "Device not found" });
+    }
+
+    await TrustedDevice.deleteOne({ _id: deviceSubId, employee: id });
 
     // 🔒 Realtime logout: tell the revoked device to sign out immediately.
     try {
@@ -731,7 +730,10 @@ router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
       console.error("[device_revoked emit error]", emitErr);
     }
 
-    res.json({ status: "success", message: "Device revoked", data: emp.trustedDevices });
+    const remaining = await TrustedDevice.find({ employee: id })
+      .sort({ addedAt: -1 })
+      .lean();
+    res.json({ status: "success", message: "Device revoked", data: remaining });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
