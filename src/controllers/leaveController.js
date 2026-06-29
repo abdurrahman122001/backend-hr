@@ -498,8 +498,20 @@ async function revertLeaveEffects(leave, performedBy) {
   try {
     if (leave.status !== "approved" && leave.status !== "auto_approved") return;
 
+    // early_leave and late never consumed leave balance or salary on approval,
+    // so there is nothing to revert for them.
+    if (leave.leaveType === "early_leave" || leave.leaveType === "late") return true;
+
     const employeeId = leave.employee._id || leave.employee;
-    const daysToRevert = leave.totalDays;
+    // Revert only what was actually consumed: full = 1, half = 0.5, and
+    // early_leave / late = 0 (these never consumed anything on approval).
+    const daysToRevert = (leave.dates || []).length
+      ? leave.dates.reduce((sum, d) => {
+          if (d.type === "early_leave" || d.type === "late") return sum;
+          return sum + (d.type === "half" ? 0.5 : 1);
+        }, 0)
+      : leave.totalDays;
+    if (!daysToRevert || daysToRevert <= 0) return true;
     const leaveYear = getLeaveYear(leave.startDate);
     
     // 1. Revert Employee model balances
@@ -1164,28 +1176,31 @@ exports.approveLeave = async (req, res) => {
       await revertLeaveSalaryDeduction(leave.employee._id, actualApprovedDays, leave.startDate);
     }
 
-    // APPLY SALARY DEDUCTION IF UNPAID (early_leave and late = no deduction on approval)
-    if (!finalIsPaid && leave.leaveType !== "early_leave" && leave.leaveType !== "late") {
-      await deductLeaveFromSalary(leave.employee._id, actualApprovedDays, leave.startDate);
+    // Days that actually consume leave balance / salary, decided per-date by the
+    // date's OWN type (NOT the leave-level leaveType): full = 1, half = 0.5, and
+    // early_leave / late = 0 (the employee was physically present, so nothing is
+    // consumed). This keeps "Early Leave" / "Late Arrival" days from ever being
+    // charged as leave, even on a request whose leaveType is annual/personal/etc.
+    const isPresentDay = (t) => t === "early_leave" || t === "late";
+    const consumingDays = (leave.dates || []).reduce((sum, d) => {
+      if (isPresentDay(d.type)) return sum;
+      return sum + (d.type === "half" ? 0.5 : 1);
+    }, 0);
+    // Respect partial approval — never consume more than what was approved.
+    const daysToDeduct = partialApproval && partialApproval.approvedDays > 0
+      ? Math.min(actualApprovedDays, consumingDays)
+      : consumingDays;
+
+    // APPLY SALARY DEDUCTION IF UNPAID (present-only days like early_leave/late deduct nothing)
+    if (!finalIsPaid && daysToDeduct > 0) {
+      await deductLeaveFromSalary(leave.employee._id, daysToDeduct, leave.startDate);
     }
 
     // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
-    // early_leave and late = employee was present; approval does not consume leave days
-    if (leave.leaveType !== "early_leave" && leave.leaveType !== "late") try {
+    if (daysToDeduct > 0) try {
       const leaveYear = getLeaveYear(leave.startDate);
       const employeeId = leave.employee._id;
       const ownerId = leave.employee.owner;
-
-      // Calculate days to deduct (handle partial approval)
-      let daysToDeduct = actualApprovedDays;
-
-      // Handle half days
-      for (const dateObj of leave.dates) {
-        if (dateObj.type === 'half') {
-          daysToDeduct -= 0.5; // Reduce by 0.5 for each half day (already counted as 1)
-          daysToDeduct += 0.5; // Add back as 0.5
-        }
-      }
 
       if (finalIsPaid) {
         // Increment usedPaid in Employee model
@@ -1255,11 +1270,14 @@ exports.approveLeave = async (req, res) => {
     }
 
     // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
-    // early_leave and late = employee was physically present; attendance status stays unchanged
-    if (leave.leaveType !== "early_leave" && leave.leaveType !== "late") try {
+    try {
       const Attendance = require("../models/Attendance");
 
       for (const dateObj of leave.dates) {
+        // early_leave / late dates = employee was physically present; leave it as
+        // whatever attendance already exists (do NOT overwrite it with "Leave").
+        if (isPresentDay(dateObj.type)) continue;
+
         // Convert date to YYYY-MM-DD format consistently
         let dateStr;
         if (typeof dateObj.date === 'string') {
@@ -1286,6 +1304,11 @@ exports.approveLeave = async (req, res) => {
           owner: leave.employee.owner || ownerId,
         });
 
+        // A half-day leave date must stay a half day — it should be valued at
+        // 0.5, not promoted to a full "Leave"/paid day.
+        const isHalfDay = dateObj.type === "half";
+        const leaveStatus = isHalfDay ? "Half Day" : "Leave";
+
         if (attendance) {
           // Update existing attendance - preserve original status if needed
           if (!attendance.originalStatus) {
@@ -1295,13 +1318,13 @@ exports.approveLeave = async (req, res) => {
           // Special handling for absence justifications
           const wasAbsent = attendance.status === "Absent";
 
-          attendance.status = "Leave";
+          attendance.status = leaveStatus;
           attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
           attendance.markedByHR = true;
 
-          let updateNote = "Marked as Leave via approved leave request";
+          let updateNote = `Marked as ${leaveStatus} via approved leave request`;
           if (leave.isAbsenceJustification && wasAbsent) {
-            updateNote = `Unexplained absence on ${dateStr} justified and converted to ${finalIsPaid ? "Paid" : "Unpaid"} Leave`;
+            updateNote = `Unexplained absence on ${dateStr} justified and converted to ${finalIsPaid ? "Paid" : "Unpaid"} ${leaveStatus}`;
           }
 
           attendance.notes = attendance.notes
@@ -1310,17 +1333,17 @@ exports.approveLeave = async (req, res) => {
 
           await attendance.save();
         } else {
-          // Create new attendance record as Leave
+          // Create new attendance record as Leave / Half Day
           attendance = new Attendance({
             owner: leave.employee.owner || ownerId,
             employee: leave.employee._id || leave.employee,
             date: dateStr,
-            status: "Leave",
+            status: leaveStatus,
             leaveType: finalIsPaid ? "Paid" : "Unpaid",
             markedByHR: true,
             notes: leave.isAbsenceJustification
-              ? "Auto-created from approved absence justification"
-              : "Auto-created from approved leave request",
+              ? `Auto-created from approved absence justification (${leaveStatus})`
+              : `Auto-created from approved leave request (${leaveStatus})`,
           });
           await attendance.save();
         }
@@ -1474,22 +1497,9 @@ exports.rejectLeave = async (req, res) => {
 
     await leave.save();
 
-    // For early_leave and late: the event already happened regardless of approval.
-    // Rejection means no approved cover — deduct salary for the missed hours.
-    if (leave.leaveType === "early_leave" || leave.leaveType === "late") {
-      try {
-        const daysToDeduct = leave.totalDays || (leave.totalHours ? leave.totalHours / 8 : 0);
-        if (daysToDeduct > 0) {
-          await deductLeaveFromSalary(
-            leave.employee._id || leave.employee,
-            daysToDeduct,
-            leave.startDate
-          );
-        }
-      } catch (salaryErr) {
-        console.error("⚠️ Error deducting salary on early_leave/late rejection:", salaryErr);
-      }
-    }
+    // early_leave and late never consume leave balance or salary — neither on
+    // approval nor on rejection. The employee was physically present, so there is
+    // nothing to deduct in either case.
 
     // 🔥 NEW: Real-time notification for rejection
     if (req.app.get("io")) {

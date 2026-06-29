@@ -110,6 +110,22 @@ module.exports = async function anyPayrollAuth(req, res, next) {
                 return next();
             }
 
+            // Special case: Allow POST to /salary-slips/authorize-decryption for all
+            // employees (self-service unlock of their OWN salary via password re-auth).
+            // The route re-authenticates via requireEmpAuth + password before issuing the key.
+            if (req.method === "POST" && req.originalUrl.includes("/salary-slips/authorize-decryption")) {
+                req.user = {
+                    _id: finalOwner,
+                    employeeId: employee._id,
+                    owner: finalOwner,
+                    role: "employee",
+                    isAdmin: false,
+                    isEmployee: true,
+                    accessType: "view",
+                };
+                return next();
+            }
+
             // For write operations, check BOTH Payroll and Attendance access
             const [payrollGrant, attendanceGrant] = await Promise.all([
                 PayrollAccess.findOne({ owner: finalOwner, grantedTo: employee._id, active: true }),
