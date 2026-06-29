@@ -7,6 +7,25 @@ const fs = require("fs");
 const path = require("path");
 const mongoose = require("mongoose");
 const multer = require("multer");
+const normalizeTaskStatus = (status) => {
+  switch (String(status || "").toLowerCase()) {
+    case "in_progress":
+      return "in_progress";
+    case "review_approved":
+    case "pending_review":
+    case "review":
+      return "review_approved";
+    case "closed":
+    case "complete":
+    case "done":
+      return "closed";
+    case "pending":
+    case "todo":
+    default:
+      return "pending";
+  }
+};
+
 
 const uploadRoot = path.join(__dirname, "..", "uploads");
 const taskUploadDir = path.join(uploadRoot, "tasks");
@@ -144,7 +163,7 @@ exports.createTask = async (req, res) => {
       title,
       description: description || "",
       priority: priority || "medium",
-      status: "todo",
+      status: "pending",
       dueDate: dueDate ? new Date(dueDate) : undefined,
     });
 
@@ -226,13 +245,13 @@ exports.getMyTasks = async (req, res) => {
  * body: { status?, priority?, dueDate?, title?, description?, assignedTo?, completed? }
  *
  * Review workflow:
- * - If an **employee/assignee** requests status=done:
- *      we set status => "pending_review"
+ * - If an **employee/assignee** requests status=closed:
+ *      we set status => "review_approved"
  *      and notify Team Lead (or Manager fallback): "Task ready for review"
- * - If a **Team Lead** sets status=done from pending_review:
- *      we set status => "done"
- *      and notify Manager: "Task approved & done"
- * - Managers can set status to done directly (no extra notify).
+ * - If a **Team Lead** sets status=closed from review_approved:
+ *      we set status => "closed"
+ *      and notify Manager: "Task review approved"
+ * - Managers can set status to closed directly (no extra notify).
  */
 exports.updateTask = async (req, res) => {
   try {
@@ -282,13 +301,13 @@ exports.updateTask = async (req, res) => {
 
     // Handle STATUS with the review workflow
     if ("status" in req.body) {
-      const requested = String(req.body.status || "").toLowerCase();
-      const prevStatus = String(task.status || "").toLowerCase();
+      const requested = normalizeTaskStatus(req.body.status);
+      const prevStatus = normalizeTaskStatus(task.status);
 
-      if (requested === "done") {
+      if (requested === "closed") {
         if (!managerScopeOk) {
-          // Assignee marked as done -> gate to pending_review and notify Team Lead
-          task.status = "pending_review";
+          // Assignee requested close -> gate to review_approved and notify Team Lead
+          task.status = "review_approved";
           await task.save();
 
           // Notify TL (fallback Manager)
@@ -305,7 +324,7 @@ exports.updateTask = async (req, res) => {
             me._id,
             receiverId,
             `Task ready for review: ${task.title}`,
-            `The assignee (${me.name || me.companyEmail || me._id}) marked "${task.title}" as done. Please review.`
+            `The assignee (${me.name || me.companyEmail || me._id}) requested closing "${task.title}". Please review.`
           );
 
           const populated = await Task.findById(task._id)
@@ -313,20 +332,20 @@ exports.updateTask = async (req, res) => {
             .populate("assignedTo", "_id name companyEmail");
           return res.json(populated);
         } else {
-          // Manager/Team Lead approval to actual DONE
-          task.status = "done";
+          // Manager/Team Lead approval to closed
+          task.status = "closed";
           await task.save();
 
-          // If Team Lead approved from pending_review -> notify Manager
-          if (isTeamLead(me.role) && prevStatus === "pending_review") {
+          // If Team Lead approved from review_approved -> notify Manager
+          if (isTeamLead(me.role) && prevStatus === "review_approved") {
             const manager = await findOneByRole(ownerId, /^manager$/i);
             await notify(
               ownerId,
               clientId,
               me._id,
               manager?._id,
-              `Task approved & done: ${task.title}`,
-              `Team Lead approved "${task.title}". Marked as done.`
+              `Task review approved: ${task.title}`,
+              `Team Lead approved "${task.title}" for closing.`
             );
           }
 
@@ -336,7 +355,7 @@ exports.updateTask = async (req, res) => {
           return res.json(populated);
         }
       } else {
-        // Any other status (todo/in_progress/blocked/pending_review etc.)
+        // Any other allowed status
         task.status = requested;
       }
     }
