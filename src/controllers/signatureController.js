@@ -18,7 +18,10 @@ const storage = multer.diskStorage({
     cb(null, "uploads/signatures/");
   },
   filename: function (req, file, cb) {
-    cb(null, "signature_" + req.user._id + path.extname(file.originalname));
+    // Key the signature image by the company owner so an isAdmin employee
+    // writes the owner's signature (not a per-employee one).
+    const ownerId = req.user.owner || req.user._id;
+    cb(null, "signature_" + ownerId + path.extname(file.originalname));
   },
 });
 const upload = multer({ storage });
@@ -66,7 +69,8 @@ async function getCompanyContext(ownerId) {
 -------------------------------------------------------- */
 const saveSignature = async (req, res) => {
   try {
-    const owner = req.user._id;
+    // Owner-keyed: an isAdmin employee acts on the company owner's signature.
+    const owner = req.user.owner || req.user._id;
     const { signatureText } = req.body; // HTML string from Quill
 
     let signatureImage;
@@ -101,7 +105,8 @@ const saveSignature = async (req, res) => {
 -------------------------------------------------------- */
 const getMySignature = async (req, res) => {
   try {
-    const owner = req.user._id;
+    // Owner-keyed: an isAdmin employee sees the company owner's signature.
+    const owner = req.user.owner || req.user._id;
 
     const signature = await Signature.findOne({ owner });
     if (!signature)

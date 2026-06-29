@@ -19,7 +19,9 @@ const DEFAULT_HTML = `
 async function getOfferEmailTemplate(req, res) {
   try {
     const key = String(req.query.key || "offer_letter");
-    let ownerId = req.user._id;
+    // Owner-keyed: an isAdmin employee must read the company owner's template
+    // (req.user._id is the employee id under route-level requireAuth).
+    let ownerId = req.user.owner || req.user._id;
     if (!(ownerId instanceof mongoose.Types.ObjectId)) {
       ownerId = new mongoose.Types.ObjectId(ownerId);
     }
@@ -36,7 +38,8 @@ async function getOfferEmailTemplate(req, res) {
 async function saveOfferEmailTemplate(req, res) {
   try {
     const { key = "offer_letter", subject = DEFAULT_SUBJECT, html = DEFAULT_HTML } = req.body || {};
-    let ownerId = req.user._id;
+    // Owner-keyed: an isAdmin employee saves to the company owner's template.
+    let ownerId = req.user.owner || req.user._id;
     if (!(ownerId instanceof mongoose.Types.ObjectId)) {
       ownerId = new mongoose.Types.ObjectId(ownerId);
     }

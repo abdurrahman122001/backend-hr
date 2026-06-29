@@ -137,32 +137,37 @@ router.get("/", requireAuth, async (req, res) => {
 router.post("/authorize-decryption", requireEmpAuth, async (req, res) => {
   try {
     const { password } = req.body || {};
-    if (!password) {
-      return res
-        .status(400)
-        .json({ status: "error", message: "Password is required" });
-    }
 
-    // Re-authenticate with the account password. requireEmpAuth accepts both
-    // Employee tokens AND admin/HR User tokens, so the subject may live in
-    // either collection — look in both before giving up.
+    // requireEmpAuth accepts both Employee tokens AND admin/HR User tokens, so
+    // the subject may live in either collection — look in both before giving up.
     let subject = await Employee.findById(req.employee._id).select(
       "password owner"
     );
     if (!subject) {
       subject = await User.findById(req.employee._id).select("password owner");
     }
-    if (!subject || !subject.password) {
+    if (!subject) {
       return res
         .status(401)
         .json({ status: "error", message: "Unable to verify your account" });
     }
 
-    const ok = await subject.comparePassword(password);
-    if (!ok) {
-      return res
-        .status(401)
-        .json({ status: "error", message: "Incorrect password" });
+    // If a password is supplied (manual unlock), verify it. If it is omitted,
+    // the authenticated session itself authorizes viewing the employee's OWN
+    // salary — they can only fetch their own slips via GET /salary-slips, so the
+    // key only unlocks their own data.
+    if (password) {
+      if (!subject.password) {
+        return res
+          .status(401)
+          .json({ status: "error", message: "Unable to verify your account" });
+      }
+      const ok = await subject.comparePassword(password);
+      if (!ok) {
+        return res
+          .status(401)
+          .json({ status: "error", message: "Incorrect password" });
+      }
     }
 
     // Resolve the owner (company root) that holds the decryption key
