@@ -823,42 +823,24 @@ router.post("/loan/:employeeId", async (req, res) => {
       }),
     );
 
-    // Create or update loan
-    let loan = await LoanDetail.findOne({ employee: employeeId, type });
-
-    if (loan) {
-      // Update existing loan
-      loan.type = type || loan.type;
-      loan.loanAllowanceField = type === "Loan Allowance" ? (loanAllowanceField || null) : null;
-      loan.loanAmount = encryptedData.loanAmount;
-      loan.loanTerm = loanTerm;
-      loan.markupType = markupType;
-      loan.markupValue = markupValue;
-      loan.scheduleStartMonth = scheduleStartMonth;
-      loan.scheduleStartYear = scheduleStartYear;
-      loan.monthlyInstallment = encryptedData.monthlyInstallment;
-      loan.totalMarkup = encryptedData.totalMarkup;
-      loan.totalToBePaid = encryptedData.totalToBePaid;
-      loan.paymentSchedule = encryptedPaymentSchedule;
-      await loan.save();
-    } else {
-      // Create new loan
-      loan = await LoanDetail.create({
-        employee: employeeId,
-        type,
-        loanAllowanceField: type === "Loan Allowance" ? (loanAllowanceField || null) : null,
-        loanAmount: encryptedData.loanAmount,
-        loanTerm,
-        markupType,
-        markupValue,
-        scheduleStartMonth,
-        scheduleStartYear,
-        monthlyInstallment: encryptedData.monthlyInstallment,
-        totalMarkup: encryptedData.totalMarkup,
-        totalToBePaid: encryptedData.totalToBePaid,
-        paymentSchedule: encryptedPaymentSchedule,
-      });
-    }
+    // Always create a NEW loan record. Each loan is independent — a second loan
+    // of the same type for the same employee must not overwrite the previous one.
+    // (Edits to an existing loan go through the dedicated PATCH endpoints.)
+    const loan = await LoanDetail.create({
+      employee: employeeId,
+      type,
+      loanAllowanceField: type === "Loan Allowance" ? (loanAllowanceField || null) : null,
+      loanAmount: encryptedData.loanAmount,
+      loanTerm,
+      markupType,
+      markupValue,
+      scheduleStartMonth,
+      scheduleStartYear,
+      monthlyInstallment: encryptedData.monthlyInstallment,
+      totalMarkup: encryptedData.totalMarkup,
+      totalToBePaid: encryptedData.totalToBePaid,
+      paymentSchedule: encryptedPaymentSchedule,
+    });
 
     // Recompute salary slips for this employee
     await recomputeOtherLoansForExistingSlips(employeeId, ownerId);

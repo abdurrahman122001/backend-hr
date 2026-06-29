@@ -3,8 +3,11 @@ const PDFDocument = require("pdfkit");
 const jwt = require("jsonwebtoken");
 const router = express.Router();
 const requireAuth = require("../middleware/auth");
+const requireEmpAuth = require("../middleware/empAuth");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
+const User = require("../models/Users");
+const DecryptionKey = require("../models/DecryptionKey");
 const mongoose = require("mongoose");
 const { ObjectId } = mongoose.Types;
 const { encrypt, decrypt } = require("../utils/encryption");
@@ -123,6 +126,65 @@ router.get("/", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("Error fetching salary slips:", err);
     res.status(500).json({ status: "error", message: err.message });
+  }
+});
+
+// ---------- AUTHORIZE self-service salary decryption (EMPLOYEE) ----------
+// Lets a logged-in employee retrieve their company's salary decryption key
+// after re-confirming their own account password, so they can view their own
+// salary slips without an HR-provided key. Employees can only fetch their own
+// slips via GET /salary-slips, so the key only unlocks their own data here.
+router.post("/authorize-decryption", requireEmpAuth, async (req, res) => {
+  try {
+    const { password } = req.body || {};
+    if (!password) {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Password is required" });
+    }
+
+    // Re-authenticate with the account password. requireEmpAuth accepts both
+    // Employee tokens AND admin/HR User tokens, so the subject may live in
+    // either collection — look in both before giving up.
+    let subject = await Employee.findById(req.employee._id).select(
+      "password owner"
+    );
+    if (!subject) {
+      subject = await User.findById(req.employee._id).select("password owner");
+    }
+    if (!subject || !subject.password) {
+      return res
+        .status(401)
+        .json({ status: "error", message: "Unable to verify your account" });
+    }
+
+    const ok = await subject.comparePassword(password);
+    if (!ok) {
+      return res
+        .status(401)
+        .json({ status: "error", message: "Incorrect password" });
+    }
+
+    // Resolve the owner (company root) that holds the decryption key
+    const rawOwnerId = subject.owner || req.employee.owner;
+    const ownerId = Array.isArray(rawOwnerId) ? rawOwnerId[0] : rawOwnerId;
+
+    const keyDoc =
+      (await DecryptionKey.findOne({ owner: ownerId, active: true })) ||
+      (await DecryptionKey.findOne({ owner: ownerId }));
+
+    if (!keyDoc || !keyDoc.currentAesKey) {
+      return res.status(404).json({
+        status: "error",
+        message:
+          "No decryption key configured. Contact your HR administrator.",
+      });
+    }
+
+    return res.json({ status: "success", aesKey: keyDoc.currentAesKey });
+  } catch (err) {
+    console.error("[SALARY-SLIPS] authorize-decryption error:", err);
+    res.status(500).json({ status: "error", message: "Server error" });
   }
 });
 
