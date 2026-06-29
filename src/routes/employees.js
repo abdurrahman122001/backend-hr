@@ -3,6 +3,7 @@ const router = express.Router();
 const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
+const TrustedDevice = require("../models/TrustedDevice");
 const {
   getUpcomingBirthdays,
   updateEmployeeRole,
@@ -695,17 +696,44 @@ router.delete("/:id/devices/:deviceSubId", requireAuth, async (req, res) => {
     }
 
     const scope = buildEmployeeScope(req.user);
-    const emp = await Employee.findOneAndUpdate(
-      { _id: id, ...scope },
-      { $pull: { trustedDevices: { _id: deviceSubId } } },
-      { new: true }
-    );
 
+    // Ensure the target employee is within the requester's scope (owner-scoped).
+    const emp = await Employee.findOne({ _id: id, ...scope })
+      .select("_id")
+      .lean();
     if (!emp) {
       return res.status(404).json({ error: "Employee not found or unauthorized" });
     }
 
-    res.json({ status: "success", message: "Device revoked", data: emp.trustedDevices });
+    // Capture the device being revoked BEFORE deleting it, so we know which
+    // deviceId to target for realtime logout.
+    const removedDevice = await TrustedDevice.findOne({
+      _id: deviceSubId,
+      employee: id,
+    }).lean();
+    if (!removedDevice) {
+      return res.status(404).json({ error: "Device not found" });
+    }
+
+    await TrustedDevice.deleteOne({ _id: deviceSubId, employee: id });
+
+    // 🔒 Realtime logout: tell the revoked device to sign out immediately.
+    try {
+      const io = req.app.get("io");
+      if (io && removedDevice?.deviceId) {
+        io.to(`employee_${id}`).emit("device_revoked", {
+          deviceId: removedDevice.deviceId,
+          deviceName: removedDevice.deviceName || null,
+        });
+      }
+    } catch (emitErr) {
+      console.error("[device_revoked emit error]", emitErr);
+    }
+
+    const remaining = await TrustedDevice.find({ employee: id })
+      .sort({ addedAt: -1 })
+      .lean();
+    res.json({ status: "success", message: "Device revoked", data: remaining });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

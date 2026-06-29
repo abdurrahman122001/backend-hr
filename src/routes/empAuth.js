@@ -5,6 +5,8 @@ const mongoose = require("mongoose");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const Employee = require("../models/Employees");
+const TrustedDevice = require("../models/TrustedDevice");
+const { getGeoFromIp } = require("../utils/geoIp");
 const User = require("../models/Users");
 const Shift = require("../models/Shift");
 const Attendance = require("../models/Attendance");
@@ -233,7 +235,11 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     date: todayKarachi
   });
 
-  if (existingAttendance && (existingAttendance.checkOut || existingAttendance.logoutTime)) {
+  // Only RESTORE a session that the employee actually worked — i.e. one with a
+  // real checkIn. A record that has a checkOut/logoutTime but NO checkIn is a
+  // pre-marked Leave/Absent placeholder that a logout was wrongly stamped onto;
+  // that case is handled by the placeholder-override branch below.
+  if (existingAttendance && existingAttendance.checkIn && (existingAttendance.checkOut || existingAttendance.logoutTime)) {
     let statusToRestore = existingAttendance.originalStatus;
     if (!statusToRestore) {
       if (!existingAttendance.checkOut && existingAttendance.status !== "Half Day") {
@@ -406,6 +412,92 @@ async function performAttendanceLogic(emp, nowKarachi, deviceFingerprint) {
     } catch (err) { console.error("New login log error:", err); }
 
     return { attendance, sessionStatus, attendanceExists: false };
+  }
+
+  // PRE-MARKED PLACEHOLDER OVERRIDE
+  // A record exists for today but the employee never actually logged in (no
+  // checkIn). This happens when Leave / Absent / Holiday was marked in advance.
+  // It may also carry a spurious checkOut/logoutTime if an auto-logout got
+  // stamped onto the placeholder. When the employee DOES log in on that date,
+  // convert it into a real attendance instead of leaving it as "Leave"/"Absent".
+  if (existingAttendance && !existingAttendance.checkIn) {
+    const empShift = await getEmployeeShift(emp._id);
+    const reportingTimeMinutes = emp.rt
+      ? timeToMinutes(emp.rt)
+      : (empShift && empShift.start ? timeToMinutes(empShift.start) : (15 * 60 + 30));
+
+    const gracePeriodEnd = reportingTimeMinutes + GRACE_PERIOD_MINUTES;
+    const halfDayThreshold = HALF_DAY_THRESHOLD_HOUR * 60;
+
+    let sessionStatus = "Present";
+    let isLoginAfter6PM = false;
+    if (currentTime <= gracePeriodEnd) {
+      sessionStatus = "Present";
+    } else if (currentTime < halfDayThreshold) {
+      sessionStatus = "Late";
+    } else {
+      sessionStatus = "Half Day";
+      isLoginAfter6PM = true;
+    }
+
+    const previousStatus = existingAttendance.status;
+    const previousLeaveType = existingAttendance.leaveType;
+
+    await Attendance.findByIdAndUpdate(existingAttendance._id, {
+      $set: {
+        status: sessionStatus,
+        checkIn: formatTimeOnly(nowKarachi),
+        loginTime: nowKarachi.utc().toDate(),
+        deviceFingerprint,
+        active: true,
+        isLoginAfter6PM,
+        markedByHR: false,
+        shiftId: empShift?._id || existingAttendance.shiftId || null,
+        shiftName: empShift?.name || existingAttendance.shiftName || "Default Shift",
+        shiftStartTime: empShift?.start || existingAttendance.shiftStartTime || "15:30",
+        shiftEndTime: empShift?.end || existingAttendance.shiftEndTime || "00:00",
+        timezone: TIMEZONE,
+        totalHours: 0,
+      },
+      // Clear the leave/holiday markers and any spurious checkout that a logout
+      // may have stamped onto the placeholder, so it becomes a clean login.
+      $unset: { leaveType: 1, originalStatus: 1, halfDayFromAutoLogout: 1, checkOut: 1, logoutTime: 1, proportionate: 1 },
+    });
+
+    if (sessionStatus === "Late") {
+      await applyRealTimeLateDeduction(emp._id, emp.owner, emp._id, todayKarachi);
+    } else if (sessionStatus === "Half Day") {
+      await applyRealTimeHalfDayDeduction(emp._id, emp.owner, emp._id, todayKarachi, existingAttendance._id);
+    }
+
+    try {
+      let outcome = "None";
+      let adjDays = 0;
+      if (sessionStatus === "Late") outcome = "Potential Late Deduction";
+      else if (sessionStatus === "Half Day") {
+        outcome = "Half Day Deduction";
+        adjDays = 0.5;
+      }
+
+      await logAttendanceChange({
+        ownerId: emp.owner,
+        performerId: emp._id,
+        performerType: 'Employee',
+        performerName: emp.name,
+        employeeId: emp._id,
+        attendanceDate: todayKarachi,
+        oldStatus: previousStatus,
+        newStatus: sessionStatus,
+        oldLeaveType: previousLeaveType || "None",
+        newLeaveType: "None",
+        outcome,
+        adjustedDays: adjDays,
+        details: `Auto Login (overrode pre-marked ${previousStatus || "record"})`,
+      });
+    } catch (err) { console.error("Pre-marked override log error:", err); }
+
+    const freshAttendance = await Attendance.findById(existingAttendance._id).lean();
+    return { attendance: freshAttendance, sessionStatus: freshAttendance.status, attendanceExists: true };
   }
 
   return { attendance: existingAttendance, sessionStatus: existingAttendance.status, attendanceExists: true };
@@ -744,7 +836,7 @@ router.post("/reset-password/:token", async (req, res) => {
 const codes = new Map();
 
 router.post("/login", async (req, res) => {
-  const { identifier, companyEmail, password, deviceFingerprint, deviceToken, testDate } = req.body;
+  const { identifier, companyEmail, password, deviceFingerprint, deviceToken, deviceName, testDate } = req.body;
 
   // Support both old `companyEmail` key and new `identifier` key
   const rawIdentifier = (identifier || companyEmail || "").trim();
@@ -771,14 +863,14 @@ router.post("/login", async (req, res) => {
 
     if (isEmail) {
       emp = await Employee.findOne({ companyEmail: rawIdentifier }).select(
-        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+        "_id companyEmail password role owner name department status rt shifts employeeId cnic"
       );
     } else {
       // Try employeeId first (exact match, case-insensitive)
       emp = await Employee.findOne({
         employeeId: { $regex: `^${rawIdentifier}$`, $options: "i" }
       }).select(
-        "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+        "_id companyEmail password role owner name department status rt shifts employeeId cnic"
       );
 
       // If not found by employeeId, try CNIC (strip dashes from stored value and compare)
@@ -787,7 +879,7 @@ router.post("/login", async (req, res) => {
         const candidates = await Employee.find({
           cnic: { $exists: true, $ne: "" }
         }).select(
-          "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+          "_id companyEmail password role owner name department status rt shifts employeeId cnic"
         ).lean();
 
         emp = candidates.find(e => e.cnic && e.cnic.replace(/-/g, "") === normalizedInput) || null;
@@ -795,7 +887,7 @@ router.post("/login", async (req, res) => {
         if (emp) {
           // Re-fetch as Mongoose document so comparePassword works
           emp = await Employee.findById(emp._id).select(
-            "_id companyEmail password role owner name trustedDevices department status rt shifts employeeId cnic"
+            "_id companyEmail password role owner name department status rt shifts employeeId cnic"
           );
         }
       }
@@ -867,11 +959,39 @@ router.post("/login", async (req, res) => {
     // ✅ DEV MODE BYPASSED: User wants to test 2FA flow
     const devModeAutoTrust = false;
 
-    const isTrusted = emp.trustedDevices?.some(
-      (d) =>
-        (deviceFingerprint && d.deviceFingerprint === deviceFingerprint) ||
-        (deviceToken && d.deviceId === deviceToken)
-    );
+    const deviceOr = [];
+    if (deviceFingerprint) deviceOr.push({ deviceFingerprint });
+    if (deviceToken) deviceOr.push({ deviceId: deviceToken });
+    const matchedDevice = deviceOr.length
+      ? await TrustedDevice.findOne({ employee: emp._id, $or: deviceOr })
+      : null;
+    const isTrusted = !!matchedDevice;
+
+    // ✅ Keep the trust anchors fresh on every trusted login so they don't
+    // silently age out. If the device was matched (by fingerprint OR cookie),
+    // refresh its stored fingerprint to the current one and bump addedAt. The
+    // matched device's deviceId is returned below so the client can renew its
+    // 1-year cookie even when it matched purely on fingerprint.
+    if (matchedDevice) {
+      if (deviceFingerprint && matchedDevice.deviceFingerprint !== deviceFingerprint) {
+        matchedDevice.deviceFingerprint = deviceFingerprint;
+      }
+      if (deviceName && !matchedDevice.deviceName) matchedDevice.deviceName = deviceName;
+      // Backfill geolocation once for trusted devices that don't have it yet.
+      if (!matchedDevice.location) {
+        const refreshIp =
+          req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "";
+        if (refreshIp && !matchedDevice.ip) matchedDevice.ip = refreshIp;
+        const geo = await getGeoFromIp(refreshIp || matchedDevice.ip);
+        if (geo) {
+          matchedDevice.city = geo.city;
+          matchedDevice.country = geo.country;
+          matchedDevice.location = geo.location;
+        }
+      }
+      matchedDevice.addedAt = new Date();
+      await matchedDevice.save().catch((e) => console.error("trusted device refresh error", e));
+    }
 
     // UNRECOGNIZED DEVICE (2FA flow)
     if (!isTrusted) {
@@ -934,6 +1054,7 @@ router.post("/login", async (req, res) => {
       return res.json({
         message: "Login successful (Restricted hours: 12 AM - 8 AM Karachi time. No attendance recorded)",
         token,
+        deviceToken: matchedDevice?.deviceId,
         user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
         restrictedHours: true,
         expiresIn: TOKEN_EXPIRY_SECONDS,
@@ -948,14 +1069,16 @@ router.post("/login", async (req, res) => {
       const userAgent = req.headers["user-agent"] || "unknown";
       const ip = req.headers["x-forwarded-for"]?.split(",")[0]?.trim() || req.ip || "unknown";
 
-      emp.trustedDevices.push({
+      await TrustedDevice.create({
+        employee: emp._id,
+        owner: emp.owner,
         deviceId,
         deviceFingerprint,
+        deviceName,
         userAgent,
         ip,
         addedAt: new Date(),
       });
-      await emp.save();
     }
 
     console.log(`🔐 [LOGIN] Employee: ${emp.companyEmail}, calling performAttendanceLogic...`);
@@ -973,6 +1096,7 @@ router.post("/login", async (req, res) => {
       return res.json({
         message: "Login successful (Manual Marking mode - no auto-attendance).",
         token,
+        deviceToken: matchedDevice?.deviceId,
         user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
         attendanceId: attendanceResult.attendance?._id || null,
         sessionStatus: attendanceResult.sessionStatus,
@@ -995,6 +1119,7 @@ router.post("/login", async (req, res) => {
       return res.json({
         message: "Login successful (non-working day - attendance not marked).",
         token,
+        deviceToken: matchedDevice?.deviceId,
         user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
         attendanceId: null,
         sessionStatus: "Non-Working Day",
@@ -1036,6 +1161,7 @@ router.post("/login", async (req, res) => {
     return res.json({
       message: attendanceResult.attendanceExists ? "Login successful (attendance already marked)." : "Login successful (trusted device).",
       token,
+      deviceToken: matchedDevice?.deviceId,
       user: { id: emp._id, name: emp.name, companyEmail: emp.companyEmail, role: emp.role, owner: emp.owner, department: emp.department },
       attendanceId: attendance?._id,
       sessionStatus: sessionStatus,
@@ -1054,7 +1180,7 @@ router.post("/login", async (req, res) => {
 });
 
 router.post("/confirm-code", async (req, res) => {
-  const { code, deviceFingerprint } = req.body;
+  const { code, deviceFingerprint, deviceName } = req.body;
   const tempToken = req.headers.authorization?.split(" ")[1];
 
   if (!tempToken)
@@ -1078,7 +1204,7 @@ router.post("/confirm-code", async (req, res) => {
     codes.delete(decoded.id);
 
     const emp = await Employee.findById(decoded.id).select(
-      "_id companyEmail role owner name trustedDevices rt shifts"
+      "_id companyEmail role owner name rt shifts"
     );
 
     const userAgent = req.headers["user-agent"] || "unknown";
@@ -1087,30 +1213,45 @@ router.post("/confirm-code", async (req, res) => {
       req.ip ||
       "unknown";
 
-    const deviceIndex = emp.trustedDevices.findIndex(
-      (d) => d.deviceFingerprint === deviceFingerprint
-    );
+    const existingDevice = await TrustedDevice.findOne({
+      employee: emp._id,
+      deviceFingerprint,
+    });
+
+    const geo = await getGeoFromIp(ip);
 
     let deviceId;
-    if (deviceIndex > -1) {
+    if (existingDevice) {
       // ✅ Device fingerprint already known — KEEP the existing deviceId so the
-      // browser cookie stays valid. Only refresh metadata (IP, userAgent).
-      deviceId = emp.trustedDevices[deviceIndex].deviceId;
-      emp.trustedDevices[deviceIndex].userAgent = userAgent;
-      emp.trustedDevices[deviceIndex].ip = ip;
-      emp.trustedDevices[deviceIndex].addedAt = new Date();
+      // browser cookie stays valid. Only refresh metadata (IP, userAgent, geo).
+      deviceId = existingDevice.deviceId;
+      existingDevice.userAgent = userAgent;
+      existingDevice.ip = ip;
+      if (deviceName) existingDevice.deviceName = deviceName;
+      if (geo) {
+        existingDevice.city = geo.city;
+        existingDevice.country = geo.country;
+        existingDevice.location = geo.location;
+      }
+      existingDevice.addedAt = new Date();
+      await existingDevice.save();
     } else {
       // 🆕 Brand new device — generate a fresh permanent token
       deviceId = crypto.randomBytes(32).toString("hex");
-      emp.trustedDevices.push({
+      await TrustedDevice.create({
+        employee: emp._id,
+        owner: emp.owner,
         deviceId,
         deviceFingerprint,
+        deviceName,
         userAgent,
         ip,
+        city: geo?.city,
+        country: geo?.country,
+        location: geo?.location,
         addedAt: new Date(),
       });
     }
-    await emp.save();
     const token = jwt.sign(
       { id: emp._id, role: emp.role, owner: emp.owner },
       JWT_SECRET,
@@ -1272,6 +1413,20 @@ router.post("/logout", requireAuth, async (req, res) => {
     }
 
     console.log(`📊 [LOGOUT] Found attendance: ${attendance._id}, date: ${attendance.date}, status: ${attendance.status}, hasCheckout: ${!!attendance.checkOut}`);
+
+    // Guard: never log out of a record the employee never logged into. A record
+    // with no checkIn is a pre-marked Leave/Absent/Holiday placeholder; stamping
+    // a checkOut/Half-Day onto it corrupts it (and would later be "restored" as
+    // leave on next login). Leave such placeholders untouched.
+    if (!attendance.checkIn) {
+      console.warn(`⚠️ [LOGOUT] Skipping logout on placeholder (no checkIn): ${attendance._id} status=${attendance.status}`);
+      return res.json({
+        message: "No active session to log out (record has no check-in).",
+        attendanceId: attendance._id,
+        status: attendance.status,
+        skipped: true,
+      });
+    }
 
     const attendanceDate = attendance.date; // The day they actually logged in (important)
 

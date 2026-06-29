@@ -11,7 +11,7 @@ exports.getMe = async (req, res) => {
     if (req.user.isEmployeeFallback || req.user.isEmployee) {
       const Employee = require('../models/Employees');
       const emp = await Employee.findById(req.user.employeeId || req.user._id)
-        .select('name companyEmail role photographUrl');
+        .select('name companyEmail role photographUrl department designation employeeId rt reportingTime reportingTimeRange joiningDate graceTime graceMinutes');
       if (emp) {
         return res.json({
           _id: emp._id,
@@ -20,6 +20,15 @@ exports.getMe = async (req, res) => {
           email: emp.companyEmail,
           role: req.user.role || emp.role,
           photographUrl: emp.photographUrl || null,
+          department: emp.department || "",
+          designation: emp.designation || "",
+          employeeId: emp.employeeId || "",
+          empId: emp.employeeId || emp._id.toString(),
+          rt: emp.rt || emp.reportingTime || emp.reportingTimeRange || "",
+          reportingTime: emp.reportingTime || emp.rt || emp.reportingTimeRange || "",
+          reportingTimeRange: emp.reportingTimeRange || "",
+          joiningDate: emp.joiningDate || null,
+          graceTime: emp.graceTime || emp.graceMinutes,
           isEmployee: true,
         });
       }
