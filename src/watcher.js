@@ -504,25 +504,44 @@ async function processMessage(stream, uid) {
         await sendSafeEmail({
           to: fromAddr,
           subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
-          html: `...`, // Your HTML here
+          html: `
+            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+              <p style="font-size:15px; line-height:1.7;">Dear <strong>${bestName}</strong>,</p>
+              <p style="font-size:15px; line-height:1.7;">🎉 Welcome aboard! We're absolutely thrilled to have you join the <strong>${COMPANY_NAME}</strong> family. Thank you for accepting our offer your journey with us officially begins now.</p>
+              <p style="font-size:15px; line-height:1.7;">Here's what happens next in your onboarding:</p>
+              <ul style="margin:0 0 1em 2em;padding:0;">
+                <li style="margin-bottom:6px;">📄 We'll share your onboarding documents and contract for your review.</li>
+                <li style="margin-bottom:6px;">📝 You'll be asked to complete your employee profile so we can set up your payroll, benefits, and records.</li>
+                <li style="margin-bottom:6px;">📅 Our team will reach out with your start date and first-day details.</li>
+                <li style="margin-bottom:6px;">🤝 If you have any questions, simply reply to this email we're here to help.</li>
+              </ul>
+              <p style="font-size:15px; line-height:1.7;">We can't wait to see the great things we'll achieve together. Once again, welcome to the team! 💙</p>
+              ${signatureBlock}
+            </div>
+          `,
           ownerId,
           type: 'offer_acceptance'
         });
 
-        // Notify admins
-        const admins = await User.find({
-          role: { $in: ["admin", "super-admin"] },
-          email: { $exists: true, $ne: "" }
-        });
-
-        for (const admin of admins) {
+        // Notify only the relevant owner (the account that owns this candidate),
+        // not every admin across all tenants.
+        const owner = await User.findById(ownerId);
+        if (owner?.email) {
           await sendSafeEmail({
-            to: admin.email,
+            to: owner.email,
             subject: `🎉 Offer Accepted: ${bestName}`,
-            html: `...`, // Your HTML here
+            html: `
+              <div style="font-family: Arial, Helvetica, sans-serif;font-size:15px;line-height:1.7;color:#212121;">
+                <p style="font-size:15px; line-height:1.7;">Good news! 🎉</p>
+                <p style="font-size:15px; line-height:1.7;"><strong>${bestName}</strong> (${fromAddr}) has <strong>accepted</strong> the offer and has been moved to <strong>Onboarding</strong>.</p>
+                <p style="font-size:15px; line-height:1.7;">You can review their progress and onboarding documents from your dashboard.</p>
+              </div>
+            `,
             ownerId,
             type: 'admin_notification'
           });
+        } else {
+          console.warn(`⚠️ Owner ${ownerId} has no email on file; skipping owner notification`);
         }
       },
 
