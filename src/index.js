@@ -219,24 +219,6 @@ app.use(
   ),
 );
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      // Allow server-to-server, Postman, curl
-      if (!origin) return cb(null, true);
-      if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  }),
-);
-// (Optional) CORS error handler to avoid generic 500s
-app.use((err, _req, res, next) => {
-  if (err && /CORS blocked/.test(String(err.message))) {
-    return res.status(403).json({ error: err.message });
-  }
-  return next(err);
-});
 // ---------- Body parsers ----------
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));

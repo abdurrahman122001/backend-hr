@@ -25,6 +25,16 @@ function buildPublicUrl(req, filename) {
   return `${base}/uploads/${filename}`;
 }
 
+function getInvalidLeaveDateTime(dates = []) {
+  return dates.find(
+    (day) =>
+      ((day?.type === "late" || day?.type === "early_leave") &&
+        !String(day?.time || "").trim()) ||
+      (day?.type === "half" &&
+        (!String(day?.checkInTime || "").trim() || !String(day?.checkOutTime || "").trim())),
+  );
+}
+
 // Helper function to process employee data and add full photo URLs
 function processEmployeeWithPhoto(employee, req) {
   if (!employee) return employee;
@@ -627,6 +637,12 @@ exports.applyLeave = async (req, res) => {
         .json({ message: "Please select at least one date" });
     }
 
+    if (getInvalidLeaveDateTime(dates)) {
+      return res.status(400).json({
+        message: "Please add the required time for the selected day type",
+      });
+    }
+
     // NOTE: Past date validation removed - users can now apply for past dates
     // This allows back-dating leave requests for record-keeping purposes
 
@@ -879,6 +895,12 @@ exports.updateLeave = async (req, res) => {
 
     // Update fields
     if (dates && dates.length > 0) {
+      if (getInvalidLeaveDateTime(dates)) {
+        return res.status(400).json({
+          message: "Please add the required time for the selected day type",
+        });
+      }
+
       leave.dates = dates;
       
       const sortedDates = [...dates].sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -1273,6 +1295,11 @@ exports.approveLeave = async (req, res) => {
     try {
       const Attendance = require("../models/Attendance");
 
+      // Only mark attendance for dates that have already occurred (today or
+      // earlier). Future leave dates are intentionally NOT pre-marked here —
+      // leaveSyncCron creates each day's record when that day actually arrives.
+      const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
+
       for (const dateObj of leave.dates) {
         // early_leave / late dates = employee was physically present; leave it as
         // whatever attendance already exists (do NOT overwrite it with "Leave").
@@ -1294,6 +1321,10 @@ exports.approveLeave = async (req, res) => {
           // Fallback
           dateStr = new Date(dateObj.date).toISOString().split('T')[0];
         }
+
+        // Skip future dates — attendance for them is created on the actual day
+        // by leaveSyncCron, not pre-marked at approval time.
+        if (dateStr > todayStr) continue;
 
         const leaveDate = new Date(dateStr);
 
@@ -1809,28 +1840,27 @@ exports.getPendingLeaves = async (req, res) => {
       let canAct = false;
       let waitingFor = null;
       try {
-        if (user && (user.isAdmin || user.role === 'hr' || user.role === 'admin')) {
+        const userIdStr = String(user.employeeId || user._id);
+        const isAdminUser = !!(user && (user.isAdmin || user.role === 'hr' || user.role === 'admin'));
+        const idx = leave.currentApprovalIndex || 0;
+        const approver = Array.isArray(leave.approvalChain) ? leave.approvalChain[idx] : null;
+        if (approver) {
+          const approverId = String(approver._id || approver);
+          if (approverId === userIdStr) {
+            canAct = true;
+          } else {
+            canAct = false;
+            waitingFor = {
+              id: approverId,
+              name: approver.name || null,
+              role: approver.role || null,
+            };
+          }
+        } else if (isAdminUser && idx >= (Array.isArray(leave.approvalChain) ? leave.approvalChain.length : 0)) {
           canAct = true;
         } else {
-          const userIdStr = String(user.employeeId || user._id);
-          const idx = leave.currentApprovalIndex || 0;
-          const approver = Array.isArray(leave.approvalChain) ? leave.approvalChain[idx] : null;
-          if (approver) {
-            const approverId = String(approver._id || approver);
-            if (approverId === userIdStr) {
-              canAct = true;
-            } else {
-              canAct = false;
-              waitingFor = {
-                id: approverId,
-                name: approver.name || null,
-                role: approver.role || null,
-              };
-            }
-          } else {
-            // If no approvalChain defined, default to false for non-admins
-            canAct = false;
-          }
+          // If no approvalChain/current approver is defined, default to false.
+          canAct = false;
         }
       } catch (e) {
         canAct = false;
@@ -2229,6 +2259,12 @@ exports.updateLeave = async (req, res) => {
 
     // Recalculate if dates changed
     if (dates && dates.length > 0) {
+      if (getInvalidLeaveDateTime(dates)) {
+        return res.status(400).json({
+          message: "Please add the required time for the selected day type",
+        });
+      }
+
       const sortedDates = [...dates].sort(
         (a, b) => new Date(a.date) - new Date(b.date),
       );
