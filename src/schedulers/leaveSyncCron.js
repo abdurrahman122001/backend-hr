@@ -58,11 +58,27 @@ cron.schedule("45 23 * * *", async () => {
                     continue;
                 }
 
-                // Skip if already processed by approveLeave (status is Leave and markedByHR)
-                if (existingAttendance && existingAttendance.status === "Leave" && existingAttendance.markedByHR) {
+                // Skip if already processed by approveLeave (markedByHR with a final
+                // leave status). Must include "Half Day" — half-day leaves are written
+                // as status "Half Day", not "Leave", so matching only "Leave" caused
+                // half-days to be re-processed here (double-deducting the balance and
+                // potentially flipping the day to Absent on the balance check below).
+                if (existingAttendance && existingAttendance.markedByHR &&
+                    ["Leave", "Half Day"].includes(existingAttendance.status)) {
                     console.log(`[LeaveSync] Employee ${employeeId} already processed for ${todayStr} (approved via leave request). Skipping.`);
                     continue;
                 }
+
+                // If approveLeave already deducted balance & salary for this leave
+                // at approval time, do NOT deduct again here — only mark the day's
+                // attendance/session below. approveLeave records a LeaveTransaction
+                // for the leave (and intentionally does not pre-create future-dated
+                // attendance), so the transaction's presence means the balance was
+                // already consumed and this run should only materialise the record.
+                const alreadyDeductedAtApproval = await LeaveTransaction.exists({
+                    sourceModel: "ApplyLeave",
+                    sourceId: leave._id,
+                });
 
                 // Logic for deduction and marking
                 let daysToDeduct = (dateEntry.type === "half") ? 0.5 : 1;
@@ -79,8 +95,9 @@ cron.schedule("45 23 * * *", async () => {
                     sessionStatus = "late";
                 }
 
-                // Check balance if leave is supposed to be paid
-                if (finalIsPaid) {
+                // Check balance if leave is supposed to be paid (skip when the
+                // balance was already deducted at approval — trust that decision).
+                if (finalIsPaid && !alreadyDeductedAtApproval) {
                     const leaveYear = getLeaveYear(todayStr);
                     const balance = await LeaveYearBalance.findOne({
                         owner: ownerId,
@@ -142,8 +159,12 @@ cron.schedule("45 23 * * *", async () => {
                 );
 
                 // 3. Update Leave Balances and Transactions
+                // Skip entirely when approveLeave already deducted at approval time —
+                // the attendance/session above is all this run needs to do.
                 const leaveYearForDeduction = getLeaveYear(todayStr);
-                if (finalIsPaid) {
+                if (alreadyDeductedAtApproval) {
+                    console.log(`[LeaveSync] Marked attendance for ${employeeId} on ${todayStr} (balance already deducted at approval).`);
+                } else if (finalIsPaid) {
                     // Increment usedPaid in Employee model
                     await Employee.findByIdAndUpdate(employeeId, {
                         $inc: { "leaveEntitlement.usedPaid": daysToDeduct },
