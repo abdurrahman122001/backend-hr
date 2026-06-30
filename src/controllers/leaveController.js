@@ -1273,6 +1273,11 @@ exports.approveLeave = async (req, res) => {
     try {
       const Attendance = require("../models/Attendance");
 
+      // Only mark attendance for dates that have already occurred (today or
+      // earlier). Future leave dates are intentionally NOT pre-marked here —
+      // leaveSyncCron creates each day's record when that day actually arrives.
+      const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
+
       for (const dateObj of leave.dates) {
         // early_leave / late dates = employee was physically present; leave it as
         // whatever attendance already exists (do NOT overwrite it with "Leave").
@@ -1294,6 +1299,10 @@ exports.approveLeave = async (req, res) => {
           // Fallback
           dateStr = new Date(dateObj.date).toISOString().split('T')[0];
         }
+
+        // Skip future dates — attendance for them is created on the actual day
+        // by leaveSyncCron, not pre-marked at approval time.
+        if (dateStr > todayStr) continue;
 
         const leaveDate = new Date(dateStr);
 
