@@ -472,16 +472,7 @@ exports.getLeaveApprovals = async (req, res) => {
         employee: { $ne: employeeId },
         status: { $in: ["approved", "rejected"] },
       };
-      const adminEmployees = await Employee.find({
-        owner: { $in: ownerIds },
-        _id: { $ne: employeeId },
-      })
-        .select("_id")
-        .lean();
-      const adminEmployeeIds = adminEmployees.map((employee) => employee._id);
-
       const [
-        adminLeaves,
         loans,
         bonuses,
         reimbursements,
@@ -505,18 +496,6 @@ exports.getLeaveApprovals = async (req, res) => {
         closedOvertimeRaw,
         closedProfileRevisions,
       ] = await Promise.all([
-        ApplyLeave.find({
-          employee: { $in: adminEmployeeIds },
-          status: "pending",
-          isTrashed: { $ne: true },
-        })
-          .populate("employee", populateEmp)
-          .populate(populateChain)
-          .populate(populateApprovedBy)
-          .populate(populateRejectedBy)
-          .populate(populateAppliedBy)
-          .sort({ createdAt: -1 })
-          .lean(),
         LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         BonusRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         ReimbursementRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
@@ -545,7 +524,6 @@ exports.getLeaveApprovals = async (req, res) => {
       const closedOvertime = await attachOvertimeAttendance(closedOvertimeRaw);
 
       pendingAdminRequests = [
-        ...tagRequests(adminLeaves, "leave", "attendance").map((leave) => ({ ...leave, canAct: true })),
         ...tagRequests(loans, "loan", "payroll"),
         ...tagRequests(bonuses, "bonus", "payroll"),
         ...tagRequests(reimbursements, "reimbursement", "payroll"),

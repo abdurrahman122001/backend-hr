@@ -4,6 +4,26 @@ const TaskSpace = require("../models/TaskSpace");
 const Task = require("../models/Task");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
+const TASK_STATUSES = ["pending", "in_progress", "review_approved", "closed"];
+const normalizeTaskStatus = (status) => {
+  switch (String(status || "").toLowerCase()) {
+    case "in_progress":
+      return "in_progress";
+    case "review_approved":
+    case "pending_review":
+    case "review":
+      return "review_approved";
+    case "closed":
+    case "complete":
+    case "done":
+      return "closed";
+    case "pending":
+    case "todo":
+    default:
+      return "pending";
+  }
+};
+
 
 /* =========================
    ADMIN ACCESS HELPERS
@@ -119,7 +139,7 @@ exports.getMyTasks = async (req, res) => {
       owner: req.employee.owner,
       workspace: space.workspace,
     })
-      .populate("assignees", "name companyEmail avatar")
+      .populate("assignees", "name companyEmail avatar photographUrl photoUrl")
       .populate("createdBy", "name companyEmail")
       .sort({ createdAt: -1 });
 
@@ -200,7 +220,7 @@ exports.createTask = async (req, res) => {
       title,
       description,
       priority: priority || "medium",
-      status: status || "todo",
+      status: normalizeTaskStatus(status),
       assignees: taskAssignees,
       createdBy: req.employee._id,
       dueDate: dueDate || null,
@@ -208,7 +228,7 @@ exports.createTask = async (req, res) => {
 
     // Populate the response
     const populatedTask = await Task.findById(task._id)
-      .populate("assignees", "name companyEmail avatar")
+      .populate("assignees", "name companyEmail avatar photographUrl photoUrl")
       .populate("createdBy", "name companyEmail");
 
     res.status(201).json(populatedTask);
@@ -265,7 +285,7 @@ exports.updateTaskAssignee = async (req, res) => {
     // 5️⃣ Populate response
     await task.populate({
       path: "assignees",
-      select: "_id name companyEmail avatar",
+      select: "_id name companyEmail avatar photographUrl photoUrl",
     });
 
     res.json({
@@ -306,7 +326,7 @@ exports.getEmployeesForSpace = async (req, res) => {
       owner: req.employee.owner,
     }).populate({
       path: "members.employee",
-      select: "_id name companyEmail avatar isActive status",
+      select: "_id name companyEmail avatar photographUrl photoUrl isActive status",
       model: "Employee",
     });
 
@@ -333,7 +353,7 @@ exports.getEmployeesForSpace = async (req, res) => {
         owner: req.employee.owner,
         isActive: true,
         status: "active",
-      }).select("_id name companyEmail avatar isActive status");
+      }).select("_id name companyEmail avatar photographUrl photoUrl isActive status");
 
       return res.json(allEmployees);
     }
@@ -355,7 +375,7 @@ exports.updateTask = async (req, res) => {
   const { status, title, description, priority, dueDate } = req.body;
 
   // Allowed statuses (from Task model)
-  const ALLOWED_STATUSES = ["todo", "in_progress", "pending", "complete"];
+  const ALLOWED_STATUSES = TASK_STATUSES;
 
   try {
     // Find the task
@@ -378,13 +398,14 @@ exports.updateTask = async (req, res) => {
 
     // Update fields if provided
     if (status !== undefined) {
-      if (!ALLOWED_STATUSES.includes(status)) {
+      const normalizedStatus = normalizeTaskStatus(status);
+      if (!ALLOWED_STATUSES.includes(normalizedStatus)) {
         return res.status(400).json({
           message:
-            "Invalid task status. Allowed: todo, in_progress, review, done",
+            "Invalid task status. Allowed: pending, in_progress, review_approved, closed",
         });
       }
-      task.status = status;
+      task.status = normalizedStatus;
     }
 
     if (title !== undefined) task.title = title;
@@ -406,7 +427,7 @@ exports.updateTask = async (req, res) => {
 
     // Get updated task with populated fields
     const updatedTask = await Task.findById(task._id)
-      .populate("assignees", "name companyEmail avatar")
+      .populate("assignees", "name companyEmail avatar photographUrl photoUrl")
       .populate("createdBy", "name companyEmail");
 
     res.json({
@@ -497,10 +518,10 @@ exports.getTaskStats = async (req, res) => {
 
     // Format the stats
     const formattedStats = {
-      todo: 0,
+      pending: 0,
       in_progress: 0,
-      review: 0,
-      done: 0,
+      review_approved: 0,
+      closed: 0,
       total: 0,
     };
 
@@ -543,7 +564,7 @@ exports.createSpace = async (req, res) => {
       workspace: workspaceId,
       name,
       visibleTo: visibleTo || [],
-      status: "todo",
+      status: "pending",
       isArchived: false,
     });
 
@@ -564,3 +585,4 @@ exports.createSpace = async (req, res) => {
     });
   }
 };
+

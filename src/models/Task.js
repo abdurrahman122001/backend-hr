@@ -35,8 +35,8 @@ const TaskSchema = new Schema(
 
     status: {
       type: String,
-      enum: ["todo", "in_progress", "pending", "complete"],
-      default: "todo",
+      enum: ["pending", "in_progress", "review_approved", "closed"],
+      default: "pending",
     },
 
     priority: {

@@ -31,6 +31,8 @@ const leaveSchema = new Schema(
         },
         hours: { type: Number, default: 8 },
         time: { type: String }, // For late arrival or early departure time (e.g., "10:30")
+        checkInTime: { type: String }, // For half-day check-in time (e.g., "09:30")
+        checkOutTime: { type: String }, // For half-day check-out time (e.g., "13:30")
         _id: false,
       },
     ],
