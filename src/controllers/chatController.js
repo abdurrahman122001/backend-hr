@@ -4285,16 +4285,29 @@ exports.addReaction = async (req, res) => {
     // ✅ EMIT SOCKET EVENT FOR REACTION UPDATE
     const io = req.app.get("io");
     if (io) {
+      const payload = {
+        messageId,
+        reactions: updatedMessage.reactions,
+        updatedBy: req.employee._id.toString(),
+        updatedAt: new Date(),
+      };
+
       const room = message.space
         ? `space_${message.space}`
         : `conversation_${message.conversation}`;
 
-      io.to(room).emit("message_reaction_updated", {
-        messageId,
-        reactions: updatedMessage.reactions,
-        updatedBy: req.employee._id,
-        updatedAt: new Date(),
-      });
+      io.to(room).emit("message_reaction_updated", payload);
+
+      // Also deliver to each DM participant's personal room so the update
+      // arrives even if a participant hasn't joined the conversation room.
+      if (!message.space && conversation?.participants?.length) {
+        conversation.participants.forEach((participantId) => {
+          io.to(`user_${participantId.toString()}`).emit(
+            "message_reaction_updated",
+            payload
+          );
+        });
+      }
     }
 
     res.json({
