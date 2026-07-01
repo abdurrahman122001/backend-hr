@@ -690,7 +690,7 @@ exports.applyLeave = async (req, res) => {
       const usedAnnual = leaveSummary.annual
         ? leaveSummary.annual.totalDays
         : 0;
-      const totalEntitlement = employee.leaveEntitlement.total;
+      const totalEntitlement = employee.leaveEntitlement?.total || 0;
 
       if (usedAnnual + totalDays > totalEntitlement) {
         // Just add a warning but don't block - let admin decide

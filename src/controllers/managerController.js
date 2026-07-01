@@ -540,27 +540,10 @@ exports.assignClient = async (req, res) => {
         .status(404)
         .json({ error: "Client not found or not under your owner" });
 
-    // Allow if: Manager/Team Lead role OR is a senior in EmployeeHierarchy for the target employees
-    // For unassign (empty employeeIds), check if user is senior for currently assigned employees
-    const isManagerRole = await hasCrmAccess(req.employee);
-    let isHierarchySenior = false;
-    if (!isManagerRole) {
-      const targetIds = employeeIds.length > 0
-        ? employeeIds
-        : (clientBeforeUpdate.assignedTo?.map((emp) => (emp._id || emp).toString()) || []);
-
-      if (Array.isArray(targetIds) && targetIds.length > 0) {
-        const seniorLink = await EmployeeHierarchy.exists({
-          owner: me.owner,
-          senior: me._id,
-          junior: { $in: targetIds },
-        });
-        isHierarchySenior = !!seniorLink;
-      }
-    }
-
-    if (!isManagerRole && !isHierarchySenior) {
-      return res.status(403).json({ error: "Unauthorized: you are not a manager/team lead and do not supervise any of the target employees" });
+    // Only admins (isAdmin) may assign clients. Merely holding a CRMAccess
+    // grant does NOT grant assignment rights.
+    if (!me.isAdmin) {
+      return res.status(403).json({ error: "Unauthorized: only admins can assign clients" });
     }
 
     const previousEmployeeIds = clientBeforeUpdate.assignedTo
