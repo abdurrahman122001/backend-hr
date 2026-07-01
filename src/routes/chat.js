@@ -30,6 +30,11 @@ router.get(
   empAuth,
   chatController.getMessages
 );
+router.post(
+  "/messages/:messageId/forward",
+  empAuth,
+  chatController.forwardMessage
+);
 router.post("/messages/:messageId/star", empAuth, chatController.starMessage);
 router.delete(
   "/messages/:messageId/unstar",

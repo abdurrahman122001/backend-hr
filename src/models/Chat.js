@@ -95,6 +95,18 @@ const messageSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Message",
     },
+    // ✅ ADDED: Forwarded message tracking
+    forwarded: {
+      type: Boolean,
+      default: false,
+    },
+    forwardedFrom: {
+      name: String,
+      employee: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    },
     readBy: [
       {
         employee: {
