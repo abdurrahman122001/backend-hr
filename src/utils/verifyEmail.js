@@ -45,26 +45,45 @@ async function verifyEmail(email) {
 
     // If ZeroBounce is configured, use it
     if (process.env.ZEROBOUNCE_API_KEY && process.env.ZEROBOUNCE_API_URL) {
-      const response = await axios.get(process.env.ZEROBOUNCE_API_URL, {
-        params: {
-          api_key: process.env.ZEROBOUNCE_API_KEY,
-          email: email,
-          ip_address: ''
-        },
-        timeout: 10000, // 10 second timeout
-      });
+      try {
+        const response = await axios.get(process.env.ZEROBOUNCE_API_URL, {
+          params: {
+            api_key: process.env.ZEROBOUNCE_API_KEY,
+            email: email,
+            ip_address: ''
+          },
+          timeout: 10000, // 10 second timeout
+        });
 
-      const result = response.data;
-      console.log("ZeroBounce Response for", email, ":", result.status);
+        const result = response.data || {};
+        const status = result.status;
+        console.log("ZeroBounce Response for", email, ":", status);
 
-      // Consider 'valid', 'catch-all', and 'unknown' as acceptable
-      const isValid = ['valid', 'catch-all', 'unknown'].includes(result.status);
+        const acceptable = ['valid', 'catch-all', 'unknown'];
+        const rejectable = ['invalid', 'spamtrap', 'abuse', 'do_not_mail'];
 
-      verificationCache.set(email, { isValid, timestamp: Date.now() });
-      return isValid;
+        if (acceptable.includes(status)) {
+          verificationCache.set(email, { isValid: true, timestamp: Date.now() });
+          return true;
+        }
+        if (rejectable.includes(status)) {
+          verificationCache.set(email, { isValid: false, timestamp: Date.now() });
+          return false;
+        }
+
+        // status is undefined/unexpected — this usually means an API key/credit/
+        // config problem (ZeroBounce returns an error object, not a verdict).
+        // Don't block a possibly-valid email; fall through to the MX check below.
+        console.warn(
+          `ZeroBounce returned no usable status for ${email} (${JSON.stringify(result.error || status)}); falling back to MX check`
+        );
+      } catch (zbErr) {
+        console.warn(`ZeroBounce check failed for ${email}: ${zbErr.message}; falling back to MX check`);
+      }
     }
 
-    // If no ZeroBounce, do DNS MX check
+    // DNS MX check — used when ZeroBounce is not configured OR returned an
+    // inconclusive/error response above.
     try {
       const dns = require('dns').promises;
       await dns.resolveMx(domain);
