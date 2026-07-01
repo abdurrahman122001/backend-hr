@@ -1242,6 +1242,213 @@ exports.sendMessage = async (req, res) => {
   }
 };
 
+// ✅ ADDED: Forward an existing message to one or more employees (direct messages)
+exports.forwardMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    let { participantIds } = req.body;
+
+    // Accept either an array or a single participantId
+    if (!participantIds && req.body.participantId) {
+      participantIds = [req.body.participantId];
+    }
+
+    if (!Array.isArray(participantIds) || participantIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "At least one recipient is required",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(messageId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid message ID" });
+    }
+
+    // Load the source message and verify the requester can access it
+    const sourceMessage = await Message.findById(messageId)
+      .populate("conversation")
+      .populate("sender", "name companyEmail avatar");
+
+    if (!sourceMessage) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Message not found" });
+    }
+
+    // Verify the requester is a participant of the source conversation
+    const sourceConversation = sourceMessage.conversation;
+    if (sourceConversation && sourceConversation.participants) {
+      const isParticipant = sourceConversation.participants.some(
+        (p) => p.toString() === req.employee._id.toString()
+      );
+      if (!isParticipant) {
+        return res.status(403).json({
+          success: false,
+          error: "You do not have access to this message",
+        });
+      }
+    }
+
+    const io = req.app.get("io");
+    const results = [];
+    const errors = [];
+
+    // De-duplicate and drop self-forwards
+    const uniqueTargets = [
+      ...new Set(
+        participantIds
+          .map((id) => (id ? id.toString() : ""))
+          .filter(
+            (id) =>
+              id &&
+              mongoose.Types.ObjectId.isValid(id) &&
+              id !== req.employee._id.toString()
+          )
+      ),
+    ];
+
+    for (const participantId of uniqueTargets) {
+      try {
+        // Skip offboarded / terminated / resigned employees
+        const targetEmployee = await Employee.findById(participantId).select(
+          "status"
+        );
+        if (
+          !targetEmployee ||
+          ["offboarded", "terminated", "resigned"].includes(
+            targetEmployee.status
+          )
+        ) {
+          errors.push({ participantId, error: "Recipient is not active" });
+          continue;
+        }
+
+        // Block status check
+        const blockStatus = await Employee.getBlockStatus(
+          req.employee._id,
+          participantId
+        );
+        if (!blockStatus.canCommunicate) {
+          errors.push({ participantId, error: "Cannot message this user" });
+          continue;
+        }
+
+        // Find or create direct conversation
+        let conversation = await Conversation.findOne({
+          participants: { $all: [req.employee._id, participantId] },
+          isGroup: false,
+          space: { $exists: false },
+        });
+
+        if (!conversation) {
+          conversation = new Conversation({
+            participants: [req.employee._id, participantId],
+            isGroup: false,
+            unreadCount: new Map([
+              [req.employee._id.toString(), 0],
+              [participantId, 0],
+            ]),
+          });
+          await conversation.save();
+
+          if (io) {
+            const populatedConv = await Conversation.findById(conversation._id)
+              .populate("participants", "name companyEmail avatar photographUrl")
+              .populate("lastMessage");
+            [req.employee._id.toString(), participantId].forEach((userId) => {
+              io.to(`user_${userId}`).emit("conversation_created", {
+                conversation: {
+                  _id: populatedConv._id,
+                  participants: populatedConv.participants,
+                  isGroup: populatedConv.isGroup,
+                  unreadCount: populatedConv.unreadCount.get(userId) || 0,
+                  updatedAt: populatedConv.updatedAt,
+                  lastMessage: populatedConv.lastMessage,
+                },
+              });
+            });
+          }
+        }
+
+        // Build the forwarded message copying content/type/attachments
+        const messageData = {
+          conversation: conversation._id,
+          sender: req.employee._id,
+          receiver: participantId,
+          content: sourceMessage.content || "",
+          messageType: sourceMessage.messageType || "text",
+          attachments: (sourceMessage.attachments || []).map((att) => ({
+            filename: att.filename,
+            url: att.url,
+            mimetype: att.mimetype,
+            size: att.size,
+          })),
+          isGroupMessage: false,
+          read: false,
+          forwarded: true,
+          forwardedFrom: {
+            name: sourceMessage.sender?.name || "",
+            employee: sourceMessage.sender?._id || sourceMessage.sender,
+          },
+          readBy: [{ employee: req.employee._id, readAt: new Date() }],
+        };
+
+        const message = new Message(messageData);
+        await message.save();
+
+        // Update conversation metadata + unread count
+        conversation.lastMessage = message._id;
+        conversation.updatedAt = new Date();
+        const currentCount =
+          conversation.unreadCount.get(participantId.toString()) || 0;
+        conversation.unreadCount.set(participantId.toString(), currentCount + 1);
+        await conversation.save();
+
+        const populatedMessage = await Message.findById(message._id)
+          .populate("sender", "name companyEmail avatar")
+          .populate("receiver", "name companyEmail avatar")
+          .populate("conversation");
+
+        if (io) {
+          io.to(`conversation_${conversation._id}`).emit(
+            "receive_message",
+            populatedMessage
+          );
+        }
+
+        results.push(populatedMessage);
+      } catch (innerErr) {
+        console.error("Forward to participant error:", innerErr);
+        errors.push({ participantId, error: "Failed to forward" });
+      }
+    }
+
+    if (results.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: errors[0]?.error || "Failed to forward message",
+        errors,
+      });
+    }
+
+    res.json({
+      success: true,
+      forwardedCount: results.length,
+      messages: results,
+      errors,
+    });
+  } catch (error) {
+    console.error("Forward message error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to forward message",
+      details: error.message,
+    });
+  }
+};
+
 exports.sendDirectMessage = async (req, res) => {
   try {
     const { participantId, content, messageType = "text" } = req.body;

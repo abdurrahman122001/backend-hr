@@ -120,7 +120,7 @@ exports.getRoster = async (req, res) => {
       }).select("assignedTo").lean(),
       Employee.find(employeeQuery)
         .select(
-          "_id name email companyEmail role department designation employeeId supervisionMode supervisor supervisorMode photographUrl"
+          "_id name email companyEmail role department designation employeeId supervisionMode supervisor supervisorMode photographUrl status"
         )
         .populate("supervisor", "_id name companyEmail")
         .sort({ name: 1 }),
