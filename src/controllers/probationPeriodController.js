@@ -15,7 +15,7 @@ exports.createProbationPeriod = async (req, res) => {
       providentFundDuringProbation,
       gratuityFundAfterProbation,
       gratuityFundDuringProbation,
-      owner: req.user._id,
+      owner: req.user.owner,
     });
     await probation.save();
     res.status(201).json({ status: "success", data: probation });
@@ -27,7 +27,7 @@ exports.createProbationPeriod = async (req, res) => {
 // READ ALL (for current owner/user)
 exports.getProbationPeriods = async (req, res) => {
   try {
-    const list = await ProbationPeriod.find({ owner: req.user._id }).sort({ createdAt: -1 });
+    const list = await ProbationPeriod.find({ owner: req.user.owner }).sort({ createdAt: -1 });
     res.json({ status: "success", data: list });
   } catch (err) {
     res.status(500).json({ status: "error", message: err.message });
@@ -37,7 +37,7 @@ exports.getProbationPeriods = async (req, res) => {
 // READ ONE
 exports.getProbationPeriod = async (req, res) => {
   try {
-    const probation = await ProbationPeriod.findOne({ _id: req.params.id, owner: req.user._id });
+    const probation = await ProbationPeriod.findOne({ _id: req.params.id, owner: req.user.owner });
     if (!probation)
       return res.status(404).json({ status: "error", message: "Not found" });
     res.json({ status: "success", data: probation });
@@ -53,7 +53,7 @@ exports.updateProbationPeriod = async (req, res) => {
       providentFundAfterProbation, providentFundDuringProbation,
       gratuityFundAfterProbation, gratuityFundDuringProbation } = req.body;
     const probation = await ProbationPeriod.findOneAndUpdate(
-      { _id: req.params.id, owner: req.user._id },
+      { _id: req.params.id, owner: req.user.owner },
       {
         days,
         leaveAfterProbation,
@@ -76,7 +76,7 @@ exports.updateProbationPeriod = async (req, res) => {
 // DELETE
 exports.deleteProbationPeriod = async (req, res) => {
   try {
-    const probation = await ProbationPeriod.findOneAndDelete({ _id: req.params.id, owner: req.user._id });
+    const probation = await ProbationPeriod.findOneAndDelete({ _id: req.params.id, owner: req.user.owner });
     if (!probation)
       return res.status(404).json({ status: "error", message: "Not found" });
     res.json({ status: "success", message: "Probation period deleted." });

@@ -108,7 +108,9 @@ async function getSignature(req, res) {
       return res.status(401).json({ error: "No user context found." });
     }
 
-    const ownerId = req.user._id;
+    // Use the company owner so isAdmin employees resolve the same company data
+    // as the super-admin (req.user.owner is the company root for both).
+    const ownerId = req.user.owner || req.user._id;
 
     const signature = await Signature.findOne({ owner: ownerId });
 
@@ -402,7 +404,11 @@ async function sendOfferLetter(req, res) {
       return res.status(401).json({ error: "No user context found." });
     }
 
-    let ownerId = req.user._id;
+    // Company owner (req.user.owner) — for an isAdmin employee sending the offer
+    // this is the company root, NOT the employee's own id. The created Employee /
+    // Salary / OfferEmailGenerated records below are all keyed on this owner so
+    // they belong to the company, not the individual admin employee.
+    let ownerId = req.user.owner || req.user._id;
     if (!(ownerId instanceof mongoose.Types.ObjectId))
       ownerId = new mongoose.Types.ObjectId(ownerId);
 
@@ -415,15 +421,17 @@ async function sendOfferLetter(req, res) {
 
     /* ---------------------------------------------------------
      * ⭐ ZEROBOUNCE EMAIL VERIFICATION (with IP bypass fix)
+     * TEMPORARILY DISABLED — the deliverability check was blocking valid
+     * sends ("invalid or undeliverable"). Re-enable when ready.
      * --------------------------------------------------------- */
-    const isValidEmail = await verifyEmail(candidateEmail);
+    // const isValidEmail = await verifyEmail(candidateEmail);
 
-    if (!isValidEmail) {
-      return res.status(400).json({
-        error:
-          "The provided email address is invalid or undeliverable. Email sending has been blocked.",
-      });
-    }
+    // if (!isValidEmail) {
+    //   return res.status(400).json({
+    //     error:
+    //       "The provided email address is invalid or undeliverable. Email sending has been blocked.",
+    //   });
+    // }
     /* --------------------------------------------------------- */
 
     // Build template context
@@ -598,7 +606,7 @@ async function previewOfferLetter(req, res) {
       return res.status(401).json({ error: "No user context found." });
     }
 
-    const ownerId = req.user._id;
+    const ownerId = req.user.owner || req.user._id;
 
     const { ctx, companyCtx, signatureBlock } = await buildContext({
       ownerId,

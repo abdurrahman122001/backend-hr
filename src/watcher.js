@@ -13,9 +13,10 @@ const {
   generateAndSaveContract,
   generateAndSaveSalaryCertificate,
 } = require("./services/ndaService");
-const { extractCNICUsingOpenAI } = require("./services/deepseekService");
+const { extractCNICUsingOpenAI, classifyEmailUsingOpenAI } = require("./services/deepseekService");
 const Signature = require("./models/Signature");
 const User = require("./models/Users");
+const CompanyProfile = require("./models/CompanyProfile");
 
 // IMAP Config
 const imap = new Imap(require("./config/imapConfig"));
@@ -105,61 +106,63 @@ function parseStream(input) {
   });
 }
 
-// Email classification with error handling
-function classifyEmail(text) {
+// Email classification is now handled by the LLM (classifyEmailUsingOpenAI in
+// deepseekService.js). The model reads the email and decides the intent label,
+// which drives which reply is sent below — replacing the old regex keyword
+// matching.
+
+// Get signature block
+// Resolve the company variables used in signature/email templates. Mirrors
+// getCompanyContext() in offerLetterController: address/phone come from the
+// documentation branch (or first branch), name/email/website from the top level.
+async function getCompanyVars(ownerId) {
+  const fallback = {
+    companyName: COMPANY_NAME,
+    companyEmail: COMPANY_EMAIL,
+    companyPhone: COMPANY_CONTACT,
+    companyWebsite: "",
+    companyAddress: "",
+  };
   try {
-    if (!text || typeof text !== 'string') return "hr_related";
-    const cleaned = text.toLowerCase().replace(/[\n\r]+/g, " ").trim();
-    if (!cleaned) return "hr_related";
+    const doc = await CompanyProfile.findOne({ owner: ownerId })
+      .select("name email website branches")
+      .lean();
+    if (!doc) return fallback;
 
-    // Check for rejection
-    const rejectionPatterns = [
-      /\b(reject|decline|regret)\b/,
-      /\b(not accept|cannot accept|can't accept|won't accept|do not accept)\b/,
-      /\b(sorry.*(cannot|can't|won't|not able))\b/,
-      /\b(unfortunately.*(decline|not able|cannot|can't|won't))\b/,
-      /\b(not interested|withdraw|not accepted|no longer|not joining)\b/,
-      /\b(will not be able to join|don't want|do not want)\b/
-    ];
-
-    for (const pattern of rejectionPatterns) {
-      if (pattern.test(cleaned)) {
-        return "offer_rejection";
-      }
+    let branch = null;
+    if (doc.branches && doc.branches.length > 0) {
+      branch = doc.branches.find((b) => b.useForDocumentation === true) || doc.branches[0];
     }
 
-    // Check for acceptance
-    if (
-      /\b(accepted|accept|acceptance|i will join|happy to join|excited to join|looking forward to join|thank you for the offer)\b/.test(cleaned) &&
-      !/\b(not accept|cannot accept|can't accept|won't accept|don't accept|not going to accept|do not accept)\b/.test(cleaned) &&
-      !/\b(reject|decline|regret)\b/.test(cleaned)
-    ) {
-      return "offer_acceptance";
-    }
-
-    if (/\bapprove|approved|reject|rejected\b/.test(cleaned)) {
-      return "approval_response";
-    }
-
-    if (
-      /\b(\d{1,2}[\/-]\d{1,2}[\/-]\d{4})\b/.test(cleaned) ||
-      /\b(today|tomorrow|leave|vacation|holiday|day off|sick|absent)\b/.test(cleaned)
-    ) {
-      return "leave_request";
-    }
-
-    return "hr_related";
+    return {
+      companyName: doc.name || fallback.companyName,
+      companyEmail: branch?.email || doc.email || fallback.companyEmail,
+      companyPhone: branch?.phone || fallback.companyPhone,
+      companyWebsite: doc.website || fallback.companyWebsite,
+      companyAddress: branch?.address || fallback.companyAddress,
+    };
   } catch (error) {
-    console.error("Email classification error:", error);
-    return "hr_related";
+    console.error("Error resolving company vars:", error);
+    return fallback;
   }
 }
 
-// Get signature block
+// Replace {{companyName}}, {{companyPhone}}, {{companyEmail}}, {{companyWebsite}},
+// {{companyAddress}} placeholders with their resolved values.
+function fillCompanyVars(text, vars) {
+  return String(text || "").replace(
+    /\{\{\s*(companyName|companyPhone|companyEmail|companyWebsite|companyAddress)\s*\}\}/g,
+    (_, key) => vars[key] ?? ""
+  );
+}
+
 async function getSignatureBlock(ownerId) {
   try {
     const signature = await Signature.findOne({ owner: ownerId });
     if (!signature) return "";
+
+    const companyVars = await getCompanyVars(ownerId);
+    const signatureText = fillCompanyVars(signature.signatureText || "", companyVars);
 
     return `
       <div style="margin-top:32px;margin-bottom:12px;font-size:15px !important;line-height:1.7;">
@@ -168,7 +171,7 @@ async function getSignatureBlock(ownerId) {
         : ""
       }
         <div style="text-align:left;font-size:15px !important;line-height:1.7;">
-          ${removeSignatureParagraphMargins(signature.signatureText || "")}
+          ${removeSignatureParagraphMargins(signatureText)}
         </div>
       </div>
     `;
@@ -337,7 +340,17 @@ async function processMessage(stream, uid) {
     }
 
     const fromAddr = parsed.from.value[0].address.toLowerCase();
-    const bodyText = (parsed.text || "").trim();
+    // Prefer the plain-text part; fall back to stripping the HTML body so
+    // HTML-only replies still produce text for classification.
+    let bodyText = (parsed.text || "").trim();
+    if (!bodyText && parsed.html) {
+      bodyText = String(parsed.html)
+        .replace(/<style[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]*>/g, " ")
+        .replace(/&nbsp;/gi, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
     const subject = parsed.subject || "No Subject";
 
     // Check ignored senders
@@ -390,7 +403,8 @@ async function processMessage(stream, uid) {
 
       for (const att of parsed.attachments) {
         const fname = (att.filename || "").toLowerCase();
-        console.log(`📄 Processing attachment: ${fname}`);
+        const ctype = (att.contentType || "").toLowerCase();
+        console.log(`📄 Attachment: name="${fname || "(none)"}" type="${ctype}" disposition="${att.contentDisposition || ""}" size=${att.size}`);
 
         // Validate attachment
         if (att.size > MAX_ATTACHMENT_SIZE) {
@@ -398,7 +412,15 @@ async function processMessage(stream, uid) {
           continue;
         }
 
-        if (/\.(png|jpe?g|pdf)$/i.test(fname)) {
+        // Accept by content-type too — pasted/inline CNIC images often have no
+        // filename (or a non-standard one), so a filename-extension check alone
+        // misses them and the CNIC flow never triggers.
+        const isImageOrPdf =
+          /\.(png|jpe?g|pdf)$/i.test(fname) ||
+          /^image\/(png|jpe?g|jpg|webp)$/.test(ctype) ||
+          ctype === "application/pdf";
+
+        if (isImageOrPdf) {
           docSent = true;
           const buf = att.content;
           try {
@@ -432,9 +454,9 @@ async function processMessage(stream, uid) {
               ...data,
               email: fromAddr,
               owner: ownerId,
+              status: "Document Submitted",
               $setOnInsert: {
                 name: extractedName || parsed.from.value[0]?.name || "Candidate",
-                status: "Document Submitted"
               }
             },
             {
@@ -478,10 +500,15 @@ async function processMessage(stream, uid) {
       );
     }
 
-    const label = classifyEmail(bodyText);
+    // Classify on subject + body so short replies like "Subject: Accepted" are
+    // detected even when the body is sparse.
+    const classifyText = `Subject: ${subject}\n\n${bodyText}`.trim();
+    console.log(`📝 Body for classification (${bodyText.length} chars): ${bodyText.slice(0, 160).replace(/\s+/g, " ")}`);
+
+    const label = await classifyEmailUsingOpenAI(classifyText);
     const signatureBlock = await getSignatureBlock(ownerId);
 
-    console.log(`🏷️ Email classified as: ${label}`);
+    console.log(`🏷️ Email classified as: ${label} → sending "${label}" reply to ${fromAddr}`);
 
     // Handle different email types
     const responseHandlers = {
@@ -500,22 +527,28 @@ async function processMessage(stream, uid) {
 
         const bestName = emp?.name || "Candidate";
 
-        // Send welcome email
+        // Send acceptance acknowledgement asking the candidate to reply with their
+        // CNIC (front & back) and CV. Their reply with those attachments triggers
+        // the document-processing path below (CNIC extraction → DB update →
+        // complete-profile link).
         await sendSafeEmail({
           to: fromAddr,
-          subject: "Welcome Aboard! Next Steps for Your Onboarding 🎉",
+          subject: `Welcome to ${COMPANY_NAME}! 🎉 Next Step: Share Your Documents`,
           html: `
             <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
               <p style="font-size:15px; line-height:1.7;">Dear <strong>${bestName}</strong>,</p>
-              <p style="font-size:15px; line-height:1.7;">🎉 Welcome aboard! We're absolutely thrilled to have you join the <strong>${COMPANY_NAME}</strong> family. Thank you for accepting our offer your journey with us officially begins now.</p>
-              <p style="font-size:15px; line-height:1.7;">Here's what happens next in your onboarding:</p>
+              <p style="font-size:15px; line-height:1.7;">We are absolutely delighted to receive your acceptance! 🎉</p>
+              <p style="font-size:15px; line-height:1.7;">Welcome to the <strong>${COMPANY_NAME}</strong> family!</p>
+              <p style="font-size:15px; line-height:1.7;">Our team is looking forward to working with you and helping you grow in your new role. We know that joining a new company can be both exciting and a little overwhelming — but don't worry, we're here to guide you every step of the way.</p>
+              <p style="font-size:15px; line-height:1.7;"><strong>What's next?</strong></p>
               <ul style="margin:0 0 1em 2em;padding:0;">
-                <li style="margin-bottom:6px;">📄 We'll share your onboarding documents and contract for your review.</li>
-                <li style="margin-bottom:6px;">📝 You'll be asked to complete your employee profile so we can set up your payroll, benefits, and records.</li>
-                <li style="margin-bottom:6px;">📅 Our team will reach out with your start date and first-day details.</li>
-                <li style="margin-bottom:6px;">🤝 If you have any questions, simply reply to this email we're here to help.</li>
+                <li style="margin-bottom:6px;">Please <strong>reply to this email</strong> with clear images of your <strong>CNIC (front &amp; back, JPG or PNG format)</strong>.</li>
+                <li style="margin-bottom:6px;">Attach your latest <strong>CV/Resume (PDF)</strong>.</li>
+                <li style="margin-bottom:6px;">Once we have your documents, you'll receive a special link to complete your digital employee profile online.</li>
               </ul>
-              <p style="font-size:15px; line-height:1.7;">We can't wait to see the great things we'll achieve together. Once again, welcome to the team! 💙</p>
+              <p style="font-size:15px; line-height:1.7;">If you have any questions about your offer, role, or onboarding process, feel free to reach out. Your HR AI Agent (that's me!) is always ready to assist you.</p>
+              <p style="font-size:15px; line-height:1.7;">We're excited to see you thrive at ${COMPANY_NAME}. Let's make this journey unforgettable, together!</p>
+              <p style="font-size:15px; line-height:1.7;">With excitement,</p>
               ${signatureBlock}
             </div>
           `,
@@ -549,7 +582,14 @@ async function processMessage(stream, uid) {
         await sendSafeEmail({
           to: fromAddr,
           subject: "Thank You for Your Response",
-          html: `...`, // Your HTML here
+          html: `
+            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+              <p style="font-size:15px; line-height:1.7;">Thank you for taking the time to let us know your decision.</p>
+              <p style="font-size:15px; line-height:1.7;">We completely respect your choice and truly appreciate the opportunity to have connected with you. While we're sorry it didn't work out this time, we wish you the very best in your career and hope our paths cross again in the future.</p>
+              <p style="font-size:15px; line-height:1.7;">Warm regards,</p>
+              ${signatureBlock}
+            </div>
+          `,
           ownerId,
           type: 'offer_rejection'
         });
@@ -558,8 +598,15 @@ async function processMessage(stream, uid) {
       approval_response: async () => {
         await sendSafeEmail({
           to: fromAddr,
-          subject: "Approval/Decision Recorded",
-          html: `...`, // Your HTML here
+          subject: "Your Response Has Been Recorded",
+          html: `
+            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+              <p style="font-size:15px; line-height:1.7;">Thank you — your response has been received and recorded.</p>
+              <p style="font-size:15px; line-height:1.7;">If any further action is required, our team will follow up with you shortly. Feel free to reply to this email if you have any questions.</p>
+              <p style="font-size:15px; line-height:1.7;">Best regards,</p>
+              ${signatureBlock}
+            </div>
+          `,
           ownerId,
           type: 'approval_response'
         });
@@ -569,7 +616,14 @@ async function processMessage(stream, uid) {
         await sendSafeEmail({
           to: fromAddr,
           subject: "Leave Request Received",
-          html: `...`, // Your HTML here
+          html: `
+            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+              <p style="font-size:15px; line-height:1.7;">We've received your leave request and it has been forwarded to the relevant approver for review.</p>
+              <p style="font-size:15px; line-height:1.7;">You'll be notified by email once a decision has been made. If you need to add any details, simply reply to this message.</p>
+              <p style="font-size:15px; line-height:1.7;">Best regards,</p>
+              ${signatureBlock}
+            </div>
+          `,
           ownerId,
           type: 'leave_request'
         });
@@ -579,7 +633,14 @@ async function processMessage(stream, uid) {
         await sendSafeEmail({
           to: fromAddr,
           subject: "Thank You for Your Message",
-          html: `...`, // Your HTML here
+          html: `
+            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
+              <p style="font-size:15px; line-height:1.7;">Thank you for reaching out to <strong>${COMPANY_NAME}</strong>.</p>
+              <p style="font-size:15px; line-height:1.7;">We've received your message and a member of our HR team will get back to you as soon as possible. If your query is urgent, please reply to this email with additional details.</p>
+              <p style="font-size:15px; line-height:1.7;">Best regards,</p>
+              ${signatureBlock}
+            </div>
+          `,
           ownerId,
           type: 'hr_general'
         });
@@ -610,6 +671,11 @@ async function processMessageWithTimeout(stream, uid, timeout = 30000) {
 let isProcessing = false;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 5;
+// Highest UID processed so far. We track by UID instead of the \Seen flag so an
+// email already marked read (by webmail preview or another client) is still
+// picked up. Initialised at openBox to the current newest UID so existing mail
+// isn't reprocessed.
+let lastProcessedUid = 0;
 
 function checkLatest() {
   if (isProcessing) {
@@ -619,20 +685,24 @@ function checkLatest() {
 
   isProcessing = true;
 
-  imap.search(["UNSEEN"], (err, uids) => {
+  // Search by UID range rather than the \Seen flag. Note: an IMAP `start:*`
+  // range can return the newest UID even when start > newest, so we filter
+  // explicitly to keep only UIDs strictly greater than the last processed one.
+  imap.search([["UID", `${lastProcessedUid + 1}:*`]], (err, found) => {
     if (err) {
       console.error("IMAP search error:", err);
       isProcessing = false;
       return;
     }
 
-    if (!uids?.length) {
+    const uids = (found || []).filter((u) => u > lastProcessedUid);
+    if (!uids.length) {
       console.log("No new emails found");
       isProcessing = false;
       return;
     }
 
-    console.log(`📬 Found ${uids.length} new email(s)`);
+    console.log(`📬 Found ${uids.length} new email(s) (UIDs: ${uids.join(", ")})`);
 
     const fetcher = imap.fetch(uids, {
       bodies: [""],
@@ -640,23 +710,32 @@ function checkLatest() {
       struct: true
     });
 
-    let processedCount = 0;
+    let maxUid = lastProcessedUid;
+    const pending = [];
 
-    fetcher.on("message", (msg, seqno) => {
-      console.log(`Processing email ${++processedCount} of ${uids.length}`);
-
+    fetcher.on("message", (msg) => {
+      let uid = 0;
+      let buffer = "";
+      msg.on("attributes", (attrs) => { uid = attrs.uid; });
       msg.on("body", (stream) => {
-        (async () => {
-          try {
-            await processMessageWithTimeout(stream, uids[seqno - 1], 30000);
-          } catch (error) {
-            console.error(`Error processing email ${seqno}:`, error);
-          }
-        })();
+        stream.on("data", (chunk) => { buffer += chunk.toString("utf8"); });
       });
-
+      msg.once("end", () => {
+        pending.push((async () => {
+          try {
+            // 90s — CNIC vision extraction on a reasoning model plus the DB
+            // update and outbound email can exceed the old 30s budget.
+            await processMessageWithTimeout(buffer, uid, 90000);
+            if (uid > maxUid) maxUid = uid;
+          } catch (error) {
+            console.error(`Error processing email UID ${uid}:`, error);
+            // Still advance past a failing email so it doesn't wedge the queue.
+            if (uid > maxUid) maxUid = uid;
+          }
+        })());
+      });
       msg.on("error", (error) => {
-        console.error(`Message stream error for email ${seqno}:`, error);
+        console.error(`Message stream error:`, error);
       });
     });
 
@@ -665,8 +744,10 @@ function checkLatest() {
       isProcessing = false;
     });
 
-    fetcher.once("end", () => {
-      console.log("✅ Done processing new messages");
+    fetcher.once("end", async () => {
+      await Promise.allSettled(pending);
+      lastProcessedUid = Math.max(lastProcessedUid, maxUid);
+      console.log(`✅ Done processing new messages (lastProcessedUid=${lastProcessedUid})`);
       isProcessing = false;
     });
   });
@@ -684,15 +765,32 @@ function startWatcher() {
       }
 
       console.log(`📪 Connected to INBOX, ${box.messages.total} total messages`);
-      console.log("👀 Watching for new emails...");
 
-      imap.on("mail", () => {
-        console.log("📩 New mail event detected");
-        setTimeout(checkLatest, 1000);
+      // Start tracking from the current newest UID so the existing inbox isn't
+      // reprocessed; only mail that arrives from now on (UID greater than this)
+      // is handled — regardless of its read/unread state. Derive it from an ALL
+      // search (reliable everywhere); fall back to uidnext-1.
+      const armWatch = () => {
+        console.log(`👀 Watching for new emails (UID > ${lastProcessedUid})...`);
+        // Re-arm the listener fresh each connection so reconnects don't stack
+        // duplicate handlers.
+        imap.removeAllListeners("mail");
+        imap.on("mail", () => {
+          console.log("📩 New mail event detected");
+          setTimeout(checkLatest, 1000);
+        });
+        checkLatest();
+        setInterval(checkLatest, 30000);
+      };
+
+      imap.search(["ALL"], (searchErr, allUids) => {
+        if (!searchErr && allUids && allUids.length) {
+          lastProcessedUid = Math.max(...allUids);
+        } else if (box.uidnext) {
+          lastProcessedUid = box.uidnext - 1;
+        }
+        armWatch();
       });
-
-      checkLatest();
-      setInterval(checkLatest, 30000);
     });
   });
 
