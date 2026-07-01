@@ -758,7 +758,10 @@ async function tokenMap(
     "tenure.monthsTotal": tenureMonthsTotal,
 
     "employee.name": emp?.name || "—",
-    "employee.id": emp?._id ? String(emp._id) : "",
+    // System-generated, human-readable employee ID (e.g. "EMP001"). Falls back
+    // to the Mongo _id only for legacy records that never got an employeeId.
+    "employee.id": emp?.employeeId || (emp?._id ? String(emp._id) : ""),
+    "employee.employeeId": emp?.employeeId || (emp?._id ? String(emp._id) : ""),
     "employee.cnic": emp?.cnic || "—",
     "employee.nationality": emp?.nationality || "—",
     "employee.designation": emp?.designation || emp?.position || "—",
@@ -1013,24 +1016,62 @@ function generateSinglePageHTML(page, tokens, totalPages) {
       if (String(el.type).toLowerCase() === "table") {
         const data = Array.isArray(el.data) ? el.data : [];
         const colWidths = Array.isArray(el.columnWidths) ? el.columnWidths : [];
+        const rowHeights = Array.isArray(el.rowHeights) ? el.rowHeights : [];
+        const cellAlignments = (el.cellAlignments && typeof el.cellAlignments === "object") ? el.cellAlignments : {};
+        // Fixed column count so every row (including intentionally empty
+        // header rows) reserves the full width — otherwise an empty row
+        // collapses to zero height and overlaid title text overlaps the
+        // first data row.
+        const colCount =
+          num(el.cols, 0) ||
+          data.reduce((m, r) => Math.max(m, Array.isArray(r) ? r.length : 0), 0) ||
+          colWidths.length ||
+          1;
+
+        const colgroup = colWidths.length
+          ? `<colgroup>${colWidths
+              .map((cw) => `<col style="width:${num(cw)}px;" />`)
+              .join("")}</colgroup>`
+          : "";
 
         const rowsHtml = data
-          .map((row) => {
+          .map((row, rIndex) => {
             const cells = Array.isArray(row) ? row : [];
-            const tds = cells
-              .map((cell, cIndex) => {
-                const colW = colWidths[cIndex] ? `width:${num(colWidths[cIndex])}px;` : "";
-                const cellHtml = applyTokens(cell ?? "", tokens);
-                return `<td style="padding:6px;border:1px solid #222;vertical-align:top;${colW}">${cellHtml}</td>`;
-              })
-              .join("");
+            // Keep empty/short rows at their designed height so overlaid
+            // elements line up (matches the builder canvas).
+            const rowH = num(rowHeights[rIndex], 0) || 32;
 
-            return `<tr>${tds}</tr>`;
+            let tds;
+            if (cells.length === 0) {
+              // Intentionally empty row (e.g. a spanning title header). Render a
+              // single cell spanning every column so there is NO internal
+              // vertical divider, and reserve its height so it doesn't collapse.
+              const align = cellAlignments[`${rIndex}-0`] || el.align || "left";
+              tds = `<td colspan="${colCount}" style="padding:6px 8px;border:1px solid #000;vertical-align:top;text-align:${align};">&nbsp;</td>`;
+            } else {
+              tds = cells
+                .map((cell, cIndex) => {
+                  // If a row has fewer cells than the table's column count, let
+                  // the last cell span the remaining columns (no stray divider).
+                  const isLast = cIndex === cells.length - 1;
+                  const span =
+                    isLast && cells.length < colCount
+                      ? ` colspan="${colCount - cells.length + 1}"`
+                      : "";
+                  const align =
+                    cellAlignments[`${rIndex}-${cIndex}`] || el.align || "left";
+                  const cellHtml = applyTokens(cell ?? "", tokens);
+                  return `<td${span} style="padding:6px 8px;border:1px solid #000;vertical-align:top;text-align:${align};">${cellHtml}</td>`;
+                })
+                .join("");
+            }
+            return `<tr style="height:${rowH}px;">${tds}</tr>`;
           })
           .join("");
 
-        return `<div class="el" style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:auto;">
-            <table style="width:100%;border-collapse:collapse;border-spacing:0;border:none;color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;line-height:${lineHeight};">
+        return `<div class="el" style="position:absolute;left:${x}px;top:${y}px;width:${w}px;height:${h}px;overflow:visible;">
+            <table style="width:100%;table-layout:fixed;border-collapse:collapse;border-spacing:0;border:2px solid #000;color:${color};font-family:'${escCss(ff)}',sans-serif;font-size:${fs}px;line-height:${lineHeight};">
+              ${colgroup}
               ${rowsHtml}
             </table>
           </div>`;

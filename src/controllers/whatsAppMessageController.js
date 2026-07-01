@@ -2197,6 +2197,24 @@ exports.editMessage = async function editMessage(req, res) {
       });
     }
 
+    // Once a message is finally approved it has already been delivered to the
+    // client. A user whose only edit authority is being the original sender can
+    // no longer edit it (mirrors the client-side gate). Managers / receivers /
+    // approvers retain their existing (status-gated) edit rights below.
+    if (
+      isSender &&
+      !isReceiver &&
+      !isManager &&
+      !isTeamLead &&
+      !isPreviousApprover &&
+      msg.approvalStatus === "approved"
+    ) {
+      return res.status(403).json({
+        error:
+          "This message has already been approved and delivered. It can no longer be edited.",
+      });
+    }
+
     // Team leads can only edit messages if client requires approval
     if (isTeamLead && !isSender) {
       if (!clientRequiresApproval) {
