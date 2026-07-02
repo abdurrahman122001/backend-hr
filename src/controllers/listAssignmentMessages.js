@@ -1558,9 +1558,13 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
       "readBy.employee": { $ne: userId },
       trashedBy: { $ne: userId },
       spamReporters: { $ne: userId },
+      // Globally trashed/spam messages are hidden from every list view, so
+      // they must not keep the sidebar badge alive either.
+      isTrashed: { $ne: true },
+      isSpam: { $ne: true },
       status: "sent",
       // 🔥 FIX: Include pending messages in unread count for supervisors
-      // approvalStatus: { $ne: "pending" }, 
+      // approvalStatus: { $ne: "pending" },
     });
 
     res.json({

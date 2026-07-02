@@ -1692,30 +1692,16 @@ exports.approveMessage = async function approveMessage(req, res) {
       .lean();
     const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
 
-    // Find the immediate seniors of the current approver (1 level up)
-    console.log("════════════════════════════════════════════════");
-    console.log("📨 [approveMessage] APPROVAL TRIGGERED");
-    console.log("   approver (currentUserId):", currentUserId);
-    console.log("   approver name:", req.employee?.name);
-    console.log("   approver role:", req.employee?.role);
-    console.log("   ownerId:", String(ownerId));
-    console.log("   message._id:", String(msg._id));
-    console.log("   message current status:", msg.approvalStatus);
-    console.log("   message current receivers:", msg.receiver?.map(r => String(r._id || r)));
-
     // Show ALL hierarchy records where this approver is the junior (for debugging)
     const allLinksAsJunior = await EmployeeHierarchy.find({
       owner: ownerId,
       junior: currentUserId,
     }).lean();
-    console.log("   [DB] hierarchy records where approver is JUNIOR:", JSON.stringify(allLinksAsJunior, null, 2));
 
     const immediateSeniors = await findSupervisorsFromHierarchy(
       ownerId,
       currentUserId
     );
-    console.log("   [DB] immediate seniors of approver:", immediateSeniors);
-    console.log("════════════════════════════════════════════════");
 
     // Record this approval step
     if (!msg.approvalChain) msg.approvalChain = [];
@@ -1743,7 +1729,6 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.approvalStatus = "pending";
       msg.receiver = [immediateSeniors[0]];
       responseStatusMessage = "Message approved and escalated to next-level supervisor";
-      console.log("⬆️ [approveMessage] Escalating to next senior in hierarchy:", immediateSeniors[0]);
     } else {
       // Top of hierarchy reached — finalize as approved
       msg.approvalStatus = "approved";
@@ -1752,7 +1737,6 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.status = "sent";
       msg.sentAt = new Date();
       approvalFinalized = true;
-      console.log("✅ [approveMessage] Top of hierarchy reached — finalizing as approved");
     }
 
     // 🔥 GROUP MESSAGE: When finalized, expand receiver to ALL intended group members
@@ -1810,7 +1794,6 @@ exports.approveMessage = async function approveMessage(req, res) {
         const { managers: orgManagers } = await findTLsAndManagersByOwner(ownerId);
         orgManagers.forEach(id => addReceiver(id));
       }
-      console.log("✅ [approveMessage] Final receivers after expansion:", [...currentReceiverSet]);
     }
 
     await msg.save();
@@ -1894,9 +1877,6 @@ exports.approveMessage = async function approveMessage(req, res) {
         }
       }
 
-      console.log("🔔 [approveMessage] Socket emission to allInvolvedUsers:", [...allInvolvedUsers]);
-      console.log("🔔 [approveMessage] updatedMessage.receiver:", (updatedMessage.receiver || []).map(r => String(r._id || r)));
-      console.log("🔔 [approveMessage] approvalFinalized:", approvalFinalized);
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
           message: updatedMessage,
@@ -4054,22 +4034,11 @@ exports.createMessage = async function createMessage(req, res) {
         // senior above to approve it); on a direct client it's a plain send.
         approvalStatus = needsApproval ? "approved" : null;
       } else if (needsApproval) {
-        // Route to the immediate senior in the hierarchy — regardless of role.
-        // The full hierarchy chain is followed: e.g. Abdur Rahman New → Ali →
-        // Abdullah Ahmed Qureshi (manager). Every level approves explicitly.
-        console.log("📨 [createMessage] Looking up hierarchy from DB for sender:", String(sender));
         const immediateSupervisors = await findSupervisorsFromHierarchy(owner, String(sender));
-        console.log("📨 [createMessage] Immediate supervisors from DB:", immediateSupervisors);
-
         if (immediateSupervisors.length > 0) {
           approvalStatus = "pending";
           receivers = [immediateSupervisors[0]];
-          console.log("✅ [createMessage] Routing to immediate hierarchy supervisor:", immediateSupervisors[0]);
         } else {
-          // Sender is the highest-level person in the hierarchy (no one above
-          // them). There is no senior to approve, so the message is
-          // automatically APPROVED (shows the green tick).
-          console.log("✅ [createMessage] Sender is top of hierarchy — auto-approving:", String(sender));
           approvalStatus = "approved";
         }
       } else if (isDirect) {
@@ -4101,12 +4070,7 @@ exports.createMessage = async function createMessage(req, res) {
 
       const beforeFilter = [...receivers];
       receivers = receivers.filter(id => allSeniors.has(String(id)));
-      console.log("🔒 [createMessage] PENDING safeguard — beforeFilter:", beforeFilter, "→ afterFilter:", receivers);
     }
-
-    console.log("📬 [createMessage] FINAL receivers (will be stored in msg.receiver):", receivers);
-    console.log("📬 [createMessage] approvalStatus:", approvalStatus);
-
     if (receivers.length === 0) {
       return res.status(400).json({ error: "No valid receivers found" });
     }
@@ -4527,7 +4491,6 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
   }
   if (ops.length > 0) {
     await ClientInfo.bulkWrite(ops, { ordered: false });
-    console.log(`🔧 [chat-list-repair] refreshed lastWhatsAppMessage for ${ops.length} client(s)`);
   }
 }
 
@@ -4882,8 +4845,6 @@ exports.getChatList = async function getChatList(req, res) {
     });
 
     res.json({ chats, total: chats.length });
-    console.log(`📋 [chat-list] ${chats.length} chats served in ${Date.now() - t0}ms`);
-
     // ── AFTER responding: refresh stale lastWhatsAppMessage in the background
     // (heavy aggregation, throttled to once per employee per interval)
     const repairKey = String(meId);

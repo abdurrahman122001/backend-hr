@@ -638,9 +638,12 @@ exports.getSpaces = async (req, res) => {
     const spacesWithLastMessage = await Promise.all(
       spaces.map(async (space) => {
         // Find conversation for this space
+        // Membership is already established by the Space query above; do NOT
+        // filter by participants — members added to a space after creation may
+        // be missing from the conversation's participants (old sync bug) and
+        // would permanently see unreadCount 0.
         const conversation = await Conversation.findOne({
           space: space._id,
-          participants: req.employee._id,
         }).populate("lastMessage");
 
         const unreadCount = conversation
@@ -1226,6 +1229,16 @@ exports.sendMessage = async (req, res) => {
         "receive_message",
         populatedMessage
       );
+
+      // Also deliver to each participant's personal room — a receiver who has
+      // never opened this conversation isn't in its room yet (brand-new chat),
+      // so the room broadcast alone never reaches them. Clients dedupe by _id.
+      (conversation.participants || []).forEach((p) => {
+        const pid = String(p._id || p);
+        if (pid !== String(req.employee._id)) {
+          io.to(`user_${pid}`).emit("receive_message", populatedMessage);
+        }
+      });
     }
 
     res.json({
@@ -1416,6 +1429,8 @@ exports.forwardMessage = async (req, res) => {
             "receive_message",
             populatedMessage
           );
+          // Personal-room delivery for receivers not yet joined to the room
+          io.to(`user_${participantId}`).emit("receive_message", populatedMessage);
         }
 
         results.push(populatedMessage);
@@ -1611,6 +1626,8 @@ exports.sendDirectMessage = async (req, res) => {
         "receive_message",
         populatedMessage
       );
+      // Personal-room delivery for a receiver not yet joined to the room
+      io.to(`user_${String(receiver)}`).emit("receive_message", populatedMessage);
       io.to(`user_${req.employee._id}`).emit("message_sent", {
         success: true,
         message: populatedMessage,
@@ -1866,9 +1883,10 @@ exports.spaceMarkAsUnread = async (req, res) => {
     }
 
     // Find the conversation associated with this space
+    // Space membership was verified above — don't filter by participants
+    // (members added after space creation may be missing from that array)
     const conversation = await Conversation.findOne({
       space: spaceId,
-      participants: req.employee._id,
     });
 
     if (!conversation) {
@@ -1963,9 +1981,10 @@ exports.spaceMarkAsRead = async (req, res) => {
     }
 
     // Find the conversation associated with this space
+    // Space membership was verified above — don't filter by participants
+    // (members added after space creation may be missing from that array)
     const conversation = await Conversation.findOne({
       space: spaceId,
-      participants: req.employee._id,
     });
 
     if (!conversation) {
@@ -2121,7 +2140,9 @@ exports.createSpace = async (req, res) => {
 
     await space.save();
 
-    // Create group conversation
+    // Create group conversation — the `space` link is what getSpaces &
+    // sendSpaceMessage use to find this conversation (without it the space
+    // has no unread tracking and messaging breaks)
     const conversation = new Conversation({
       participants: space.members,
       isGroup: true,
@@ -2130,6 +2151,7 @@ exports.createSpace = async (req, res) => {
       groupAvatar: space.avatar,
       admins: [req.employee._id],
       unreadCount: new Map(),
+      space: space._id,
     });
 
     await conversation.save();
@@ -2298,9 +2320,11 @@ exports.addSpaceMembers = async (req, res) => {
     space.members.push(...newMembers);
     await space.save();
 
-    // Update conversation participants
+    // Update conversation participants — the conversation is linked to the
+    // space via its `space` field ({ _id: spaceId } never matched, which left
+    // added members out of `participants` and broke their space unread counts)
     await Conversation.findOneAndUpdate(
-      { _id: spaceId, isGroup: true },
+      { space: spaceId, isGroup: true },
       { $addToSet: { participants: { $each: newMembers } } }
     );
 
@@ -2538,6 +2562,12 @@ exports.sendSpaceMessage = async (req, res) => {
     if (io) {
       // Broadcast to ALL users in the space room
       io.to(`space_${spaceId}`).emit("receive_space_message", populatedMessage);
+
+      // Also deliver to each member's personal room — members who never opened
+      // this space aren't in its room yet. Clients dedupe by message _id.
+      receivers.forEach((rid) => {
+        io.to(`user_${String(rid)}`).emit("receive_space_message", populatedMessage);
+      });
     }
 
     res.json({
@@ -5388,9 +5418,10 @@ exports.getSpaceSharedContent = async (req, res) => {
     }
 
     // Find the conversation for this space
+    // Space membership was verified above — don't filter by participants
+    // (members added after space creation may be missing from that array)
     const conversation = await Conversation.findOne({
       space: spaceId,
-      participants: req.employee._id,
     });
 
     if (!conversation) {
@@ -6330,9 +6361,9 @@ exports.getPinnedMessages = async (req, res) => {
 
     if (space) {
       // If it's a space ID, find the conversation associated with this space
+      // Space membership was verified above — don't filter by participants
       const spaceConversation = await Conversation.findOne({
         space: conversationId,
-        participants: req.employee._id,
       });
 
       if (!spaceConversation) {
@@ -6709,7 +6740,7 @@ exports.getMentionedMessages = async (req, res) => {
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("mentions.employee", "name companyEmail avatar photographUrl")
       .populate("conversation", "isGroup groupName space participants")
-      .populate("space", "name description avatar")
+      .populate("space", "name description avatar emoji")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
       .skip((page - 1) * limit)
@@ -6758,6 +6789,8 @@ exports.getMentionedMessages = async (req, res) => {
           ? {
             _id: message.space._id,
             name: message.space.name,
+            emoji: message.space.emoji || null,
+            avatar: message.space.avatar || null,
           }
           : null,
         mentionedAt: userMention ? userMention.mentionedAt : null,

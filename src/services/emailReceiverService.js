@@ -17,6 +17,10 @@ class EmailReceiverService {
     this.pollingInterval = null;
     this.isProcessing = false;
     this.processedMessageIds = new Set();
+    // Highest UID processed so far. We track by UID instead of the \Seen flag
+    // because watcher.js shares this inbox and marks messages seen when it
+    // fetches them — which made the UNSEEN search silently miss client emails.
+    this.lastProcessedUid = 0;
   }
 
   initialize(io) {
@@ -109,7 +113,19 @@ class EmailReceiverService {
       }
 
       console.log(`📥 [EmailReceiver] Inbox opened with ${box.messages.total} messages`);
-      this.startListening();
+
+      // Initialise UID tracking at the current newest message so the existing
+      // inbox isn't reprocessed; only mail arriving from now on is handled,
+      // regardless of its read/unread state.
+      this.imap.search(["ALL"], (searchErr, allUids) => {
+        if (!searchErr && allUids && allUids.length) {
+          this.lastProcessedUid = Math.max(...allUids);
+        } else if (box.uidnext) {
+          this.lastProcessedUid = box.uidnext - 1;
+        }
+        console.log(`👀 [EmailReceiver] Watching for new emails (UID > ${this.lastProcessedUid})`);
+        this.startListening();
+      });
     });
   }
 
@@ -133,7 +149,8 @@ class EmailReceiverService {
       console.log('🔄 [EmailReceiver] Processing new emails...');
 
       await new Promise((resolve, reject) => {
-        this.imap.search(["UNSEEN"], (err, results) => {
+        // UID-range search: unaffected by watcher.js marking messages \Seen
+        this.imap.search([["UID", `${this.lastProcessedUid + 1}:*`]], (err, results) => {
           if (err) {
             console.error(
               "❌ [EmailReceiver] Error searching new emails:",
@@ -143,14 +160,17 @@ class EmailReceiverService {
             return;
           }
 
-          if (!results || results.length === 0) {
-            console.log('📭 [EmailReceiver] No new unseen emails');
+          // A `start:*` range can return the newest UID even when start > newest,
+          // so filter explicitly to keep only UIDs we haven't processed.
+          const newUids = (results || []).filter((u) => u > this.lastProcessedUid);
+          if (newUids.length === 0) {
+            console.log('📭 [EmailReceiver] No new emails');
             resolve();
             return;
           }
 
-          console.log(`📨 [EmailReceiver] Found ${results.length} new unseen email(s)`);
-          const recentEmails = results.slice(-10);
+          console.log(`📨 [EmailReceiver] Found ${newUids.length} new email(s)`);
+          const recentEmails = newUids.slice(-10);
           console.log(`📨 [EmailReceiver] Processing ${recentEmails.length} most recent email(s)`);
 
           this.processEmailBatch(recentEmails, resolve, reject);
@@ -179,7 +199,8 @@ class EmailReceiverService {
       console.log('🔍 [EmailReceiver] Checking for new emails...');
 
       await new Promise((resolve, reject) => {
-        this.imap.search(["UNSEEN"], (err, results) => {
+        // UID-range search: unaffected by watcher.js marking messages \Seen
+        this.imap.search([["UID", `${this.lastProcessedUid + 1}:*`]], (err, results) => {
           if (err) {
             console.error(
               "❌ [EmailReceiver] Error searching new emails:",
@@ -189,14 +210,15 @@ class EmailReceiverService {
             return;
           }
 
-          if (!results || results.length === 0) {
-            console.log('📭 [EmailReceiver] No new unseen emails');
+          const newUids = (results || []).filter((u) => u > this.lastProcessedUid);
+          if (newUids.length === 0) {
+            console.log('📭 [EmailReceiver] No new emails');
             resolve();
             return;
           }
 
-          console.log(`📨 [EmailReceiver] Found ${results.length} new unseen email(s)`);
-          this.processEmailBatch(results, resolve, reject);
+          console.log(`📨 [EmailReceiver] Found ${newUids.length} new email(s)`);
+          this.processEmailBatch(newUids, resolve, reject);
         });
       });
     } catch (error) {
@@ -228,10 +250,15 @@ class EmailReceiverService {
     let processedCount = 0;
     let errorCount = 0;
     let skippedCount = 0;
+    let maxUid = this.lastProcessedUid;
 
     f.on("message", (msg, seqno) => {
-      const uid = results[seqno - 1];
-      console.log(`📩 [EmailReceiver] Processing message #${seqno} (UID: ${uid})`);
+      // seqno is the mailbox-wide sequence number, NOT an index into `results` —
+      // read the real UID from the message attributes.
+      let uid = 0;
+      msg.on("attributes", (attrs) => {
+        uid = attrs.uid;
+      });
 
       let emailBuffer = "";
 
@@ -242,6 +269,7 @@ class EmailReceiverService {
       });
 
       msg.once("end", async () => {
+        console.log(`📩 [EmailReceiver] Processing message #${seqno} (UID: ${uid})`);
         try {
           const parsed = await simpleParser(emailBuffer);
           const shouldProcess = await this.processEmail(parsed, uid);
@@ -261,9 +289,13 @@ class EmailReceiverService {
           errorCount++;
         }
 
+        // Advance past this email even on error/skip so it doesn't wedge the queue
+        if (uid > maxUid) maxUid = uid;
+
         const totalProcessed = processedCount + errorCount + skippedCount;
         if (totalProcessed === results.length) {
-          console.log(`✅ [EmailReceiver] Batch processing complete: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors`);
+          this.lastProcessedUid = Math.max(this.lastProcessedUid, maxUid);
+          console.log(`✅ [EmailReceiver] Batch processing complete: ${processedCount} processed, ${skippedCount} skipped, ${errorCount} errors (lastProcessedUid=${this.lastProcessedUid})`);
           resolve();
         }
       });
@@ -282,6 +314,17 @@ class EmailReceiverService {
 
       console.log(`📧 [EmailReceiver] Processing email UID ${uid} from: ${fromName} <${fromEmail}>`);
 
+      // mailparser returns `references` as an ARRAY when the thread has multiple
+      // message-ids; normalize to a space-separated string so .substring/.split work
+      const rawReferences = email.references || email.headers.get('references') || null;
+      const references = Array.isArray(rawReferences)
+        ? rawReferences.join(" ")
+        : rawReferences;
+      const rawInReplyTo = email.inReplyTo || email.headers.get('in-reply-to') || null;
+      const inReplyTo = Array.isArray(rawInReplyTo)
+        ? rawInReplyTo[0]
+        : rawInReplyTo;
+
       const emailDetails = {
         uid: uid,
         from: fromEmail,
@@ -293,8 +336,8 @@ class EmailReceiverService {
         html: email.html || email.text || "",
         date: email.date || new Date(),
         messageId: email.messageId || "",
-        inReplyTo: email.inReplyTo || email.headers.get('in-reply-to') || null,
-        references: email.references || email.headers.get('references') || null,
+        inReplyTo: inReplyTo,
+        references: references,
         cc: email.cc ? email.cc.value.map((cc) => cc.address) : [],
         bcc: email.bcc ? email.bcc.value.map((bcc) => bcc.address) : [],
         attachments: email.attachments || [],
@@ -348,10 +391,10 @@ class EmailReceiverService {
 
       const { client, clientEmployee } = clientMatch;
 
-      // STEP 2: Get assigned employee (this is the receiver)
-      const assignedEmployee = await this.getAssignedEmployee(client);
+      // STEP 2: Get assigned employees (these are the receivers)
+      const assignedEmployees = await this.getAssignedEmployees(client);
 
-      if (!assignedEmployee) {
+      if (!assignedEmployees.length) {
         console.log(`❌ [EmailReceiver] No assigned employee found for client: ${client.clientName}`);
         this.processedMessageIds.add(emailDetails.messageId);
         return "skipped";
@@ -419,7 +462,7 @@ class EmailReceiverService {
       const assignmentMessage = await this.createAssignmentMessage(
         emailDetails,
         client,
-        assignedEmployee,
+        assignedEmployees,
         clientEmployee,
         teamLeads,
         threadId,
@@ -462,7 +505,7 @@ class EmailReceiverService {
 
   isFromOurDomain(email) {
     if (!email) return false;
-    const ourDomains = ["virsme.com", "mavensadvisor.com", "mavensadvisor.co"];
+    const ourDomains = ["virsme.com", "mavensadvisor.com", "mavensadvisor.co", "brannovate.com"];
     return ourDomains.some((domain) => email.toLowerCase().includes(domain));
   }
 
@@ -578,40 +621,49 @@ class EmailReceiverService {
     }
   }
 
-  async getAssignedEmployee(clientInfo) {
+  async getAssignedEmployees(clientInfo) {
     try {
-      // First try to get the specifically assigned employee
-      if (clientInfo.assignedTo) {
-        const assignedEmployee = await Employee.findById(
-          clientInfo.assignedTo
-        ).select("_id name companyEmail role owner");
+      // ClientInfo.assignedTo is an ARRAY of Employee refs (may be populated docs)
+      const assignedIds = (Array.isArray(clientInfo.assignedTo)
+        ? clientInfo.assignedTo
+        : clientInfo.assignedTo
+          ? [clientInfo.assignedTo]
+          : []
+      )
+        .map((a) => a?._id || a)
+        .filter(Boolean);
 
-        if (assignedEmployee) {
-          console.log(`👤 [EmailReceiver] Found assigned employee: ${assignedEmployee.name}`);
-          return assignedEmployee;
+      if (assignedIds.length > 0) {
+        const assignedEmployees = await Employee.find({
+          _id: { $in: assignedIds },
+        }).select("_id name companyEmail role owner");
+
+        if (assignedEmployees.length > 0) {
+          console.log(`👤 [EmailReceiver] Found ${assignedEmployees.length} assigned employee(s): ${assignedEmployees.map((e) => e.name).join(", ")}`);
+          return assignedEmployees;
         }
       }
 
       // If no assigned employee, get the owner as fallback
       if (clientInfo.owner) {
         const ownerEmployee = await Employee.findOne({
-          owner: clientInfo.owner,
+          owner: clientInfo.owner._id || clientInfo.owner,
         }).select("_id name companyEmail role owner");
 
         if (ownerEmployee) {
           console.log(`👤 [EmailReceiver] Using owner as assigned employee: ${ownerEmployee.name}`);
-          return ownerEmployee;
+          return [ownerEmployee];
         }
       }
 
       console.log('❌ [EmailReceiver] No employee found to assign the message to');
-      return null;
+      return [];
     } catch (error) {
       console.error(
         "❌ [EmailReceiver] Error getting assigned employee:",
         error
       );
-      return null;
+      return [];
     }
   }
 
@@ -648,7 +700,7 @@ class EmailReceiverService {
   async createAssignmentMessage(
     emailDetails,
     client,
-    assignedEmployee,
+    assignedEmployees,
     clientEmployee,
     teamLeads = [],
     existingThreadId = null,
@@ -665,8 +717,8 @@ class EmailReceiverService {
         console.log(`🔗 [EmailReceiver] Using existing thread ID: ${threadId}`);
       }
 
-      // Prepare receiver list: assigned employee + team leads
-      let receivers = [assignedEmployee._id];
+      // Prepare receiver list: assigned employees + team leads
+      let receivers = assignedEmployees.map((emp) => emp._id);
 
       // Add team leads to receivers if any exist
       if (teamLeads && teamLeads.length > 0) {
@@ -761,13 +813,27 @@ class EmailReceiverService {
         },
       };
 
-      // Handle CC recipients if any
+      // Handle CC recipients if any. Strip our own mailbox address — when the
+      // client hits Reply-All in Gmail our receiving address lands in their CC,
+      // and storing it makes the UI's Reply-All CC our own inbox back.
       if (emailDetails.cc && emailDetails.cc.length > 0) {
-        messageData.cc = emailDetails.cc.map((ccEmail) => ({
-          email: ccEmail.trim().toLowerCase(),
-          name: ccEmail.split("@")[0],
-          addedAt: new Date(),
-        }));
+        const ownMailboxes = [
+          process.env.CLIENT_MAIL_FROM_ADDRESS,
+          process.env.CLIENT_MAIL_USERNAME,
+          process.env.MAIL_FROM_ADDRESS,
+          process.env.MAIL_USERNAME,
+          process.env.IMAP_USER,
+        ]
+          .filter(Boolean)
+          .map((e) => e.trim().toLowerCase());
+
+        messageData.cc = emailDetails.cc
+          .map((ccEmail) => ({
+            email: ccEmail.trim().toLowerCase(),
+            name: ccEmail.split("@")[0],
+            addedAt: new Date(),
+          }))
+          .filter((cc) => !ownMailboxes.includes(cc.email));
       }
 
       // Process attachments if any
@@ -787,7 +853,7 @@ class EmailReceiverService {
                   "base64"
                 )}`,
                 uploadedAt: new Date(),
-                uploadedBy: assignedEmployee._id,
+                uploadedBy: assignedEmployees[0]._id,
               };
             } catch (err) {
               console.error(
@@ -810,7 +876,7 @@ class EmailReceiverService {
       console.log(`✅ [EmailReceiver] Created assignment message: ${message._id}`);
       console.log('📝 [EmailReceiver] Message details:', {
         sender: `Client: ${client.clientName}`,
-        receivers: `Total: ${receivers.length} (Employee: ${assignedEmployee.name}, Team Leads: ${teamLeads.length})`,
+        receivers: `Total: ${receivers.length} (Assigned: ${assignedEmployees.map((e) => e.name).join(", ")}, Team Leads: ${teamLeads.length})`,
         subject: message.subject,
         threadId: message.threadId,
         isReply: !!replyToMessageId,

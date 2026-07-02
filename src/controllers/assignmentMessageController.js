@@ -5,6 +5,7 @@ const mongoose = require("mongoose");
 const ClientInfo = require("../models/ClientInfo");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
+const { sendApprovedReplyToClient } = require("../services/clientEmailService");
 
 function readByEmployeeId(readEntry) {
   const employee = readEntry?.employee ?? readEntry;
@@ -226,6 +227,21 @@ function normalizeIds(val) {
 }
 
 /** ---------- CC HELPER FUNCTIONS ---------- **/
+// The system's own mailboxes must never appear as CC recipients. They sneak in
+// when a client hits Reply-All in Gmail (our receiving address lands in their CC,
+// gets stored on the inbound message, and the UI's Reply-All then inherits it).
+function getOwnMailboxAddresses() {
+  return [
+    process.env.CLIENT_MAIL_FROM_ADDRESS,
+    process.env.CLIENT_MAIL_USERNAME,
+    process.env.MAIL_FROM_ADDRESS,
+    process.env.MAIL_USERNAME,
+    process.env.IMAP_USER,
+  ]
+    .filter(Boolean)
+    .map((e) => e.trim().toLowerCase());
+}
+
 function parseCCEmails(ccBody) {
   let ccEmails = [];
   if (ccBody) {
@@ -262,7 +278,8 @@ function parseCCEmails(ccBody) {
       ];
     }
   }
-  return ccEmails;
+  const ownMailboxes = getOwnMailboxAddresses();
+  return ccEmails.filter((cc) => !ownMailboxes.includes(cc.email));
 }
 
 async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId, approvalStatus) {
@@ -1522,6 +1539,22 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
+    // A reply that is already fully approved at creation (top-of-hierarchy sender,
+    // direct supervision, manager/team-lead) never passes through approveMessage,
+    // so it must reach the client's real mailbox from here. The service is a no-op
+    // for threads that did not originate from an inbound client email.
+    if (!isScheduled && approvalStatus === "approved" && msgData.client) {
+      sendApprovedReplyToClient(msg)
+        .then((result) => {
+          if (result?.sent) {
+            console.log(`📤 [createMessage] Reply emailed to client: ${result.to}`);
+          }
+        })
+        .catch((err) =>
+          console.error("❌ [createMessage] Failed to email reply to client:", err.message)
+        );
+    }
+
     const io = getIO(req);
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
@@ -1941,28 +1974,16 @@ exports.approveMessage = async function approveMessage(req, res) {
       .lean();
     const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
 
-    // Diagnostic logging
-    console.log("════════════════════════════════════════════════");
-    console.log("📨 [assignment approveMessage] APPROVAL TRIGGERED");
-    console.log("   approver (currentUserId):", currentUserId);
-    console.log("   approver name:", req.employee?.name);
-    console.log("   ownerId:", String(ownerId));
-    console.log("   message._id:", String(msg._id));
-    console.log("   message current status:", msg.approvalStatus);
-
     const allLinksAsJunior = await EmployeeHierarchy.find({
       owner: ownerId,
       junior: currentUserId,
     }).lean();
-    console.log("   [DB] hierarchy records where approver is JUNIOR:", JSON.stringify(allLinksAsJunior, null, 2));
 
     // Find the immediate seniors (1 level up) of the current approver
     const immediateSeniors = await findSupervisorsFromHierarchy(
       ownerId,
       currentUserId
     );
-    console.log("   [DB] immediate seniors of approver:", immediateSeniors);
-    console.log("════════════════════════════════════════════════");
 
     const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;
@@ -2014,10 +2035,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           );
         }
         responseStatusMessage = "Message approved and escalated to next-level supervisor";
-        console.log("⬆️ [assignment approveMessage] Escalating to next senior:", targetSupervisor);
       } else {
-        // At top of hierarchy or no active supervisors found up-chain -> Finalize
-        // Get managers and CRM for the owner
         const { managers, crm } = await findTLsAndManagersByOwner(ownerId);
         const crmIds = Array.isArray(crm) ? crm : [];
 
@@ -2153,6 +2171,21 @@ exports.approveMessage = async function approveMessage(req, res) {
         populate: { path: "approver", select: "_id name role designation", model: "Employee" },
       },
     ]);
+
+    // Final approval reached: deliver the reply to the client's real mailbox via
+    // SMTP. Fire-and-forget — an SMTP failure must not fail the approval itself.
+    // (The service only sends for threads that started from an inbound client email.)
+    if (approvalFinalized) {
+      sendApprovedReplyToClient(populated)
+        .then((result) => {
+          if (result?.sent) {
+            console.log(`📤 [approveMessage] Approved reply emailed to client: ${result.to}`);
+          }
+        })
+        .catch((err) =>
+          console.error("❌ [approveMessage] Failed to email approved reply to client:", err.message)
+        );
+    }
 
     // 🔥 ENHANCED REAL-TIME EMISSION - FIXED FOR HIERARCHY
     const io = getIO(req);
