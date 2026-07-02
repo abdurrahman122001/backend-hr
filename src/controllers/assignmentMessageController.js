@@ -552,9 +552,11 @@ async function emitToSpecificReceivers(
       });
     }
 
-    // 🔥 NEW: Add anyone assigned to the client so it shows in their external inbox
-    // ONLY if the message is fully approved
-    if (populatedMessage.client && populatedMessage.approvalStatus === "approved") {
+    // Add anyone assigned to the client so it shows in their external inbox.
+    // CRM-access/root sends are stored with approvalStatus null, while approved
+    // employee replies use "approved"; both are deliverable. Pending messages
+    // must stay limited to their approval receivers.
+    if (populatedMessage.client && populatedMessage.approvalStatus !== "pending") {
       const clientId = populatedMessage.client._id || populatedMessage.client;
       const clientDoc = await ClientInfo.findById(clientId)
         .select("assignedTo")
@@ -631,9 +633,8 @@ async function emitMessageUpdate(io, message, action) {
       });
     }
 
-    // 🔥 NEW: Add users assigned to this client
-    // ONLY if the message is fully approved
-    if (populatedMessage.client && populatedMessage.approvalStatus === "approved") {
+    // Add users assigned to this client once the message is deliverable.
+    if (populatedMessage.client && populatedMessage.approvalStatus !== "pending") {
       const clientId = populatedMessage.client._id || populatedMessage.client;
       const clientDoc = await ClientInfo.findById(clientId)
         .select("assignedTo")
@@ -3088,10 +3089,12 @@ exports.sendDraft = async function sendDraft(req, res) {
         const otherManagerIds = ownerManagerIds.filter(
           (mid) => mid !== String(msg.sender),
         );
+        const senderHasCrmAccess = ownerManagerIds.includes(String(msg.sender));
         const senderIsTopCrm =
-          senderRole === "manager" && otherManagerIds.length === 0;
+          (senderRole === "manager" || senderHasCrmAccess) &&
+          otherManagerIds.length === 0;
 
-        if (!isSenderAssigned && !senderIsTopCrm && otherManagerIds.length > 0) {
+        if (!isSenderAssigned && !senderIsTopCrm && !senderHasCrmAccess && otherManagerIds.length > 0) {
           // Remove the assigned junior(s) and add the CRM (manager).
           receivers = receivers.filter((id) => !assignedToIds.includes(id));
           otherManagerIds.forEach((mid) => {
