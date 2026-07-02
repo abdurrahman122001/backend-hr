@@ -17,6 +17,7 @@ const { extractCNICUsingOpenAI, classifyEmailUsingOpenAI } = require("./services
 const Signature = require("./models/Signature");
 const User = require("./models/Users");
 const CompanyProfile = require("./models/CompanyProfile");
+const ClientInfo = require("./models/ClientInfo");
 
 // IMAP Config
 const imap = new Imap(require("./config/imapConfig"));
@@ -359,6 +360,25 @@ async function processMessage(stream, uid) {
       return;
     }
 
+    // Client emails are handled exclusively by emailReceiverService (client →
+    // assigned employee flow). The HR bot must never auto-reply to them, even
+    // though both watchers share the same inbox. Checked before the expensive
+    // verification/LLM steps so client mail costs nothing here.
+    try {
+      const isClientSender = await ClientInfo.exists({
+        $or: [
+          { clientEmail: fromAddr },
+          { "companyEmployees.email": fromAddr },
+        ],
+      });
+      if (isClientSender) {
+        console.log(`⏭️ Skipping client email from ${fromAddr} — handled by client email receiver`);
+        return;
+      }
+    } catch (clientCheckErr) {
+      console.error("Client sender check failed:", clientCheckErr.message);
+    }
+
     console.log(`📩 Processing email from ${fromAddr}, Subject: ${subject.substring(0, 50)}...`);
     processedEmails.set(emailKey, Date.now());
 
@@ -629,21 +649,11 @@ async function processMessage(stream, uid) {
         });
       },
 
+      // Catch-all: generic/unclassified emails get NO auto-reply. The old
+      // "Thank you for reaching out" template also fired for client emails and
+      // anything else that landed in the shared inbox, confusing recipients.
       hr_related: async () => {
-        await sendSafeEmail({
-          to: fromAddr,
-          subject: "Thank You for Your Message",
-          html: `
-            <div style="font-family: Arial, Helvetica, sans-serif;font-size:16px;line-height:1.7;color:#212121;width:100%">
-              <p style="font-size:15px; line-height:1.7;">Thank you for reaching out to <strong>${COMPANY_NAME}</strong>.</p>
-              <p style="font-size:15px; line-height:1.7;">We've received your message and a member of our HR team will get back to you as soon as possible. If your query is urgent, please reply to this email with additional details.</p>
-              <p style="font-size:15px; line-height:1.7;">Best regards,</p>
-              ${signatureBlock}
-            </div>
-          `,
-          ownerId,
-          type: 'hr_general'
-        });
+        console.log(`ℹ️ Unclassified/general email from ${fromAddr} — no auto-reply sent`);
       }
     };
 

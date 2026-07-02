@@ -526,6 +526,20 @@ const io = new Server(primaryServer, {
 
 // ---------- Socket Events ----------
 app.set("io", io);
+
+// ---------- Inbound client email receiver (IMAP → assignment messages) ----------
+// Watches the client-facing mailbox (info@brannovate.com). Incoming client emails
+// are matched against ClientInfo and delivered to the assigned employee(s) in
+// realtime; approved replies go back out via clientEmailService SMTP.
+if (String(process.env.ENABLE_EMAIL_RECEIVER || "").toLowerCase() === "true") {
+  const emailReceiverService = require("./services/emailReceiverService");
+  const emailPollingService = require("./services/emailPollingService");
+  emailReceiverService.initialize(io);
+  emailReceiverService.connect();
+  emailPollingService.startPolling();
+  console.log("📬 Client email receiver started (IMAP watch + polling)");
+}
+
 io.on("connection", (socket) => {
   console.log("🟢 Client connected:", socket.id);
 

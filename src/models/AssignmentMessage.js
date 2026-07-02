@@ -28,6 +28,14 @@ const AssignmentMessageSchema = new Schema(
       index: true,
     },
     sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    // "client" when the message arrived via email from the client — in that case
+    // `sender` holds a ClientInfo id and populate("sender") returns null; the UI
+    // must fall back to clientEmployeeName / clientName for display.
+    senderType: {
+      type: String,
+      enum: ["employee", "client"],
+      default: "employee",
+    },
     receiver: [
       { type: Schema.Types.ObjectId, ref: "Employee" },
     ],
@@ -167,10 +175,14 @@ const AssignmentMessageSchema = new Schema(
     emailMetadata: {
       messageId: String,
       from: String,
+      fromName: String,
       to: String,
       date: Date,
       cc: [String],
       bcc: [String],
+      // RFC-2822 threading headers so replies stay in the same email thread
+      inReplyTo: String,
+      references: String,
       headers: Schema.Types.Mixed, // Store full headers if needed
     },
 
