@@ -317,7 +317,8 @@ async function updateLeaveEntitlementForEmployeeProportional(
   date,
   daysToDeduct,
   type = "absent",
-  forcePaid = false
+  forcePaid = false,
+  performedBy = null
 ) {
   const leaveYear = getLeaveYear(date);
   const balance = await LeaveYearBalance.findOne({
@@ -362,6 +363,7 @@ async function updateLeaveEntitlementForEmployeeProportional(
           date: new Date(date),
           type: "PAID_LEAVE_USED",
           value: paidToUse,
+          createdBy: performedBy || ownerId,
         },
       );
 
@@ -378,6 +380,7 @@ async function updateLeaveEntitlementForEmployeeProportional(
           date: new Date(date),
           type: "UNPAID_LEAVE_USED",
           value: unpaidToUse,
+          createdBy: performedBy || ownerId,
         },
       );
 
@@ -449,7 +452,7 @@ async function reverseOldBonus(oldRec, sourceModel = undefined) {
       type: "ADJUSTMENT", // or you could create a "BONUS_REVERSED" type
       value: -bonusDecrease,
       sourceModel: "Attendance",
-      createdBy: oldRec.createdBy,
+      createdBy: oldRec.createdBy || ownerId,
     });
   }
 
@@ -532,7 +535,7 @@ async function reverseAttendanceEffects(record, slip = null, perDay = 0, sourceM
           type: "BONUS_RESTORED",
           value: 1,
           sourceModel: "Attendance",
-          createdBy: record.createdBy,
+          createdBy: record.createdBy || ownerId,
         });
       }
 
@@ -667,7 +670,7 @@ async function updateBonusForNonWorkingDay(
       type: "BONUS_EARNED",
       value: 1,
       sourceModel: "Attendance",
-      createdBy: employee.createdBy,
+      createdBy: employee.createdBy || ownerId,
     });
   }
 
@@ -791,7 +794,7 @@ async function updateBonusForEarlyBird(
       type: "BONUS_EARNED",
       value: 1,
       sourceModel: "Attendance",
-      createdBy: employee.createdBy,
+      createdBy: employee.createdBy || ownerId,
     });
   }
 
@@ -815,6 +818,11 @@ async function updateBonusForEarlyBird(
   return { bonus: newBonus, accumulated: newAccumulated };
 }
 
+// Early-departure bonus deduction is DISABLED: leaving early no longer deducts
+// bonus hours/days. Reversal logic elsewhere is kept so historical deductions
+// on old records can still be reversed. Flip to true to re-enable.
+const EARLY_DEPARTURE_BONUS_DEDUCTION_ENABLED = false;
+
 async function deductBonusForEarlyDeparture(
   employeeId,
   checkIn,
@@ -823,6 +831,9 @@ async function deductBonusForEarlyDeparture(
   checkOut,
   date
 ) {
+  if (!EARLY_DEPARTURE_BONUS_DEDUCTION_ENABLED)
+    return { deducted: 0, remainingBonus: null, negativeHours: 0 };
+
   // Early departure calculation logic
   if (!checkIn || !shiftStart || !shiftEnd || !checkOut)
     return { deducted: 0, remainingBonus: null, negativeHours: 0 };
@@ -917,11 +928,8 @@ async function deductBonusForEarlyDeparture(
       remainingToDeduct -= hoursFromBonus;
     }
 
-    // If still have remaining hours to deduct, add as negative hours
-    if (remainingToDeduct > 0) {
-      negativeHours = remainingToDeduct;
-      newAccumulated -= remainingToDeduct; // This will make it negative
-    }
+    // Any remaining hours beyond the available bonus are NOT deducted —
+    // bonusHoursAccumulated must never go negative
   }
 
   // Create transaction for bonus deduction if any hours were deducted from bonus
@@ -936,7 +944,7 @@ async function deductBonusForEarlyDeparture(
       type: "BONUS_DEDUCTED",
       value: -bonusDaysDeducted,
       sourceModel: "Attendance",
-      createdBy: employee.createdBy,
+      createdBy: employee.createdBy || ownerId,
     });
   }
 

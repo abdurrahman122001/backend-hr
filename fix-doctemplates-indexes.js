@@ -1,4 +1,4 @@
-// fix-doctemplates-indexes.js
+s// fix-doctemplates-indexes.js
 const mongoose = require('mongoose');
 require('dotenv').config();
 

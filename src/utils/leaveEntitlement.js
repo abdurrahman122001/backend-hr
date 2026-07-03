@@ -22,7 +22,8 @@ async function updateLeaveEntitlementForEmployee(
   attendanceDate,
   deductionCount = 1,
   type = "absent",
-  forceUnpaid = false
+  forceUnpaid = false,
+  performedBy = null
 ) {
   const leaveYear = getLeaveYear(attendanceDate);
 
@@ -98,6 +99,7 @@ async function updateLeaveEntitlementForEmployee(
             type: "PAID_LEAVE_USED",
             value: addPaid,
             sourceId: new mongoose.Types.ObjectId(),
+            createdBy: performedBy || ownerId,
           },
         ],
         { session }
@@ -118,6 +120,7 @@ async function updateLeaveEntitlementForEmployee(
             type: "UNPAID_LEAVE_USED",
             value: addUnpaid,
             sourceId: new mongoose.Types.ObjectId(),
+            createdBy: performedBy || ownerId,
           },
         ],
         { session }
@@ -144,7 +147,8 @@ async function reverseLeaveEntitlementForEmployee(
   employeeId,
   attendanceDate,
   reversalCount = 1,
-  type = "paid" // "paid" or "unpaid"
+  type = "paid", // "paid" or "unpaid"
+  performedBy = null
 ) {
   const leaveYear = getLeaveYear(attendanceDate);
 
@@ -173,6 +177,7 @@ async function reverseLeaveEntitlementForEmployee(
             type: "PAID_LEAVE_REVERSED",
             value: reversalCount,
             sourceId: new mongoose.Types.ObjectId(),
+            createdBy: performedBy || ownerId,
           },
         ],
         { session }
@@ -193,6 +198,7 @@ async function reverseLeaveEntitlementForEmployee(
             type: "UNPAID_LEAVE_REVERSED",
             value: reversalCount,
             sourceId: new mongoose.Types.ObjectId(),
+            createdBy: performedBy || ownerId,
           },
         ],
         { session }

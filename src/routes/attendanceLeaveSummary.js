@@ -322,6 +322,8 @@ router.get("/:employeeId", async (req, res) => {
             total: balanceData.finalBalance, // Remaining balance
             initialBalance: balanceData.initialBalance,
             bonus: leaveBalance?.bonus || 0,
+            // Accumulated overtime/bonus hours (9 hrs converts to 1 bonus day)
+            bonusHours: leaveBalance?.bonusHoursAccumulated || 0,
             history
         });
     } catch (e) {
