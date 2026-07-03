@@ -6,7 +6,7 @@ const Shift = require("../models/Shift");
 const TaxConfig = require("../models/TaxConfig");
 const CompanyProfile = require("../models/CompanyProfile");
 const { encrypt, decrypt } = require("../utils/encryption");
-const { sendCompleteProfileLink, sendSetPasswordEmail } = require("../services/profileEmailService");
+const { sendCompleteProfileLink, sendSetPasswordEmail, sendMissingDocumentsRequest, REQUESTABLE_DOC_LABELS } = require("../services/profileEmailService");
 const crypto = require("crypto");
 const path = require("path");
 const fs = require("fs");
@@ -1131,6 +1131,54 @@ exports.resendCompleteProfileLink = async (req, res) => {
     return res
       .status(500)
       .json({ message: err.message || "Failed to resend profile email" });
+  }
+};
+
+exports.requestMissingDocuments = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^[0-9a-fA-F]{24}$/.test(id)) {
+      return res.status(400).json({ message: "Invalid employee ID format" });
+    }
+
+    // Only super-admin/admin users or employees granted isAdmin rights may
+    // request documents (anyPayrollAuth sets isAdmin for exactly those).
+    if (!req.user?.isAdmin) {
+      return res
+        .status(403)
+        .json({ message: "Only admins can request missing documents" });
+    }
+
+    const requested = Array.isArray(req.body?.missingDocs)
+      ? req.body.missingDocs.filter((k) => REQUESTABLE_DOC_LABELS[k])
+      : [];
+    if (!requested.length) {
+      return res.status(400).json({ message: "No valid documents selected" });
+    }
+
+    const emp = await Employee.findById(id);
+    if (!emp) return res.status(404).json({ message: "Employee not found" });
+    if (!emp.email)
+      return res.status(400).json({ message: "Employee email is missing" });
+
+    const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
+    await sendMissingDocumentsRequest({
+      id: emp._id.toString(),
+      to: emp.email,
+      employeeName: emp.name || "Employee",
+      ownerId,
+      missingDocs: requested,
+    });
+
+    return res.json({
+      success: true,
+      message: "Missing documents request sent.",
+    });
+  } catch (err) {
+    console.error("requestMissingDocuments error:", err);
+    return res
+      .status(500)
+      .json({ message: err.message || "Failed to send documents request" });
   }
 };
 

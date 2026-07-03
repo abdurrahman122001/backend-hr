@@ -89,6 +89,71 @@ async function sendCompleteProfileLink({
   await sendEmail({ to, subject, html });
 }
 
+/** Documents an admin can request via the complete-profile form. */
+const REQUESTABLE_DOC_LABELS = {
+  cnicFront: "CNIC (Front)",
+  cnicBack: "CNIC (Back)",
+  resume: "CV / Resume",
+  matric: "Matric Certificate",
+  inter: "Inter Certificate",
+  graduate: "Graduate/Bachelor's Certificate",
+  masters: "Master's Certificate",
+};
+
+/**
+ * Sends a "missing documents" request email with the complete-profile link.
+ * @param {{id:string,to:string,employeeName?:string,companyName?:string,ownerId?:string,missingDocs:string[]}} p
+ */
+async function sendMissingDocumentsRequest({
+  id,
+  to,
+  employeeName,
+  companyName = COMPANY_NAME,
+  ownerId,
+  missingDocs = [],
+}) {
+  if (!id || !to) throw new Error("Missing 'id' or 'to' for missing documents email");
+
+  const labels = missingDocs
+    .map((key) => REQUESTABLE_DOC_LABELS[key])
+    .filter(Boolean);
+  if (!labels.length) throw new Error("No valid documents requested");
+
+  const link = `${FRONTEND_BASE_URL}/complete-profile/${id}`;
+  const subject = "📄 Action Required: Missing Documents for Your Employee Profile";
+  const signatureBlock = await getSignatureBlock(ownerId);
+
+  const docListItems = labels
+    .map(
+      (label) =>
+        `<li style="margin-bottom:4px;">📎 <strong>${label}</strong></li>`
+    )
+    .join("\n");
+
+  const html = `
+    <div style="font-family: Arial, Helvetica, sans-serif;font-size:15px;line-height:1.7;color:#212121;width:100%">
+      <p style="font-size: 15px;line-height: 18px;">Dear <strong>${employeeName || "Employee"}</strong>,</p>
+      <p style="font-size: 15px;line-height: 22px;">While reviewing your employee profile, our HR team noticed that the following document${labels.length > 1 ? "s are" : " is"} missing from our records:</p>
+      <ul style="margin:0 0 1em 2em;padding:0;">
+        ${docListItems}
+      </ul>
+      <p style="font-size: 15px;line-height: 18px;">To keep your records complete and up to date, please upload ${labels.length > 1 ? "them" : "it"} using your profile form:</p>
+      <p style="font-size: 15px;line-height: 18px;">
+        📝 <strong>
+          <a href="${link}" style="color: #0057b7; text-decoration: underline;">
+            Click here to upload your missing document${labels.length > 1 ? "s" : ""}
+          </a>
+        </strong>
+      </p>
+      <p style="font-size: 15px;line-height: 18px;">It'll only take a few minutes and, as always, your data will be handled with strict confidentiality and care.</p>
+      <p style="font-size: 15px;line-height: 18px;">Thank you for being such an important part of the <strong>${companyName}</strong> family.</p>
+      ${signatureBlock}
+    </div>
+  `;
+
+  await sendEmail({ to, subject, html });
+}
+
 /**
  * Optional helper to send the Set-Password email (you can call this anywhere).
  * @param {{to:string, employeeName?:string, token:string, employeeId:string, ownerId?:string}} p
@@ -133,5 +198,7 @@ async function sendSetPasswordEmail({ to, employeeName, token, employeeId, owner
 
 module.exports = {
   sendCompleteProfileLink,
+  sendMissingDocumentsRequest,
+  REQUESTABLE_DOC_LABELS,
   sendSetPasswordEmail, // optional export if you want to use it elsewhere
 };
