@@ -7,6 +7,7 @@ const unifiedAuth = require("../middleware/unifiedAuth");
 // Employee routes
 router.post("/apply", empAuth, ctrl.applyOvertimeRequest);
 router.get("/my-requests", empAuth, ctrl.getMyRequests);
+router.get("/eligible-days", empAuth, ctrl.getEligibleEarlyDays);
 
 // Admin / HR routes
 router.get("/all", unifiedAuth, ctrl.getAllRequests);

@@ -35,7 +35,7 @@ exports.getMyRequests = async (req, res) => {
   try {
     const employeeId = req.user.employeeId || req.user.id || req.user._id;
     const requests = await CommissionRequest.find({ employee: employeeId })
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
@@ -52,7 +52,7 @@ exports.getAllRequests = async (req, res) => {
     if (status) filter.status = status;
     if (month) filter.month = month;
     const requests = await CommissionRequest.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {

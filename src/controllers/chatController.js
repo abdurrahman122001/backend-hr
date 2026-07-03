@@ -62,50 +62,31 @@ const processMentions = async (content, senderId) => {
 
   const mentions = [];
 
-  // Handle both formats: @[Name](userId) and simple @username
-  const mentionRegex = /(?:@\[([^\]]+)\]\(([^)]+)\)|@(\w+))/g;
+  // Only the explicit picker format @[Name](userId) counts as a mention.
+  // Plain "@word" text must NOT be resolved by fuzzy name/email search —
+  // it misattributes mentions (e.g. a typed email address like
+  // "x@company.com" matched every employee's companyEmail domain and
+  // pinned a mention on an unrelated employee).
+  const mentionRegex = /@\[([^\]]+)\]\(([^)]+)\)/g;
   let match;
 
   while ((match = mentionRegex.exec(content)) !== null) {
-    const [, mentionText, userId, simpleMention] = match;
-
-    let finalUserId = userId;
-    let finalMentionText = mentionText;
-
-    // If it's a simple @mention (without brackets), we need to find the user
-    if (simpleMention && !userId) {
-      try {
-        // Search for user by name, email, or username
-        const user = await Employee.findOne({
-          $or: [
-            { name: { $regex: simpleMention, $options: "i" } },
-            { companyEmail: { $regex: simpleMention, $options: "i" } },
-            { username: { $regex: simpleMention, $options: "i" } },
-          ],
-        }).select("_id name companyEmail");
-
-        if (user && user._id.toString() !== senderId.toString()) {
-          finalUserId = user._id;
-          finalMentionText = `@${simpleMention}`;
-        } else {
-          continue; // Skip if user not found or is sender
-        }
-      } catch (error) {
-        console.error("Error finding user for mention:", error);
-        continue;
-      }
-    }
+    const [, mentionText, userId] = match;
 
     // Validate user exists and is not the sender
-    if (finalUserId && finalUserId !== senderId.toString()) {
-      const user = await Employee.findById(finalUserId).select(
+    if (
+      userId &&
+      userId !== senderId.toString() &&
+      mongoose.Types.ObjectId.isValid(userId)
+    ) {
+      const user = await Employee.findById(userId).select(
         "name companyEmail"
       );
       if (user) {
         mentions.push({
-          employee: finalUserId,
+          employee: userId,
           mentionedAt: new Date(),
-          mentionText: finalMentionText || `@${user.name}`,
+          mentionText: mentionText || `@${user.name}`,
         });
       }
     }

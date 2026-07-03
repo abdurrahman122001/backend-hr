@@ -53,7 +53,7 @@ exports.getMyReports = async (req, res) => {
   try {
     const employeeId = req.employee?._id;
     const reports = await WhistleblowingReport.find({ employee: employeeId })
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: reports });
   } catch (error) {
@@ -72,7 +72,7 @@ exports.getAllReports = async (req, res) => {
     if (reportType) filter.reportType = reportType;
 
     const reports = await WhistleblowingReport.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: reports });
   } catch (error) {

@@ -10,17 +10,22 @@ function getTransporter() {
     transporter = nodemailer.createTransport({
       host: process.env.MAIL_HOST || 'smtp.titan.email',
       port: Number(process.env.MAIL_PORT) || 465,
-      secure: process.env.MAIL_PORT === "465" || true,
+      secure: (Number(process.env.MAIL_PORT) || 465) === 465,
       auth: {
         user: process.env.MAIL_USERNAME,
         pass: process.env.MAIL_PASSWORD,
       },
-      tls: { 
-        rejectUnauthorized: false 
+      tls: {
+        rejectUnauthorized: false
       },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 30000
+      // Reuse connections instead of opening a fresh one per email — Titan
+      // tarpits (delays the greeting for) IPs that reconnect frequently.
+      pool: true,
+      maxConnections: 3,
+      // Titan's greet delay has been observed at 12s+; keep well above it.
+      connectionTimeout: 30000,
+      greetingTimeout: 30000,
+      socketTimeout: 60000
     });
   }
   return transporter;

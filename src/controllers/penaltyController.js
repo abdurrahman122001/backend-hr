@@ -55,7 +55,7 @@ exports.getAllPenalties = async (req, res) => {
   try {
     const ownerId = req.user.owner || req.user._id;
     const penalties = await Penalty.find({ owner: ownerId })
-      .populate("employee", "name department")
+      .populate("employee", "name department employeeId")
       .populate("reportedBy", "name")
       .sort({ createdAt: -1 });
 
@@ -95,7 +95,7 @@ exports.updatePenalty = async (req, res) => {
       req.body,
       { new: true }
     )
-      .populate("employee", "name department")
+      .populate("employee", "name department employeeId")
       .populate("reportedBy", "name");
 
     if (!penalty) {
@@ -199,7 +199,7 @@ exports.getMyPenalties = async (req, res) => {
       employee: employeeId,
       owner: ownerId,
     })
-      .populate("employee", "name department")
+      .populate("employee", "name department employeeId")
       .populate("reportedBy", "name")
       .sort({ createdAt: -1 });
 

@@ -68,7 +68,7 @@ exports.getAllReports = async (req, res) => {
     if (reportType) filter.reportType = reportType;
 
     const reports = await WhistleblowingReport.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .populate("reviewedBy", "name")
       .sort({ createdAt: -1 });
 

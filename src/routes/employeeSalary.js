@@ -9,6 +9,7 @@ router.get('/:id', anyPayrollAuth, controller.getEmployeeAndSalarySlip);
 router.get('/:id/history', anyPayrollAuth, controller.getSalaryHistory);
 router.put('/:id', anyPayrollAuth, controller.updateEmployeeAndSalarySlip);
 router.post("/:id/send-complete-profile", anyPayrollAuth, controller.resendCompleteProfileLink);
+router.post("/:id/request-missing-documents", anyPayrollAuth, controller.requestMissingDocuments);
 router.post("/:id/resend-set-password", anyPayrollAuth, controller.resendSetPasswordLink);
 router.put('/:id/photo', anyPayrollAuth, uploadPhotos.single('photo'), controller.updateEmployeePhoto); // ✅ Corrected
 router.post("/calc-preview", controller.calculatePreviewTax);
