@@ -308,7 +308,7 @@ exports.resolveWarning = async (req, res) => {
 exports.getAllWarnings = async (req, res) => {
   try {
     const warnings = await EmployeeWarning.find({ owner: req.user._id })
-      .populate("employee", "name department")
+      .populate("employee", "name department employeeId")
       .populate("warning", "name maxWarnings penaltyAmount")
       .populate("reportedBy", "name")
       .sort({ createdAt: -1 });

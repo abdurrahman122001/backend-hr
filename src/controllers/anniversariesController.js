@@ -36,14 +36,14 @@ exports.getUpcomingAnniversaries = async (req, res) => {
 
     const emps = await Employee.find({
       owner: ownerId,
-      status: { $nin: ["offboarded", "resigned", "terminated"] },
+      status: "active",
       isTrashed: { $ne: true },
       $or: [
         { resignationDate: { $exists: false } },
         { resignationDate: null },
         { resignationDate: "" }
       ],
-    }).select("name dateOfBirth joiningDate department designation photographUrl");
+    }).select("name dateOfBirth joiningDate department designation photographUrl status");
 
     const result = [];
 

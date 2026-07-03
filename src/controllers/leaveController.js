@@ -786,7 +786,7 @@ exports.applyLeave = async (req, res) => {
     if (!isEmployeeAdmin && req.app.get("io") && approvalChain && approvalChain.length > 0) {
       const io = req.app.get("io");
       const populatedLeave = await Leave.findById(leave._id)
-        .populate("employee", "name email department photographUrl")
+        .populate("employee", "name email department employeeId photographUrl")
         .lean();
 
       const processedLeave = {
@@ -1112,7 +1112,7 @@ exports.approveLeave = async (req, res) => {
 
       // Re-fetch to ensure we have the latest data
       const updatedLeave = await Leave.findById(leave._id)
-        .populate("employee", "name email department photographUrl")
+        .populate("employee", "name email department employeeId photographUrl")
         .populate("supervisor", "name email role")
         .populate("approvalChain", "name email role")
         .lean();
@@ -1386,7 +1386,7 @@ exports.approveLeave = async (req, res) => {
 
     // Get updated leave with populated fields
     const updatedLeave = await Leave.findById(leave._id)
-      .populate("employee", "name email department photographUrl")
+      .populate("employee", "name email department employeeId photographUrl")
       .populate("approvedBy", "name email")
       .lean();
 
@@ -1537,7 +1537,7 @@ exports.rejectLeave = async (req, res) => {
       const io = req.app.get("io");
       try {
         const populatedLeave = await Leave.findById(leave._id)
-          .populate("employee", "name email department photographUrl")
+          .populate("employee", "name email department employeeId photographUrl")
           .populate("rejectedBy", "name email")
           .lean();
 
@@ -1823,7 +1823,7 @@ exports.getPendingLeaves = async (req, res) => {
     }
 
     const pendingLeaves = await Leave.find(query)
-      .populate("employee", "name email department designation photographUrl status owner")
+      .populate("employee", "name email department designation employeeId photographUrl status owner")
       .populate("supervisor", "name email role")
       .populate("appliedBy", "name email")
       .populate("approvalChain", "name email role")
@@ -2172,7 +2172,7 @@ exports.getLeaveStats = async (req, res) => {
       recentLeaves = await Leave.find(baseFilter)
         .sort({ createdAt: -1 })
         .limit(10)
-        .populate("employee", "name email department photographUrl status")
+        .populate("employee", "name email department employeeId photographUrl status")
         .lean();
 
       recentLeaves = recentLeaves.map((leave) => ({

@@ -60,7 +60,7 @@ exports.getAllLoanRequests = async (req, res) => {
     }
 
     const requests = await LoanRequest.find({ owner: ownerId })
-      .populate("employee", "name companyEmail department designation photographUrl")
+      .populate("employee", "name companyEmail department designation employeeId photographUrl")
       .sort({ createdAt: -1 });
     
     res.json({
