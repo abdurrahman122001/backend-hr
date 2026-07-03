@@ -1,5 +1,8 @@
 const OvertimeRequest = require("../models/OvertimeRequest");
 const LeaveYearBalance = require("../models/LeaveYearBalance");
+const Attendance = require("../models/Attendance");
+const Employee = require("../models/Employees");
+const Shift = require("../models/Shift");
 const { approvedFields } = require("../utils/requestAutoApproval");
 
 const getEmployeeId = (req) => req.employee?._id;
@@ -76,6 +79,101 @@ exports.applyOvertimeRequest = async (req, res) => {
     });
   } catch (error) {
     console.error("Overtime Apply Error:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * EMPLOYEE: Days eligible for early-arrival overtime.
+ * A day qualifies when the employee checked in BEFORE the shift start
+ * (e.g. shift starts 15:00, checked in 13:00) AND the checkout happened at
+ * 12:00 AM or after (i.e. rolled past midnight into the next day).
+ * Days that already have a pending/approved overtime request are excluded.
+ * ───────────────────────────────────────────────────────────────────────── */
+exports.getEligibleEarlyDays = async (req, res) => {
+  try {
+    const employeeId = getEmployeeId(req);
+    const ownerId = getOwnerId(req);
+
+    const toMin = (hhmm) => {
+      if (!hhmm) return null;
+      const [hStr, mStr = "0"] = String(hhmm).trim().split(":");
+      const h = Number(hStr);
+      const m = Number(String(mStr).replace(/[^\d]/g, ""));
+      if (Number.isNaN(h) || Number.isNaN(m)) return null;
+      return h * 60 + m;
+    };
+
+    // Fallback shift start for old records without a shift snapshot
+    let fallbackShiftStart = null;
+    const employee = await Employee.findById(employeeId).select("shifts").lean();
+    if (employee?.shifts?.length) {
+      const shift = await Shift.findById(employee.shifts[0]).select("start").lean();
+      fallbackShiftStart = shift?.start || null;
+    }
+
+    // Look back over the last 6 months (date is stored as "YYYY-MM-DD")
+    const sinceDate = new Date();
+    sinceDate.setMonth(sinceDate.getMonth() - 6);
+    const since = sinceDate.toISOString().slice(0, 10);
+
+    const records = await Attendance.find({
+      owner: ownerId,
+      employee: employeeId,
+      date: { $gte: since },
+      checkIn: { $nin: [null, ""] },
+      checkOut: { $nin: [null, ""] },
+      status: { $in: ["Present", "Late", "Half Day"] },
+    })
+      .select("date checkIn checkOut shiftStartTime shiftName status")
+      .sort({ date: -1 })
+      .lean();
+
+    // Exclude days that already have a request (pending or approved)
+    const existing = await OvertimeRequest.find({
+      employee: employeeId,
+      status: { $ne: "rejected" },
+    })
+      .select("date")
+      .lean();
+    const requestedDates = new Set(
+      existing.map((r) => String(r.date).slice(0, 10))
+    );
+
+    const eligible = [];
+    for (const rec of records) {
+      if (requestedDates.has(String(rec.date).slice(0, 10))) continue;
+
+      const shiftStart = rec.shiftStartTime || fallbackShiftStart;
+      const inMin = toMin(rec.checkIn);
+      const startMin = toMin(shiftStart);
+      const outMin = toMin(rec.checkOut);
+      if (inMin == null || startMin == null || outMin == null) continue;
+
+      // Must have arrived before the shift started
+      if (inMin >= startMin) continue;
+
+      // Checkout must be 12:00 AM or after — a checkout past midnight shows up
+      // as a time "earlier" than the check-in (e.g. in 13:00 → out 00:30)
+      const checkedOutAtOrAfterMidnight = outMin < inMin;
+      if (!checkedOutAtOrAfterMidnight) continue;
+
+      const earlyMinutes = startMin - inMin;
+      eligible.push({
+        date: rec.date,
+        checkIn: rec.checkIn,
+        checkOut: rec.checkOut,
+        shiftStart,
+        shiftName: rec.shiftName || null,
+        status: rec.status,
+        earlyMinutes,
+        earlyHours: +(earlyMinutes / 60).toFixed(2),
+      });
+    }
+
+    res.status(200).json({ data: eligible });
+  } catch (error) {
+    console.error("Overtime EligibleDays Error:", error);
     res.status(500).json({ message: error.message });
   }
 };

@@ -1050,8 +1050,16 @@ async function reverseLateDayDeduction(employeeId, ownerId, userId, attendanceDa
  * @param {number} hoursEarly - Number of hours early they departed
  * @returns {Promise<Object>} - { success: boolean, hoursDeducted: number, message: string }
  */
+// Early-departure bonus deduction is DISABLED: leaving early no longer deducts
+// bonus hours. Reversal logic is kept so historical deductions can still be
+// reversed. Flip to true to re-enable.
+const EARLY_DEPARTURE_BONUS_DEDUCTION_ENABLED = false;
+
 async function applyEarlyDepartureHoursDeduction(employeeId, ownerId, userId, attendanceDate, hoursEarly) {
   try {
+    if (!EARLY_DEPARTURE_BONUS_DEDUCTION_ENABLED) {
+      return { success: false, hoursDeducted: 0, message: "Early-departure bonus deduction is disabled" };
+    }
     if (hoursEarly <= 0) {
       return { success: false, hoursDeducted: 0, message: "No early departure to deduct" };
     }
@@ -1117,9 +1125,13 @@ async function applyEarlyDepartureHoursDeduction(employeeId, ownerId, userId, at
     // Deduct from bonusHoursAccumulated
     const previousHours = Number(balance.bonusHoursAccumulated || 0);
 
-    // Always deduct, even if it goes negative (tracks deficit)
-    const deductedHours = hoursEarly;
-    const newHours = previousHours - hoursEarly;
+    // Only deduct what is actually available — the balance must never go negative
+    const deductedHours = Math.min(hoursEarly, Math.max(0, previousHours));
+    if (deductedHours <= 0) {
+      console.log(`[EARLY-DEPARTURE] ${employee.name}: No bonus hours available to deduct on ${attendanceDate}. Skipping.`);
+      return { success: false, hoursDeducted: 0, message: "No bonus hours available to deduct" };
+    }
+    const newHours = previousHours - deductedHours;
 
     balance.bonusHoursAccumulated = newHours;
     await balance.save();
@@ -1134,7 +1146,7 @@ async function applyEarlyDepartureHoursDeduction(employeeId, ownerId, userId, at
       type: "BONUS_HOURS_DEDUCTED",
       value: deductedHours,
       sourceModel: "Attendance",
-      reason: `Early Departure Hours: ${hoursEarly.toFixed(2)} hours deducted (stayed until 9 PM but left before shift end). Previous: ${previousHours.toFixed(2)}, Deducted: ${deductedHours.toFixed(2)}, New: ${newHours.toFixed(2)}`,
+      reason: `Early Departure Hours: ${deductedHours.toFixed(2)} of ${hoursEarly.toFixed(2)} early hours deducted (stayed until 9 PM but left before shift end). Previous: ${previousHours.toFixed(2)}, Deducted: ${deductedHours.toFixed(2)}, New: ${newHours.toFixed(2)}`,
       createdBy: userId,
     });
 
