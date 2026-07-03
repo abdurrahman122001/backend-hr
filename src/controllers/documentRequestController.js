@@ -80,7 +80,7 @@ exports.getMyRequests = async (req, res) => {
     const filter = { employee: employeeId };
     if (req.query.documentType) filter.documentType = req.query.documentType;
     const requests = await DocumentRequest.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
@@ -99,7 +99,7 @@ exports.getAllRequests = async (req, res) => {
     if (month) filter.month = month;
 
     const requests = await DocumentRequest.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
@@ -125,7 +125,7 @@ exports.updateStatus = async (req, res) => {
     }
 
     const request = await DocumentRequest.findByIdAndUpdate(id, updateData, { new: true })
-      .populate("employee", "name designation department companyEmail");
+      .populate("employee", "name designation department employeeId companyEmail");
     if (!request) return res.status(404).json({ message: "Request not found" });
 
     // Auto-generate salary certificate PDF on approval

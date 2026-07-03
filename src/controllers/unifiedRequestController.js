@@ -109,7 +109,7 @@ exports.getUnifiedToDoList = async (req, res) => {
 
     // 1. Leave Requests
     const leavePromise = LeaveRequest.find(leaveMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .populate("approvalChain", "name designation role")
       .populate("supervisor", "name designation role")
       .sort({ createdAt: -1 })
@@ -117,79 +117,79 @@ exports.getUnifiedToDoList = async (req, res) => {
 
     // 2. Loan Requests
     const loanPromise = LoanRequest.find(baseMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 3. Salary Change Requests
     const salaryChangePromise = SalaryChangeRequest.find(baseMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 4. Advance Salary Requests
     const advanceSalaryPromise = AdvanceSalaryRequest.find(baseMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 5. Reimbursement Requests
     const reimbursementPromise = ReimbursementRequest.find(baseMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
 // 6. Commission Requests
      const commissionPromise = CommissionRequest.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 7. Tax Adjustment Requests
      const taxAdjustmentPromise = TaxAdjustmentRequest.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 8. Bonus Requests
      const bonusPromise = BonusRequest.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 9. Leave Encashment Requests
      const leaveEncashmentPromise = LeaveEncashmentRequest.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 10. Leave Carry Forward Requests
      const leaveCarryForwardPromise = LeaveCarryForwardRequest.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
      
      // 11. Profile Revision Requests
      const profileRevisionPromise = ProfileRevision.find(baseMatch)
-       .populate("employee", "name department designation photographUrl")
+       .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
     // 12. Attendance Challenges
     const attendancePromise = Attendance.find(attendanceMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ challengeAt: -1 })
       .limit(fetchLimit);
 
     // 7. Salary Revision History
     const promotionPromise = (status === "pending") ? Promise.resolve([]) : SalaryRevisionHistory.find({ employee: { $in: employeeIds } })
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ revisionDate: -1 })
       .limit(fetchLimit);
 
     // 13. Overtime Requests
     const overtimePromise = OvertimeRequest.find(baseMatch)
-      .populate("employee", "name department designation photographUrl")
+      .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 

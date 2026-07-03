@@ -49,7 +49,7 @@ exports.getAllRequests = async (req, res) => {
   try {
     const ownerId = req.user.owner;
     const requests = await AdvanceSalaryRequest.find({ owner: ownerId })
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {

@@ -300,7 +300,7 @@ exports.getMyOpenRequests = async (req, res) => {
       ProfileRevision.find(base).populate("employee", populateEmp).lean(),
       // ApplyLeave - populate all fields needed for the detail modal
       ApplyLeave.find({ employee: employeeId, isTrashed: { $ne: true } })
-        .populate("employee", "name email companyEmail role designation photographUrl photoUrl owner")
+        .populate("employee", "name email companyEmail role designation photographUrl photoUrl employeeId owner")
         .populate("approvalChain", "name role designation")
         .populate("approvedBy", "name companyEmail email role designation photographUrl photoUrl")
         .populate("rejectedBy", "name companyEmail email role designation photographUrl photoUrl")
@@ -358,7 +358,7 @@ exports.getLeaveApprovals = async (req, res) => {
 
     const empObjId = new mongoose.Types.ObjectId(String(employeeId));
     const empIdStr = String(empObjId);
-    const populateEmp = "name companyEmail email designation department photographUrl photoUrl owner";
+    const populateEmp = "name companyEmail email designation department photographUrl photoUrl employeeId owner";
 
     const populateChain = { path: "approvalChain", select: "name companyEmail email role designation photographUrl photoUrl" };
     const populateApprovedBy = { path: "approvedBy", select: "name companyEmail email role designation photographUrl photoUrl" };

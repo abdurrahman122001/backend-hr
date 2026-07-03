@@ -59,7 +59,7 @@ exports.getAllRequests = async (req, res) => {
     if (status) filter.status = status;
     if (month) filter.month = month;
     const requests = await BonusRequest.find(filter)
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {

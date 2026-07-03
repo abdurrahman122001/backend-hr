@@ -90,7 +90,7 @@ exports.getMySalaryChangeRequests = async (req, res) => {
   try {
     const employeeId = req.user.employeeId || req.user.id || req.user._id;
     const requests = await SalaryChangeRequest.find({ employee: employeeId })
-      .populate("employee", "name designation department")
+      .populate("employee", "name designation department employeeId")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
@@ -104,7 +104,7 @@ exports.getAllSalaryChangeRequests = async (req, res) => {
   try {
     const ownerId = req.user.owner;
     const requests = await SalaryChangeRequest.find({ owner: ownerId })
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {

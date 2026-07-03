@@ -37,7 +37,7 @@ exports.getMyRequests = async (req, res) => {
   try {
     const employeeId = req.user.employeeId || req.user.id || req.user._id;
     const requests = await ReimbursementRequest.find({ employee: employeeId })
-      .populate("employee", "name designation department photographUrl")
+      .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {
@@ -50,7 +50,7 @@ exports.getAllRequests = async (req, res) => {
   try {
     const ownerId = req.user.owner;
   const requests = await ReimbursementRequest.find({ owner: ownerId })
-    .populate("employee", "name designation department photographUrl")
+    .populate("employee", "name designation department employeeId photographUrl")
     .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });
   } catch (error) {

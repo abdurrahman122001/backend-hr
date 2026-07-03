@@ -47,7 +47,7 @@ exports.getPendingApprovals = async (req, res) => {
         }
 
         const approvals = await ProbationLeaveApproval.find(filter)
-            .populate("employee", "name email department designation joiningDate photographUrl")
+            .populate("employee", "name email department designation employeeId joiningDate photographUrl")
             .sort({ createdAt: -1 })
             .lean();
 
@@ -72,7 +72,7 @@ exports.getApprovalById = async (req, res) => {
             _id: req.params.id,
             owner: req.user._id,
         })
-            .populate("employee", "name email department designation joiningDate photographUrl")
+            .populate("employee", "name email department designation employeeId joiningDate photographUrl")
             .lean();
 
         if (!approval) {
@@ -94,7 +94,7 @@ exports.approveLeaveCredit = async (req, res) => {
         const approval = await ProbationLeaveApproval.findOne({
             _id: req.params.id,
             owner: req.user._id,
-        }).populate("employee", "name");
+        }).populate("employee", "name employeeId");
 
         if (!approval) {
             return res.status(404).json({ status: "error", message: "Not found" });
@@ -194,7 +194,7 @@ exports.rejectLeaveCredit = async (req, res) => {
         const approval = await ProbationLeaveApproval.findOne({
             _id: req.params.id,
             owner: req.user._id,
-        }).populate("employee", "name");
+        }).populate("employee", "name employeeId");
 
         if (!approval) {
             return res.status(404).json({ status: "error", message: "Not found" });
@@ -253,7 +253,7 @@ exports.extendProbation = async (req, res) => {
         const approval = await ProbationLeaveApproval.findOne({
             _id: req.params.id,
             owner: req.user._id,
-        }).populate("employee", "name");
+        }).populate("employee", "name employeeId");
 
         if (!approval) {
             return res.status(404).json({ status: "error", message: "Not found" });
