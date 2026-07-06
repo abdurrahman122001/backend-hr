@@ -33,6 +33,7 @@ router.get("/supervision", filterCtrl.getSupervisionMessages);
 
 // General Message Routes
 router.get("/has-juniors", filterCtrl.hasJuniors);
+router.get("/my-juniors", filterCtrl.getMyJuniors);
 router.get("/", filterCtrl.listMessages);
 
 // Normal employees can create/send email (normal approval flow). The

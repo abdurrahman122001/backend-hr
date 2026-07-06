@@ -133,6 +133,27 @@ function getIO(req) {
 const oid = (v) =>
   mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 
+// Slim a message for LIST responses: inbound emails store whole attachment
+// files as base64 `data:` URIs — shipping those in every list page makes the
+// payload megabytes and is the main reason "Loading emails" took so long.
+// The list UI only renders attachment names/counts; the detail view refetches
+// the full thread, so nothing user-facing is lost. Uploaded-file attachments
+// (short path URLs) are kept untouched.
+function slimListMessage(m) {
+  if (!m) return m;
+  if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+    m.attachments = m.attachments.map((a) =>
+      a && typeof a.url === "string" && a.url.startsWith("data:")
+        ? { ...a, url: "", hasInlineData: true }
+        : a
+    );
+  }
+  if (m.emailMetadata && m.emailMetadata.headers) {
+    delete m.emailMetadata.headers;
+  }
+  return m;
+}
+
 async function applyVisibility(q, req, filterParam) {
   if (!req.employee?._id) return { _id: null };
 
@@ -158,8 +179,22 @@ async function applyVisibility(q, req, filterParam) {
   const allJuniorIdStrings = await getCachedJuniors(ownerId, me);
   const juniorIds = allJuniorIdStrings.filter(isObjId).map((id) => oid(id));
 
+  // PRE-APPROVAL: a pending message stuck at a LOWER level of my chain (both
+  // its sender and its current approver are my juniors) is visible to me, so
+  // an upline senior can open and approve it when the approver is absent.
+  if (juniorIds.length > 0) {
+    isParticipant.$or.push({
+      approvalStatus: "pending",
+      sender: { $in: juniorIds },
+      receiver: { $in: juniorIds },
+    });
+  }
+
   // Activity filter: show ALL messages (any status) from every junior in the
   // hierarchy — but EXTERNAL (client) mail only, never internal/team messages.
+  // Includes inbound client mail delivered to juniors (sender is a ClientInfo
+  // id, so it never matches the junior-sender rule) — otherwise a client email
+  // the assigned employee hasn't responded to is invisible to their seniors.
   if (filterParam === "review") {
     const isOwner = currentUserRole === "owner";
     const externalOnly = { client: { $exists: true, $ne: null } };
@@ -168,7 +203,26 @@ async function applyVisibility(q, req, filterParam) {
       return { $and: [q, { owner: ownerId }, externalOnly] };
     }
     if (juniorIds.length === 0) return { _id: null };
-    return { $and: [q, { sender: { $in: juniorIds } }, externalOnly] };
+    return {
+      $and: [
+        q,
+        externalOnly,
+        {
+          $or: [
+            { sender: { $in: juniorIds } },
+            // Client-authored mail delivered to my juniors: real inbound
+            // (senderType "client") OR manually composed client messages
+            // (isFromClient flag with an employee sender — the composer may
+            // be OUTSIDE my subtree, e.g. a top manager, but the assigned
+            // employee receiving it is my junior, so I must see it).
+            {
+              receiver: { $in: juniorIds },
+              $or: [{ senderType: "client" }, { isFromClient: true }],
+            },
+          ],
+        },
+      ],
+    };
   }
 
   // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) get org-wide email view.
@@ -363,7 +417,12 @@ exports.getMessage = async function getMessage(req, res) {
     const msg = await AssignmentMessage.findById(messageId).populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
+      { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
+      { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
+      { path: "approvedBy", select: "_id name companyEmail role designation" },
+      { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+      { path: "readBy.employee", select: "_id name companyEmail" },
+      { path: "starredBy", select: "_id name companyEmail" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       {
         path: "receiver",
@@ -480,6 +539,7 @@ exports.listMessages = async function listMessages(req, res) {
       includeDirectMessages = "true",
       excludeHrPolicy = "false",
       threadId,
+      reviewState,
     } = req.query;
 
     const q = {};
@@ -606,10 +666,38 @@ exports.listMessages = async function listMessages(req, res) {
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
+      // Inbox = mail addressed to ME plus inbound mail of MY assigned
+      // clients. Juniors' client mail is monitored in Activity, not here.
+      const myAssignedClients = await ClientInfo.find({
+        owner: q.owner || req.employee?.owner,
+        $or: [{ assignedTo: me }, { supervisedBy: me }],
+      })
+        .select("_id")
+        .lean();
+      const myAssignedClientIds = myAssignedClients.map((c) => c._id);
+
       q.$or = [
-        { isFromClient: true },
         { receiver: me },
-        { receiver: { $in: [me] } }
+        { receiver: { $in: [me] } },
+        ...(myAssignedClientIds.length > 0
+          ? [{ client: { $in: myAssignedClientIds }, isFromClient: true }]
+          : []),
+      ];
+      // Supervision items don't belong in the Primary inbox: a pending
+      // message's receiver is its current APPROVER, and it must only show in
+      // the For-approval filter until it's approved and actually delivered.
+      q.approvalStatus = { $ne: "pending" };
+      // Emails I only touched as an APPROVER (in the approval chain) belong
+      // to the For-approval history, not my inbox — unless I was an intended
+      // recipient of the message myself.
+      q.$and = [
+        ...(q.$and || []),
+        {
+          $or: [
+            { "approvalChain.approver": { $ne: me } },
+            { intendedRecipients: me },
+          ],
+        },
       ];
     } else if (
       ["all", "inbox", "allMail"].includes(filter) &&
@@ -642,6 +730,17 @@ exports.listMessages = async function listMessages(req, res) {
     const isThreaded = req.query.threadMode === "true" || req.query.threadMode === true;
 
     if (isThreaded) {
+      // Activity sub-filter: threads whose latest message is the client's
+      // (no employee has responded yet), split by whether an assigned
+      // employee (receiver) has at least read it:
+      //   unresponded → read by an assignee but not replied
+      //   unread      → not even read by any assignee
+      const reviewStateVal =
+        filter === "review" &&
+        ["unresponded", "unread"].includes(String(reviewState))
+          ? String(reviewState)
+          : null;
+
       const pipeline = [
         { $match: qFinal },
         { $sort: { createdAt: -1 } },
@@ -650,6 +749,20 @@ exports.listMessages = async function listMessages(req, res) {
             _id: "$threadId",
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
+            // Docs are sorted newest-first, so $first = the thread's latest message.
+            // "From client" = real inbound mail (senderType "client") OR a
+            // manually composed client message (isFromClient flag with an
+            // employee sender) — both count for Unread/Unresponded.
+            latestFromClient: {
+              $first: {
+                $or: [
+                  { $eq: ["$senderType", "client"] },
+                  { $eq: ["$isFromClient", true] },
+                ],
+              },
+            },
+            latestClient: { $first: "$client" },
+            latestReadByIds: { $first: { $ifNull: ["$readBy.employee", []] } },
             receivedSomething: {
               $max: {
                 $cond: [
@@ -691,68 +804,99 @@ exports.listMessages = async function listMessages(req, res) {
         pipeline.push({ $match: { receivedSomething: true } });
       }
 
+      if (reviewStateVal) {
+        pipeline.push(
+          { $match: { latestFromClient: true } },
+          // "Read" must mean read by one of the client's ASSIGNED employees.
+          // Inbound mail is also delivered to team leads / CC'd employees, and
+          // they (or a senior receiver) opening it must NOT move the thread
+          // out of Unread — only the assignee's read counts.
+          {
+            $lookup: {
+              from: "clientinfos",
+              localField: "latestClient",
+              foreignField: "_id",
+              as: "clientDoc",
+            },
+          },
+          {
+            $addFields: {
+              latestReadByAssignee: {
+                $gt: [
+                  {
+                    $size: {
+                      $setIntersection: [
+                        { $ifNull: ["$latestReadByIds", []] },
+                        {
+                          $ifNull: [
+                            { $arrayElemAt: ["$clientDoc.assignedTo", 0] },
+                            [],
+                          ],
+                        },
+                      ],
+                    },
+                  },
+                  0,
+                ],
+              },
+            },
+          },
+          {
+            $match: {
+              latestReadByAssignee: reviewStateVal === "unresponded",
+            },
+          },
+          { $project: { clientDoc: 0 } }
+        );
+      }
+
       pipeline.push(
         { $sort: { latestMessageAt: -1 } },
-        { $skip: (pageNum - 1) * lim },
-        { $limit: lim }
+        // Page + total in ONE pass. The match/sort/group above is by far the
+        // expensive part of this endpoint — previously a second, nearly
+        // identical aggregation re-grouped the whole mailbox just to count
+        // the threads, doubling the load time.
+        {
+          $facet: {
+            page: [{ $skip: (pageNum - 1) * lim }, { $limit: lim }],
+            total: [{ $count: "total" }],
+          },
+        }
       );
 
-      const distinctThreads = await AssignmentMessage.aggregate(pipeline);
+      const [aggResult] = await AssignmentMessage.aggregate(pipeline);
+      const distinctThreads = aggResult?.page || [];
+      const totalCount = aggResult?.total?.[0]?.total || 0;
 
       const latestMessageIds = distinctThreads.map(t => t.latestId);
       if (latestMessageIds.length === 0) {
-        return res.json({ items: [], total: 0, page: pageNum, pages: 0, limit: lim });
+        return res.json({
+          items: [],
+          total: totalCount,
+          page: pageNum,
+          pages: Math.ceil(totalCount / lim),
+          limit: lim,
+        });
       }
 
-      const totalPipeline = [
-          { $match: qFinal },
-          {
-            $group: {
-              _id: "$threadId",
-              receivedSomething: {
-                $max: {
-                  $cond: [
-                    {
-                      $or: [
-                        { $eq: ["$isFromClient", true] },
-                        { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
-                        { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
-                      ]
-                    },
-                    true,
-                    false
-                  ]
-                }
-              }
-            }
-          }
-      ];
+      const messages = await AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+        // Raw RFC-2822 headers are never rendered in the list and can be huge
+        .select("-emailMetadata.headers")
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
+          // client photo + contacts travel with the thread list so detail
+          // view avatars render instantly without extra requests; assignedTo
+          // feeds the Unread/Unresponded badge (read-by-assignee check)
+          { path: "client", select: "_id clientName photographUrl companyEmployees assignedTo" },
+        ])
+        .lean();
 
-      if (filter !== "all" && filter !== "allMail") {
-        totalPipeline.push({ $match: { receivedSomething: true } });
-      }
-
-      totalPipeline.push({ $count: "total" });
-
-      const [messages, totalThreadsResult] = await Promise.all([
-        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
-          .populate([
-            { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl" },
-            { path: "receiver", select: "_id name companyEmail role designation" },
-            // client photo + contacts travel with the thread list so detail
-            // view avatars render instantly without extra requests
-            { path: "client", select: "_id clientName photographUrl companyEmployees" },
-          ])
-          .lean(),
-        AssignmentMessage.aggregate(totalPipeline)
-      ]);
-
-      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
       const finalItems = messages.map(m => {
         const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
         return {
-          ...m,
+          ...slimListMessage(m),
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
@@ -777,6 +921,7 @@ exports.listMessages = async function listMessages(req, res) {
         .sort({ createdAt: -1 })
         .skip((pageNum - 1) * lim)
         .limit(lim)
+        .select("-emailMetadata.headers")
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           {
@@ -795,7 +940,7 @@ exports.listMessages = async function listMessages(req, res) {
     ]);
 
     const normalizedItems = items.map((item) => ({
-      ...item,
+      ...slimListMessage(item),
       receiver: Array.isArray(item.receiver)
         ? item.receiver
         : [item.receiver].filter(Boolean),
@@ -886,7 +1031,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role designation" },
         { path: "receiver", select: "_id name companyEmail role designation" },
-        { path: "client", select: "_id clientName legalBusinessName dba" },
+        { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       ])
       .lean();
@@ -999,13 +1144,40 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const isSentView = status === "sent";
     const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true" && filter !== "review";
 
-    // CRM/Manager Fix: External Inbox ONLY shows incoming client mail or mail to self.
+    // Client Box inbox: CRM-access users see all client mail; everyone else
+    // only sees mail for clients assigned directly to them.
     if (isInboxView) {
-      q.$or = [
-        { isFromClient: true },
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        { approvalStatus: "pending" }
+      const canSeeAllClientBox = await hasCrmAccess(req.employee);
+
+      if (!canSeeAllClientBox) {
+        const myAssignedClients = await ClientInfo.find({
+          owner: q.owner,
+          assignedTo: me,
+        })
+          .select("_id")
+          .lean();
+        const myAssignedClientIds = myAssignedClients.map((c) => c._id);
+
+        if (myAssignedClientIds.length === 0) {
+          q.client = { $in: [] };
+        } else if (isObjId(client)) {
+          q.client = myAssignedClientIds.some((id) => String(id) === String(client))
+            ? oid(String(client))
+            : { $in: [] };
+        } else {
+          q.client = { $in: myAssignedClientIds };
+        }
+      }
+
+      q.approvalStatus = { $ne: "pending" };
+      q.$and = [
+        ...(q.$and || []),
+        {
+          $or: [
+            { "approvalChain.approver": { $ne: me } },
+            { intendedRecipients: me },
+          ],
+        },
       ];
     }
 
@@ -1015,7 +1187,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const isThreaded = threadMode === "true" || threadMode === true;
 
     if (isThreaded) {
-      const distinctThreads = await AssignmentMessage.aggregate([
+      const [extAgg] = await AssignmentMessage.aggregate([
         { $match: qFinal },
         { $sort: { createdAt: -1 } },
         {
@@ -1065,61 +1237,37 @@ exports.getExternalCommunications = async function getExternalCommunications(
         // Filter: Must have client ID AND must have an incoming message from a client
         { $match: { hasClient: true, hasClientInteraction: true } },
         { $sort: { latestMessageAt: -1 } },
-        { $skip: (pageNum - 1) * lim },
-        { $limit: lim }
+        // Page + total in one pass — no second full re-group just to count
+        {
+          $facet: {
+            page: [{ $skip: (pageNum - 1) * lim }, { $limit: lim }],
+            total: [{ $count: "total" }],
+          },
+        },
       ]);
+
+      const distinctThreads = extAgg?.page || [];
+      const totalCount = extAgg?.total?.[0]?.total || 0;
 
       const latestMessageIds = distinctThreads.map(t => t.latestId);
       if (latestMessageIds.length === 0) {
-        return res.json({ communicationType: "external", items: [], total: 0, page: pageNum, pages: 0, limit: lim });
+        return res.json({ communicationType: "external", items: [], total: totalCount, page: pageNum, pages: Math.ceil(totalCount / lim), limit: lim });
       }
 
-      const [messages, totalThreadsResult] = await Promise.all([
-        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
-          .populate([
-            { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role designation" },
-            { path: "client", select: "_id clientName legalBusinessName dba" },
-          ])
-          .lean(),
-        AssignmentMessage.aggregate([
-          { $match: qFinal },
-          {
-            $group: {
-              _id: "$threadId",
-              hasClientInteraction: {
-                $max: {
-                  $cond: [
-                    {
-                      $or: [
-                        { $eq: ["$isFromClient", true] },
-                        {
-                          $and: [
-                            { $ifNull: ["$client", false] },
-                            { $ne: ["$senderType", "client"] },
-                          ],
-                        },
-                      ],
-                    },
-                    true,
-                    false,
-                  ],
-                },
-              },
-              hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } }
-            }
-          },
-          { $match: { hasClient: true, hasClientInteraction: true } },
-          { $count: "total" }
+      const messages = await AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+        .select("-emailMetadata.headers")
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         ])
-      ]);
+        .lean();
 
-      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
       const finalItems = messages.map(m => {
         const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
         return {
-          ...m,
+          ...slimListMessage(m),
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
@@ -1150,7 +1298,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
             select: "_id name companyEmail role designation supervisionMode",
           },
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
@@ -1335,55 +1483,37 @@ exports.getInternalCommunications = async function getInternalCommunications(
         // Filter to only include threads without clients AND that have incoming interaction
         { $match: { hasClient: false, receivedFromOthers: true } },
         { $sort: { latestMessageAt: -1 } },
-        { $skip: (pageNum - 1) * lim },
-        { $limit: lim }
+        // Page + total in one pass — no second full re-group just to count
+        {
+          $facet: {
+            page: [{ $skip: (pageNum - 1) * lim }, { $limit: lim }],
+            total: [{ $count: "total" }],
+          },
+        },
       ]);
 
-      const latestMessageIds = distinctThreads.map(t => t.latestId);
+      const intAgg = distinctThreads[0];
+      const pageThreads = intAgg?.page || [];
+      const totalCount = intAgg?.total?.[0]?.total || 0;
+
+      const latestMessageIds = pageThreads.map(t => t.latestId);
       if (latestMessageIds.length === 0) {
-        return res.json({ communicationType: "internal", items: [], total: 0, page: pageNum, pages: 0, limit: lim });
+        return res.json({ communicationType: "internal", items: [], total: totalCount, page: pageNum, pages: Math.ceil(totalCount / lim), limit: lim });
       }
 
-      const [messages, totalThreadsResult] = await Promise.all([
-        AssignmentMessage.find({ _id: { $in: latestMessageIds } })
-          .populate([
-            { path: "owner", select: "_id name companyEmail" },
-            { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-            { path: "receiver", select: "_id name companyEmail role designation" },
-          ])
-          .lean(),
-        AssignmentMessage.aggregate([
-          { $match: qFinal },
-          {
-            $group: {
-              _id: "$threadId",
-              receivedFromOthers: {
-                $max: {
-                  $cond: [
-                    {
-                      $or: [
-                        { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
-                        { $and: [{ $ne: [{ $toString: "$sender" }, { $toString: me }] }, { $ne: ["$sender", null] }] }
-                      ]
-                    },
-                    true,
-                    false
-                  ]
-                }
-              },
-              hasClient: { $first: { $cond: [{ $ifNull: ["$client", false] }, true, false] } }
-            }
-          },
-          { $match: { hasClient: false, receivedFromOthers: true } }, // Internal only
-          { $count: "total" }
+      const messages = await AssignmentMessage.find({ _id: { $in: latestMessageIds } })
+        .select("-emailMetadata.headers")
+        .populate([
+          { path: "owner", select: "_id name companyEmail" },
+          { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+          { path: "receiver", select: "_id name companyEmail role designation" },
         ])
-      ]);
+        .lean();
 
-      const totalCount = totalThreadsResult.length > 0 ? totalThreadsResult[0].total : 0;
       const finalItems = messages.map(m => {
-        const stats = distinctThreads.find(t => String(t.latestId) === String(m._id));
+        const stats = pageThreads.find(t => String(t.latestId) === String(m._id));
         return {
-          ...m,
+          ...slimListMessage(m),
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
@@ -1527,7 +1657,12 @@ exports.starMessage = async function starMessage(req, res) {
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "receiver", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
+      { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
+      { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
+      { path: "approvedBy", select: "_id name companyEmail role designation" },
+      { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+      { path: "readBy.employee", select: "_id name companyEmail" },
+      { path: "starredBy", select: "_id name companyEmail" },
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "starredBy", select: "_id name companyEmail" },
     ]);
@@ -1767,13 +1902,26 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     };
 
     // Review (All Activity): unread EXTERNAL (client) messages authored by my
-    // juniors (owners see the whole org). Excludes my own messages.
+    // juniors (owners see the whole org), plus inbound client mail delivered
+    // to juniors (unresponded client emails). Excludes my own messages.
     const externalOnly = { client: { $exists: true, $ne: null } };
     let reviewQuery = { _id: null };
     if (isOwner) {
       reviewQuery = { owner, sender: { $ne: currentUser }, ...externalOnly, ...baseUnread };
     } else if (juniorIds.length > 0) {
-      reviewQuery = { sender: { $in: juniorIds }, ...externalOnly, ...baseUnread };
+      reviewQuery = {
+        $or: [
+          { sender: { $in: juniorIds } },
+          // Client-authored mail delivered to my juniors (inbound OR manual
+          // isFromClient compose) — must match the review list visibility.
+          {
+            receiver: { $in: juniorIds },
+            $or: [{ senderType: "client" }, { isFromClient: true }],
+          },
+        ],
+        ...externalOnly,
+        ...baseUnread,
+      };
     }
 
     // Get counts for different categories
@@ -1789,19 +1937,41 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       externalUnread,
       internalUnread,
       reviewUnread,
+      supervisionPending,
     ] = await Promise.all([
-      // Inbox: messages where user is receiver, not in THEIR bin/spam, status sent
+      // Inbox: messages where user is receiver, not in THEIR bin/spam, status sent.
+      // Pending items are supervision work (receiver = current approver) and
+      // live in the For-approval filter, not the inbox; messages I only
+      // touched as an approver don't count either.
       AssignmentMessage.countDocuments({
-        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+        $and: [
+          { $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }] },
+          {
+            $or: [
+              { "approvalChain.approver": { $ne: currentUser } },
+              { intendedRecipients: currentUser },
+            ],
+          },
+        ],
         status: "sent",
+        approvalStatus: { $ne: "pending" },
         trashedBy: { $ne: currentUser },
         spamReporters: { $ne: currentUser },
       }),
 
       // Unread: inbox threads where the current user has at least one unread message
       countUnreadThreads({
-        $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }],
+        $and: [
+          { $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }] },
+          {
+            $or: [
+              { "approvalChain.approver": { $ne: currentUser } },
+              { intendedRecipients: currentUser },
+            ],
+          },
+        ],
         status: "sent",
+        approvalStatus: { $ne: "pending" },
         trashedBy: { $ne: currentUser },
         spamReporters: { $ne: currentUser },
         "readBy.employee": { $ne: currentUser },
@@ -1844,10 +2014,12 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         trashedBy: currentUser,
       }),
 
-      // External Inbox unread: client threads where I'm a receiver and haven't read
+      // External Inbox unread: client threads where I'm a receiver and haven't
+      // read. Pending items live in For-approval, not the Client Box.
       countUnreadThreads({
         $or: receiverOr,
         client: { $exists: true, $ne: null },
+        approvalStatus: { $ne: "pending" },
         ...baseUnread,
       }),
 
@@ -1862,6 +2034,17 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 
       // All Activity (review) unread threads
       countUnreadThreads(reviewQuery),
+
+      // For-approval: threads with messages pending MY approval (I'm the
+      // current approver in the chain and haven't actioned them yet)
+      countUnreadThreads({
+        owner,
+        receiver: currentUser,
+        approvalStatus: "pending",
+        "approvalChain.approver": { $ne: currentUser },
+        trashedBy: { $ne: currentUser },
+        spamReporters: { $ne: currentUser },
+      }),
     ]);
 
     res.json({
@@ -1877,6 +2060,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       external: externalUnread,
       internal: internalUnread,
       review: reviewUnread,
+      supervision: supervisionPending,
     });
   } catch (e) {
     console.error("Error in getMessageCounts:", e);
@@ -1899,7 +2083,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
         .populate([
           { path: "sender", select: "name supervisionMode" },
           { path: "receiver", select: "name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "name companyEmail" },
         ])
         .lean(),
@@ -1949,6 +2133,23 @@ exports.hasJuniors = async function hasJuniors(req, res) {
   } catch (e) {
     console.error("hasJuniors error:", e);
     res.json({ hasJuniors: false });
+  }
+};
+
+// GET /assignment-messages/my-juniors — all hierarchy junior ids of the
+// current user (used by EmailDetail to gate pre-approval actions: an upline
+// senior can approve a message pending at a lower level of their own chain).
+exports.getMyJuniors = async function getMyJuniors(req, res) {
+  try {
+    const me = req.employee?._id;
+    const ownerId = req.employee?.owner;
+    if (!isObjId(me) || !isObjId(ownerId)) return res.json({ juniorIds: [] });
+
+    const juniorIds = await getCachedJuniors(oid(String(ownerId)), oid(String(me)));
+    res.json({ juniorIds });
+  } catch (e) {
+    console.error("getMyJuniors error:", e);
+    res.json({ juniorIds: [] });
   }
 };
 
@@ -2006,11 +2207,12 @@ exports.getStarredMessages = async function getStarredMessages(req, res) {
         .sort({ updatedAt: -1 }) // Sort by when they were starred/updated
         .skip((pageNum - 1) * lim)
         .limit(lim)
+        .select("-emailMetadata.headers")
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" }, // Populate who starred it
@@ -2020,7 +2222,7 @@ exports.getStarredMessages = async function getStarredMessages(req, res) {
     ]);
 
     res.json({
-      items,
+      items: items.map(slimListMessage),
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
@@ -2075,7 +2277,7 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
       { path: "receiver", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
+      { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
       { path: "trashedBy", select: "_id name companyEmail" },
     ];
 
@@ -2083,13 +2285,14 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
       .sort({ trashedAt: -1, updatedAt: -1 })
       .skip((pageNum - 1) * lim)
       .limit(lim)
+      .select("-emailMetadata.headers")
       .populate(populateFields)
       .lean();
 
     const total = await AssignmentMessage.countDocuments(q);
     // Ensure receiver is always treated as array for consistency
     const normalizedItems = items.map((item) => ({
-      ...item,
+      ...slimListMessage(item),
       receiver: Array.isArray(item.receiver)
         ? item.receiver
         : [item.receiver].filter(Boolean),
@@ -2164,11 +2367,12 @@ async function _getSpamMessages_disabled(req, res) {
           .sort({ spamReportedAt: -1, createdAt: -1 })
           .skip((pageNum - 1) * lim)
           .limit(lim)
+          .select("-emailMetadata.headers")
           .populate([
             { path: "owner", select: "_id name companyEmail" },
             { path: "sender", select: "_id name companyEmail role designation" },
             { path: "receiver", select: "_id name companyEmail role designation" },
-            { path: "client", select: "_id clientName legalBusinessName dba" },
+            { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
             { path: "attachments.uploadedBy", select: "_id name companyEmail" },
             { path: "spamReportedBy", select: "_id name companyEmail" },
             { path: "spamReporters", select: "_id name companyEmail" },
@@ -2185,7 +2389,7 @@ async function _getSpamMessages_disabled(req, res) {
     }
 
     res.json({
-      items: items || [],
+      items: (items || []).map(slimListMessage),
       total: total || 0,
       page: pageNum,
       pages: Math.ceil(total / lim) || 1,
@@ -2421,7 +2625,7 @@ exports.searchMessages = async function searchMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" },
@@ -2500,11 +2704,12 @@ exports.listDrafts = async function listDrafts(req, res) {
         .sort({ updatedAt: -1 }) // Show recently updated drafts first
         .skip((pageNum - 1) * lim)
         .limit(lim)
+        .select("-emailMetadata.headers")
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         ])
         .lean(),
@@ -2512,7 +2717,7 @@ exports.listDrafts = async function listDrafts(req, res) {
     ]);
 
     res.json({
-      items,
+      items: items.map(slimListMessage),
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
@@ -2528,13 +2733,17 @@ exports.listDrafts = async function listDrafts(req, res) {
 // Shows pending approval messages sent by team members
 exports.getSupervisionMessages = async function getSupervisionMessages(req, res) {
   try {
-    const { page = 1, limit = 50, client } = req.query;
+    const { page = 1, limit = 50, client, view } = req.query;
     const currentUserId = req.employee?._id;
     const ownerId = req.employee?.owner;
 
     if (!isObjId(currentUserId) || !isObjId(ownerId)) {
       return res.status(401).json({ error: "Unauthorized" });
     }
+
+    // "pre" = Pre approval tab: messages pending at a LOWER level of my chain
+    // (the current approver is one of my juniors) — I can approve over them.
+    const isPreApproval = String(view || "") === "pre";
 
     // Get all juniors (team members) under current user in the hierarchy
     const juniorIds = await getAllJuniorsRecursively(String(ownerId), String(currentUserId));
@@ -2550,26 +2759,36 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
       });
     }
 
-    // Query for PENDING messages sent FROM team members (juniors)
+    const juniorObjIds = juniorIds.map(id => new mongoose.Types.ObjectId(id));
+
+    // Approval-related messages sent FROM team members (juniors)
     const query = {
       owner: ownerId,
-      sender: { $in: juniorIds.map(id => new mongoose.Types.ObjectId(id)) }, // Messages from juniors
-      // 🔥 Only messages currently escalated to ME for approval. A pending
-      // message's receiver is the CURRENT approver in the chain (it escalates
-      // one level at a time), and pending messages are only visible to their
-      // participants (applyVisibility). Without this, a higher-up senior would
-      // see threads still pending at a lower level and, on opening them, get
-      // "No messages found" because they aren't a participant yet.
-      receiver: currentUserId,
-      approvalStatus: "pending", // 🔥 Only pending messages
+      sender: { $in: juniorObjIds }, // Messages from juniors
       trashedBy: { $ne: currentUserId },
       spamReporters: { $ne: currentUserId },
-      // 🔥 Hide messages this user has already approved. With a multi-level
-      // approval chain a message stays "pending" after I approve (it escalates
-      // to the next senior) — but it's no longer MY responsibility, so it must
-      // not keep showing in my for-approval list.
-      "approvalChain.approver": { $ne: currentUserId },
     };
+
+    if (isPreApproval) {
+      // Pending at one of MY juniors and not yet escalated to me.
+      query.approvalStatus = "pending";
+      query["approvalChain.approver"] = { $ne: currentUserId };
+      query.receiver = { $in: juniorObjIds, $nin: [currentUserId] };
+    } else {
+      // My approval = work currently pending at ME plus my own approval
+      // history. Pending messages assigned to another employee stay in Pre
+      // approval unless I already acted on them earlier in the chain.
+      query.$or = [
+        {
+          approvalStatus: "pending",
+          receiver: currentUserId,
+          "approvalChain.approver": { $ne: currentUserId },
+        },
+        { "approvalChain.approver": currentUserId },
+        { approvedBy: currentUserId },
+        { disapprovedBy: currentUserId },
+      ];
+    }
 
     // Apply client filter if provided
     if (isObjId(client)) {
@@ -2579,24 +2798,76 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
 
-    const [items, total] = await Promise.all([
-      AssignmentMessage.find(query)
-        .sort({ createdAt: -1 }) // Newest first
-        .skip((pageNum - 1) * lim)
-        .limit(lim)
-        .populate([
-          { path: "owner", select: "_id name companyEmail" },
-          { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
-          { path: "attachments.uploadedBy", select: "_id name companyEmail" },
-        ])
-        .lean(),
-      AssignmentMessage.countDocuments(query),
-    ]);
+    const populateFields = [
+      { path: "owner", select: "_id name companyEmail" },
+      { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
+      { path: "receiver", select: "_id name companyEmail role designation" },
+      { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
+      { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
+      { path: "approvedBy", select: "_id name companyEmail role designation" },
+      { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+      { path: "readBy.employee", select: "_id name companyEmail" },
+      { path: "starredBy", select: "_id name companyEmail" },
+      { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+    ];
+
+    // Paginate by THREAD, not by raw message. Otherwise a page can contain
+    // several messages from the same thread and the UI either shows duplicates
+    // or collapses them into fewer than 50 rows.
+    const matching = await AssignmentMessage.find(query)
+      .sort({ createdAt: -1 })
+      .select("_id threadId createdAt approvalStatus")
+      .lean();
+
+    const threadGroups = [];
+    const threadMap = new Map();
+
+    matching.forEach((message) => {
+      const threadId = message.threadId || `single_${message._id}`;
+      if (!threadMap.has(threadId)) {
+        const group = {
+          threadId,
+          latestId: message._id,
+          latestMessageAt: message.createdAt,
+          totalMessages: 0,
+          pendingMessages: 0,
+        };
+        threadMap.set(threadId, group);
+        threadGroups.push(group);
+      }
+
+      const group = threadMap.get(threadId);
+      group.totalMessages += 1;
+      if ((message.approvalStatus || "pending") === "pending") {
+        group.pendingMessages += 1;
+      }
+    });
+
+    const total = threadGroups.length;
+    const pageGroups = threadGroups.slice((pageNum - 1) * lim, pageNum * lim);
+    const latestIds = pageGroups.map((group) => group.latestId);
+
+    const pageItems = latestIds.length
+      ? await AssignmentMessage.find({ _id: { $in: latestIds } })
+        .populate(populateFields)
+        .lean()
+      : [];
+
+    const itemMap = new Map(pageItems.map((item) => [String(item._id), item]));
+    const items = pageGroups
+      .map((group) => {
+        const item = itemMap.get(String(group.latestId));
+        if (!item) return null;
+        return {
+          ...item,
+          threadMessageCount: group.totalMessages,
+          threadPendingCount: group.pendingMessages,
+        };
+      })
+      .filter(Boolean);
 
     res.json({
-      items,
+      items: items.map(slimListMessage),
       total,
       page: pageNum,
       pages: Math.ceil(total / lim),
@@ -2745,7 +3016,7 @@ exports.getTeamLeadPendingApprovals =
             select: "_id name companyEmail role designation supervisionMode",
           },
           { path: "receiver", select: "_id name companyEmail role designation" },
-          { path: "client", select: "_id clientName legalBusinessName dba" },
+          { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "readBy.employee", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" },
         ])

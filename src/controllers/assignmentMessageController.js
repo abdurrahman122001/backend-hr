@@ -1573,6 +1573,35 @@ exports.createMessage = async function createMessage(req, res) {
           });
         });
       }
+
+      // PRE-APPROVAL realtime: every senior ABOVE the current approver in the
+      // sender's management chain can see (and act on) this pending message in
+      // their Pre-approval tab — notify them so their list/count update live.
+      if (approvalStatus === "pending") {
+        try {
+          const chainSeniors = await getManagementChainFromHierarchy(owner, sender);
+          const currentApprover = targetSupervisor ? String(targetSupervisor) : null;
+          (chainSeniors || [])
+            .map(String)
+            .filter((id) => id !== currentApprover && id !== String(sender))
+            .forEach((seniorId) => {
+              io.to(`employee_${seniorId}`).emit("supervision_updated", {
+                threadId: threadId,
+                clientId: client,
+                updatedAt: new Date(),
+              });
+            });
+        } catch (notifyErr) {
+          console.error("pre-approval realtime notify error:", notifyErr);
+        }
+      }
+    } else if (io && isScheduled) {
+      // Sender-only: update their Scheduled list in realtime. Receivers must
+      // not learn about the message before it actually sends.
+      io.to(`employee_${String(sender)}`).emit("message_scheduled", {
+        message: populated,
+        timestamp: new Date(),
+      });
     }
 
     res.status(201).json(populated);
@@ -1915,6 +1944,33 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
     throw e;
   }
 };
+// PRE-APPROVAL: an upline senior may act on a message that is pending at a
+// LOWER level of their own hierarchy chain (e.g. the current approver is
+// absent today). The current approver(s) = pending receivers who have not
+// recorded an approval yet; both the sender and the current approver must be
+// the acting user's juniors.
+async function isUplineOfPendingApprover(msg, ownerId, currentUserId) {
+  if (msg.approvalStatus !== "pending") return false;
+  const juniorIds = await getAllJuniorsRecursively(
+    String(ownerId),
+    String(currentUserId)
+  );
+  if (juniorIds.length === 0) return false;
+
+  const chain = new Set(
+    (msg.approvalChain || []).map((e) => String(e.approver?._id || e.approver))
+  );
+  const pendingApprovers = (Array.isArray(msg.receiver) ? msg.receiver : [msg.receiver])
+    .filter(Boolean)
+    .map((r) => String(r._id || r))
+    .filter((idStr) => !chain.has(idStr));
+
+  return (
+    juniorIds.includes(String(msg.sender?._id || msg.sender)) &&
+    pendingApprovers.some((idStr) => juniorIds.includes(idStr))
+  );
+}
+
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1934,9 +1990,18 @@ exports.approveMessage = async function approveMessage(req, res) {
     const isManagerOrOwner = userRole === "manager" || userRole === "owner";
 
     if (!isManagerOrOwner && !isReceiver) {
-      return res
-        .status(403)
-        .json({ error: "Only designated supervisors or managers can approve messages" });
+      // Pre-approval: an upline senior can approve a message stuck pending at
+      // a lower level of their chain (current approver absent/unavailable).
+      const preApprovalAllowed = await isUplineOfPendingApprover(
+        msg,
+        ownerId,
+        currentUserId
+      );
+      if (!preApprovalAllowed) {
+        return res
+          .status(403)
+          .json({ error: "Only designated supervisors or managers can approve messages" });
+      }
     }
 
     // Prevent double approval
@@ -2303,9 +2368,18 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     const isManagerOrOwner = userRole === "manager" || userRole === "owner";
 
     if (!isManagerOrOwner && !isReceiver) {
-      return res
-        .status(403)
-        .json({ error: "Only designated supervisors or managers can disapprove messages" });
+      // Pre-approval: an upline senior can reject a message stuck pending at
+      // a lower level of their chain (current approver absent/unavailable).
+      const preApprovalAllowed = await isUplineOfPendingApprover(
+        msg,
+        msg.owner,
+        currentUserId
+      );
+      if (!preApprovalAllowed) {
+        return res
+          .status(403)
+          .json({ error: "Only designated supervisors or managers can disapprove messages" });
+      }
     }
 
     // Idempotency guard: a duplicate/retried request (the UI can fire disapprove
@@ -2642,6 +2716,7 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     const msg = await AssignmentMessage.findById(req.params.id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
+
     const files = (req.files || []).map((f) => ({
       filename: path.basename(f.filename),
       originalName: f.originalname,
@@ -2675,6 +2750,24 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
 };
 
 // GET /api/assignment-messages/sent
+// Slim a message for LIST responses (same as listAssignmentMessages):
+// inbound emails store attachments as base64 `data:` URIs — never ship those
+// in list pages. Detail views refetch the full thread.
+function slimListMessage(m) {
+  if (!m) return m;
+  if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+    m.attachments = m.attachments.map((a) =>
+      a && typeof a.url === "string" && a.url.startsWith("data:")
+        ? { ...a, url: "", hasInlineData: true }
+        : a
+    );
+  }
+  if (m.emailMetadata && m.emailMetadata.headers) {
+    delete m.emailMetadata.headers;
+  }
+  return m;
+}
+
 exports.listMySentToClient = async function listMySentToClient(req, res) {
   try {
     const client = req.query.client || req.query.clientId || null;
@@ -2714,6 +2807,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
         .sort({ createdAt: 1 })
         .skip((page - 1) * limit)
         .limit(limit)
+        .select("-emailMetadata.headers")
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
@@ -2727,7 +2821,7 @@ exports.listMySentToClient = async function listMySentToClient(req, res) {
     ]);
 
     return res.json({
-      items,
+      items: items.map(slimListMessage),
       total,
       page,
       pages: Math.ceil(total / limit),
@@ -3236,7 +3330,43 @@ exports.sendDraft = async function sendDraft(req, res) {
               }
             );
           });
+
+          // PRE-APPROVAL realtime: seniors above the current approver see this
+          // pending message in their Pre-approval tab — notify them live.
+          try {
+            const chainSeniors = await getManagementChainFromHierarchy(
+              msg.owner,
+              msg.sender
+            );
+            const currentApprover = targetSupervisor
+              ? String(targetSupervisor)
+              : null;
+            (chainSeniors || [])
+              .map(String)
+              .filter((sid) => sid !== currentApprover && sid !== String(msg.sender))
+              .forEach((seniorId) => {
+                io.to(`employee_${seniorId}`).emit("supervision_updated", {
+                  threadId: msg.threadId,
+                  clientId: msg.client?._id || msg.client,
+                  updatedAt: new Date(),
+                });
+              });
+          } catch (notifyErr) {
+            console.error("pre-approval realtime notify error:", notifyErr);
+          }
         }
+      }
+    } else {
+      const io = getIO(req);
+      if (io) {
+        // Sender-only: update their Scheduled list in realtime. Receivers must
+        // not learn about the message before it actually sends.
+        io.to(
+          `employee_${String(populated.sender?._id || populated.sender)}`
+        ).emit("message_scheduled", {
+          message: populated,
+          timestamp: new Date(),
+        });
       }
     }
 

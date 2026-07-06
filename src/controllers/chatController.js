@@ -197,7 +197,7 @@ exports.uploadFile = async (req, res) => {
 // Upload multiple files endpoint
 exports.uploadFiles = async (req, res) => {
   try {
-    upload.array("files", 10)(req, res, async function (err) {
+    upload.array("files", 20)(req, res, async function (err) {
       if (err) {
         return res.status(400).json({
           success: false,
@@ -2281,15 +2281,25 @@ exports.addSpaceMembers = async (req, res) => {
         .json({ success: false, error: "Member IDs are required" });
     }
 
-    const space = await Space.findOne({
-      _id: spaceId,
-      $or: [{ createdBy: req.employee._id }, { admins: req.employee._id }],
-    });
+    const space = await Space.findById(spaceId);
 
     if (!space) {
       return res.status(404).json({
         success: false,
-        error: "Space not found or insufficient permissions",
+        error: "Space not found",
+      });
+    }
+
+    const canUpdateSpace =
+      space.createdBy?.toString() === req.employee._id.toString() ||
+      space.admins?.some(
+        (adminId) => adminId.toString() === req.employee._id.toString()
+      );
+
+    if (!canUpdateSpace) {
+      return res.status(403).json({
+        success: false,
+        error: "Only space owners and admins can update space details",
       });
     }
 
