@@ -197,7 +197,7 @@ exports.uploadFile = async (req, res) => {
 // Upload multiple files endpoint
 exports.uploadFiles = async (req, res) => {
   try {
-    upload.array("files", 10)(req, res, async function (err) {
+    upload.array("files", 20)(req, res, async function (err) {
       if (err) {
         return res.status(400).json({
           success: false,

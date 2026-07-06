@@ -6,6 +6,7 @@ const path = require("path");
 const fs = require("fs");
 
 const Employee = require("../models/Employees");
+const User = require("../models/Users");
 const Salary = require("../models/Salaries");
 const SalarySlip = require("../models/SalarySlip");
 const DocTemplate = require("../models/DocTemplate");
@@ -696,6 +697,38 @@ function generatePositionsTimeline(positions) {
 }
 
 // Updated tokenMap function
+async function resolveSignerContext(ownerId, authUser = null) {
+  const fromAuth = {
+    _id: authUser?.employeeId || authUser?._id || "",
+    name: authUser?.employeeName || authUser?.name || authUser?.username || "",
+    email: authUser?.email || authUser?.companyEmail || "",
+    designation: authUser?.designation || authUser?.employeeRole || authUser?.role || "",
+    department: authUser?.department || "",
+    role: authUser?.role || authUser?.userRole || "",
+  };
+
+  if (fromAuth.name || fromAuth.designation) return fromAuth;
+
+  try {
+    const ownerUser = await User.findById(ownerId)
+      .select("username name email role")
+      .lean();
+    if (ownerUser) {
+      return {
+        _id: ownerUser._id,
+        name: ownerUser.name || ownerUser.username || "",
+        email: ownerUser.email || "",
+        designation: ownerUser.role || "",
+        department: "",
+        role: ownerUser.role || "",
+      };
+    }
+  } catch (err) {
+    console.error("Error resolving document signer:", err.message);
+  }
+
+  return {};
+}
 async function tokenMap(
   emp,
   defaults = {},
@@ -704,6 +737,9 @@ async function tokenMap(
   options = {}
 ) {
   const decryptedSalary = await fetchAndDecryptSalary(emp?._id);
+  const signer = options.signer || (await resolveSignerContext(ownerId));
+  const signerName = signer.name || signer.username || defaults.signName || "ADEEL SHAIKH";
+  const signerTitle = signer.designation || signer.title || signer.role || defaults.signTitle || "CHIEF EXECUTIVE OFFICER";
 
   const join = emp?.joiningDate;
   const endDate = emp?.leavingDate || new Date();
@@ -725,8 +761,8 @@ async function tokenMap(
     (pos) => !pos.isCurrentRole
   );
 
-  const referenceNumber = options.referenceNumber || await generateReferenceNumber(docType, ownerId);
-  const nextReferenceNumber = options.nextReferenceNumber || await getCurrentReferenceNumber(docType, ownerId);
+  const referenceNumber = options.referenceNumber || (await generateReferenceNumber(docType, ownerId));
+  const nextReferenceNumber = options.nextReferenceNumber || (await getCurrentReferenceNumber(docType, ownerId));
   const currentDate = formatDateDDMMYYYY(new Date(), timezone);
   const docTypeCode = getDocTypeCode(docType);
   const docTypeName = getDocTypeName(docType);
@@ -735,8 +771,14 @@ async function tokenMap(
     "company.name": defaults.companyName || "Mavens Advisor Pvt. Ltd.",
     "company.address": defaults.companyAddress || "",
     "contact.phone": defaults.contactPhone || "+1 (615) 988-0800",
-    "sign.name": defaults.signName || "ADEEL SHAIKH",
-    "sign.title": defaults.signTitle || "CHIEF EXECUTIVE OFFICER",
+    "sign.name": signerName,
+    "sign.title": signerTitle,
+    "signature.name": signerName,
+    "signature.designation": signerTitle,
+    "signature.title": signerTitle,
+    "signature.department": signer.department || "",
+    "signature.email": signer.email || "",
+    "signature.role": signer.role || "",
 
     "doc.referenceNo": referenceNumber,
     "doc.nextReferenceNo": nextReferenceNumber,
@@ -1164,7 +1206,8 @@ async function generateDocumentPDF(
   templateId = "",
   ownerId,
   precomputedTokens = null,
-  referenceNumber = null
+  referenceNumber = null,
+  signerContext = null
 ) {
   const emp = await Employee.findById(employeeId).lean();
   if (!emp) throw new Error("Employee not found");
@@ -1193,6 +1236,7 @@ async function generateDocumentPDF(
     precomputedTokens ||
     (await tokenMap(emp, defaults, normalizedDocType, ownerId, {
       referenceNumber,
+      signer: signerContext,
     }));
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
@@ -1260,6 +1304,8 @@ const generateAndSaveDocument = async (req, res, docType) => {
       req.ownerId
     );
 
+    const signerContext = await resolveSignerContext(req.ownerId, req.user);
+
     // 2. Generate the PDF using this reference number
     const pdfBuffer = await generateDocumentPDF(
       employeeId,
@@ -1267,7 +1313,8 @@ const generateAndSaveDocument = async (req, res, docType) => {
       templateId,
       req.ownerId,
       null, // precomputedTokens
-      referenceNumber // Pass the reference number here
+      referenceNumber, // Pass the reference number here
+      signerContext
     );
 
     // Save to file system
@@ -1532,6 +1579,7 @@ router.post("/bulk/:docType", async (req, res) => {
     try {
       const mergedPdf = await PDFDocument.create();
       const allReferenceNumbers = [];
+      const signerContext = await resolveSignerContext(req.ownerId, req.user);
 
       // Process each employee with sequential reference numbers
       for (let i = 0; i < employees.length; i++) {
@@ -1557,7 +1605,7 @@ router.post("/bulk/:docType", async (req, res) => {
           defaults,
           normalizedDocType,
           req.ownerId,
-          { referenceNumber, nextReferenceNumber }
+          { referenceNumber, nextReferenceNumber, signer: signerContext }
         );
 
         // For each page in the template, generate for this employee

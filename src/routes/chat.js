@@ -95,7 +95,7 @@ router.post("/conversations/start", empAuth, chatController.startConversation);
 router.post(
   "/conversations/:conversationId/messages",
   empAuth,
-  upload.array("attachments", 10),
+  upload.array("attachments", 20),
   chatController.sendMessage
 );
 
@@ -118,7 +118,7 @@ router.get(
 router.post(
   "/messages/direct",
   empAuth,
-  upload.array("attachments", 10),
+  upload.array("attachments", 20),
   chatController.sendDirectMessage
 );
 
@@ -215,7 +215,7 @@ router.post(
 router.post(
   "/spaces/:spaceId/messages",
   empAuth,
-  upload.array("attachments", 10),
+  upload.array("attachments", 20),
   chatController.sendSpaceMessage
 );
 
@@ -284,7 +284,7 @@ router.delete(
 router.put(
   "/messages/:messageId",
   empAuth,
-  upload.array("files", 10),
+  upload.array("files", 20),
   chatController.updateMessage
 );
 
