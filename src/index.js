@@ -460,7 +460,7 @@ const CERT_PRIVKEY =
   process.env.CERT_PRIVKEY ||
   `/etc/letsencrypt/live/${DEFAULT_DOMAIN}/privkey.pem`;
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 443);
-const HTTP_PORT = Number(process.env.HTTP_PORT || 3000);
+const HTTP_PORT = Number(process.env.HTTP_PORT || 4000);
 let primaryServer; // the server we attach socket.io to
 let httpsEnabled = false;
 if (
