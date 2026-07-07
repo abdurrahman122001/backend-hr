@@ -3955,15 +3955,28 @@ exports.deleteConversation = async (req, res) => {
     }
 
     // Find conversation and verify user participation
-    const conversation = await Conversation.findOne({
-      _id: conversationId,
-      participants: req.employee._id,
-    }).populate("participants", "name companyEmail avatar");
+    const conversation = await Conversation.findById(conversationId).populate(
+      "participants",
+      "name companyEmail avatar"
+    );
 
+    // Idempotent: already gone (deleted from another view/device) is a success
     if (!conversation) {
-      return res.status(404).json({
+      return res.json({
+        success: true,
+        message: "Conversation already deleted",
+        conversationId,
+        alreadyDeleted: true,
+      });
+    }
+
+    const isParticipant = conversation.participants.some(
+      (p) => p._id.toString() === req.employee._id.toString()
+    );
+    if (!isParticipant) {
+      return res.status(403).json({
         success: false,
-        error: "Conversation not found or access denied",
+        error: "Access denied",
       });
     }
 
