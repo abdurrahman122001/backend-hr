@@ -795,6 +795,7 @@ exports.listMessages = async function listMessages(req, res) {
         {
           $group: {
             _id: "$threadId",
+            threadOwner: { $first: "$owner" },
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
             // Docs are sorted newest-first, so $first = the thread's latest message.
@@ -912,6 +913,53 @@ exports.listMessages = async function listMessages(req, res) {
           },
         });
       }
+      if (filter === "review" && !reviewStateVal) {
+        pipeline.push(
+          {
+            $lookup: {
+              from: "assignmentmessages",
+              let: { threadId: "$_id", ownerId: "$threadOwner" },
+              pipeline: [
+                {
+                  $match: {
+                    $expr: {
+                      $and: [
+                        { $eq: ["$threadId", "$$threadId"] },
+                        { $eq: ["$owner", "$$ownerId"] },
+                      ],
+                    },
+                    isTrashed: { $ne: true },
+                    isSpam: { $ne: true },
+                  },
+                },
+                { $sort: { createdAt: -1 } },
+                { $limit: 1 },
+                { $project: { _id: 1, createdAt: 1 } },
+              ],
+              as: "actualLatestMessage",
+            },
+          },
+          {
+            $addFields: {
+              latestId: {
+                $ifNull: [
+                  { $arrayElemAt: ["$actualLatestMessage._id", 0] },
+                  "$latestId",
+                ],
+              },
+              latestMessageAt: {
+                $ifNull: [
+                  { $arrayElemAt: ["$actualLatestMessage.createdAt", 0] },
+                  "$latestMessageAt",
+                ],
+              },
+            },
+          },
+          { $project: { actualLatestMessage: 0 } }
+        );
+      }
+
+
 
       if (reviewStateVal) {
         pipeline.push(

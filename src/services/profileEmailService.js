@@ -2,6 +2,7 @@
 require("dotenv").config();
 
 const Signature = require("../models/Signature");
+const CompanyProfile = require("../models/CompanyProfile");
 const { sendEmail } = require("./mailService");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
 
@@ -9,6 +10,65 @@ const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const SERVER_URL = process.env.SERVER_URL || "";
 const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL || "http://localhost:5173";
 const APP_URL = process.env.APP_URL || "http://localhost:3000";
+
+/**
+ * Company details for signature tokens — prefers the documentation branch.
+ * No hardcoded fallbacks: anything missing from the company profile resolves
+ * to an empty string so the email never shows another company's details.
+ */
+async function getCompanyContext(ownerId) {
+  const empty = { name: "", email: "", phone: "", website: "", address: "" };
+  if (!ownerId) return empty;
+
+  let companyDoc = null;
+  try {
+    companyDoc = await CompanyProfile.findOne(
+      { owner: ownerId },
+      { name: 1, email: 1, website: 1, branches: 1 }
+    ).lean();
+  } catch (err) {
+    console.error("Error fetching company profile:", err);
+  }
+  if (!companyDoc) return empty;
+
+  let branch = null;
+  if (Array.isArray(companyDoc.branches) && companyDoc.branches.length > 0) {
+    branch =
+      companyDoc.branches.find(
+        (b) => b.useForDocumentation === true || b.useForDocumentation === "true"
+      ) || companyDoc.branches[0];
+  }
+
+  return {
+    name: companyDoc.name || "",
+    email: branch?.email || companyDoc.email || "",
+    phone: branch?.phone || "",
+    website: companyDoc.website || "",
+    address: branch?.address || "",
+  };
+}
+
+/**
+ * Resolve {{companyName}}/{{companyPhone}}/… placeholders the signature
+ * builder embeds in the rich text. Editors can split a token across spans or
+ * inject &nbsp; inside the braces, so the inner text is normalized first.
+ */
+function applyCompanyTokens(html, ctx) {
+  const map = {
+    companyName: ctx.name,
+    companyEmail: ctx.email,
+    companyPhone: ctx.phone,
+    companyWebsite: ctx.website,
+    companyAddress: ctx.address,
+  };
+  return String(html || "").replace(/\{\{([\s\S]*?)\}\}/g, (match, inner) => {
+    const key = inner
+      .replace(/<[^>]*>/g, "")
+      .replace(/&nbsp;/gi, " ")
+      .trim();
+    return key in map ? String(map[key] ?? "") : match;
+  });
+}
 
 /** Build owner signature block (image + rich text) */
 async function getSignatureBlock(ownerId) {
@@ -19,7 +79,10 @@ async function getSignatureBlock(ownerId) {
   const img = signature.signatureImage
     ? `<img src="${SERVER_URL}${signature.signatureImage}" alt="Signature" style="height:70px;display:block;margin-bottom:6px;object-fit:contain;max-width:200px;" />`
     : "";
-    const signatureText = removeSignatureParagraphMargins(signature.signatureText || "");
+  const signatureText = applyCompanyTokens(
+    removeSignatureParagraphMargins(signature.signatureText || ""),
+    await getCompanyContext(ownerId)
+  );
 
   return `
     <div style="margin-bottom:12px;">
@@ -29,6 +92,21 @@ async function getSignatureBlock(ownerId) {
       </div>
     </div>
   `;
+}
+
+
+async function getCompanyName(ownerId, providedCompanyName) {
+  const explicitName = (providedCompanyName || "").trim();
+  if (explicitName) return explicitName;
+
+  if (!ownerId) return COMPANY_NAME;
+
+  const companyDoc = await CompanyProfile.findOne(
+    { owner: ownerId },
+    { name: 1 }
+  ).lean();
+
+  return (companyDoc?.name || "").trim() || COMPANY_NAME;
 }
 
 /**
@@ -42,7 +120,7 @@ async function sendCompleteProfileLink({
   id,
   to,
   employeeName,
-  companyName = COMPANY_NAME,
+  companyName,
   ownerId,
 }) {
   if (!id || !to) throw new Error("Missing 'id' or 'to' for complete profile email");
@@ -51,6 +129,7 @@ async function sendCompleteProfileLink({
   const link = `${FRONTEND_BASE_URL}/complete-profile/${id}?from=resend`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const signatureBlock = await getSignatureBlock(ownerId);
+  const resolvedCompanyName = await getCompanyName(ownerId, companyName);
 
   const html = `
     <div style="font-family: Arial, Helvetica, sans-serif;font-size:15px;line-height:1.7;color:#212121;width:100%">
@@ -81,7 +160,7 @@ async function sendCompleteProfileLink({
       <p style="font-size: 15px;line-height: 18px;
 ">It'll only take a few minutes and, as always, your data will be handled with strict confidentiality and care.</p>
       <p style="font-size: 15px;line-height: 18px;
-">Thank you again for being such an important part of the <strong>${companyName}</strong> family.</p>
+">Thank you again for being such an important part of the <strong>${resolvedCompanyName}</strong> family.</p>
       ${signatureBlock}
     </div>
   `;
@@ -108,7 +187,7 @@ async function sendMissingDocumentsRequest({
   id,
   to,
   employeeName,
-  companyName = COMPANY_NAME,
+  companyName,
   ownerId,
   missingDocs = [],
 }) {
@@ -122,6 +201,7 @@ async function sendMissingDocumentsRequest({
   const link = `${FRONTEND_BASE_URL}/complete-profile/${id}`;
   const subject = "📄 Action Required: Missing Documents for Your Employee Profile";
   const signatureBlock = await getSignatureBlock(ownerId);
+  const resolvedCompanyName = await getCompanyName(ownerId, companyName);
 
   const docListItems = labels
     .map(
@@ -146,7 +226,7 @@ async function sendMissingDocumentsRequest({
         </strong>
       </p>
       <p style="font-size: 15px;line-height: 18px;">It'll only take a few minutes and, as always, your data will be handled with strict confidentiality and care.</p>
-      <p style="font-size: 15px;line-height: 18px;">Thank you for being such an important part of the <strong>${companyName}</strong> family.</p>
+      <p style="font-size: 15px;line-height: 18px;">Thank you for being such an important part of the <strong>${resolvedCompanyName}</strong> family.</p>
       ${signatureBlock}
     </div>
   `;

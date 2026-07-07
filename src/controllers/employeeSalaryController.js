@@ -1158,13 +1158,19 @@ exports.requestMissingDocuments = async (req, res) => {
 
     const emp = await Employee.findById(id);
     if (!emp) return res.status(404).json({ message: "Employee not found" });
-    if (!emp.email)
-      return res.status(400).json({ message: "Employee email is missing" });
+
+    const emailTarget = req.body?.emailTarget === "company" ? "company" : "personal";
+    const targetEmail = emailTarget === "company" ? emp.companyEmail : emp.email;
+    if (!targetEmail) {
+      return res.status(400).json({
+        message: `Employee ${emailTarget} email is missing`,
+      });
+    }
 
     const ownerId = Array.isArray(emp.owner) ? emp.owner[0] : emp.owner;
     await sendMissingDocumentsRequest({
       id: emp._id.toString(),
-      to: emp.email,
+      to: targetEmail,
       employeeName: emp.name || "Employee",
       ownerId,
       missingDocs: requested,
@@ -1173,6 +1179,8 @@ exports.requestMissingDocuments = async (req, res) => {
     return res.json({
       success: true,
       message: "Missing documents request sent.",
+      emailTarget,
+      to: targetEmail,
     });
   } catch (err) {
     console.error("requestMissingDocuments error:", err);
