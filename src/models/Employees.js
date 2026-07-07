@@ -163,7 +163,6 @@ const EmployeeSchema = new Schema(
       type: String,
       enum: [
         "active",
-        "pending",
         "Offered",
         "Onboarding",
         "review",
@@ -171,7 +170,7 @@ const EmployeeSchema = new Schema(
         "offboarded",
         "terminated",
       ],
-      default: "pending",
+      default: "Offered",
     },
     resignationDate: { type: String }, // Date when employee resigned
     noticePeriodEndDate: { type: String }, // Calculated date when notice period ends (resignationDate + 30 days)
