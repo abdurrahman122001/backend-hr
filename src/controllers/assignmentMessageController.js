@@ -956,7 +956,7 @@ exports.createMessage = async function createMessage(req, res) {
     }
 
     const senderDoc = await Employee.findById(sender)
-      .select("_id role supervisor supervisionMode owner")
+      .select("_id role supervisor supervisionMode owner isAdmin")
       .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
 
@@ -1195,6 +1195,17 @@ exports.createMessage = async function createMessage(req, res) {
           // Own client, sender is the top CRM, or sender holds CRM access:
           // add assigned team members (and never reroute to another CRM).
           assignedToIds.forEach((id) => {
+            if (!receivers.includes(id) && id !== String(sender)) {
+              receivers.push(id);
+            }
+          });
+        }
+
+        // 👑 ADMIN CRM BROADCAST: a client compose from an isAdmin employee
+        // who holds CRM access is delivered to ALL CRM-access users (not just
+        // the client's assigned employees), so every CRM user receives it.
+        if (senderHasCrmAccess && senderDoc?.isAdmin === true) {
+          otherManagerIds.forEach((id) => {
             if (!receivers.includes(id) && id !== String(sender)) {
               receivers.push(id);
             }
@@ -3136,7 +3147,7 @@ exports.sendDraft = async function sendDraft(req, res) {
     }
 
     // Update client employee tracking fields for managers
-    const senderDoc = await Employee.findById(msg.sender).select("_id role").lean();
+    const senderDoc = await Employee.findById(msg.sender).select("_id role isAdmin").lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
 
     if (senderRole === "manager") {
@@ -3191,6 +3202,16 @@ exports.sendDraft = async function sendDraft(req, res) {
         if (!isSenderAssigned && !senderIsTopCrm && !senderHasCrmAccess && otherManagerIds.length > 0) {
           // Remove the assigned junior(s) and add the CRM (manager).
           receivers = receivers.filter((id) => !assignedToIds.includes(id));
+          otherManagerIds.forEach((mid) => {
+            if (!receivers.includes(mid) && mid !== String(msg.sender)) {
+              receivers.push(mid);
+            }
+          });
+        }
+
+        // 👑 ADMIN CRM BROADCAST (mirror of createMessage): an isAdmin sender
+        // with CRM access sending a client message → deliver to ALL CRM users.
+        if (senderHasCrmAccess && senderDoc?.isAdmin === true) {
           otherManagerIds.forEach((mid) => {
             if (!receivers.includes(mid) && mid !== String(msg.sender)) {
               receivers.push(mid);

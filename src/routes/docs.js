@@ -795,6 +795,14 @@ async function tokenMap(
     "dates.end": emp?.leavingDate
       ? fmtDate(emp.leavingDate, timezone)
       : "present",
+    // Employment period phrase: past employees get an explicit range, current
+    // employees just get "since <joining date>".
+    "dates.period": emp?.leavingDate
+      ? `from ${fmtDate(emp.joiningDate, timezone)} till ${fmtDate(
+          emp.leavingDate,
+          timezone
+        )}`
+      : `since ${fmtDate(emp?.joiningDate, timezone)}`,
     "dates.timezone": timezone,
     "tenure.human": tenureHuman,
     "tenure.monthsTotal": tenureMonthsTotal,
@@ -941,7 +949,13 @@ async function tokenMap(
 
 /** supports {{ key }}, {{ key | upper }}, {{ key | lower }}, {{ key | title }}, {{ key | trim }} */
 function applyTokens(html, tokens) {
-  return String(html).replace(
+  // The rich-text builder can split a token across tags (e.g.
+  // "{{</span><span>dates.end}}") and insert &nbsp; inside it, which the
+  // token regex below can't match. Strip tags/entities found inside {{ }}.
+  const normalized = String(html).replace(/\{\{[^{}]*\}\}/g, (m) =>
+    m.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ")
+  );
+  return normalized.replace(
     /\{\{\s*([a-zA-Z0-9_.]+)(?:\s*\|\s*([a-zA-Z]+))?\s*\}\}/g,
     (_, key, filter) => {
       let v = tokens[key] ?? "";
