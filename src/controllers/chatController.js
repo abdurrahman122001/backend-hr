@@ -700,7 +700,7 @@ exports.getMessages = async (req, res) => {
     const messagesRaw = await Message.find({
       conversation: conversationId,
     })
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
@@ -708,7 +708,7 @@ exports.getMessages = async (req, res) => {
         path: "replyTo",
         populate: {
           path: "sender",
-          select: "name companyEmail avatar",
+          select: "name companyEmail avatar photographUrl",
         },
       })
       .sort({ createdAt: -1 })
@@ -1018,7 +1018,7 @@ exports.sendMessage = async (req, res) => {
       repliedMessage = await Message.findOne({
         _id: replyTo,
         conversation: conversationId, // Ensure replied message is in same conversation
-      }).populate("sender", "name companyEmail avatar");
+      }).populate("sender", "name companyEmail avatar photographUrl");
 
       if (!repliedMessage) {
         return res.status(400).json({
@@ -1189,7 +1189,7 @@ exports.sendMessage = async (req, res) => {
 
     // Populate and return - ✅ ADD populate for replyTo
     const populatedMessage = await Message.findById(message._id)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("receiver", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("conversation")
@@ -1198,7 +1198,7 @@ exports.sendMessage = async (req, res) => {
         path: "replyTo",
         populate: {
           path: "sender",
-          select: "name companyEmail avatar",
+          select: "name companyEmail avatar photographUrl",
         },
       });
 
@@ -1263,7 +1263,7 @@ exports.forwardMessage = async (req, res) => {
     // Load the source message and verify the requester can access it
     const sourceMessage = await Message.findById(messageId)
       .populate("conversation")
-      .populate("sender", "name companyEmail avatar");
+      .populate("sender", "name companyEmail avatar photographUrl");
 
     if (!sourceMessage) {
       return res
@@ -1401,7 +1401,7 @@ exports.forwardMessage = async (req, res) => {
         await conversation.save();
 
         const populatedMessage = await Message.findById(message._id)
-          .populate("sender", "name companyEmail avatar")
+          .populate("sender", "name companyEmail avatar photographUrl")
           .populate("receiver", "name companyEmail avatar")
           .populate("conversation");
 
@@ -1597,7 +1597,7 @@ exports.sendDirectMessage = async (req, res) => {
     }
     // Populate message
     const populatedMessage = await Message.findById(message._id)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("receiver", "name companyEmail avatar");
 
     // ✅ UPDATED: Use compatible socket events
@@ -2436,7 +2436,7 @@ exports.sendSpaceMessage = async (req, res) => {
       repliedMessage = await Message.findOne({
         _id: replyTo,
         conversation: conversation._id, // Ensure replied message is in same space conversation
-      }).populate("sender", "name companyEmail avatar");
+      }).populate("sender", "name companyEmail avatar photographUrl");
 
       if (!repliedMessage) {
         return res.status(400).json({
@@ -2536,7 +2536,7 @@ exports.sendSpaceMessage = async (req, res) => {
 
     // Populate message for response - ✅ ADD populate for replyTo
     const populatedMessage = await Message.findById(message._id)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
       .populate("conversation")
@@ -2544,7 +2544,7 @@ exports.sendSpaceMessage = async (req, res) => {
         path: "replyTo",
         populate: {
           path: "sender",
-          select: "name companyEmail avatar",
+          select: "name companyEmail avatar photographUrl",
         },
       });
 
@@ -3353,7 +3353,7 @@ exports.getSpaceMessages = async (req, res) => {
     const messagesRaw = await Message.find({
       conversation: conversation._id,
     })
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("receivers", "name companyEmail avatar")
       .populate("readBy.employee", "name companyEmail avatar")
       .populate("space")
@@ -3361,7 +3361,7 @@ exports.getSpaceMessages = async (req, res) => {
         path: "replyTo",
         populate: {
           path: "sender",
-          select: "name companyEmail avatar",
+          select: "name companyEmail avatar photographUrl",
         },
       })
       .sort({ createdAt: -1 })
@@ -3761,7 +3761,7 @@ exports.getSharedContent = async (req, res) => {
 
     // Fetch messages with shared content
     const messages = await Message.find(messageQuery)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(200); // Limit to prevent overload
@@ -4306,7 +4306,7 @@ exports.addReaction = async (req, res) => {
 
     // Populate the updated message
     const updatedMessage = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("reactions.users", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
@@ -5508,7 +5508,7 @@ exports.getSpaceSharedContent = async (req, res) => {
 
     // Fetch messages with shared content
     const messages = await Message.find(messageQuery)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(200); // Limit to prevent overload
@@ -5885,7 +5885,7 @@ exports.starMessage = async (req, res) => {
 
     // Populate the updated message
     const updatedMessage = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("starredBy.employee", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
@@ -5973,7 +5973,7 @@ exports.unstarMessage = async (req, res) => {
 
     // Populate the updated message
     const updatedMessage = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("starredBy.employee", "name companyEmail avatar")
       .populate("receivers", "name companyEmail avatar")
       .populate("space")
@@ -6142,7 +6142,7 @@ exports.pinMessage = async (req, res) => {
 
     // Find the message
     const message = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("conversation", "participants isGroup space");
 
     if (!message) {
@@ -6255,7 +6255,7 @@ exports.unpinMessage = async (req, res) => {
 
     // Find the message
     const message = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar")
+      .populate("sender", "name companyEmail avatar photographUrl")
       .populate("conversation", "participants isGroup space");
 
     if (!message) {

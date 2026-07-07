@@ -413,6 +413,27 @@ router.post("/2fa/verify-session", requireAuth, async (req, res) => {
   }
 });
 
+// ── 2FA: Does this device still hold a valid week-long trust? ─────
+// Used by the ?token= gate (header opens from Employee_dashboard/CRM/Connect).
+// The trust token is keyed to the 2FA SUBJECT (owner User for employee-admins),
+// so a trust earned at normal admin login also covers header-opened sessions.
+router.post("/2fa/check-trust", requireAuth, async (req, res) => {
+  const { twoFaTrustToken } = req.body;
+  try {
+    const { doc: user } = await resolve2faSubject(req, "+twoFactorEnabled");
+    if (!user || !user.twoFactorEnabled) {
+      return res.json({ trusted: true, twoFactorEnabled: false });
+    }
+    return res.json({
+      trusted: isTwoFaTrusted(twoFaTrustToken, user._id),
+      twoFactorEnabled: true,
+    });
+  } catch (err) {
+    console.error("[2fa/check-trust]", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
 // POST /auth/refresh
 router.post("/refresh", async (req, res) => {
   const { refreshToken } = req.body;
