@@ -666,23 +666,60 @@ exports.listMessages = async function listMessages(req, res) {
 
     // Force incoming-only for unified inbox unless explicitly in Sent, Trash, or asking for ALL mail
     if (isInboxView) {
+      const isCrmScope = String(req.query.scope || "") === "crm";
       // Inbox = mail addressed to ME plus inbound mail of MY assigned
       // clients. Juniors' client mail is monitored in Activity, not here.
+      // Outside the CRM app "my clients" means strictly assignedTo — a
+      // hierarchy senior sits in `supervisedBy` of every downline client,
+      // which would pull the whole org's client threads into his Primary.
       const myAssignedClients = await ClientInfo.find({
         owner: q.owner || req.employee?.owner,
-        $or: [{ assignedTo: me }, { supervisedBy: me }],
+        $or: isCrmScope
+          ? [{ assignedTo: me }, { supervisedBy: me }]
+          : [{ assignedTo: me }],
       })
         .select("_id")
         .lean();
       const myAssignedClientIds = myAssignedClients.map((c) => c._id);
 
-      q.$or = [
-        { receiver: me },
-        { receiver: { $in: [me] } },
-        ...(myAssignedClientIds.length > 0
-          ? [{ client: { $in: myAssignedClientIds }, isFromClient: true }]
-          : []),
-      ];
+      const receiverMe = {
+        $or: [{ receiver: me }, { receiver: { $in: [me] } }],
+      };
+      if (isCrmScope) {
+        // CRM app: Primary shows everything addressed to me plus inbound
+        // mail of my assigned clients (org-wide client mail is CRM's job).
+        q.$or = [
+          { receiver: me },
+          { receiver: { $in: [me] } },
+          ...(myAssignedClientIds.length > 0
+            ? [{ client: { $in: myAssignedClientIds }, isFromClient: true }]
+            : []),
+        ];
+      } else {
+        // Employee_dashboard/Connect: CLIENT mail reaches Primary only for MY
+        // assigned clients — even when I'm a receiver (e.g. a CRM-access user
+        // added to a client compose). Internal (non-client) mail addressed to
+        // me is unaffected; unassigned client mail lives in the CRM app.
+        q.$or = [
+          {
+            $and: [
+              receiverMe,
+              { $or: [{ client: { $exists: false } }, { client: null }] },
+            ],
+          },
+          ...(myAssignedClientIds.length > 0
+            ? [
+                {
+                  $and: [
+                    receiverMe,
+                    { client: { $in: myAssignedClientIds } },
+                  ],
+                },
+                { client: { $in: myAssignedClientIds }, isFromClient: true },
+              ]
+            : []),
+        ];
+      }
       // Supervision items don't belong in the Primary inbox: a pending
       // message's receiver is its current APPROVER, and it must only show in
       // the For-approval filter until it's approved and actually delivered.
@@ -741,6 +778,17 @@ exports.listMessages = async function listMessages(req, res) {
           ? String(reviewState)
           : null;
 
+      // All activity: a message pending at one of MY juniors belongs to Pre
+      // approval — while a thread has one, the whole thread is hidden from my
+      // All activity (mirrors the pending-at-ME → My approval rule below).
+      let reviewJuniorIdStrings = [];
+      if (filter === "review") {
+        const ownerForJuniors = q.owner || req.employee?.owner;
+        reviewJuniorIdStrings = (
+          await getCachedJuniors(ownerForJuniors, me)
+        ).map(String);
+      }
+
       const pipeline = [
         { $match: qFinal },
         { $sort: { createdAt: -1 } },
@@ -792,6 +840,54 @@ exports.listMessages = async function listMessages(req, res) {
                   0
                 ]
               }
+            },
+            // Thread has a message currently pending MY approval (a pending
+            // message's receiver is its current approver). While true, the
+            // whole thread belongs in For approval → My approval, NOT in
+            // All activity; once I approve (receiver moves to the next
+            // senior) the thread returns to All activity for me.
+            hasPendingForMe: {
+              $max: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$approvalStatus", "pending"] },
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                    ]
+                  },
+                  true,
+                  false
+                ]
+              }
+            },
+            // Thread has a message pending at one of MY junior approvers —
+            // that work lives in For approval → Pre approval, so the thread
+            // must stay out of my All activity until it's approved.
+            hasPendingBelowMe: {
+              $max: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$approvalStatus", "pending"] },
+                      {
+                        $gt: [
+                          {
+                            $size: {
+                              $setIntersection: [
+                                reviewJuniorIdStrings,
+                                { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }
+                              ]
+                            }
+                          },
+                          0
+                        ]
+                      }
+                    ]
+                  },
+                  true,
+                  false
+                ]
+              }
             }
           }
         }
@@ -802,6 +898,19 @@ exports.listMessages = async function listMessages(req, res) {
       // is incoming-only, so it DOES require the thread to have received something.
       if (filter !== "all" && filter !== "allMail") {
         pipeline.push({ $match: { receivedSomething: true } });
+      }
+
+      // All activity hides threads awaiting approval: pending at ME → they
+      // show exclusively in For approval → My approval; pending at one of MY
+      // juniors → For approval → Pre approval. Either way the whole thread
+      // stays out of All activity until the pending work is cleared.
+      if (filter === "review") {
+        pipeline.push({
+          $match: {
+            hasPendingForMe: { $ne: true },
+            hasPendingBelowMe: { $ne: true },
+          },
+        });
       }
 
       if (reviewStateVal) {
@@ -1144,10 +1253,14 @@ exports.getExternalCommunications = async function getExternalCommunications(
     const isSentView = status === "sent";
     const isInboxView = !isSentView && isTrashed !== "true" && isSpam !== "true" && filter !== "review";
 
-    // Client Box inbox: CRM-access users see all client mail; everyone else
-    // only sees mail for clients assigned directly to them.
+    // Client Box inbox: org-wide client mail is a CRM-app feature — the CRM
+    // frontend sends scope=crm and its users hold CRM access. In
+    // Employee_dashboard/Connect (no scope param) everyone, including
+    // CRM-access holders, sees only mail of clients assigned directly to them.
     if (isInboxView) {
-      const canSeeAllClientBox = await hasCrmAccess(req.employee);
+      const canSeeAllClientBox =
+        String(req.query.scope || "") === "crm" &&
+        (await hasCrmAccess(req.employee));
 
       if (!canSeeAllClientBox) {
         const myAssignedClients = await ClientInfo.find({
@@ -1888,6 +2001,31 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       spamReporters: { $ne: currentUser },
       "readBy.employee": { $ne: currentUser },
     };
+
+    // Primary-inbox client scoping must match listMessages: outside the CRM
+    // app (no scope=crm), client mail only counts for MY assigned clients.
+    const isCrmScope = String(req.query.scope || "") === "crm";
+    let inboxClientScope = null;
+    if (!isCrmScope) {
+      // Strictly assignedTo — matches the Primary list (supervisedBy would
+      // count every downline client's mail for hierarchy seniors).
+      const myAssignedClients = await ClientInfo.find({
+        owner,
+        assignedTo: currentUser,
+      })
+        .select("_id")
+        .lean();
+      const assignedClientIds = myAssignedClients.map((c) => c._id);
+      inboxClientScope = {
+        $or: [
+          { client: { $exists: false } },
+          { client: null },
+          ...(assignedClientIds.length > 0
+            ? [{ client: { $in: assignedClientIds } }]
+            : []),
+        ],
+      };
+    }
     const receiverOr = [
       { receiver: currentUser },
       { receiver: { $in: [currentUser] } },
@@ -1952,6 +2090,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
               { intendedRecipients: currentUser },
             ],
           },
+          ...(inboxClientScope ? [inboxClientScope] : []),
         ],
         status: "sent",
         approvalStatus: { $ne: "pending" },
@@ -1969,6 +2108,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
               { intendedRecipients: currentUser },
             ],
           },
+          ...(inboxClientScope ? [inboxClientScope] : []),
         ],
         status: "sent",
         approvalStatus: { $ne: "pending" },
@@ -2775,19 +2915,12 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
       query["approvalChain.approver"] = { $ne: currentUserId };
       query.receiver = { $in: juniorObjIds, $nin: [currentUserId] };
     } else {
-      // My approval = work currently pending at ME plus my own approval
-      // history. Pending messages assigned to another employee stay in Pre
-      // approval unless I already acted on them earlier in the chain.
-      query.$or = [
-        {
-          approvalStatus: "pending",
-          receiver: currentUserId,
-          "approvalChain.approver": { $ne: currentUserId },
-        },
-        { "approvalChain.approver": currentUserId },
-        { approvedBy: currentUserId },
-        { disapprovedBy: currentUserId },
-      ];
+      // My approval = ONLY work currently pending at ME. Once I approve or
+      // disapprove, the row leaves this tab (approved mail is then visible in
+      // All activity); the tab stays empty until a new message escalates to me.
+      query.approvalStatus = "pending";
+      query.receiver = currentUserId;
+      query["approvalChain.approver"] = { $ne: currentUserId };
     }
 
     // Apply client filter if provided
