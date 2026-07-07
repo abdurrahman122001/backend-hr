@@ -2845,7 +2845,7 @@ cron.schedule(
             : true;
           const baseFilter = {
             isTrashed: false,
-            status: { $in: ["active", "pending", "review", "Onboarding"] },
+            status: { $in: ["active", "review", "Onboarding"] },
             owner: ownerId,
           };
           if (!leaveDuringProbation && probationDays > 0) {

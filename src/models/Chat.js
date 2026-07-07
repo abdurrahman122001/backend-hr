@@ -171,6 +171,14 @@ const messageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    // Soft delete: message stays as a "Message deleted by its author" tombstone
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+    deletedAt: {
+      type: Date,
+    },
     // ✅ ADDED: View tracking for space messages
     viewCount: {
       type: Number,

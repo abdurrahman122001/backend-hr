@@ -1846,16 +1846,15 @@ exports.approveMessage = async function approveMessage(req, res) {
         });
       }
 
-      // When finalized: notify previous approvers (approval status update) but NOT all managers
-      // Supervisors receive approval notifications only; client notifications go to assigned employees
-      if (approvalFinalized) {
-        (msg.approvalChain || []).forEach(step => {
-          const aid = step.approver?._id || step.approver;
-          if (aid) allInvolvedUsers.add(String(aid));
-        });
-        // msg.receiver already contains only assigned employees (expanded above)
-        // — no need to add all managers here
-      }
+      // Notify everyone earlier in the chain who already approved — otherwise a senior
+      // who approved loses realtime visibility the moment it escalates past them,
+      // since msg.receiver is overwritten with only the next approver on each step.
+      (msg.approvalChain || []).forEach(step => {
+        const aid = step.approver?._id || step.approver;
+        if (aid) allInvolvedUsers.add(String(aid));
+      });
+      // msg.receiver already contains only assigned employees when finalized (expanded above)
+      // — no need to add all managers here
 
       // 🔥 If it's a group message:
       // - When finalized: broadcast to ALL group members + managers + TLs (message is approved)

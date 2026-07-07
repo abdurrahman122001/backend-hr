@@ -16,6 +16,24 @@ const REFRESH_SECRET = process.env.REFRESH_SECRET || "refreshsecret123";
 const ACCESS_TTL = process.env.ACCESS_TTL || "30m";
 const REFRESH_TTL = process.env.REFRESH_TTL || "7d";
 const TWO_FA_PENDING_TTL = "5m"; // short-lived token during 2FA verification step
+const TWO_FA_TRUST_TTL = "7d"; // once OTP passes, this device skips 2FA for a week
+
+// Issued after a successful OTP; presented back at login to skip the OTP step.
+function signTwoFaTrustToken(userId) {
+  return jwt.sign({ id: userId, twoFaTrust: true }, JWT_SECRET, {
+    expiresIn: TWO_FA_TRUST_TTL,
+  });
+}
+
+function isTwoFaTrusted(trustToken, userId) {
+  if (!trustToken) return false;
+  try {
+    const p = jwt.verify(trustToken, JWT_SECRET);
+    return p.twoFaTrust === true && String(p.id) === String(userId);
+  } catch {
+    return false;
+  }
+}
 const APP_NAME = process.env.APP_NAME || "HR Dashboard";
 
 // Resolve the account that owns 2FA for the current request. Employees granted
@@ -99,7 +117,7 @@ router.post("/hr-login", async (req, res) => {
 });
 
 router.post("/login", async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password, twoFaTrustToken } = req.body;
 
   try {
     // Try User model first (super-admin, admin, hr accounts)
@@ -112,7 +130,8 @@ router.post("/login", async (req, res) => {
         return res.status(401).json({ message: "Invalid credentials" });
       }
 
-      if (user.twoFactorEnabled) {
+      // A device that passed OTP within the trust window skips the 2FA step.
+      if (user.twoFactorEnabled && !isTwoFaTrusted(twoFaTrustToken, user._id)) {
         const pendingToken = jwt.sign(
           { id: user._id, twoFactorPending: true },
           JWT_SECRET,
@@ -138,6 +157,9 @@ router.post("/login", async (req, res) => {
       return res.json({
         token: accessToken,
         refreshToken,
+        // Tells the client 2FA is active even though the OTP step was skipped,
+        // so it still auto-unlocks salary decryption.
+        twoFactorEnabled: !!user.twoFactorEnabled,
         user: { id: user._id, username: user.username },
       });
     }
@@ -227,6 +249,7 @@ router.post("/2fa/verify", async (req, res) => {
     return res.json({
       token: accessToken,
       refreshToken,
+      twoFaTrustToken: signTwoFaTrustToken(user._id),
       user: { id: user._id, username: user.username },
     });
   } catch (err) {
@@ -381,9 +404,32 @@ router.post("/2fa/verify-session", requireAuth, async (req, res) => {
       window: 1,
     });
     if (!isValid) return res.status(401).json({ message: "Invalid code. Please try again." });
-    return res.json({ verified: true });
+    // Trust token is keyed to the 2FA subject (the owner User for
+    // employee-admins) so a later /login by that account skips the OTP.
+    return res.json({ verified: true, twoFaTrustToken: signTwoFaTrustToken(user._id) });
   } catch (err) {
     console.error("[2fa/verify-session]", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ── 2FA: Does this device still hold a valid week-long trust? ─────
+// Used by the ?token= gate (header opens from Employee_dashboard/CRM/Connect).
+// The trust token is keyed to the 2FA SUBJECT (owner User for employee-admins),
+// so a trust earned at normal admin login also covers header-opened sessions.
+router.post("/2fa/check-trust", requireAuth, async (req, res) => {
+  const { twoFaTrustToken } = req.body;
+  try {
+    const { doc: user } = await resolve2faSubject(req, "+twoFactorEnabled");
+    if (!user || !user.twoFactorEnabled) {
+      return res.json({ trusted: true, twoFactorEnabled: false });
+    }
+    return res.json({
+      trusted: isTwoFaTrusted(twoFaTrustToken, user._id),
+      twoFactorEnabled: true,
+    });
+  } catch (err) {
+    console.error("[2fa/check-trust]", err);
     return res.status(500).json({ message: "Server error" });
   }
 });

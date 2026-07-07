@@ -183,13 +183,18 @@ exports.getGroupMessages = async function (req, res) {
       status: { $ne: "draft" },
       // Approval visibility rules:
       // - null / "approved"  → everyone in the group can see
-      // - "pending"          → only sender or the designated approver (in receiver[])
+      // - "pending"          → sender, the current designated approver (receiver[]),
+      //                        or anyone earlier in the chain who already approved it
+      //                        (escalation overwrites receiver[], so without this a
+      //                        senior who approved would lose the message the moment
+      //                        it moved on to the next approver)
       // - "disapproved"      → only the sender
       $or: [
         { approvalStatus: null },
         { approvalStatus: "approved" },
         { approvalStatus: "pending", sender: me },
         { approvalStatus: "pending", receiver: me },
+        { approvalStatus: "pending", "approvalChain.approver": me },
         { approvalStatus: "disapproved", sender: me },
       ],
     };
