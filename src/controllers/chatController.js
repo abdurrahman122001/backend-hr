@@ -3548,7 +3548,7 @@ exports.deleteMessage = async (req, res) => {
     message.pinnedBy = [];
     await message.save();
 
-    // ✅ UPDATED: Use socket events for message deletion
+    // Notify connected clients so the deleted message renders as a tombstone
     const io = req.app.get("io");
     if (io) {
       if (space) {
