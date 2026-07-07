@@ -3537,20 +3537,16 @@ exports.deleteMessage = async (req, res) => {
 
     const { conversation, space } = message;
 
-    // Delete the message
-    await Message.findByIdAndDelete(messageId);
-
-    // Update conversation's last message if this was the last message
-    if (conversation && conversation.lastMessage?.toString() === messageId) {
-      const previousMessage = await Message.findOne({
-        conversation: conversation._id,
-      })
-        .sort({ createdAt: -1 })
-        .select("_id");
-
-      conversation.lastMessage = previousMessage ? previousMessage._id : null;
-      await conversation.save();
-    }
+    // Soft delete: keep the message as a tombstone so clients can show
+    // "Message deleted by its author" in place instead of removing it
+    message.isDeleted = true;
+    message.deletedAt = new Date();
+    message.content = "";
+    message.attachments = [];
+    message.reactions = [];
+    message.isPinned = false;
+    message.pinnedBy = [];
+    await message.save();
 
     // ✅ UPDATED: Use socket events for message deletion
     const io = req.app.get("io");
