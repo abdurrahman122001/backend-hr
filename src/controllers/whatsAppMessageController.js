@@ -1130,23 +1130,36 @@ exports.listMessagesForManager = async function listMessagesForManager(
     }
     const displayMessages = [...messages].reverse();
 
+    // CRM-access senders represent the client — their messages show the client
+    // avatar (incl. voice messages), not the employee photo. Build the set once.
+    let crmSenderIdSet = new Set();
+    try {
+      const crmIds = await getCrmUserIds(req.employee?.owner || req.employee?._id);
+      crmSenderIdSet = new Set((crmIds || []).map((id) => String(id)));
+    } catch (e) {
+      console.warn("getCrmUserIds failed for message list:", e.message);
+    }
+
     // 🔥 Get client supervision info for each message
     const Client = require("../models/ClientInfo");
     const messagesWithSupervision = await Promise.all(
       displayMessages.map(async (message) => {
+        const senderId = String(message.sender?._id || message.sender || "");
+        const senderHasCrmAccess = crmSenderIdSet.has(senderId);
         if (message.client) {
           const clientDoc = await Client.findById(message.client)
             .select("supervision clientName")
             .lean();
           return {
             ...message,
+            senderHasCrmAccess,
             parentClientId: message.client?._id || message.client,
             clientSupervision: clientDoc?.supervision || "direct",
             clientName: clientDoc?.clientName || "Unknown",
             requiresApproval: clientDoc?.supervision === "needs_approval",
           };
         }
-        return message;
+        return { ...message, senderHasCrmAccess };
       }),
     );
 
@@ -1947,10 +1960,14 @@ exports.approveMessage = async function approveMessage(req, res) {
 };
 // PATCH /api/assignment-messages/:id/disapprove
 /**
- * GET /pre-approvals?clientId=&clientEmployeeId=&groupId=
- * Messages in this chat that are PENDING at someone BELOW the current user in
- * the hierarchy. A higher senior can approve/disapprove them on the junior
- * approver's behalf (see the pre-approval override in approveMessage).
+ * GET /pre-approvals[?clientId=&clientEmployeeId=&groupId=]
+ * Messages PENDING at someone BELOW the current user in the hierarchy. A higher
+ * senior can approve/disapprove them on the junior approver's behalf (see the
+ * pre-approval override in approveMessage).
+ *
+ * With no clientId/groupId this is UNIVERSAL — it returns such messages across
+ * every chat and group the user oversees, each tagged with its chat context so
+ * the UI can label where it came from.
  */
 exports.getPreApprovalMessages = async (req, res) => {
   try {
@@ -1967,6 +1984,7 @@ exports.getPreApprovalMessages = async (req, res) => {
       receiver: { $ne: oid(me) },
     };
 
+    // Optional scoping. Omitting both => universal across all chats/groups.
     if (groupId && isObjId(groupId)) {
       q.groupId = oid(groupId);
       q.isGroupMessage = true;
@@ -1978,13 +1996,11 @@ exports.getPreApprovalMessages = async (req, res) => {
       } else {
         q.isClientEmployeeMessage = { $ne: true };
       }
-    } else {
-      return res.status(400).json({ error: "clientId or groupId is required" });
     }
 
     const msgs = await WhatsAppMessage.find(q)
       .sort({ createdAt: -1 })
-      .limit(100)
+      .limit(200)
       .populate([
         { path: "sender", select: "_id name companyEmail role designation photographUrl" },
         { path: "receiver", select: "_id name companyEmail role designation" },
@@ -1994,6 +2010,7 @@ exports.getPreApprovalMessages = async (req, res) => {
           populate: { path: "approver", select: "_id name role designation", model: "Employee" },
         },
         { path: "client", select: "_id clientName" },
+        { path: "groupId", select: "_id name avatar" },
       ])
       .lean();
 
@@ -2017,7 +2034,26 @@ exports.getPreApprovalMessages = async (req, res) => {
           break;
         }
       }
-      if (belowMe) result.push(m);
+      if (!belowMe) continue;
+
+      // Tag with a human-readable chat label + navigation ids so the universal
+      // popup can show where each message lives and open that chat.
+      let chatLabel = "Chat";
+      let chatKind = "client";
+      if (m.isGroupMessage) {
+        chatKind = "group";
+        chatLabel = m.groupId?.name || "Group";
+      } else if (m.isClientEmployeeMessage) {
+        chatKind = "client_employee";
+        chatLabel =
+          m.clientEmployeeData?.clientEmployeeName ||
+          m.clientEmployeeName ||
+          "Client Employee";
+      } else {
+        chatKind = "client";
+        chatLabel = m.client?.clientName || "Client";
+      }
+      result.push({ ...m, chatLabel, chatKind });
     }
 
     res.json({ messages: result, total: result.length });

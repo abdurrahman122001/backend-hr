@@ -3,6 +3,7 @@ const WhatsAppGroup = require("../models/WhatsAppGroup");
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const Employee = require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { getCrmUserIds } = require("../utils/crmAccess");
 const mongoose = require("mongoose");
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
@@ -256,7 +257,23 @@ exports.getGroupMessages = async function (req, res) {
       items.reverse();
     }
 
-    res.json({ items, group, pagination: { hasMore, nextCursor } });
+    // Flag messages sent by CRM-access employees so the UI shows the client
+    // avatar (incl. voice messages) rather than the employee photo.
+    let crmSenderIdSet = new Set();
+    try {
+      const crmIds = await getCrmUserIds(owner);
+      crmSenderIdSet = new Set((crmIds || []).map((id) => String(id)));
+    } catch (e) {
+      console.warn("getCrmUserIds failed for group messages:", e.message);
+    }
+    const itemsOut = items.map((m) => ({
+      ...m,
+      senderHasCrmAccess: crmSenderIdSet.has(
+        String(m.sender?._id || m.sender || ""),
+      ),
+    }));
+
+    res.json({ items: itemsOut, group, pagination: { hasMore, nextCursor } });
   } catch (error) {
     console.error("Error fetching group messages:", error);
     res.status(500).json({ error: "Failed to fetch group messages" });

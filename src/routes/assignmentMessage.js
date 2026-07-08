@@ -106,6 +106,8 @@ router.patch(
 router.post("/:id/read", ctrl.markAsRead);
 // Read receipts — which employees have read this message (for the "Read by" dialog)
 router.get("/:id/read-by", ctrl.getReadBy);
+// Lightweight approval-chain payload for the "Message Info" stepper
+router.get("/:id/approval-info", ctrl.getApprovalInfo);
 router.post("/:id/unread", ctrl.markAsUnread);
 router.post("/read-multiple", ctrl.markMultipleAsRead);
 router.post("/read-all", ctrl.markAllMessagesRead);

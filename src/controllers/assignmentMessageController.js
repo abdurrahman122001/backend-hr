@@ -4561,60 +4561,135 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
   }
 };
 
-// GET /:id/read-by — employees who have READ this email/message (for the
-// "Read by" dialog in EmailDetail). Owner-scoped, excludes the sender,
-// de-duplicated per employee (keep earliest read time).
+// GET /:id/read-by — read receipts for an email/message (for the "Read by"
+// dialog). Owner-scoped, excludes the sender. Returns BOTH:
+//   • readers    — employees who actually opened it (kept for the existing
+//                  EmailDetail dialog; each has `seenAt`).
+//   • recipients — the full "delivered" set (direct receivers + planned and
+//                  actual approvers), each flagged read/pending, so the dialog
+//                  can show who it was delivered to and how many have read it.
 exports.getReadBy = async function getReadBy(req, res) {
   try {
     const { id } = req.params;
     if (!isObjId(id)) return res.status(400).json({ error: "Invalid message id" });
 
     const ownerId = req.employee?.owner;
+    const empSelect = "_id name companyEmail role designation photographUrl";
     const msg = await AssignmentMessage.findOne({ _id: id, owner: ownerId })
-      .select("readBy sender")
-      .populate({
-        path: "readBy.employee",
-        select: "_id name companyEmail role designation photographUrl",
-      })
+      .select("readBy sender receiver plannedApprovalChain approvalChain")
+      .populate({ path: "readBy.employee", select: empSelect })
+      .populate({ path: "receiver", select: empSelect })
+      .populate({ path: "plannedApprovalChain", select: empSelect })
+      .populate({ path: "approvalChain.approver", select: empSelect })
       .lean();
 
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const senderId = String(msg.sender || "");
-    const byEmployee = new Map();
+
+    // employeeId → earliest readAt (only for employees who actually read).
+    const readAtMap = new Map();
     for (const r of msg.readBy || []) {
       if (!r.employee || !r.employee._id) continue;
       const eid = String(r.employee._id);
       if (eid === senderId) continue; // exclude the sender
       const seenAt = r.readAt || null;
-      const existing = byEmployee.get(eid);
-      if (!existing) {
-        byEmployee.set(eid, {
-          _id: r.employee._id,
-          name: r.employee.name,
-          companyEmail: r.employee.companyEmail,
-          role: r.employee.role,
-          designation: r.employee.designation,
-          photographUrl: r.employee.photographUrl || null,
-          seenAt, // keep field name `seenAt` so the frontend dialog is shared
-        });
-      } else if (
-        seenAt &&
-        (!existing.seenAt || new Date(seenAt) < new Date(existing.seenAt))
+      const existing = readAtMap.get(eid);
+      if (
+        existing === undefined ||
+        (seenAt && (!existing || new Date(seenAt) < new Date(existing)))
       ) {
-        existing.seenAt = seenAt;
+        readAtMap.set(eid, seenAt);
       }
     }
 
-    const readers = Array.from(byEmployee.values()).sort(
-      (a, b) =>
-        new Date(a.seenAt || 0).getTime() - new Date(b.seenAt || 0).getTime(),
+    // Delivered set = direct receivers + planned approvers + actual approvers
+    // (+ anyone who read), minus the sender. De-duplicated per employee.
+    const deliveredMap = new Map();
+    const addEmp = (emp) => {
+      if (!emp || !emp._id) return;
+      const eid = String(emp._id);
+      if (eid === senderId) return;
+      if (!deliveredMap.has(eid)) deliveredMap.set(eid, emp);
+    };
+    (Array.isArray(msg.receiver) ? msg.receiver : []).forEach(addEmp);
+    (Array.isArray(msg.plannedApprovalChain) ? msg.plannedApprovalChain : []).forEach(addEmp);
+    (Array.isArray(msg.approvalChain) ? msg.approvalChain : []).forEach((ac) =>
+      addEmp(ac && ac.approver),
     );
+    (msg.readBy || []).forEach((r) => addEmp(r.employee));
 
-    return res.json({ count: readers.length, readers });
+    const recipients = Array.from(deliveredMap.values()).map((emp) => {
+      const eid = String(emp._id);
+      const read = readAtMap.has(eid);
+      return {
+        _id: emp._id,
+        name: emp.name,
+        companyEmail: emp.companyEmail,
+        role: emp.role,
+        designation: emp.designation,
+        photographUrl: emp.photographUrl || null,
+        read,
+        seenAt: read ? readAtMap.get(eid) : null,
+      };
+    });
+
+    // Read employees first (earliest read on top), then pending ones by name.
+    recipients.sort((a, b) => {
+      if (a.read && b.read)
+        return new Date(a.seenAt || 0).getTime() - new Date(b.seenAt || 0).getTime();
+      if (a.read !== b.read) return a.read ? -1 : 1;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+
+    // Back-compat: `readers` is just the read subset (with `seenAt`).
+    const readers = recipients
+      .filter((r) => r.read)
+      .map(({ read, ...rest }) => rest);
+
+    return res.json({
+      count: readers.length,
+      readCount: readers.length,
+      deliveredCount: recipients.length,
+      readers,
+      recipients,
+    });
   } catch (e) {
     console.error("Error fetching read-by:", e);
     return res.status(500).json({ error: "Failed to fetch read receipts" });
+  }
+};
+
+// GET /:id/approval-info — lightweight payload for the "Message Info" approval
+// stepper. Deliberately avoids the heavy fully-populated getMessage (no
+// attachments/labels/permission-chain walk) so the dialog opens fast.
+exports.getApprovalInfo = async function getApprovalInfo(req, res) {
+  try {
+    const { id } = req.params;
+    if (!isObjId(id)) return res.status(400).json({ error: "Invalid message id" });
+
+    const ownerId = req.employee?.owner;
+    const empSelect = "_id name role designation";
+    const msg = await AssignmentMessage.findOne({ _id: id, owner: ownerId })
+      .select(
+        "approvalStatus sender receiver plannedApprovalChain approvalChain " +
+          "approvedBy approvedAt disapprovedBy disapprovedAt disapprovalNote " +
+          "createdAt clientName client isFromClient",
+      )
+      .populate({ path: "sender", select: empSelect })
+      .populate({ path: "receiver", select: empSelect })
+      .populate({ path: "plannedApprovalChain", select: empSelect })
+      .populate({ path: "approvalChain.approver", select: empSelect })
+      .populate({ path: "approvedBy", select: empSelect })
+      .populate({ path: "disapprovedBy", select: empSelect })
+      .populate({ path: "client", select: "_id clientName" })
+      .lean();
+
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+    return res.json(msg);
+  } catch (e) {
+    console.error("Error fetching approval-info:", e);
+    return res.status(500).json({ error: "Failed to fetch approval info" });
   }
 };
 

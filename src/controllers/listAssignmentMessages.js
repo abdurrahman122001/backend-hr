@@ -419,6 +419,7 @@ exports.getMessage = async function getMessage(req, res) {
       { path: "sender", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
       { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
+      { path: "plannedApprovalChain", select: "_id name companyEmail role designation" },
       { path: "approvedBy", select: "_id name companyEmail role designation" },
       { path: "disapprovedBy", select: "_id name companyEmail role designation" },
       { path: "readBy.employee", select: "_id name companyEmail" },
