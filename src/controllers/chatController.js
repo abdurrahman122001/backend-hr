@@ -375,6 +375,7 @@ exports.getConversations = async (req, res) => {
           name: space.name,
           description: space.description,
           avatar: space.avatar,
+          emoji: space.emoji,
           createdBy: space.createdBy,
           admins: space.admins,
           members: space.members,
@@ -2098,7 +2099,7 @@ exports.getConversationByParticipant = async (req, res) => {
 
 exports.createSpace = async (req, res) => {
   try {
-    const { name, description, avatar, memberIds, isPrivate, settings } =
+    const { name, description, avatar, emoji, memberIds, isPrivate, settings } =
       req.body;
 
     if (!name) {
@@ -2112,9 +2113,12 @@ exports.createSpace = async (req, res) => {
       name,
       description,
       avatar,
+      emoji: emoji || "💡",
       createdBy: req.employee._id,
       admins: [req.employee._id],
-      members: [req.employee._id, ...(memberIds || [])],
+      members: Array.from(
+        new Set([req.employee._id.toString(), ...(memberIds || []).map(String)])
+      ),
       isPrivate: isPrivate || false,
       settings: settings || {},
     });
@@ -2152,11 +2156,13 @@ exports.createSpace = async (req, res) => {
     if (io) {
       // Notify all members about the new space
       space.members.forEach((memberId) => {
-        io.to(`employee_${memberId.toString()}`).emit("space_created", {
+        const payload = {
           space: populatedSpace,
           conversation: populatedConversation,
           createdBy: req.employee._id,
-        });
+        };
+        io.to(`employee_${memberId.toString()}`).emit("space_created", payload);
+        io.to(`user_${memberId.toString()}`).emit("space_created", payload);
       });
     }
 
