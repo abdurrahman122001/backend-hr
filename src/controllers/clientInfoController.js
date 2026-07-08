@@ -105,6 +105,54 @@ exports.getClientInfo = async (req, res) => {
   }
 };
 
+// Flat list of every client employee (ClientInfo.companyEmployees) across the
+// clients the logged-in employee can see — used by the WhatsApp group member
+// picker. Access is scoped exactly like getClientInfo: Owner/CRM see all clients
+// under their owner, a regular employee sees only their assigned clients. Each
+// embedded sub-document is returned with its own _id plus a lightweight `client`
+// reference ({ _id, clientName }) so the picker can group and label them.
+exports.getAllCompanyEmployees = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id).select("_id role owner");
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    let q;
+    const role = String(emp.role || "").trim();
+
+    if (role === "Owner") {
+      if (!emp.owner)
+        return res.status(400).json({ error: "This owner record has no linked user id." });
+      q = { owner: emp.owner };
+    } else if (await hasCrmAccess(req.employee)) {
+      if (!emp.owner)
+        return res.status(400).json({ error: "Your profile is missing owner id." });
+      q = { owner: emp.owner };
+    } else {
+      q = { assignedTo: emp._id };
+    }
+
+    const clients = await ClientInfo.find(q)
+      .select("_id clientName companyEmployees")
+      .lean();
+
+    const clientEmployees = [];
+    for (const client of clients) {
+      for (const ce of client.companyEmployees || []) {
+        clientEmployees.push({
+          ...ce,
+          clientEmployeeName: ce.name,
+          client: { _id: client._id, clientName: client.clientName },
+        });
+      }
+    }
+
+    res.json({ clientEmployees });
+  } catch (err) {
+    console.error("getAllCompanyEmployees error:", err);
+    res.status(500).json({ error: "Failed to fetch client employees" });
+  }
+};
+
 exports.getMyClients = async (req, res) => {
   try {
     const employeeId = req.employee._id;

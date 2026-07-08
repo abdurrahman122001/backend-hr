@@ -217,7 +217,8 @@ exports.getGroupMessages = async function (req, res) {
       .sort({ createdAt: -1 })
       .limit(lim + 1)
       .populate([
-        { path: "sender", select: "_id name companyEmail role designation" },
+        // photographUrl → voice messages show the employee photo, not client image
+        { path: "sender", select: "_id name companyEmail role designation photographUrl" },
         { path: "receiver", select: "_id name companyEmail role designation" },
         { path: "attachments.uploadedBy", select: "_id name" },
         { path: "repliedTo", select: "_id note message sender" },
@@ -499,7 +500,7 @@ exports.sendGroupMessage = async function (req, res) {
       // gate (crmNotify): CRM group messages on a client/client-employee should
       // only notify the client's ASSIGNED employees, and isCrmSender checks the
       // sender's role/designation.
-      .populate("sender", "_id name companyEmail role designation")
+      .populate("sender", "_id name companyEmail role designation photographUrl")
       .populate("receiver", "_id name companyEmail role designation")
       .populate("client", "_id clientName assignedTo")
       // Message-info dialog needs the full planned approver route

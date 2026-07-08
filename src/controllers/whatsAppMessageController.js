@@ -1086,7 +1086,9 @@ exports.listMessagesForManager = async function listMessagesForManager(
       .limit(limit + 1) // Get one extra to check if there are more
       .populate([
         { path: "owner", select: "_id name companyEmail" },
-        { path: "sender", select: "_id name companyEmail role designation" },
+        // photographUrl → so voice messages (and any sender-avatar UI) can show
+        // the actual employee photo instead of falling back to the client image
+        { path: "sender", select: "_id name companyEmail role designation photographUrl" },
         { path: "receiver", select: "_id name companyEmail role designation" },
         { path: "client", select: "_id clientName assignedTo" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
@@ -4277,7 +4279,8 @@ exports.createMessage = async function createMessage(req, res) {
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
-      { path: "sender", select: "_id name companyEmail role designation" },
+      // photographUrl → sent voice messages show the employee photo in realtime
+      { path: "sender", select: "_id name companyEmail role designation photographUrl" },
       { path: "receiver", select: "_id name companyEmail role designation" },
       { path: "client", select: "_id clientName assignedTo" },
       { path: "scheduledBy", select: "_id name companyEmail" },
