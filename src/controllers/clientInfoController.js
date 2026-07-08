@@ -131,7 +131,9 @@ exports.getAllCompanyEmployees = async (req, res) => {
       q = { assignedTo: emp._id };
     }
 
-    const clients = await ClientInfo.find(q)
+    // Only pull client employees that belong to active clients — an inactive
+    // client's contacts should not appear in the group member picker.
+    const clients = await ClientInfo.find({ ...q, isActive: { $ne: false } })
       .select("_id clientName companyEmployees")
       .lean();
 
