@@ -217,10 +217,23 @@ exports.getGroupMessages = async function (req, res) {
       .sort({ createdAt: -1 })
       .limit(lim + 1)
       .populate([
-        { path: "sender", select: "_id name companyEmail role" },
-        { path: "receiver", select: "_id name companyEmail role" },
+        { path: "sender", select: "_id name companyEmail role designation" },
+        { path: "receiver", select: "_id name companyEmail role designation" },
         { path: "attachments.uploadedBy", select: "_id name" },
         { path: "repliedTo", select: "_id note message sender" },
+        // Approval hierarchy fields — without these the message-info dialog
+        // can't show each level or who currently has the message pending.
+        { path: "plannedApprovalChain", select: "_id name role designation" },
+        {
+          path: "approvalChain",
+          populate: {
+            path: "approver",
+            select: "_id name role designation",
+            model: "Employee",
+          },
+        },
+        { path: "approvedBy", select: "_id name companyEmail role designation" },
+        { path: "disapprovedBy", select: "_id name companyEmail role designation" },
       ])
       .lean();
 
@@ -352,6 +365,9 @@ exports.sendGroupMessage = async function (req, res) {
     let receiverIds = [];
     let intendedReceiverIds = [];
     let approvalStatus = null;
+    // Full ordered approver route, stored so the message-info dialog can show
+    // every hierarchy level and who currently holds the message.
+    let plannedApprovalChainIds = [];
 
     if (needsApproval) {
       // Approval must follow THIS CLIENT'S designated approver chain
@@ -385,6 +401,21 @@ exports.sendGroupMessage = async function (req, res) {
         // One-by-one approval chain: route to the next designated approver up the chain
         receiverIds = [oid(nextApprover)];
         approvalStatus = "pending";
+
+        // Planned route = first approver, then escalation walks up the
+        // hierarchy one immediate senior at a time (mirrors approveMessage).
+        plannedApprovalChainIds = [oid(nextApprover)];
+        let chainCursor = String(nextApprover);
+        const chainSeen = new Set([String(senderId), chainCursor]);
+        for (let i = 0; i < 10; i++) {
+          const ups = await findSupervisorsInHierarchy(owner, chainCursor);
+          if (!ups || ups.length === 0) break;
+          const up = String(ups[0]);
+          if (chainSeen.has(up)) break;
+          chainSeen.add(up);
+          plannedApprovalChainIds.push(oid(up));
+          chainCursor = up;
+        }
       } else {
         // Sender is at the top of this client's approval chain (no higher
         // designated approver is in the group) → send directly, no approval.
@@ -442,6 +473,7 @@ exports.sendGroupMessage = async function (req, res) {
       repliedTo: isReply && isObjId(repliedTo) ? oid(repliedTo) : null,
       replyContent: isReply ? replyContent : null,
       approvalStatus,
+      plannedApprovalChain: plannedApprovalChainIds.filter(Boolean),
     };
 
     if (messageClientId) msgDoc.client = messageClientId;
@@ -468,8 +500,10 @@ exports.sendGroupMessage = async function (req, res) {
       // only notify the client's ASSIGNED employees, and isCrmSender checks the
       // sender's role/designation.
       .populate("sender", "_id name companyEmail role designation")
-      .populate("receiver", "_id name companyEmail role")
+      .populate("receiver", "_id name companyEmail role designation")
       .populate("client", "_id clientName assignedTo")
+      // Message-info dialog needs the full planned approver route
+      .populate("plannedApprovalChain", "_id name role designation")
       .lean();
 
     // ── Real-time socket notifications ────────────────────────────
