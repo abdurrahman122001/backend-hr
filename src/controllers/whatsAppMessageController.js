@@ -1669,9 +1669,22 @@ exports.approveMessage = async function approveMessage(req, res) {
     const ownerId = msg.owner;
 
     // ✅ Verify current user is one of the designated receivers (approvers)
-    const isReceiver = msg.receiver.some(
+    let isReceiver = msg.receiver.some(
       (r) => String(r._id || r) === currentUserId
     );
+    // Pre-approval: a senior ABOVE the current approver in the hierarchy may
+    // approve on their behalf. The escalation below continues from the
+    // senior's own level (their immediate seniors), skipping the lower steps.
+    if (!isReceiver && msg.approvalStatus === "pending") {
+      for (const r of msg.receiver) {
+        const rid = String(r._id || r);
+        const chainUp = await getManagementChainFromHierarchy(ownerId, rid);
+        if (chainUp.includes(currentUserId)) {
+          isReceiver = true;
+          break;
+        }
+      }
+    }
     if (!isReceiver) {
       return res.status(403).json({
         error: "You are not a designated approver for this message.",
@@ -1931,6 +1944,87 @@ exports.approveMessage = async function approveMessage(req, res) {
   }
 };
 // PATCH /api/assignment-messages/:id/disapprove
+/**
+ * GET /pre-approvals?clientId=&clientEmployeeId=&groupId=
+ * Messages in this chat that are PENDING at someone BELOW the current user in
+ * the hierarchy. A higher senior can approve/disapprove them on the junior
+ * approver's behalf (see the pre-approval override in approveMessage).
+ */
+exports.getPreApprovalMessages = async (req, res) => {
+  try {
+    const me = String(req.employee._id);
+    const owner = req.employee?.owner || req.employee?._id;
+    const { clientId, clientEmployeeId, groupId } = req.query;
+
+    const q = {
+      owner,
+      approvalStatus: "pending",
+      sender: { $ne: oid(me) },
+      // Pending at ME shows in the normal chat view with approve buttons —
+      // this screen is only for messages held by OTHERS below me.
+      receiver: { $ne: oid(me) },
+    };
+
+    if (groupId && isObjId(groupId)) {
+      q.groupId = oid(groupId);
+      q.isGroupMessage = true;
+    } else if (clientId && isObjId(clientId)) {
+      q.client = oid(clientId);
+      q.isGroupMessage = { $ne: true };
+      if (clientEmployeeId) {
+        q.clientEmployeeId = String(clientEmployeeId);
+      } else {
+        q.isClientEmployeeMessage = { $ne: true };
+      }
+    } else {
+      return res.status(400).json({ error: "clientId or groupId is required" });
+    }
+
+    const msgs = await WhatsAppMessage.find(q)
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .populate([
+        { path: "sender", select: "_id name companyEmail role designation photographUrl" },
+        { path: "receiver", select: "_id name companyEmail role designation" },
+        { path: "plannedApprovalChain", select: "_id name role designation" },
+        {
+          path: "approvalChain",
+          populate: { path: "approver", select: "_id name role designation", model: "Employee" },
+        },
+        { path: "client", select: "_id clientName" },
+      ])
+      .lean();
+
+    // Keep only messages whose current approver is MY junior (I appear in
+    // the approver's upward management chain).
+    const chainCache = new Map();
+    const result = [];
+    for (const m of msgs) {
+      const receiverIds = (Array.isArray(m.receiver) ? m.receiver : [m.receiver])
+        .filter(Boolean)
+        .map((r) => String(r._id || r));
+      let belowMe = false;
+      for (const rid of receiverIds) {
+        let chain = chainCache.get(rid);
+        if (!chain) {
+          chain = await getManagementChainFromHierarchy(owner, rid);
+          chainCache.set(rid, chain);
+        }
+        if (chain.includes(me)) {
+          belowMe = true;
+          break;
+        }
+      }
+      if (belowMe) result.push(m);
+    }
+
+    res.json({ messages: result, total: result.length });
+  } catch (e) {
+    console.error("❌ getPreApprovalMessages error:", e);
+    res.status(500).json({ error: "Failed to load pre-approval messages" });
+  }
+};
+
 exports.disapproveMessage = async function disapproveMessage(req, res) {
   try {
     const { id } = req.params;
@@ -1959,7 +2053,19 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
 
     const userRole = normalizeRole(req.employee?.role || "");
     const currentUserId = String(req.employee?._id);
-    const isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
+    let isReceiver = msg.receiver.some((r) => String(r._id || r) === currentUserId);
+
+    // Pre-approval: a senior above the current approver may also disapprove
+    if (!isReceiver && msg.approvalStatus === "pending") {
+      for (const r of msg.receiver) {
+        const rid = String(r._id || r);
+        const chainUp = await getManagementChainFromHierarchy(msg.owner, rid);
+        if (chainUp.includes(currentUserId)) {
+          isReceiver = true;
+          break;
+        }
+      }
+    }
 
     const isManagerOrOwner = userRole === "manager" || userRole === "owner";
     if (!isManagerOrOwner && !isReceiver) {
