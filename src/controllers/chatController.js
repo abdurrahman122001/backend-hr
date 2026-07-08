@@ -5352,7 +5352,7 @@ exports.getConversationMembersSimple = async (req, res) => {
     })
       .populate(
         "participants",
-        "name companyEmail avatar photographUrl isOnline"
+        "name companyEmail avatar photographUrl isOnline department position"
       )
       .lean();
 
@@ -5370,12 +5370,18 @@ exports.getConversationMembersSimple = async (req, res) => {
           participant._id.toString() !== req.employee._id.toString()
       )
       .map((participant) => ({
+        id: participant._id,
         _id: participant._id,
         name: participant.name,
         email: participant.companyEmail,
         avatar: participant.photographUrl || participant.avatar,
+        // Same shape as getSpaceMembers so MembersManagement renders both
+        avatarUrl: participant.photographUrl || participant.avatar || null,
+        department: participant.department || "",
+        position: participant.position || "",
         isOnline: participant.isOnline || false,
         status: participant.isOnline ? "online" : "offline",
+        statusColor: participant.isOnline ? "#34a853" : "#9e9e9e",
       }));
 
     res.json({
