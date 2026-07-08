@@ -3635,6 +3635,13 @@ exports.serveFile = async (req, res) => {
     // For images, allow them to be displayed inline
     if (ext.match(/\.(jpg|jpeg|png|gif|webp|svg)$/i)) {
       res.setHeader("Content-Disposition", "inline");
+    } else if (ext === ".pdf") {
+      // Inline so the in-app PDF preview (iframe) can render it;
+      // downloads still work via the preview's Download button.
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${filename}"`
+      );
     } else {
       res.setHeader(
         "Content-Disposition",
