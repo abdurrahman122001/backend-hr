@@ -7,16 +7,22 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
+const CHAT_UPLOAD_DIR = path.join(__dirname, "../uploads/chat-attachments");
+
 const storage = multer.diskStorage({
   destination(req, file, cb) {
-    const uploadDir = "uploads/chat-attachments/";
-    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
-    cb(null, uploadDir);
+    if (!fs.existsSync(CHAT_UPLOAD_DIR)) {
+      fs.mkdirSync(CHAT_UPLOAD_DIR, { recursive: true });
+    }
+    cb(null, CHAT_UPLOAD_DIR);
   },
   filename(req, file, cb) {
-    // keep original name, add 3 random chars to avoid collisions
-    const base = path.parse(file.originalname).name; // name without ext
-    const ext = path.extname(file.originalname); // includes the dot
+    const parsedName = path.parse(file.originalname);
+    const base = (parsedName.name || "file")
+      .replace(/[^\w-]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 80) || "file";
+    const ext = parsedName.ext; // includes the dot
     const uniq = Math.random().toString(36).slice(-3); // short random bit
     cb(null, `${base}-${uniq}${ext}`);
   },
