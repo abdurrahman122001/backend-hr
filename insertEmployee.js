@@ -8,6 +8,9 @@ const Employee = require("./src/models/Employees"); // adjust path if needed
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
+
+
+    
     console.log("✅ Connected to MongoDB");
 
     const newEmployee = new Employee({

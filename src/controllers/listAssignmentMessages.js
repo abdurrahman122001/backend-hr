@@ -792,6 +792,22 @@ exports.listMessages = async function listMessages(req, res) {
 
       const pipeline = [
         { $match: qFinal },
+        // Perf: keep only the scalar fields the $group below reads, so the
+        // in-memory sort/group doesn't drag full email bodies + headers around.
+        {
+          $project: {
+            threadId: 1,
+            owner: 1,
+            createdAt: 1,
+            senderType: 1,
+            isFromClient: 1,
+            client: 1,
+            sender: 1,
+            receiver: 1,
+            approvalStatus: 1,
+            "readBy.employee": 1,
+          },
+        },
         { $sort: { createdAt: -1 } },
         {
           $group: {
@@ -854,7 +870,13 @@ exports.listMessages = async function listMessages(req, res) {
                   {
                     $and: [
                       { $eq: ["$approvalStatus", "pending"] },
-                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] }
+                      { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$receiver", []] }, as: "r", in: { $toString: "$$r" } } }] },
+                      // A senior who ALREADY approved is kept in `receiver` (so the
+                      // mail lingers in their inbox) even though it's now pending
+                      // ABOVE them at the next senior. That is no longer "pending
+                      // for me", so it must NOT hide the thread from their All
+                      // Activity — the approved work is legitimate activity for them.
+                      { $not: { $in: [{ $toString: me }, { $map: { input: { $ifNull: ["$approvalChain", []] }, as: "a", in: { $toString: "$$a.approver" } } }] } }
                     ]
                   },
                   true,
@@ -890,6 +912,25 @@ exports.listMessages = async function listMessages(req, res) {
                   false
                 ]
               }
+            },
+            // Thread has at least one message a senior has ALREADY approved
+            // (approvalChain populated, or status approved). Once true, the
+            // thread is real activity and must appear in All Activity regardless
+            // of any further pending step above — it still lives in For Approval
+            // for whoever it's pending on, but is no longer hidden from Activity.
+            hasApproval: {
+              $max: {
+                $cond: [
+                  {
+                    $or: [
+                      { $eq: ["$approvalStatus", "approved"] },
+                      { $gt: [{ $size: { $ifNull: ["$approvalChain", []] } }, 0] }
+                    ]
+                  },
+                  true,
+                  false
+                ]
+              }
             }
           }
         }
@@ -909,8 +950,20 @@ exports.listMessages = async function listMessages(req, res) {
       if (filter === "review") {
         pipeline.push({
           $match: {
-            hasPendingForMe: { $ne: true },
-            hasPendingBelowMe: { $ne: true },
+            // Hide only threads STILL wholly awaiting their first approval
+            // (pending at me or a junior AND no senior has approved yet). The
+            // moment a senior approves, `hasApproval` is true and the thread
+            // shows in All Activity immediately — even while it's pending to the
+            // next senior up the chain.
+            $or: [
+              { hasApproval: true },
+              {
+                $and: [
+                  { hasPendingForMe: { $ne: true } },
+                  { hasPendingBelowMe: { $ne: true } },
+                ],
+              },
+            ],
           },
         });
       }
@@ -1022,7 +1075,7 @@ exports.listMessages = async function listMessages(req, res) {
         }
       );
 
-      const [aggResult] = await AssignmentMessage.aggregate(pipeline);
+      const [aggResult] = await AssignmentMessage.aggregate(pipeline).allowDiskUse(true);
       const distinctThreads = aggResult?.page || [];
       const totalCount = aggResult?.total?.[0]?.total || 0;
 
@@ -1351,6 +1404,21 @@ exports.getExternalCommunications = async function getExternalCommunications(
     if (isThreaded) {
       const [extAgg] = await AssignmentMessage.aggregate([
         { $match: qFinal },
+        // Perf: slim to the fields the $group reads before the in-memory sort.
+        {
+          $project: {
+            threadId: 1,
+            owner: 1,
+            createdAt: 1,
+            senderType: 1,
+            isFromClient: 1,
+            client: 1,
+            sender: 1,
+            receiver: 1,
+            approvalStatus: 1,
+            "readBy.employee": 1,
+          },
+        },
         { $sort: { createdAt: -1 } },
         {
           $group: {
@@ -1406,7 +1474,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
             total: [{ $count: "total" }],
           },
         },
-      ]);
+      ]).allowDiskUse(true);
 
       const distinctThreads = extAgg?.page || [];
       const totalCount = extAgg?.total?.[0]?.total || 0;
@@ -1603,6 +1671,21 @@ exports.getInternalCommunications = async function getInternalCommunications(
     if (isThreaded) {
       const distinctThreads = await AssignmentMessage.aggregate([
         { $match: qFinal },
+        // Perf: slim to the fields the $group reads before the in-memory sort.
+        {
+          $project: {
+            threadId: 1,
+            owner: 1,
+            createdAt: 1,
+            senderType: 1,
+            isFromClient: 1,
+            client: 1,
+            sender: 1,
+            receiver: 1,
+            approvalStatus: 1,
+            "readBy.employee": 1,
+          },
+        },
         { $sort: { createdAt: -1 } },
         {
           $group: {
@@ -1652,7 +1735,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
             total: [{ $count: "total" }],
           },
         },
-      ]);
+      ]).allowDiskUse(true);
 
       const intAgg = distinctThreads[0];
       const pageThreads = intAgg?.page || [];
@@ -1930,7 +2013,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
       },
     ];
 
-    const aggResult = await AssignmentMessage.aggregate(pipeline);
+    const aggResult = await AssignmentMessage.aggregate(pipeline).allowDiskUse(true);
     const facet =
       aggResult && aggResult[0] ? aggResult[0] : { data: [], totalCount: [] };
     const itemsRaw = facet.data || [];
@@ -2023,6 +2106,14 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
     res.status(500).json({ error: "Failed to fetch thread messages" });
   }
 };
+// Tiny in-memory cache for the sidebar/header badge counts. On the Email view
+// several components (list, sidebar, header) hit /count near-simultaneously at
+// mount and again on every unread tick — each call otherwise runs 12 count
+// queries. Badge counts tolerate a few seconds of staleness, so we collapse the
+// burst to a single DB pass per user+scope within a short window.
+const _messageCountsCache = new Map(); // key -> { at: number, payload: object }
+const MESSAGE_COUNTS_TTL_MS = 3000;
+
 exports.getMessageCounts = async function getMessageCounts(req, res) {
   try {
     const currentUser = req.employee?._id;
@@ -2030,6 +2121,12 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 
     if (!isObjId(currentUser) || !isObjId(owner)) {
       return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const cacheKey = `${currentUser}:${req.query.scope || ""}`;
+    const cachedCounts = _messageCountsCache.get(cacheKey);
+    if (cachedCounts && Date.now() - cachedCounts.at < MESSAGE_COUNTS_TTL_MS) {
+      return res.json(cachedCounts.payload);
     }
 
     // ── Per-category unread (for the Gmail-style sidebar badges) ───────────
@@ -2236,7 +2333,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       }),
     ]);
 
-    res.json({
+    const payload = {
       inbox: inboxCount,
       unread: unreadCount,
       starred: starredCount,
@@ -2250,7 +2347,11 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       internal: internalUnread,
       review: reviewUnread,
       supervision: supervisionPending,
-    });
+    };
+    // Bound the cache so it can't grow unbounded across many users.
+    if (_messageCountsCache.size > 2000) _messageCountsCache.clear();
+    _messageCountsCache.set(cacheKey, { at: Date.now(), payload });
+    res.json(payload);
   } catch (e) {
     console.error("Error in getMessageCounts:", e);
     res.status(500).json({ error: "Failed to fetch message counts" });

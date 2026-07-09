@@ -831,6 +831,24 @@ exports.listMessages = async function listMessages(req, res) {
     // 🔥 HIERARCHY-BASED: Get current user's ID for approval checking
     const currentUserId = String(req.employee._id);
 
+    // Batch-load every distinct client for this page in ONE query. Previously
+    // each message did its own Client.findById — and since all messages in a
+    // chat share the same client, opening a 40-message chat fired ~40 identical
+    // lookups. Now it's a single $in query, keyed into a Map below.
+    const _clientIds = [
+      ...new Set(
+        items
+          .filter((i) => i.client)
+          .map((i) => String(i.client?._id || i.client)),
+      ),
+    ];
+    const _clientDocs = _clientIds.length
+      ? await Client.find({ _id: { $in: _clientIds } })
+          .select("supervision clientName companyEmployees")
+          .lean()
+      : [];
+    const _clientMap = new Map(_clientDocs.map((c) => [String(c._id), c]));
+
     const normalizedItems = await Promise.all(
       items.map(async (item) => {
         // Get client supervision info
@@ -841,9 +859,9 @@ exports.listMessages = async function listMessages(req, res) {
         let conversationType = "client";
 
         if (item.client) {
-          const clientDoc = await Client.findById(item.client)
-            .select("supervision clientName companyEmployees")
-            .lean();
+          const clientDoc = _clientMap.get(
+            String(item.client?._id || item.client),
+          );
           clientSupervision = clientDoc?.supervision || "direct";
           clientName = clientDoc?.clientName || "Unknown";
           displayName = clientName;
@@ -1142,14 +1160,31 @@ exports.listMessagesForManager = async function listMessagesForManager(
 
     // 🔥 Get client supervision info for each message
     const Client = require("../models/ClientInfo");
+    // Batch-load distinct clients once (was Client.findById per message — N
+    // identical lookups for a single chat). Keyed into a Map used in the loop.
+    const _mgrClientIds = [
+      ...new Set(
+        displayMessages
+          .filter((m) => m.client)
+          .map((m) => String(m.client?._id || m.client)),
+      ),
+    ];
+    const _mgrClientDocs = _mgrClientIds.length
+      ? await Client.find({ _id: { $in: _mgrClientIds } })
+          .select("supervision clientName")
+          .lean()
+      : [];
+    const _mgrClientMap = new Map(
+      _mgrClientDocs.map((c) => [String(c._id), c]),
+    );
     const messagesWithSupervision = await Promise.all(
       displayMessages.map(async (message) => {
         const senderId = String(message.sender?._id || message.sender || "");
         const senderHasCrmAccess = crmSenderIdSet.has(senderId);
         if (message.client) {
-          const clientDoc = await Client.findById(message.client)
-            .select("supervision clientName")
-            .lean();
+          const clientDoc = _mgrClientMap.get(
+            String(message.client?._id || message.client),
+          );
           return {
             ...message,
             senderHasCrmAccess,
