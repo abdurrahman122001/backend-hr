@@ -17,6 +17,29 @@ const emit = (req, event, chatId, payload) => {
   }
 };
 
+// Browser-notify each freshly-assigned employee (skipping the actor) on their
+// personal `user_<id>` room — the same room mentions/messages use.
+const notifyAssignees = (req, task, assigneeList, actorId) => {
+  try {
+    const io = req.app.get("io");
+    if (!io) return;
+    const actor = String(actorId);
+    const by = req.employee?.name || "Someone";
+    (assigneeList || []).forEach((a) => {
+      const id = String(a?._id || a);
+      if (!id || id === actor) return;
+      io.to(`user_${id}`).emit("chat_task_assigned", {
+        chatId: String(task.chatId),
+        taskId: String(task._id),
+        title: task.title,
+        assignedByName: by,
+      });
+    });
+  } catch (e) {
+    /* non-fatal */
+  }
+};
+
 exports.getTasks = async (req, res) => {
   try {
     const { chatId } = req.params;
@@ -56,6 +79,7 @@ exports.createTask = async (req, res) => {
     task = await task.populate(POPULATE);
 
     emit(req, "chat_task_created", chatId, { task });
+    notifyAssignees(req, task, task.assignees, req.employee._id);
     return res.status(201).json({ task });
   } catch (e) {
     console.error("createTask error:", e);
@@ -68,6 +92,9 @@ exports.updateTask = async (req, res) => {
     const { taskId } = req.params;
     const task = await ChatTask.findById(taskId);
     if (!task) return res.status(404).json({ error: "Task not found" });
+
+    // Remember who was already assigned so we only notify NEW assignees.
+    const prevAssignees = (task.assignees || []).map((a) => String(a));
 
     const { title, details, dueAt, assignees, done } = req.body;
     if (typeof title === "string" && title.trim()) task.title = title.trim();
@@ -83,6 +110,12 @@ exports.updateTask = async (req, res) => {
     const populated = await task.populate(POPULATE);
 
     emit(req, "chat_task_updated", task.chatId, { task: populated });
+    if (Array.isArray(assignees)) {
+      const newlyAdded = (populated.assignees || []).filter(
+        (a) => !prevAssignees.includes(String(a._id)),
+      );
+      notifyAssignees(req, populated, newlyAdded, req.employee._id);
+    }
     return res.json({ task: populated });
   } catch (e) {
     console.error("updateTask error:", e);
