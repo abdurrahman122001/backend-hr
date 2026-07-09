@@ -224,35 +224,40 @@ exports.getBugs = async (req, res) => {
     const limitNum = parseInt(limit);
     const skip = (pageNum - 1) * limitNum;
 
-    // Get total count for current query (with all filters)
-    const total = await Bug.countDocuments(query);
+    // Run the paginated list, its total, and the status-count stats in ONE
+    // parallel batch instead of 6 sequential round trips. .lean() skips Mongoose
+    // document hydration (the imageUrls virtual isn't used by the client).
+    const [total, bugs, baseTotal, openCount, pendingCount, resolvedCount] =
+      await Promise.all([
+        Bug.countDocuments(query),
+        Bug.find(query)
+          .populate({
+            path: "reportedBy",
+            select: "name companyEmail department balance owner",
+            populate: {
+              path: "owner",
+              select: "name email",
+            },
+          })
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        Bug.countDocuments(baseQuery),
+        Bug.countDocuments({ ...baseQuery, status: "open" }),
+        Bug.countDocuments({ ...baseQuery, status: "pending_approval" }),
+        Bug.countDocuments({ ...baseQuery, status: "resolved" }),
+      ]);
 
     // Calculate total pages
     const totalPages = Math.ceil(total / limitNum);
 
-    // Execute query for paginated results
-    const bugs = await Bug.find(query)
-      .populate({
-        path: "reportedBy",
-        select: "name companyEmail department balance owner",
-        populate: {
-          path: "owner",
-          select: "name email",
-        },
-      })
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limitNum);
-
-    // Get overall statistics for the base query (without status filter)
+    // Overall statistics for the base query (without status filter)
     const statusCounts = {
-      total: await Bug.countDocuments(baseQuery),
-      open: await Bug.countDocuments({ ...baseQuery, status: "open" }),
-      pending_approval: await Bug.countDocuments({
-        ...baseQuery,
-        status: "pending_approval",
-      }),
-      resolved: await Bug.countDocuments({ ...baseQuery, status: "resolved" }),
+      total: baseTotal,
+      open: openCount,
+      pending_approval: pendingCount,
+      resolved: resolvedCount,
     };
 
     return res.json({
@@ -361,25 +366,36 @@ exports.getBugsByOwner = async (req, res) => {
       .skip(skip)
       .limit(limit);
 
-    // Calculate total reward for each employee from ALL their bugs (not just paginated)
+    // Calculate total reward per employee from their approved+resolved bugs.
+    // One grouped aggregation instead of a Bug.find per owned employee (N+1).
     const employeeTotalRewards = {};
-    
     for (const employee of ownedEmployees) {
-      const allEmployeeBugs = await Bug.find({ 
-        reportedBy: employee._id,
-        status: "resolved"
-      }).select("rewardAmount rewardAdded status approvedByReporter");
-      
-      // Sum all rewardAmounts from this employee's approved bugs only
-      const totalFromBugs = allEmployeeBugs.reduce((sum, bug) => {
-        // Only count rewards if bug is approved by reporter
-        if (bug.approvedByReporter === true) {
-          return sum + (bug.rewardAmount || 100);
-        }
-        return sum;
-      }, 0);
-      
-      employeeTotalRewards[employee._id.toString()] = totalFromBugs;
+      employeeTotalRewards[employee._id.toString()] = 0;
+    }
+
+    const rewardAgg = await Bug.aggregate([
+      {
+        $match: {
+          reportedBy: { $in: ownedEmployeeIds },
+          status: "resolved",
+          approvedByReporter: true,
+        },
+      },
+      {
+        $group: {
+          _id: "$reportedBy",
+          // Mirror the old `rewardAmount || 100`: fall back to 100 when missing/zero.
+          total: {
+            $sum: {
+              $cond: [{ $gt: ["$rewardAmount", 0] }, "$rewardAmount", 100],
+            },
+          },
+        },
+      },
+    ]);
+
+    for (const row of rewardAgg) {
+      employeeTotalRewards[row._id.toString()] = row.total;
     }
 
     // Process bugs to show appropriate data
@@ -413,25 +429,23 @@ exports.getBugsByOwner = async (req, res) => {
       totalFromAllBugs += amount;
     });
 
-    // Get bug counts for statistics
-    const totalBugCount = await Bug.countDocuments({
-      reportedBy: { $in: ownedEmployeeIds },
-    });
-    
-    const openBugCount = await Bug.countDocuments({
-      reportedBy: { $in: ownedEmployeeIds },
-      status: "open",
-    });
-    
-    const pendingBugCount = await Bug.countDocuments({
-      reportedBy: { $in: ownedEmployeeIds },
-      status: "pending_approval",
-    });
-    
-    const resolvedBugCount = await Bug.countDocuments({
-      reportedBy: { $in: ownedEmployeeIds },
-      status: "resolved",
-    });
+    // Get bug counts for statistics (run in parallel)
+    const [totalBugCount, openBugCount, pendingBugCount, resolvedBugCount] =
+      await Promise.all([
+        Bug.countDocuments({ reportedBy: { $in: ownedEmployeeIds } }),
+        Bug.countDocuments({
+          reportedBy: { $in: ownedEmployeeIds },
+          status: "open",
+        }),
+        Bug.countDocuments({
+          reportedBy: { $in: ownedEmployeeIds },
+          status: "pending_approval",
+        }),
+        Bug.countDocuments({
+          reportedBy: { $in: ownedEmployeeIds },
+          status: "resolved",
+        }),
+      ]);
 
     const bugCounts = {
       total: totalBugCount,
@@ -1145,21 +1159,53 @@ exports.getEmployeeBalance = async (req, res) => {
       });
     }
 
-    // Get bug statistics for this employee
+    // Get bug statistics for this employee. Run the counts and the earnings
+    // aggregation in parallel — the frontend previously computed earnings by
+    // fetching up to 1000 fully-populated bugs client-side, which was the main
+    // cause of the slow "Feedbacks" load. Summing in the DB is far cheaper.
+    const [totalBugs, openBugs, pendingBugs, resolvedBugs, earningsAgg] =
+      await Promise.all([
+        Bug.countDocuments({ reportedBy: employee._id }),
+        Bug.countDocuments({ reportedBy: employee._id, status: "open" }),
+        Bug.countDocuments({
+          reportedBy: employee._id,
+          status: "pending_approval",
+        }),
+        Bug.countDocuments({ reportedBy: employee._id, status: "resolved" }),
+        Bug.aggregate([
+          {
+            $match: {
+              reportedBy: employee._id,
+              status: "resolved",
+              approvedByReporter: true,
+              rewardAdded: true,
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              // Mirror the old client logic (`rewardAmount || 100`): fall back to
+              // 100 when rewardAmount is missing or zero.
+              total: {
+                $sum: {
+                  $cond: [{ $gt: ["$rewardAmount", 0] }, "$rewardAmount", 100],
+                },
+              },
+              count: { $sum: 1 },
+            },
+          },
+        ]),
+      ]);
+
     const bugStats = {
-      totalBugs: await Bug.countDocuments({ reportedBy: employee._id }),
-      openBugs: await Bug.countDocuments({
-        reportedBy: employee._id,
-        status: "open",
-      }),
-      pendingBugs: await Bug.countDocuments({
-        reportedBy: employee._id,
-        status: "pending_approval",
-      }),
-      resolvedBugs: await Bug.countDocuments({
-        reportedBy: employee._id,
-        status: "resolved",
-      }),
+      totalBugs,
+      openBugs,
+      pendingBugs,
+      resolvedBugs,
+      // Total points earned from resolved + reporter-approved bugs, plus how
+      // many such bugs — consumed directly by the Feedbacks dashboard.
+      totalFromBugs: earningsAgg[0]?.total || 0,
+      resolvedApprovedCount: earningsAgg[0]?.count || 0,
     };
 
     return res.json({

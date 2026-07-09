@@ -86,6 +86,13 @@ const bugSchema = new mongoose.Schema(
   }
 );
 
+// Indexes to keep bug queries off full collection scans.
+// - Employee/owner views filter by reportedBy (+ optional status) and sort by createdAt.
+// - Admin/R&D views filter by status (or nothing) and sort by createdAt.
+bugSchema.index({ reportedBy: 1, status: 1, createdAt: -1 });
+bugSchema.index({ status: 1, createdAt: -1 });
+bugSchema.index({ createdAt: -1 });
+
 // Virtual for image URLs
 bugSchema.virtual("imageUrls").get(function () {
   return this.images.map((image) => `/api/bugs/images/${image.filename}`);
