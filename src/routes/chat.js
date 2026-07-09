@@ -296,4 +296,12 @@ router.get(
   empAuth,
   chatController.getChatUnreadCount
 );
+
+// ── Space tasks (Tasks side-panel) ──────────────────────────────────────────
+const chatTaskController = require("../controllers/chatTaskController");
+router.get("/spaces/:chatId/tasks", empAuth, chatTaskController.getTasks);
+router.post("/spaces/:chatId/tasks", empAuth, chatTaskController.createTask);
+router.patch("/tasks/:taskId", empAuth, chatTaskController.updateTask);
+router.delete("/tasks/:taskId", empAuth, chatTaskController.deleteTask);
+
 module.exports = router;
