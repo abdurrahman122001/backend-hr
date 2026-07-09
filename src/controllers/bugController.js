@@ -274,25 +274,31 @@ exports.getBugs = async (req, res) => {
 
 exports.getBugsByOwner = async (req, res) => {
   try {
-    const userId = req.user._id;
+    // Use the effective owner id, NOT req.user._id. For an isAdmin employee token
+    // (requireAuth employee-fallback), req.user._id is the EMPLOYEE id and there is
+    // no matching User record — keying off it returned a false 404 "User not found".
+    // req.user.owner resolves to the real owner id for both real User owners and
+    // employee-admin tokens.
+    const ownerId = req.user.owner || req.user._id;
 
     // Get pagination parameters
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
 
-    // Get current user's info
-    const user = await User.findById(userId).select("name email role");
-
+    // Get owner display info. The record may live in the User collection (real owner)
+    // or be an isAdmin employee acting as owner — fall back to token info instead of 404.
+    let user = await User.findById(ownerId).select("name email role");
     if (!user) {
-      return res.status(404).json({
-        status: "error",
-        message: "User not found",
-      });
+      user = {
+        _id: ownerId,
+        name: req.user.employeeName || req.user.name || "Owner",
+        email: req.user.companyEmail || "",
+      };
     }
 
-    // Get all employees owned by this user
-    const ownedEmployees = await Employee.find({ owner: userId }).select(
+    // Get all employees owned by this owner
+    const ownedEmployees = await Employee.find({ owner: ownerId }).select(
       "_id name companyEmail department balance"
     );
 
@@ -303,7 +309,7 @@ exports.getBugsByOwner = async (req, res) => {
         owner: {
           name: user.name,
           email: user.email,
-          id: userId,
+          id: ownerId,
         },
         bugs: [],
         totalBugs: 0,
@@ -461,7 +467,7 @@ exports.getBugsByOwner = async (req, res) => {
       owner: {
         name: user.name,
         email: user.email,
-        id: userId,
+        id: ownerId,
       },
       statistics: {
         totalEmployees: ownedEmployees.length,
