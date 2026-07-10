@@ -68,7 +68,7 @@ router.post("/:id/reschedule", ctrl.rescheduleMessage);
 
 router.get("/:id", ctrl.getMessage);
 router.patch("/:id", ctrl.updateMessage);
-router.patch("/:id/edit", ctrl.editMessage);
+router.patch("/:id/edit", upload.array("files", 10), ctrl.editMessage);
 router.delete("/:id", ctrl.deleteMessage);
 router.patch("/:id/seen", ctrl.markAsSeen);
 
@@ -95,3 +95,4 @@ router.post(
 router.get("/:messageId/comments/stats", commentController.getCommentStats);
 
 module.exports = router;
+

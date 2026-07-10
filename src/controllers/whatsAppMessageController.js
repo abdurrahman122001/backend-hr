@@ -2274,6 +2274,25 @@ exports.editMessage = async function editMessage(req, res) {
   try {
     const { id } = req.params;
     const { subject, note, receiver, receivers } = req.body;
+    const parseAttachmentIds = (value) => {
+      if (!value) return [];
+      if (Array.isArray(value)) return value.map(String).filter(Boolean);
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (!trimmed) return [];
+        try {
+          const parsed = JSON.parse(trimmed);
+          return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [String(parsed)].filter(Boolean);
+        } catch {
+          return trimmed.split(",").map((id) => id.trim()).filter(Boolean);
+        }
+      }
+      return [String(value)].filter(Boolean);
+    };
+    const removedAttachments = parseAttachmentIds(
+      req.body.removedAttachments || req.body.removedattachments,
+    );
+    const uploadedFiles = Array.isArray(req.files) ? req.files : [];
 
     const msg = await WhatsAppMessage.findById(id).populate([
       { path: "sender", select: "_id name companyEmail role designation" },
@@ -2411,11 +2430,11 @@ exports.editMessage = async function editMessage(req, res) {
       }
     }
 
-    // Track if message content is actually changing
-    const isMessageChanged = note && note !== msg.note;
-    const isSubjectChanged = subject && subject !== msg.subject;
-    const hasContentChanges = isMessageChanged || isSubjectChanged;
-
+    // Track if message content or attachments are actually changing
+    const isMessageChanged = typeof note === "string" && note !== msg.note;
+    const isSubjectChanged = typeof subject === "string" && subject !== msg.subject;
+    const hasAttachmentChanges = removedAttachments.length > 0 || uploadedFiles.length > 0;
+    const hasContentChanges = isMessageChanged || isSubjectChanged || hasAttachmentChanges;
     // Add to edit history if message content is changing
     if (hasContentChanges) {
       // Initialize editHistory array if it doesn't exist
@@ -2630,6 +2649,26 @@ exports.editMessage = async function editMessage(req, res) {
       msg.receiver = Array.from(new Set(newReceivers));
     }
 
+    if (removedAttachments.length > 0) {
+      const removeSet = new Set(removedAttachments.map(String));
+      msg.attachments = (msg.attachments || []).filter(
+        (attachment) => !removeSet.has(String(attachment._id)),
+      );
+    }
+
+    if (uploadedFiles.length > 0) {
+      const newAttachments = uploadedFiles.map((file) => ({
+        filename: path.basename(file.filename || file.originalname || "file"),
+        originalName: file.originalname || file.filename || "file",
+        mimetype: file.mimetype || "application/octet-stream",
+        size: file.size || 0,
+        url: buildPublicUrl(req, file.filename || file.originalname || "file"),
+        uploadedAt: new Date(),
+        uploadedBy: req.employee?._id || undefined,
+        fileType: getFileType(file.mimetype || "application/octet-stream"),
+      }));
+      msg.attachments.push(...newAttachments);
+    }
     await msg.save();
 
     const populated = await msg.populate([
@@ -5302,3 +5341,7 @@ exports.getFrequentEmojis = async (req, res) => {
     res.status(500).json({ error: "Failed to fetch frequent emojis" });
   }
 };
+
+
+
+
