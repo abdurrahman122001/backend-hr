@@ -144,6 +144,10 @@ const EmployeeSchema = new Schema(
     },
     // Admin access — super admin can grant this employee access to the admin dashboard
     isAdmin: { type: Boolean, default: false },
+    // WhatsApp sidebar chats this employee manually marked as unread
+    // (chat keys: "<clientId>", "client_employee_<clientId>_<employeeId>",
+    // "group_<groupId>"). Cleared when the chat is opened / marked read.
+    manualUnreadChats: { type: [String], default: [] },
     // Monetary bonus/cash awarded via admin approvals
     bonusCash: { type: Number, default: 0 },
     providentFund: {

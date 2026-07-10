@@ -34,10 +34,17 @@ exports.createBug = async (req, res) => {
       ? priority
       : "medium";
 
-    // Fetch employee to get department and owner
-    const emp = await Employee.findById(req.employee._id).select(
+    // Fetch employee to get department and owner. Admin/HR Users (no Employee
+    // doc) can also report feedback — fall back to a fixed department for them.
+    let emp = await Employee.findById(req.employee._id).select(
       "department owner"
     );
+    if (!emp) {
+      const adminUser = await User.findById(req.employee._id).select("_id");
+      if (adminUser) {
+        emp = { department: "Admin", owner: req.employee._id };
+      }
+    }
     if (!emp) {
       // Clean up uploaded files if employee not found
       if (req.files && req.files.length > 0) {

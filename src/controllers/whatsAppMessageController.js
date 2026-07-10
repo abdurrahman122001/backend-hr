@@ -3674,6 +3674,19 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
       });
     }
 
+    // Opening / marking a chat read also clears a manual "mark as unread"
+    // set from the sidebar context menu.
+    const manualKey =
+      isGroupMessage === true
+        ? `group_${clientId}`
+        : isClientEmployeeMessage === true && clientEmployeeId
+          ? `client_employee_${clientId}_${clientEmployeeId}`
+          : String(clientId);
+    Employee.updateOne(
+      { _id: currentUserId },
+      { $pull: { manualUnreadChats: manualKey } },
+    ).catch(() => {});
+
     res.json({
       success: true,
       clientId,
@@ -3683,6 +3696,26 @@ exports.markAllMessagesAsSeen = async function markAllMessagesAsSeen(req, res) {
   } catch (e) {
     console.error("Error marking messages as seen:", e);
     res.status(500).json({ error: "Failed to mark messages as seen" });
+  }
+};
+
+// POST /whatsApp-messages/chat/mark-unread — WhatsApp-style manual unread
+// marker for a sidebar chat. Per-employee; shown as an unread dot until the
+// chat is opened or marked read.
+exports.markChatUnread = async function markChatUnread(req, res) {
+  try {
+    const chatId = String(req.body?.chatId || "").trim();
+    if (!chatId || chatId.length > 200) {
+      return res.status(400).json({ error: "Valid chatId required" });
+    }
+    await Employee.updateOne(
+      { _id: req.employee._id },
+      { $addToSet: { manualUnreadChats: chatId } },
+    );
+    res.json({ success: true, chatId });
+  } catch (e) {
+    console.error("Error marking chat as unread:", e);
+    res.status(500).json({ error: "Failed to mark chat as unread" });
   }
 };
 
@@ -4222,6 +4255,25 @@ exports.createMessage = async function createMessage(req, res) {
       } else if (isDirect) {
         approvalStatus = "approved";
       }
+    }
+
+    // Auto-approved messages (sender at the top of the hierarchy — no senior
+    // above to approve) must reach CRM users the same way a finalized approval
+    // does (approveMessage expands receivers to assigned employees + managers).
+    // Without this, CRM gets no realtime message and no browser notification
+    // when a top-hierarchy senior sends.
+    if (
+      approvalStatus === "approved" &&
+      senderRole !== "manager" &&
+      !isGroupMessage &&
+      !groupId
+    ) {
+      managers.forEach((managerId) => {
+        const mid = String(managerId);
+        if (mid !== String(sender) && !receivers.includes(mid)) {
+          receivers.push(mid);
+        }
+      });
     }
 
     // 🔥 Filter out invalid receiver IDs
@@ -4813,6 +4865,69 @@ exports.getChatList = async function getChatList(req, res) {
       },
     ]);
 
+    // ── Latest pending (under-review) message per chat, for THIS user ──────
+    // Pending messages never touch the shared denormalized lastWhatsAppMessage
+    // preview (they would leak to employees outside the approval flow), so
+    // without this a chat whose newest message is under review stays stuck at
+    // its old sidebar position after a refresh. Scoped to messages this user
+    // may see: sender, current approver (receiver) or a previous approver.
+    const pendingLatestPromise = WhatsAppMessage.aggregate([
+      {
+        $match: {
+          owner: ownerObjId,
+          approvalStatus: "pending",
+          status: { $ne: "draft" },
+          $or: [
+            { sender: meId },
+            { receiver: meId },
+            { "approvalChain.approver": meId },
+          ],
+        },
+      },
+      {
+        $project: {
+          isGroupMessage: 1,
+          groupId: 1,
+          isClientEmployeeMessage: 1,
+          client: 1,
+          clientEmployeeId: 1,
+          createdAt: 1,
+          sender: 1,
+          note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
+          hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+        },
+      },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: {
+            $cond: [
+              "$isGroupMessage",
+              { $toString: "$groupId" },
+              {
+                $cond: [
+                  { $eq: ["$isClientEmployeeMessage", true] },
+                  {
+                    $concat: [
+                      "client_employee_",
+                      { $toString: "$client" },
+                      "_",
+                      { $toString: "$clientEmployeeId" },
+                    ],
+                  },
+                  { $toString: "$client" },
+                ],
+              },
+            ],
+          },
+          at: { $first: "$createdAt" },
+          note: { $first: "$note" },
+          senderId: { $first: "$sender" },
+          hasAtt: { $first: "$hasAtt" },
+        },
+      },
+    ]);
+
     // ── Clients assigned/supervised to me ──────────────────────────────────
     // Select only the companyEmployees subfields needed for the photo lookup —
     // the full embedded array can be large and slows the query + transfer.
@@ -4836,7 +4951,21 @@ exports.getChatList = async function getChatList(req, res) {
           isClientEmployeeMessage: true,
           isGroupMessage: { $ne: true },
           status: { $ne: "draft" },
-          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+          $or: [
+            { approvalStatus: null },
+            { approvalStatus: "approved" },
+            // Under-review messages still count as the latest message for the
+            // users allowed to see them (sender, current approver, previous
+            // approvers), so the conversation bumps to the top of THEIR sidebar.
+            {
+              approvalStatus: "pending",
+              $or: [
+                { sender: meId },
+                { receiver: meId },
+                { "approvalChain.approver": meId },
+              ],
+            },
+          ],
         },
       },
       {
@@ -4867,16 +4996,26 @@ exports.getChatList = async function getChatList(req, res) {
     ]);
 
     // ── Run EVERYTHING in parallel — total latency = slowest single query ──
-    const [allMyClients, latestPerClientEmployee, groups, unreadRows, pendingRows] = await Promise.all([
+    // Chats this user manually marked unread from the sidebar context menu
+    const manualUnreadPromise = Employee.findById(meId)
+      .select("manualUnreadChats")
+      .lean();
+
+    const [allMyClients, latestPerClientEmployee, groups, unreadRows, pendingRows, pendingLatestRows, meDoc] = await Promise.all([
       clientsPromise,
       empAggPromise,
       groupsPromise,
       unreadPromise,
       pendingPromise,
+      pendingLatestPromise,
+      manualUnreadPromise,
     ]);
 
     const clientById = new Map(allMyClients.map((c) => [String(c._id), c]));
     const pendingMap = new Map(pendingRows.map((r) => [String(r._id), r.count]));
+    const pendingLatestMap = new Map(
+      pendingLatestRows.map((r) => [String(r._id), r]),
+    );
 
     const unreadMap = new Map(unreadRows.map((r) => [String(r._id), r.count]));
 
@@ -4888,13 +5027,25 @@ exports.getChatList = async function getChatList(req, res) {
       // Read the denormalized last message directly — it is maintained on every
       // send/approve and self-heals via the throttled background repair below.
       const lastMsg = c.lastWhatsAppMessage?.at ? c.lastWhatsAppMessage : null;
+      // A pending message visible to THIS user that is newer than the shared
+      // preview becomes the chat's last message, so the chat bumps to the top
+      // for the sender / approvers while staying hidden from everyone else.
+      const pendingLatest = pendingLatestMap.get(cid) || null;
+      const usePending =
+        !!pendingLatest &&
+        (!lastMsg?.at ||
+          new Date(pendingLatest.at).getTime() >
+            new Date(lastMsg.at).getTime());
 
       // Skip clients with NO messages at all
-      if (!lastMsg?.at) continue;
+      if (!lastMsg?.at && !usePending) continue;
 
-      const rawText = lastMsg.text || "";
+      const rawText = usePending ? pendingLatest.note || "" : lastMsg.text || "";
       const cleanText = rawText.replace(/<[^>]*>/g, "").trim();
-      const lastDeleted = !!lastMsg.deleted;
+      const lastDeleted = usePending ? false : !!lastMsg.deleted;
+      const hasAtt = usePending
+        ? !!pendingLatest.hasAtt
+        : lastMsg.hasAttachments || false;
 
       chats.push({
         chatId: cid,
@@ -4903,11 +5054,11 @@ exports.getChatList = async function getChatList(req, res) {
         dba: c.dba,
         legalBusinessName: c.legalBusinessName || null,
         photographUrl: c.photographUrl || null,
-        lastMessage: lastDeleted ? "" : (cleanText || (lastMsg.hasAttachments ? "📎 Attachment" : "")),
+        lastMessage: lastDeleted ? "" : (cleanText || (hasAtt ? "📎 Attachment" : "")),
         lastMessageDeleted: lastDeleted,
-        lastMessageAt: lastMsg.at,
-        senderId: lastMsg.senderId || null,
-        hasAttachments: lastMsg.hasAttachments || false,
+        lastMessageAt: usePending ? pendingLatest.at : lastMsg.at,
+        senderId: (usePending ? pendingLatest.senderId : lastMsg.senderId) || null,
+        hasAttachments: hasAtt,
         unreadCount: unreadMap.get(cid) || 0,
         hasUnreadMessages: !!(unreadMap.get(cid)),
         pendingApprovalCount: pendingMap.get(cid) || 0,
@@ -4998,16 +5149,25 @@ exports.getChatList = async function getChatList(req, res) {
 
     // Groups — only show if there's a last message
     for (const g of groups) {
-      if (!g.lastMessageAt && !g.lastMessage) continue;
       const gid = String(g._id);
+      const gPending = pendingLatestMap.get(gid) || null;
+      const useGPending =
+        !!gPending &&
+        (!g.lastMessageAt ||
+          new Date(gPending.at).getTime() >
+            new Date(g.lastMessageAt).getTime());
+      if (!g.lastMessageAt && !g.lastMessage && !useGPending) continue;
       chats.push({
         chatId: `group_${gid}`,
         groupId: gid,
         groupName: g.name,
         groupAvatar: g.avatar,
         groupMembers: g.members,
-        lastMessage: g.lastMessage || "",
-        lastMessageAt: g.lastMessageAt || null,
+        lastMessage: useGPending
+          ? (gPending.note || "").replace(/<[^>]*>/g, "").trim() ||
+            (gPending.hasAtt ? "📎 Attachment" : "")
+          : g.lastMessage || "",
+        lastMessageAt: useGPending ? gPending.at : g.lastMessageAt || null,
         unreadCount: unreadMap.get(gid) || 0,
         hasUnreadMessages: !!(unreadMap.get(gid)),
         pendingApprovalCount: pendingMap.get(gid) || 0,
@@ -5016,8 +5176,27 @@ exports.getChatList = async function getChatList(req, res) {
       });
     }
 
-    // Sort newest first
+    // Apply manual "mark as unread" markers — the chat shows as unread (dot,
+    // no count) until this user opens it or marks it read.
+    const manualUnreadSet = new Set(
+      (meDoc?.manualUnreadChats || []).map(String),
+    );
+    if (manualUnreadSet.size > 0) {
+      for (const chat of chats) {
+        if (manualUnreadSet.has(String(chat.chatId))) {
+          chat.hasUnreadMessages = true;
+          chat.manualUnread = true;
+        }
+      }
+    }
+
+    // Sort: chats with messages awaiting MY approval always come first; once
+    // approved, pendingApprovalCount drops to 0 and the chat falls back to
+    // plain newest-first date ordering.
     chats.sort((a, b) => {
+      const aPending = (a.pendingApprovalCount || 0) > 0 ? 1 : 0;
+      const bPending = (b.pendingApprovalCount || 0) > 0 ? 1 : 0;
+      if (aPending !== bPending) return bPending - aPending;
       const ta = a.lastMessageAt ? new Date(a.lastMessageAt).getTime() : 0;
       const tb = b.lastMessageAt ? new Date(b.lastMessageAt).getTime() : 0;
       return tb - ta;

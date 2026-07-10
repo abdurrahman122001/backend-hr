@@ -48,6 +48,8 @@ router.get("/mentionables", ctrl.getMentionables);
 router.get("/pre-approvals", ctrl.getPreApprovalMessages);
 router.get("/client/:clientId/seen-status", ctrl.getClientMessagesSeenStatus);
 router.patch("/client/:clientId/mark-all-seen", ctrl.markAllMessagesAsSeen);
+// Manual "mark as unread" from the sidebar context menu (per employee)
+router.post("/chat/mark-unread", ctrl.markChatUnread);
 
 router.get("/:id/attachments", ctrl.listAttachments);
 router.post(
