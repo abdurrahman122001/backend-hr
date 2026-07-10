@@ -91,6 +91,12 @@ router.get("/", unifiedAuth, async (req, res) => {
     const scope = buildEmployeeScope(req.user, includeTrashed);
     let query = { ...scope };
 
+    // Trash tab must list only explicitly trashed employees — legacy docs
+    // missing the isTrashed field are not trashed and stay out of this view.
+    if (includeTrashed) {
+      query.$and = [...(query.$and || []), { isTrashed: true }];
+    }
+
     // Add department filter
     if (department) {
       query.department = department;
