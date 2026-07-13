@@ -540,21 +540,80 @@ exports.assignClient = async (req, res) => {
         .status(404)
         .json({ error: "Client not found or not under your owner" });
 
-    // Only admins (isAdmin) may assign clients. Merely holding a CRMAccess
-    // grant does NOT grant assignment rights.
-    if (!me.isAdmin) {
-      return res.status(403).json({ error: "Unauthorized: only admins can assign clients" });
-    }
-
     const previousEmployeeIds = clientBeforeUpdate.assignedTo
       ? clientBeforeUpdate.assignedTo.map((emp) => (emp._id || emp).toString())
       : [];
 
+    // Admins may assign anyone. A senior in the EmployeeHierarchy may assign
+    // within their own subtree (themselves + juniors at any depth) — same
+    // descendant set getRoster uses, so it matches what the UI shows them.
+    // Merely holding a CRMAccess grant does NOT grant assignment rights.
+    let requestedEmployeeIds = Array.isArray(employeeIds)
+      ? employeeIds.map(String)
+      : [];
+
+    if (!me.isAdmin) {
+      const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
+      const [pathLinks, directLinks, supervisorReports] = await Promise.all([
+        EmployeeHierarchy.find({ owner: me.owner, path: pathRegex })
+          .select("junior")
+          .lean(),
+        EmployeeHierarchy.find({ owner: me.owner, senior: me._id })
+          .select("junior")
+          .lean(),
+        Employee.find({ owner: me.owner, supervisor: me._id })
+          .select("_id")
+          .lean(),
+      ]);
+      const allowedIds = new Set([
+        String(me._id),
+        ...pathLinks.map((l) => String(l.junior)),
+        ...directLinks.map((l) => String(l.junior)),
+        ...supervisorReports.map((e) => String(e._id)),
+      ]);
+      const isSenior = allowedIds.size > 1;
+
+      if (!isSenior) {
+        return res.status(403).json({
+          error: "Unauthorized: only admins or seniors can assign clients",
+        });
+      }
+
+      // The client must be within the senior's reach: unassigned, or already
+      // assigned to them / someone in their subtree.
+      const clientInReach =
+        previousEmployeeIds.length === 0 ||
+        previousEmployeeIds.some((id) => allowedIds.has(id));
+      if (!clientInReach) {
+        return res.status(403).json({
+          error: "You can only assign clients within your hierarchy",
+        });
+      }
+
+      // Reject only NEW assignees outside the subtree — the UI echoes back the
+      // client's existing assignees, which may include out-of-subtree people.
+      const outside = requestedEmployeeIds.filter(
+        (id) => !allowedIds.has(id) && !previousEmployeeIds.includes(id),
+      );
+      if (outside.length > 0) {
+        return res.status(403).json({
+          error: "You can only assign clients to juniors in your hierarchy",
+        });
+      }
+
+      // Preserve existing assignees outside the senior's subtree so a senior
+      // can't unassign employees they don't manage.
+      const preserved = previousEmployeeIds.filter((id) => !allowedIds.has(id));
+      requestedEmployeeIds = [
+        ...new Set([...requestedEmployeeIds, ...preserved]),
+      ];
+    }
+
     // Validate employee IDs are valid
     const validEmployeeIds = [];
-    if (Array.isArray(employeeIds) && employeeIds.length > 0) {
+    if (requestedEmployeeIds.length > 0) {
       const employees = await Employee.find({
-        _id: { $in: employeeIds },
+        _id: { $in: requestedEmployeeIds },
         owner: me.owner,
       });
       validEmployeeIds.push(...employees.map((emp) => emp._id.toString()));
