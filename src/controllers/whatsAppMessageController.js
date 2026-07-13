@@ -1,5 +1,20 @@
 const WhatsAppMessage = require("../models/WhatsAppMessage");
 const WhatsAppGroup = require("../models/WhatsAppGroup");
+
+// WhatsApp-style sidebar preview label for a message whose text is empty but
+// which carries attachments: "🎤 Voice message" / "📷 Image" / "🎥 Video",
+// falling back to the generic "📎 Attachment". Accepts full attachment docs or
+// slim { mimetype, filename } rows from the chat-list aggregations.
+function attachmentPreviewLabel(atts) {
+  const a = Array.isArray(atts) ? atts[0] : null;
+  if (!a) return "";
+  const t = String(a.mimetype || a.type || "").toLowerCase();
+  const n = String(a.filename || a.originalName || a.originalname || a.url || "").toLowerCase();
+  if (t.startsWith("audio") || /\.(wav|mp3|ogg|m4a|aac|opus)$/.test(n)) return "🎤 Voice message";
+  if (t.startsWith("image") || /\.(png|jpe?g|gif|webp|bmp|heic)$/.test(n)) return "📷 Image";
+  if (t.startsWith("video") || /\.(mp4|mov|avi|mkv|webm)$/.test(n)) return "🎥 Video";
+  return "📎 Attachment";
+}
 const Employee = require("../models/Employees");
 const path = require("path");
 const mongoose = require("mongoose");
@@ -1621,7 +1636,7 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
           ClientInfo.findByIdAndUpdate(
             msgObj.client._id || msgObj.client,
             { $set: {
-              "lastWhatsAppMessage.text": (msgObj.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
+              "lastWhatsAppMessage.text": ((msgObj.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(msgObj.attachments)).slice(0, 200),
               "lastWhatsAppMessage.at": msgObj.sentAt || now,
               "lastWhatsAppMessage.senderId": msgObj.sender?._id || msgObj.sender,
               "lastWhatsAppMessage.hasAttachments": Array.isArray(msgObj.attachments) && msgObj.attachments.length > 0,
@@ -1972,11 +1987,25 @@ exports.approveMessage = async function approveMessage(req, res) {
       const ClientInfo = require("../models/ClientInfo");
       ClientInfo.findByIdAndUpdate(msg.client, {
         $set: {
-          "lastWhatsAppMessage.text": (msg.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
+          "lastWhatsAppMessage.text": ((msg.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(msg.attachments)).slice(0, 200),
           "lastWhatsAppMessage.at": msg.approvedAt || new Date(),
           "lastWhatsAppMessage.senderId": msg.sender?._id || msg.sender,
           "lastWhatsAppMessage.hasAttachments": Array.isArray(msg.attachments) && msg.attachments.length > 0,
           "lastWhatsAppMessage.deleted": false,
+        },
+      }, { timestamps: false }).catch(() => {});
+    }
+
+    // Same bump for group chats: the approved message just reached the group,
+    // so it becomes the group's latest message and the chat rises to the top.
+    if (approvalFinalized && msg.isGroupMessage && msg.groupId) {
+      const groupIdVal = msg.groupId?._id || msg.groupId;
+      const groupText = ((msg.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(msg.attachments)).slice(0, 100);
+      WhatsAppGroup.findByIdAndUpdate(groupIdVal, {
+        $set: {
+          lastMessage: groupText,
+          lastMessageAt: msg.approvedAt || new Date(),
+          lastMessageBy: msg.sender?._id || msg.sender,
         },
       }, { timestamps: false }).catch(() => {});
     }
@@ -3212,6 +3241,51 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
 
     msg.attachments.push(...files);
     await msg.save();
+
+    // Attachments arrive in a SECOND request after the message is created, so
+    // the sidebar denorm written at create time has no attachment info yet —
+    // an image-only message would preview as an empty string. Refresh it with
+    // a typed label ("📷 Image" etc.) while this message is still the latest.
+    // Pending messages are skipped: their preview must stay hidden from
+    // employees outside the approval flow.
+    if (msg.approvalStatus !== "pending") {
+      const effAt = msg.approvedAt || msg.createdAt;
+      const noteText = (msg.note || "").replace(/<[^>]*>/g, "").trim();
+      const label = (noteText || attachmentPreviewLabel(msg.attachments)).slice(0, 200);
+      if (msg.isGroupMessage && msg.groupId) {
+        WhatsAppGroup.updateOne(
+          {
+            _id: msg.groupId,
+            $or: [
+              { lastMessageAt: { $exists: false } },
+              { lastMessageAt: null },
+              { lastMessageAt: { $lte: effAt } },
+            ],
+          },
+          { $set: { lastMessage: label.slice(0, 100) } },
+          { timestamps: false },
+        ).catch(() => {});
+      } else if (msg.client && !msg.isClientEmployeeMessage) {
+        const ClientInfo = require("../models/ClientInfo");
+        ClientInfo.updateOne(
+          {
+            _id: msg.client,
+            $or: [
+              { "lastWhatsAppMessage.at": { $exists: false } },
+              { "lastWhatsAppMessage.at": null },
+              { "lastWhatsAppMessage.at": { $lte: effAt } },
+            ],
+          },
+          {
+            $set: {
+              "lastWhatsAppMessage.text": label,
+              "lastWhatsAppMessage.hasAttachments": true,
+            },
+          },
+          { timestamps: false },
+        ).catch(() => {});
+      }
+    }
 
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
@@ -4716,21 +4790,28 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
     {
       $project: {
         client: 1,
-        createdAt: 1,
+        // Rank approved messages by approval time (matches the approveMessage
+        // denorm bump) so this repair never reverts a just-approved message
+        // back to its older composed-at position.
+        at: { $ifNull: ["$approvedAt", "$createdAt"] },
         sender: 1,
         note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
         hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+        attType: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.mimetype", 0] }, ""] } },
+        attName: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.filename", 0] }, ""] } },
         deleted: { $eq: ["$deletedForEveryone", true] },
       },
     },
-    { $sort: { createdAt: -1 } },
+    { $sort: { at: -1 } },
     {
       $group: {
         _id: "$client",
         note: { $first: "$note" },
-        at: { $first: "$createdAt" },
+        at: { $first: "$at" },
         senderId: { $first: "$sender" },
         hasAtt: { $first: "$hasAtt" },
+        attType: { $first: "$attType" },
+        attName: { $first: "$attName" },
         deleted: { $first: "$deleted" },
       },
     },
@@ -4742,7 +4823,13 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
     const cached = byId.get(String(row._id));
     const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
     if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
-      const text = row.deleted ? "" : (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      const text = row.deleted
+        ? ""
+        : ((row.note || "").replace(/<[^>]*>/g, "").trim() ||
+            (row.hasAtt
+              ? attachmentPreviewLabel([{ mimetype: row.attType, filename: row.attName }])
+              : "")
+          ).slice(0, 200);
       ops.push({
         updateOne: {
           filter: { _id: row._id },
@@ -4934,6 +5021,8 @@ exports.getChatList = async function getChatList(req, res) {
           sender: 1,
           note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
           hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+          attType: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.mimetype", 0] }, ""] } },
+          attName: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.filename", 0] }, ""] } },
         },
       },
       { $sort: { createdAt: -1 } },
@@ -4963,6 +5052,8 @@ exports.getChatList = async function getChatList(req, res) {
           note: { $first: "$note" },
           senderId: { $first: "$sender" },
           hasAtt: { $first: "$hasAtt" },
+          attType: { $first: "$attType" },
+          attName: { $first: "$attName" },
         },
       },
     ]);
@@ -5010,23 +5101,30 @@ exports.getChatList = async function getChatList(req, res) {
       {
         $project: {
           client: 1,
-          createdAt: 1,
+          // Approved messages rank by WHEN they were approved (i.e. actually
+          // sent to the client), not when they were composed, so finalizing an
+          // approval bumps the conversation to the top of the sidebar.
+          at: { $ifNull: ["$approvedAt", "$createdAt"] },
           sender: 1,
           clientEmployeeId: 1,
           clientEmployeeData: 1,
           note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
           hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
+          attType: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.mimetype", 0] }, ""] } },
+          attName: { $toLower: { $ifNull: [{ $arrayElemAt: ["$attachments.filename", 0] }, ""] } },
           deleted: { $eq: ["$deletedForEveryone", true] },
         },
       },
-      { $sort: { createdAt: -1 } },
+      { $sort: { at: -1 } },
       {
         $group: {
           _id: { client: "$client", clientEmployeeId: "$clientEmployeeId" },
           note: { $first: "$note" },
-          at: { $first: "$createdAt" },
+          at: { $first: "$at" },
           senderId: { $first: "$sender" },
           hasAtt: { $first: "$hasAtt" },
+          attType: { $first: "$attType" },
+          attName: { $first: "$attName" },
           deleted: { $first: "$deleted" },
           clientEmployeeData: { $first: "$clientEmployeeData" },
           clientEmployeeId: { $first: "$clientEmployeeId" },
@@ -5085,6 +5183,15 @@ exports.getChatList = async function getChatList(req, res) {
       const hasAtt = usePending
         ? !!pendingLatest.hasAtt
         : lastMsg.hasAttachments || false;
+      // Text-less attachment messages preview with a typed label ("📷 Image",
+      // "🎤 Voice message", …) like WhatsApp instead of a generic paperclip.
+      const attLabel = !hasAtt
+        ? ""
+        : usePending
+          ? attachmentPreviewLabel([
+              { mimetype: pendingLatest.attType, filename: pendingLatest.attName },
+            ])
+          : "📎 Attachment"; // denorm writers store the typed label in .text
 
       chats.push({
         chatId: cid,
@@ -5093,7 +5200,7 @@ exports.getChatList = async function getChatList(req, res) {
         dba: c.dba,
         legalBusinessName: c.legalBusinessName || null,
         photographUrl: c.photographUrl || null,
-        lastMessage: lastDeleted ? "" : (cleanText || (hasAtt ? "📎 Attachment" : "")),
+        lastMessage: lastDeleted ? "" : (cleanText || attLabel),
         lastMessageDeleted: lastDeleted,
         lastMessageAt: usePending ? pendingLatest.at : lastMsg.at,
         senderId: (usePending ? pendingLatest.senderId : lastMsg.senderId) || null,
@@ -5149,7 +5256,10 @@ exports.getChatList = async function getChatList(req, res) {
         `Employee (${clientInfo?.clientName || "Client"})`;
 
       const ceDeleted = !!row.deleted;
-      const text = (row.note || "").replace(/<[^>]*>/g, "").slice(0, 200);
+      const text = (row.note || "").replace(/<[^>]*>/g, "").trim().slice(0, 200);
+      const ceAttLabel = row.hasAtt
+        ? attachmentPreviewLabel([{ mimetype: row.attType, filename: row.attName }])
+        : "";
 
       const empPhotoUrl = matchedEmp?.photographUrl || null;
 
@@ -5173,7 +5283,7 @@ exports.getChatList = async function getChatList(req, res) {
           parentClientName: clientInfo?.clientName || "",
         },
         employeePhotographUrl: empPhotoUrl,
-        lastMessage: ceDeleted ? "" : (text || (row.hasAtt ? "📎 Attachment" : "")),
+        lastMessage: ceDeleted ? "" : (text || ceAttLabel),
         lastMessageDeleted: ceDeleted,
         lastMessageAt: row.at,
         senderId: row.senderId || null,
@@ -5204,7 +5314,11 @@ exports.getChatList = async function getChatList(req, res) {
         groupMembers: g.members,
         lastMessage: useGPending
           ? (gPending.note || "").replace(/<[^>]*>/g, "").trim() ||
-            (gPending.hasAtt ? "📎 Attachment" : "")
+            (gPending.hasAtt
+              ? attachmentPreviewLabel([
+                  { mimetype: gPending.attType, filename: gPending.attName },
+                ])
+              : "")
           : g.lastMessage || "",
         lastMessageAt: useGPending ? gPending.at : g.lastMessageAt || null,
         unreadCount: unreadMap.get(gid) || 0,

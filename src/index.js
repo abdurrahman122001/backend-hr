@@ -113,6 +113,7 @@ const payrollEstimateRouter = require("./routes/payrollEstimateRoutes");
 const specificNonWorkingDayRouter = require("./routes/specificNonWorkingDay");
 const anyPayrollAuth = require("./middleware/anyPayrollAuth");
 const unifiedAuth = require("./middleware/unifiedAuth");
+const thingsToDoRealtime = require("./middleware/thingsToDoRealtime");
 const emailSignatureRoute = require("./routes/emailSignature");
 const payrollSchedule = require("./routes/scheduledAllowances");
 const loanRequestRoutes = require("./routes/loanRequestRoutes");
@@ -223,6 +224,7 @@ app.use(
 // ---------- Body parsers ----------
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+app.use(thingsToDoRealtime);
 app.use("/api/auth", authRouter);
 app.use("/api/emp-auth", empAuthRouter);
 app.use("/api/employees", employeesRouter); // leave public if intentional
@@ -529,6 +531,40 @@ const io = new Server(primaryServer, {
 // ---------- Socket Events ----------
 app.set("io", io);
 
+const uniqueSocketOwnerIds = (values) =>
+  [...new Set(values.filter(Boolean).map((value) => String(value)))];
+
+async function resolveThingsToDoOwnerIds(rawToken) {
+  if (!rawToken) return [];
+
+  const jwt = require("jsonwebtoken");
+  const token = String(rawToken).replace(/^Bearer\s+/i, "");
+  const payload = jwt.verify(token, process.env.JWT_SECRET);
+
+  const userId = payload.id || payload._id || payload.userId;
+  if (!userId) return [];
+
+  const employee = await Employee.findById(userId)
+    .select("owner createdBy")
+    .lean();
+  if (employee) {
+    const employeeOwner = Array.isArray(employee.owner)
+      ? employee.owner[0]
+      : employee.owner;
+    return uniqueSocketOwnerIds([
+      employeeOwner,
+      employee.createdBy,
+      employee._id,
+    ]);
+  }
+
+  const User = require("./models/Users");
+  const user = await User.findById(userId).select("owner createdBy").lean();
+  if (!user) return [];
+  const userOwner = Array.isArray(user.owner) ? user.owner[0] : user.owner;
+  return uniqueSocketOwnerIds([userOwner, user.createdBy, user._id]);
+}
+
 // ---------- Inbound client email receiver (IMAP → assignment messages) ----------
 // Watches the client-facing mailbox (info@brannovate.com). Incoming client emails
 // are matched against ClientInfo and delivered to the assigned employee(s) in
@@ -561,6 +597,66 @@ io.on("connection", (socket) => {
       return;
     }
     socket.join(`employee_${employeeId}`);
+  });
+
+  const clearThingsToDoRooms = async () => {
+    const rooms = Array.isArray(socket.data.thingsToDoRooms)
+      ? socket.data.thingsToDoRooms
+      : [];
+    for (const room of rooms) await socket.leave(room);
+    await socket.leave("things_to_do_watchers");
+    delete socket.data.thingsToDoRooms;
+  };
+
+  // Main-dashboard widgets join server-authenticated tenant rooms. The join is
+  // acknowledged only after membership is active so clients can safely refresh
+  // their snapshot without a fetch/subscribe race.
+  socket.on("join_things_to_do", async (tokenOrAcknowledge, acknowledge) => {
+    const suppliedToken =
+      typeof tokenOrAcknowledge === "string" ? tokenOrAcknowledge : null;
+    const ack = typeof acknowledge === "function" ? acknowledge : () => {};
+    const legacyAck =
+      typeof tokenOrAcknowledge === "function" ? tokenOrAcknowledge : ack;
+    const subscriptionVersion =
+      (socket.data.thingsToDoSubscriptionVersion || 0) + 1;
+    socket.data.thingsToDoSubscriptionVersion = subscriptionVersion;
+    try {
+      const ownerIds = await resolveThingsToDoOwnerIds(
+        suppliedToken || socket.handshake.auth?.token,
+      );
+      if (socket.data.thingsToDoSubscriptionVersion !== subscriptionVersion) {
+        legacyAck({ ok: false });
+        return;
+      }
+      if (ownerIds.length === 0) {
+        await clearThingsToDoRooms();
+        legacyAck({ ok: false });
+        return;
+      }
+
+      const rooms = ownerIds.map((ownerId) => `things_to_do_${ownerId}`);
+      const previousRooms = Array.isArray(socket.data.thingsToDoRooms)
+        ? socket.data.thingsToDoRooms
+        : [];
+      for (const previousRoom of previousRooms) {
+        if (!rooms.includes(previousRoom)) await socket.leave(previousRoom);
+      }
+      await socket.join("things_to_do_watchers");
+      for (const room of rooms) await socket.join(room);
+      socket.data.thingsToDoRooms = rooms;
+      legacyAck({ ok: true });
+    } catch {
+      if (socket.data.thingsToDoSubscriptionVersion === subscriptionVersion) {
+        await clearThingsToDoRooms();
+      }
+      legacyAck({ ok: false });
+    }
+  });
+
+  socket.on("leave_things_to_do", async () => {
+    socket.data.thingsToDoSubscriptionVersion =
+      (socket.data.thingsToDoSubscriptionVersion || 0) + 1;
+    await clearThingsToDoRooms();
   });
 
   // Join owner/admin room (for leave message notifications to admin dashboard)

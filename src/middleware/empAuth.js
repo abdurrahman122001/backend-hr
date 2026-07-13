@@ -45,14 +45,16 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
     const payload = jwt.verify(token, JWT_SECRET);
     // Fetch employee with permissions
     let emp = await Employee.findById(payload.id).select(
-      "_id role companyEmail name owner department permissions joiningDate isAdmin"
+      "_id role companyEmail name owner createdBy department permissions joiningDate isAdmin"
     );
     let isAdminUser = false;
 
     if (!emp) {
       // Fallback: Check if it's an Admin/HR User
       const User = require("../models/Users");
-      const user = await User.findById(payload.id).select("_id role name email companyEmail owner");
+      const user = await User.findById(payload.id).select(
+        "_id role name email companyEmail owner createdBy",
+      );
       
       if (user) {
         emp = user;
@@ -104,6 +106,7 @@ module.exports = async function requireEmployeeAuth(req, res, next) {
       companyEmail: emp.companyEmail || emp.email,
       name: emp.name,
       owner: emp.owner || emp.createdBy || emp._id,
+      createdBy: emp.createdBy,
       department: emp.department,
       designation: emp.designation,
       permissions: emp.permissions || {},
