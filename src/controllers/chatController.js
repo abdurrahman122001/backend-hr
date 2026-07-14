@@ -3297,6 +3297,7 @@ exports.searchEmployees = async (req, res) => {
         },
         { _id: { $ne: req.employee._id } }, // Exclude current user
         { _id: { $nin: currentMemberIds } }, // Exclude current members
+        { status: "active" }, // Only active employees can be added to a space
       ],
     })
       .select("name companyEmail avatar photographUrl department position")

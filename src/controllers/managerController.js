@@ -338,7 +338,7 @@ exports.getEmployeeRoster = async (req, res) => {
       ],
     })
       .select(
-        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl",
+        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl isAdmin",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });
@@ -412,7 +412,7 @@ exports.getMentionedEmployees = async (req, res) => {
 
     const employees = await Employee.find(employeeQuery)
       .select(
-        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl",
+        "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl isAdmin",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });

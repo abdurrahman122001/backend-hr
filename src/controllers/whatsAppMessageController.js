@@ -3874,7 +3874,7 @@ exports.searchMessages = async function searchMessages(req, res) {
         { path: "groupId", select: "_id name" },
       ])
       .select(
-        "_id note message subject sender client createdAt receiver status approvalStatus isGroupMessage groupId chatType",
+        "_id note message subject sender client createdAt receiver status approvalStatus isGroupMessage groupId chatType isClientEmployeeMessage clientEmployeeId clientEmployeeData",
       )
       .lean();
 
@@ -3896,6 +3896,16 @@ exports.searchMessages = async function searchMessages(req, res) {
         : { _id: null, name: "Unknown" },
       clientId: m.client?._id || null,
       clientName: m.client?.clientName || "Unknown",
+      // Client-employee chat context so the UI can open the right chat and
+      // label the sender. The sender is the client employee only when the
+      // message wasn't sent by an internal (company) employee.
+      isClientEmployeeMessage: m.isClientEmployeeMessage === true,
+      clientEmployeeId:
+        m.clientEmployeeId || m.clientEmployeeData?.clientEmployeeId || null,
+      clientEmployeeData: m.clientEmployeeData || null,
+      parentClientId: m.client?._id || null,
+      senderIsClientEmployee:
+        m.isClientEmployeeMessage === true && !(m.sender && m.sender.companyEmail),
       time: m.createdAt
         ? new Date(m.createdAt).toLocaleTimeString([], {
           hour: "2-digit",

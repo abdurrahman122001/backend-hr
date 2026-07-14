@@ -1213,8 +1213,17 @@ exports.createMessage = async function createMessage(req, res) {
         }
       }
 
-      if (inheritedIsFromClient || inheritedIsFromCompanyEmployee) {
-        approvalStatus = "approved";
+      if (
+        inheritedIsFromClient ||
+        inheritedIsFromCompanyEmployee ||
+        isFromClient ||
+        isFromCompanyEmployee
+      ) {
+        // Client-originated emails are outside the approval flow entirely —
+        // store null (like inbound IMAP client emails), not "approved".
+        // Checked on the raw body flags too: inherited* is manager-gated, but
+        // CRM-access senders with other roles also send on the client's behalf.
+        approvalStatus = null;
       } else if (clientSupervisionMode === "needs_approval" &&
                  (isSenderAssigned || senderRole === "employee")) {
         approvalStatus = "pending";
