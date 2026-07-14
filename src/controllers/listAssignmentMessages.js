@@ -2188,10 +2188,18 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     // Review (All Activity): unread EXTERNAL (client) messages authored by my
     // juniors (owners see the whole org), plus inbound client mail delivered
     // to juniors (unresponded client emails). Excludes my own messages.
+    // NOTE: no readBy filter here — the badge must match the list's bold rows,
+    // which are threads whose LATEST message is unread by me (an old unread
+    // message buried in a read thread must not keep the thread counted).
     const externalOnly = { client: { $exists: true, $ne: null } };
+    const baseVisible = {
+      status: "sent",
+      trashedBy: { $ne: currentUser },
+      spamReporters: { $ne: currentUser },
+    };
     let reviewQuery = { _id: null };
     if (isOwner) {
-      reviewQuery = { owner, sender: { $ne: currentUser }, ...externalOnly, ...baseUnread };
+      reviewQuery = { owner, sender: { $ne: currentUser }, ...externalOnly, ...baseVisible };
     } else if (juniorIds.length > 0) {
       reviewQuery = {
         $or: [
@@ -2204,9 +2212,28 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
           },
         ],
         ...externalOnly,
-        ...baseUnread,
+        ...baseVisible,
       };
     }
+
+    // Threads whose latest (visible) message is unread by me — mirrors the
+    // list's per-thread bold state instead of "any unread message ever".
+    const countUnreadLatestThreads = async (query) => {
+      if (query._id === null) return 0;
+      const result = await AssignmentMessage.aggregate([
+        { $match: query },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { $ifNull: ["$threadId", { $toString: "$_id" }] },
+            latestReadBy: { $first: "$readBy" },
+          },
+        },
+        { $match: { "latestReadBy.employee": { $ne: oid(String(currentUser)) } } },
+        { $count: "count" },
+      ]);
+      return result[0]?.count || 0;
+    };
 
     // Get counts for different categories
     const [
@@ -2318,8 +2345,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         ...baseUnread,
       }),
 
-      // All Activity (review) unread threads
-      countUnreadThreads(reviewQuery),
+      // All Activity (review): threads whose latest message is unread by me
+      countUnreadLatestThreads(reviewQuery),
 
       // For-approval: threads with messages pending MY approval (I'm the
       // current approver in the chain and haven't actioned them yet)
@@ -2855,18 +2882,27 @@ exports.searchMessages = async function searchMessages(req, res) {
       const searchTerm = searchQuery.trim();
       const searchConditions = [];
 
+      // Escape regex metacharacters — subjects like "Invoice (July)" or queries
+      // containing +?[] used to silently match nothing (or throw).
+      const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      // Word-wise matching: every typed word must appear in the field, in any
+      // order and regardless of extra whitespace — a single whole-phrase regex
+      // missed exact subjects typed with different spacing/word order.
+      const words = searchTerm.split(/\s+/).filter(Boolean).map(escapeRegex);
+      const fieldMatchesAllWords = (field) => ({
+        $and: words.map((w) => ({ [field]: { $regex: w, $options: "i" } })),
+      });
+
       // Determine which fields to search in
       const searchFields = Array.isArray(searchIn) ? searchIn : [searchIn];
 
       // Text search in specified fields
       if (searchFields.includes("subject") || searchFields.includes("all")) {
-        searchConditions.push({
-          subject: { $regex: searchTerm, $options: "i" },
-        });
+        searchConditions.push(fieldMatchesAllWords("subject"));
       }
 
       if (searchFields.includes("note") || searchFields.includes("all")) {
-        searchConditions.push({ note: { $regex: searchTerm, $options: "i" } });
+        searchConditions.push(fieldMatchesAllWords("note"));
       }
 
       // Search in attachment filenames
@@ -2874,9 +2910,7 @@ exports.searchMessages = async function searchMessages(req, res) {
         searchFields.includes("attachments") ||
         searchFields.includes("all")
       ) {
-        searchConditions.push({
-          "attachments.originalName": { $regex: searchTerm, $options: "i" },
-        });
+        searchConditions.push(fieldMatchesAllWords("attachments.originalName"));
       }
 
       // If we have search conditions, add them to the query

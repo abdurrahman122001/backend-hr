@@ -59,7 +59,7 @@ exports.getTasks = async (req, res) => {
 exports.createTask = async (req, res) => {
   try {
     const { chatId } = req.params;
-    const { title, details, dueAt, assignees } = req.body;
+    const { title, details, dueAt, assignees, sourceMessageId, parentTaskId } = req.body;
     if (!mongoose.isValidObjectId(chatId))
       return res.status(400).json({ error: "Invalid space id" });
     if (!title || !title.trim())
@@ -75,10 +75,22 @@ exports.createTask = async (req, res) => {
         ? assignees.filter((a) => mongoose.isValidObjectId(a))
         : [],
       createdBy: req.employee._id,
+      sourceMessageId: mongoose.isValidObjectId(sourceMessageId)
+        ? sourceMessageId
+        : null,
+      parentTaskId: mongoose.isValidObjectId(parentTaskId) ? parentTaskId : null,
     });
     task = await task.populate(POPULATE);
 
     emit(req, "chat_task_created", chatId, { task });
+    // Task created from a message → let the chat put a badge under it
+    if (task.sourceMessageId) {
+      emit(req, "message_task_created", chatId, {
+        messageId: String(task.sourceMessageId),
+        taskId: String(task._id),
+        createdAt: task.createdAt,
+      });
+    }
     notifyAssignees(req, task, task.assignees, req.employee._id);
     return res.status(201).json({ task });
   } catch (e) {
@@ -129,6 +141,14 @@ exports.deleteTask = async (req, res) => {
     const task = await ChatTask.findByIdAndDelete(taskId);
     if (!task) return res.status(404).json({ error: "Task not found" });
     emit(req, "chat_task_deleted", task.chatId, { taskId });
+    // Deleting a parent removes its subtasks too (one level deep)
+    const subtasks = await ChatTask.find({ parentTaskId: taskId }).select("_id");
+    if (subtasks.length) {
+      await ChatTask.deleteMany({ parentTaskId: taskId });
+      subtasks.forEach((s) =>
+        emit(req, "chat_task_deleted", task.chatId, { taskId: String(s._id) })
+      );
+    }
     return res.json({ success: true });
   } catch (e) {
     console.error("deleteTask error:", e);

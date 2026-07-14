@@ -24,6 +24,21 @@ const chatTaskSchema = new mongoose.Schema(
       ref: "Employee",
       required: true,
     },
+    // Message this task was created from ("Create space task" on a message).
+    // Lets the chat show a task badge under that message.
+    sourceMessageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+      index: true,
+    },
+    // ClickUp-style subtasks: set to the parent task's id (one level deep).
+    parentTaskId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "ChatTask",
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true }
 );

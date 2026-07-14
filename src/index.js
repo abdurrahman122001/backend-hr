@@ -2782,6 +2782,37 @@ io.on("connection", (socket) => {
     }
     socket.join(`space_${spaceId}`);
   });
+  /** 🔹 Reset server-side unread counter when a chat is being read live.
+   *  Clients emit these when a message arrives in the currently open chat;
+   *  without them the polled unread badge (SendQuery sidebar) sticks at >0. */
+  socket.on("mark_conversation_read", async ({ conversationId, userId } = {}) => {
+    try {
+      if (!conversationId || !userId) return;
+      const { Conversation } = require("./models/Chat");
+      const conv = await Conversation.findById(conversationId);
+      if (!conv) return;
+      if ((conv.unreadCount?.get(String(userId)) || 0) !== 0) {
+        conv.unreadCount.set(String(userId), 0);
+        await conv.save();
+      }
+    } catch (e) {
+      console.error("❌ mark_conversation_read:", e.message);
+    }
+  });
+  socket.on("mark_space_read", async ({ spaceId, userId } = {}) => {
+    try {
+      if (!spaceId || !userId) return;
+      const { Conversation } = require("./models/Chat");
+      const conv = await Conversation.findOne({ space: spaceId });
+      if (!conv) return;
+      if ((conv.unreadCount?.get(String(userId)) || 0) !== 0) {
+        conv.unreadCount.set(String(userId), 0);
+        await conv.save();
+      }
+    } catch (e) {
+      console.error("❌ mark_space_read:", e.message);
+    }
+  });
   /** 🔹 CRITICAL FIX: Use io.to() for broadcasting to ALL users in room */
   socket.on("send_message", async (data) => {
     try {

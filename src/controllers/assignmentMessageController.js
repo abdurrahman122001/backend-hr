@@ -4716,8 +4716,15 @@ exports.markAsRead = async function markAsRead(req, res) {
       });
     }
 
-    // Check if user is authorized to read this message
+    // Check if user is authorized to read this message. Same-org viewers
+    // (hierarchy seniors reading juniors' activity in All Activity) must also
+    // be able to record their read — otherwise the sidebar unread badge,
+    // which is based on readBy, can never clear for them.
+    const sameOrg =
+      String(message.owner) ===
+      String(req.employee.owner || req.employee._id);
     const isAuthorized =
+      sameOrg ||
       message.sender.toString() === userId.toString() ||
       message.receiver.some(
         (receiver) => receiver.toString() === userId.toString()
@@ -4837,7 +4844,9 @@ exports.markAllMessagesRead = async function markAllMessagesRead(req, res) {
 
     const result = await AssignmentMessage.updateMany(
       {
-        $or: [{ receiver: userId }, { receiver: { $in: [userId] } }],
+        // Org-wide, not receiver-only: hierarchy seniors also see juniors'
+        // threads (All Activity) and "mark all read" must clear those badges.
+        owner: req.employee.owner || userId,
         "readBy.employee": { $ne: userId },
         status: "sent",
       },
@@ -4886,10 +4895,13 @@ exports.markThreadAsRead = async function markThreadAsRead(req, res) {
       });
     }
 
-    // 🔥 CRITICAL FIX: Get ALL messages in the thread (not just unread ones)
+    // 🔥 CRITICAL FIX: Get ALL messages in the thread (not just unread ones).
+    // Scoped by owner, NOT by participant: hierarchy seniors open juniors'
+    // threads from All Activity without being sender/receiver, and their read
+    // must still be recorded or the readBy-based unread badge never clears.
     const threadMessages = await AssignmentMessage.find({
       threadId: threadId,
-      $or: [{ receiver: userId }, { receiver: { $in: [userId] } }, { sender: userId }],
+      owner: req.employee.owner || req.employee._id,
       // $ne matches older documents where these fields were never set
       isTrashed: { $ne: true },
       isSpam: { $ne: true },

@@ -1,6 +1,7 @@
 const express = require("express");
 const { Conversation, Message, Space } = require("../models/Chat");
 const ChatThread = require("../models/ChatThread");
+const ChatTask = require("../models/ChatTask");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
 const multer = require("multer");
@@ -3273,7 +3274,9 @@ exports.searchEmployees = async (req, res) => {
     const { query } = req.query;
     const { spaceId } = req.params;
 
-    if (!query || query.length < 2) {
+    // Trim (Enter/trailing space must not blank results) and escape regex chars
+    const q = (query || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (q.length < 2) {
       return res.json({
         success: true,
         employees: [],
@@ -3291,8 +3294,8 @@ exports.searchEmployees = async (req, res) => {
       $and: [
         {
           $or: [
-            { name: { $regex: query, $options: "i" } },
-            { companyEmail: { $regex: query, $options: "i" } },
+            { name: { $regex: q, $options: "i" } },
+            { companyEmail: { $regex: q, $options: "i" } },
           ],
         },
         { _id: { $ne: req.employee._id } }, // Exclude current user
@@ -3401,11 +3404,29 @@ exports.getSpaceMessages = async (req, res) => {
       return acc;
     }, {});
 
+    // Tasks created from these messages ("Create space task") → badge counts
+    const taskStats = await ChatTask.aggregate([
+      { $match: { sourceMessageId: { $in: messageIds } } },
+      {
+        $group: {
+          _id: "$sourceMessageId",
+          taskCount: { $sum: 1 },
+          lastTaskCreatedAt: { $max: "$createdAt" },
+        },
+      },
+    ]);
+    const taskStatsMap = taskStats.reduce((acc, stat) => {
+      acc[stat._id.toString()] = stat;
+      return acc;
+    }, {});
+
     // Attach stats to messages
     const messages = messagesRaw.map(m => ({
       ...m,
       threadReplyCount: statsMap[m._id.toString()]?.threadReplyCount || 0,
-      lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null
+      lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null,
+      taskCount: taskStatsMap[m._id.toString()]?.taskCount || 0,
+      lastTaskCreatedAt: taskStatsMap[m._id.toString()]?.lastTaskCreatedAt || null
     }));
 
     // Mark messages as read for current user

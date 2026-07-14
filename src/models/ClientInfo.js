@@ -29,6 +29,19 @@ const ClientInfoSchema = new Schema(
     naicsOrSic: { type: String },
     incorporationState: { type: String }, // US only
     websites: [{ type: String }],
+    // Services agreed for this client (multi-select in the client form),
+    // each marked as recurring or one-off work.
+    scopeOfWork: [
+      {
+        _id: false,
+        service: { type: String, required: true },
+        billing: {
+          type: String,
+          enum: ["one_off", "recurring"],
+          default: "recurring",
+        },
+      },
+    ],
     incorporationYear: { type: String }, // keep string for flexibility
     servicesStartDate: { type: String }, // YYYY-MM-DD
     monthlyTransactions: { type: Number },

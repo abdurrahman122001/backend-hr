@@ -128,9 +128,19 @@ exports.createThreadReply = async (req, res) => {
       // Emit to the thread room
       io.to(`thread_${parentMessageId}`).emit("new_chat_thread_reply", populatedReply);
       
-      // Also notify participants of the parent conversation
-      io.to(`conversation_${parentMsg.conversation}`).emit("chat_thread_updated", {
+      // Also notify participants of the parent conversation/space. Socket.IO
+      // treats chained rooms as a union, so sockets in both rooms receive the
+      // update only once.
+      const conversationId = String(parentMsg.conversation);
+      const spaceId = parentMsg.space ? String(parentMsg.space) : null;
+      let threadUpdateTarget = io.to(`conversation_${conversationId}`);
+      if (spaceId) {
+        threadUpdateTarget = threadUpdateTarget.to(`space_${spaceId}`);
+      }
+      threadUpdateTarget.emit("chat_thread_updated", {
         parentMessageId,
+        conversationId,
+        spaceId,
         lastReply: populatedReply,
       });
 
