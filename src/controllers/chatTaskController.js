@@ -41,19 +41,21 @@ const notifyAssignees = (req, task, assigneeList, actorId) => {
   }
 };
 
-// Post a system-style entry into the source message's thread ("Created a
-// task…", "Assigned a task to…"). No-op for tasks not created from a message.
+// Post a system-style entry into the task's chat thread. Direct Tasks-panel
+// tasks use their generated announcement message as the thread parent.
 const postTaskThreadEntry = async (req, task, content) => {
-  if (!task?.sourceMessageId) return;
+  const parentMessageId =
+    task?.sourceMessageId || task?.announcementMessageId;
+  if (!parentMessageId) return;
   try {
     const { Message } = require("../models/Chat");
     const ChatThread = require("../models/ChatThread");
-    const parentMsg = await Message.findById(task.sourceMessageId).select(
+    const parentMsg = await Message.findById(parentMessageId).select(
       "conversation space"
     );
     if (!parentMsg) return;
     const threadEntry = await ChatThread.create({
-      parentMessageId: task.sourceMessageId,
+      parentMessageId,
       owner: req.employee.owner,
       sender: req.employee._id,
       content,
@@ -65,7 +67,7 @@ const postTaskThreadEntry = async (req, task, content) => {
       .lean();
     const io = req.app.get("io");
     if (io) {
-      io.to(`thread_${task.sourceMessageId}`).emit(
+      io.to(`thread_${parentMessageId}`).emit(
         "new_chat_thread_reply",
         populatedReply
       );
@@ -74,7 +76,7 @@ const postTaskThreadEntry = async (req, task, content) => {
       let target = io.to(`conversation_${conversationId}`);
       if (spaceId) target = target.to(`space_${spaceId}`);
       target.emit("chat_thread_updated", {
-        parentMessageId: String(task.sourceMessageId),
+        parentMessageId: String(parentMessageId),
         conversationId,
         spaceId,
         lastReply: populatedReply,
@@ -127,7 +129,6 @@ exports.createTask = async (req, res) => {
     });
     task = await task.populate(POPULATE);
 
-    emit(req, "chat_task_created", chatId, { task });
     // Task created from a message → let the chat put a badge under it
     if (task.sourceMessageId) {
       emit(req, "message_task_created", chatId, {
@@ -154,7 +155,81 @@ exports.createTask = async (req, res) => {
           `Assigned a task to ${names} (via Tasks)`
         );
       }
+    } else {
+      // Task created straight from the Tasks panel → announce it as a message
+      // in the space conversation ("Created a task (via Tasks)" + title)
+      try {
+        const { Conversation, Message, Space } = require("../models/Chat");
+        const space = await Space.findById(chatId).select("members");
+        const conversation = await Conversation.findOne({ space: chatId });
+        if (space && conversation) {
+          const receivers = space.members.filter(
+            (m) => String(m) !== String(req.employee._id)
+          );
+          const message = new Message({
+            conversation: conversation._id,
+            sender: req.employee._id,
+            receivers,
+            space: chatId,
+            content: `Created a task (via Tasks)\n${task.title}`,
+            messageType: "text",
+            isGroupMessage: true,
+            readBy: [{ employee: req.employee._id, readAt: new Date() }],
+          });
+          await message.save();
+
+          // Keep assignment activity attached to this generated conversation
+          // message without treating it as a user message converted to a task.
+          task.announcementMessageId = message._id;
+          await task.save();
+
+          conversation.lastMessage = message._id;
+          conversation.updatedAt = new Date();
+          if (!conversation.unreadCount) conversation.unreadCount = new Map();
+          receivers.forEach((rid) => {
+            const cur = conversation.unreadCount.get(String(rid)) || 0;
+            conversation.unreadCount.set(String(rid), cur + 1);
+          });
+          await conversation.save();
+
+          const populatedMessage = await Message.findById(message._id)
+            .populate("sender", "name companyEmail avatar photographUrl")
+            .populate("space");
+          const io = req.app.get("io");
+          if (io) {
+            // viaTasks lets the creator's own client render it live — clients
+            // normally drop their own incoming messages (optimistic-send dedupe)
+            const payload = { ...populatedMessage.toObject(), viaTasks: true };
+            io.to(`space_${chatId}`).emit("receive_space_message", payload);
+            receivers.forEach((rid) =>
+              io.to(`user_${String(rid)}`).emit("receive_space_message", payload)
+            );
+            io.to(`user_${String(req.employee._id)}`).emit(
+              "receive_space_message",
+              payload
+            );
+          }
+
+          // Choosing an assignee while drafting creates the task immediately,
+          // so cover that POST path as well as later PATCH assignments.
+          if (Array.isArray(task.assignees) && task.assignees.length > 0) {
+            const names = task.assignees
+              .map((a) => `@${a.name || "member"}`)
+              .join(", ");
+            await postTaskThreadEntry(
+              req,
+              task,
+              `Assigned a task to ${names} (via Tasks)`
+            );
+          }
+        }
+      } catch (e) {
+        console.error("task chat announce error:", e.message);
+      }
     }
+    // Emit after a direct-panel task has been linked to its announcement so
+    // every Tasks panel receives the complete task document.
+    emit(req, "chat_task_created", chatId, { task });
     notifyAssignees(req, task, task.assignees, req.employee._id);
     return res.status(201).json({ task });
   } catch (e) {

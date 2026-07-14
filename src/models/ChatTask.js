@@ -32,6 +32,13 @@ const chatTaskSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // Conversation message generated when the task is created directly from
+    // the Tasks panel. Assignment activity is threaded under this message.
+    announcementMessageId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Message",
+      default: null,
+    },
     // ClickUp-style subtasks: set to the parent task's id (one level deep).
     parentTaskId: {
       type: mongoose.Schema.Types.ObjectId,
