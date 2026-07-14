@@ -303,5 +303,7 @@ router.get("/spaces/:chatId/tasks", empAuth, chatTaskController.getTasks);
 router.post("/spaces/:chatId/tasks", empAuth, chatTaskController.createTask);
 router.patch("/tasks/:taskId", empAuth, chatTaskController.updateTask);
 router.delete("/tasks/:taskId", empAuth, chatTaskController.deleteTask);
+router.get("/tasks/:taskId/comments", empAuth, chatTaskController.getTaskComments);
+router.post("/tasks/:taskId/comments", empAuth, chatTaskController.addTaskComment);
 
 module.exports = router;

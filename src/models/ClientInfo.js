@@ -29,6 +29,16 @@ const ClientInfoSchema = new Schema(
     naicsOrSic: { type: String },
     incorporationState: { type: String }, // US only
     websites: [{ type: String }],
+    // Client engagement: ongoing (recurring) or a one-off project with a
+    // defined start/end date.
+    engagementType: {
+      type: String,
+      enum: ["one_off", "recurring"],
+      default: "recurring",
+    },
+    engagementStartDate: { type: String }, // YYYY-MM-DD (one-off only)
+    engagementEndDate: { type: String }, // YYYY-MM-DD (one-off only)
+
     // Services agreed for this client (multi-select in the client form),
     // each marked as recurring or one-off work.
     scopeOfWork: [

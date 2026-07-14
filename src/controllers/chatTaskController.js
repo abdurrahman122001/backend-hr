@@ -2,6 +2,7 @@
 // `space_<chatId>` socket room so all members' Tasks panels stay in sync.
 const mongoose = require("mongoose");
 const ChatTask = require("../models/ChatTask");
+const ChatTaskComment = require("../models/ChatTaskComment");
 
 const POPULATE = [
   { path: "assignees", select: "_id name companyEmail photographUrl avatar" },
@@ -37,6 +38,50 @@ const notifyAssignees = (req, task, assigneeList, actorId) => {
     });
   } catch (e) {
     /* non-fatal */
+  }
+};
+
+// Post a system-style entry into the source message's thread ("Created a
+// task…", "Assigned a task to…"). No-op for tasks not created from a message.
+const postTaskThreadEntry = async (req, task, content) => {
+  if (!task?.sourceMessageId) return;
+  try {
+    const { Message } = require("../models/Chat");
+    const ChatThread = require("../models/ChatThread");
+    const parentMsg = await Message.findById(task.sourceMessageId).select(
+      "conversation space"
+    );
+    if (!parentMsg) return;
+    const threadEntry = await ChatThread.create({
+      parentMessageId: task.sourceMessageId,
+      owner: req.employee.owner,
+      sender: req.employee._id,
+      content,
+      messageType: "text",
+      readBy: [{ employee: req.employee._id, readAt: new Date() }],
+    });
+    const populatedReply = await ChatThread.findById(threadEntry._id)
+      .populate("sender", "name photographUrl avatar companyEmail role")
+      .lean();
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`thread_${task.sourceMessageId}`).emit(
+        "new_chat_thread_reply",
+        populatedReply
+      );
+      const conversationId = String(parentMsg.conversation);
+      const spaceId = parentMsg.space ? String(parentMsg.space) : null;
+      let target = io.to(`conversation_${conversationId}`);
+      if (spaceId) target = target.to(`space_${spaceId}`);
+      target.emit("chat_thread_updated", {
+        parentMessageId: String(task.sourceMessageId),
+        conversationId,
+        spaceId,
+        lastReply: populatedReply,
+      });
+    }
+  } catch (e) {
+    console.error("task thread entry error:", e.message);
   }
 };
 
@@ -90,6 +135,25 @@ exports.createTask = async (req, res) => {
         taskId: String(task._id),
         createdAt: task.createdAt,
       });
+
+      // Mirror Google Chat: the task creation shows up inside the message's
+      // thread ("Created a task (via Tasks)"), so the thread chat covers it.
+      await postTaskThreadEntry(
+        req,
+        task,
+        `Created a task (via Tasks)\n${task.title}`
+      );
+      // Assigned right at creation → announce that in the thread too
+      if (Array.isArray(task.assignees) && task.assignees.length > 0) {
+        const names = task.assignees
+          .map((a) => `@${a.name || "member"}`)
+          .join(", ");
+        await postTaskThreadEntry(
+          req,
+          task,
+          `Assigned a task to ${names} (via Tasks)`
+        );
+      }
     }
     notifyAssignees(req, task, task.assignees, req.employee._id);
     return res.status(201).json({ task });
@@ -127,11 +191,70 @@ exports.updateTask = async (req, res) => {
         (a) => !prevAssignees.includes(String(a._id)),
       );
       notifyAssignees(req, populated, newlyAdded, req.employee._id);
+      // Announce (re)assignment in the source message's thread, Google-Chat style
+      if (newlyAdded.length > 0) {
+        const names = newlyAdded.map((a) => `@${a.name || "member"}`).join(", ");
+        await postTaskThreadEntry(
+          req,
+          populated,
+          `Assigned a task to ${names} (via Tasks)`
+        );
+      }
     }
     return res.json({ task: populated });
   } catch (e) {
     console.error("updateTask error:", e);
     return res.status(500).json({ error: "Failed to update task" });
+  }
+};
+
+// ── Task comments (thread chat on a task) ──────────────────────────────────
+exports.getTaskComments = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    if (!mongoose.isValidObjectId(taskId))
+      return res.status(400).json({ error: "Invalid task id" });
+    const comments = await ChatTaskComment.find({ taskId })
+      .sort({ createdAt: 1 })
+      .populate({ path: "sender", select: "_id name companyEmail photographUrl avatar" })
+      .lean();
+    return res.json({ comments });
+  } catch (e) {
+    console.error("getTaskComments error:", e);
+    return res.status(500).json({ error: "Failed to load comments" });
+  }
+};
+
+exports.addTaskComment = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { content } = req.body;
+    if (!mongoose.isValidObjectId(taskId))
+      return res.status(400).json({ error: "Invalid task id" });
+    if (!content || !content.trim())
+      return res.status(400).json({ error: "Content is required" });
+    const task = await ChatTask.findById(taskId);
+    if (!task) return res.status(404).json({ error: "Task not found" });
+
+    let comment = await ChatTaskComment.create({
+      taskId,
+      chatId: task.chatId,
+      sender: req.employee._id,
+      content: content.trim(),
+    });
+    comment = await comment.populate({
+      path: "sender",
+      select: "_id name companyEmail photographUrl avatar",
+    });
+
+    emit(req, "chat_task_comment_added", task.chatId, {
+      taskId: String(taskId),
+      comment,
+    });
+    return res.status(201).json({ comment });
+  } catch (e) {
+    console.error("addTaskComment error:", e);
+    return res.status(500).json({ error: "Failed to add comment" });
   }
 };
 
@@ -149,6 +272,10 @@ exports.deleteTask = async (req, res) => {
         emit(req, "chat_task_deleted", task.chatId, { taskId: String(s._id) })
       );
     }
+    // Comments go with their tasks
+    await ChatTaskComment.deleteMany({
+      taskId: { $in: [taskId, ...subtasks.map((s) => s._id)] },
+    });
     return res.json({ success: true });
   } catch (e) {
     console.error("deleteTask error:", e);
