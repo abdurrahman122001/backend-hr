@@ -205,6 +205,16 @@ router.get(
 
 // Space details
 router.get("/spaces/:spaceId/details", empAuth, chatController.getSpaceDetails);
+router.get(
+  "/spaces/:spaceId/notifications",
+  empAuth,
+  chatController.getSpaceNotificationSettings
+);
+router.put(
+  "/spaces/:spaceId/notifications",
+  empAuth,
+  chatController.updateSpaceNotificationSettings
+);
 router.post("/spaces/:spaceId/leave", empAuth, chatController.leaveSpace);
 router.post(
   "/spaces/:spaceId/transfer-ownership",

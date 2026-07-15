@@ -2827,6 +2827,65 @@ exports.updateMemberRole = async (req, res) => {
   }
 };
 
+exports.getSpaceNotificationSettings = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const employeeId = req.employee?._id;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findOne({ _id: spaceId, members: employeeId })
+      .select("notificationSettings")
+      .lean();
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    const setting = (space.notificationSettings || []).find(
+      (entry) => String(entry.employee) === String(employeeId)
+    );
+    res.json({ success: true, level: setting?.level || "main" });
+  } catch (error) {
+    console.error("Get space notification settings error:", error);
+    res.status(500).json({ success: false, error: "Failed to load notification settings" });
+  }
+};
+
+exports.updateSpaceNotificationSettings = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    const employeeId = req.employee?._id;
+    const { level } = req.body;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+    if (!["all", "main", "none"].includes(level)) {
+      return res.status(400).json({ success: false, error: "Invalid notification level" });
+    }
+
+    const space = await Space.findOne({ _id: spaceId, members: employeeId });
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    space.notificationSettings = (space.notificationSettings || []).filter(
+      (entry) => String(entry.employee) !== String(employeeId)
+    );
+    space.notificationSettings.push({
+      employee: employeeId,
+      level,
+      updatedAt: new Date(),
+    });
+    await space.save();
+
+    res.json({ success: true, level });
+  } catch (error) {
+    console.error("Update space notification settings error:", error);
+    res.status(500).json({ success: false, error: "Failed to update notification settings" });
+  }
+};
+
 exports.getSpaceDetails = async (req, res) => {
   try {
     const { spaceId } = req.params;
