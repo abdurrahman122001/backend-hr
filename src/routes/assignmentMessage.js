@@ -120,6 +120,9 @@ router.get("/thread/:threadId", filterCtrl.getMessagesByThread);
 // ✅ ATTACHMENT ROUTES (keep these last)
 // =============================
 router.get("/:id/attachments", filterCtrl.listAttachments);
+// Streams a single inbound-email attachment (stored as a base64 data URI on
+// the message) — thread responses link here instead of embedding the data.
+router.get("/:id/attachment/:attId", filterCtrl.downloadInlineAttachment);
 router.post(
   "/:id/attachments",
   upload.array("files", 50),

@@ -2086,11 +2086,30 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
       AssignmentMessage.countDocuments(qFinal),
     ]);
 
-    // Add direct message flag
-    const normalizedItems = items.map((item) => ({
-      ...item,
-      isDirectMessage: !item.client,
-    }));
+    // Add direct message flag + slim inbound-email attachments: whole files
+    // are stored as base64 `data:` URIs on the message, which made loading a
+    // thread ship megabytes of JSON. Point the URL at the streaming endpoint
+    // instead; the download handler fetches it with auth like any relative URL.
+    const normalizedItems = items.map((item) => {
+      if (Array.isArray(item.attachments) && item.attachments.length > 0) {
+        item.attachments = item.attachments.map((a) =>
+          a && typeof a.url === "string" && a.url.startsWith("data:")
+            ? {
+                ...a,
+                url: `/assignment-messages/${item._id}/attachment/${a._id}`,
+                hasInlineData: true,
+              }
+            : a
+        );
+      }
+      if (item.emailMetadata && item.emailMetadata.headers) {
+        delete item.emailMetadata.headers;
+      }
+      return {
+        ...item,
+        isDirectMessage: !item.client,
+      };
+    });
 
     res.json({
       items: normalizedItems,
@@ -2104,6 +2123,63 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
   } catch (e) {
     console.error("Error in getMessagesByThread:", e);
     res.status(500).json({ error: "Failed to fetch thread messages" });
+  }
+};
+
+// GET /assignment-messages/:id/attachment/:attId
+// Streams an inbound-email attachment that is stored as a base64 data URI on
+// the message document. Thread responses replace those URIs with this URL so
+// the thread JSON stays small; the file is only transferred when downloaded.
+exports.downloadInlineAttachment = async function downloadInlineAttachment(
+  req,
+  res
+) {
+  try {
+    const { id, attId } = req.params;
+    if (!isObjId(id)) {
+      return res.status(400).json({ error: "Invalid message id" });
+    }
+
+    // Same visibility rules as reading the thread itself.
+    const visibleQuery = await applyVisibility({ _id: oid(id) }, req);
+    const msg = await AssignmentMessage.findOne(visibleQuery)
+      .select("attachments")
+      .lean();
+    if (!msg) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    const att = (msg.attachments || []).find(
+      (a) => String(a._id) === String(attId)
+    );
+    if (!att || typeof att.url !== "string") {
+      return res.status(404).json({ error: "Attachment not found" });
+    }
+
+    if (att.url.startsWith("data:")) {
+      const comma = att.url.indexOf(",");
+      const meta = comma > 5 ? att.url.slice(5, comma) : "";
+      const mime =
+        (meta.split(";")[0] || att.mimetype || "application/octet-stream").trim() ||
+        "application/octet-stream";
+      const buf = Buffer.from(att.url.slice(comma + 1), "base64");
+      const name = encodeURIComponent(
+        att.originalName || att.filename || "attachment"
+      );
+      res.set({
+        "Content-Type": mime,
+        "Content-Length": String(buf.length),
+        "Content-Disposition": `attachment; filename="${name}"; filename*=UTF-8''${name}`,
+        "Cache-Control": "private, max-age=86400",
+      });
+      return res.send(buf);
+    }
+
+    // Uploaded-file attachments keep their static/absolute URL — redirect.
+    return res.redirect(att.url);
+  } catch (e) {
+    console.error("Error in downloadInlineAttachment:", e);
+    res.status(500).json({ error: "Failed to download attachment" });
   }
 };
 // Tiny in-memory cache for the sidebar/header badge counts. On the Email view

@@ -583,6 +583,30 @@ async function emitToSpecificReceivers(
   }
 }
 /** ---------- TARGETED MESSAGE EMISSION (REPLACES BROADCAST) ---------- **/
+// Slim a message for socket emits / JSON responses: inbound emails store whole
+// attachment files as base64 `data:` URIs — broadcasting those to every
+// participant serializes megabytes per emit. Point the URL at the streaming
+// endpoint instead (same shape the thread endpoint returns).
+function slimEmailDoc(doc) {
+  if (!doc) return doc;
+  const m = typeof doc.toObject === "function" ? doc.toObject() : { ...doc };
+  if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+    m.attachments = m.attachments.map((a) =>
+      a && typeof a.url === "string" && a.url.startsWith("data:")
+        ? {
+            ...a,
+            url: `/assignment-messages/${m._id}/attachment/${a._id}`,
+            hasInlineData: true,
+          }
+        : a
+    );
+  }
+  if (m.emailMetadata && m.emailMetadata.headers) {
+    delete m.emailMetadata.headers;
+  }
+  return m;
+}
+
 async function emitToAssignmentClients(
   io,
   message,
@@ -610,13 +634,17 @@ async function emitToAssignmentClients(
 }
 async function emitMessageUpdate(io, message, action) {
   try {
-    const populatedMessage = await AssignmentMessage.findById(message._id)
-      .populate("owner")
-      .populate("sender")
-      .populate("receiver")
-      .populate("client");
+    // Trimmed populates + slim emit payload: the old unselected populates
+    // pulled the full owner/sender/receiver/client docs, and the raw message
+    // carries base64 attachment data — both made this refetch/emit slow.
+    const populatedDoc = await AssignmentMessage.findById(message._id)
+      .populate("owner", "_id name companyEmail")
+      .populate("sender", "_id name companyEmail role designation")
+      .populate("receiver", "_id name companyEmail role designation")
+      .populate("client", "_id clientName photographUrl");
 
-    if (!populatedMessage) return;
+    if (!populatedDoc) return;
+    const populatedMessage = slimEmailDoc(populatedDoc);
 
     // 🔥 CRITICAL: Only get actual participants, not thread participants
     const actualParticipants = new Set();
@@ -919,6 +947,13 @@ exports.listMessagesForManager = async function listMessagesForManager(
 };
 
 
+// Fields createMessage actually reads off thread/original messages when
+// routing a reply. Everything else (note HTML, base64 attachments,
+// emailMetadata) is dead weight for this path.
+const THREAD_ROUTING_FIELDS =
+  "_id threadId sender receiver subject client role approvalStatus " +
+  "isFromClient isFromCompanyEmployee clientEmployeeName clientEmployeeEmail clientName createdAt";
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -971,11 +1006,15 @@ exports.createMessage = async function createMessage(req, res) {
     if (providedThreadId || replyTo) {
       try {
         if (providedThreadId) {
+          // Select only routing/inheritance fields — full docs drag in base64
+          // attachment data URIs (megabytes per inbound email), which was the
+          // main reason sending a reply was slow.
           threadMessages = await AssignmentMessage.find({
             threadId: providedThreadId,
           })
             .sort({ createdAt: -1 })
             .limit(50)
+            .select(THREAD_ROUTING_FIELDS)
             .lean();
           isNewThread = threadMessages.length === 0;
 
@@ -1005,7 +1044,9 @@ exports.createMessage = async function createMessage(req, res) {
         }
 
         if (replyTo) {
-          originalMessage = await AssignmentMessage.findById(replyTo).lean();
+          originalMessage = await AssignmentMessage.findById(replyTo)
+            .select(THREAD_ROUTING_FIELDS)
+            .lean();
           if (originalMessage && !providedThreadId) {
             threadId = originalMessage.threadId;
             threadMessages = await AssignmentMessage.find({
@@ -1013,6 +1054,7 @@ exports.createMessage = async function createMessage(req, res) {
             })
               .sort({ createdAt: -1 })
               .limit(50)
+              .select(THREAD_ROUTING_FIELDS)
               .lean();
             isNewThread = false;
 
@@ -1143,12 +1185,23 @@ exports.createMessage = async function createMessage(req, res) {
     let clientDoc = null;
     let isSenderAssigned = false;
     let assignedToIds = [];
+    let senderHasCrmAccess = false;
+
+    // One parallel fetch instead of two sequential findTLsAndManagersByOwner
+    // calls (here and again further down) plus a separate client lookup.
+    const [tlsAndManagers, clientDocFetched] = await Promise.all([
+      findTLsAndManagersByOwner(owner),
+      client && isObjId(client)
+        ? ClientInfo.findById(client)
+            .populate("assignedTo", "_id role")
+            .select("supervision assignedTo supervisedBy")
+            .lean()
+        : Promise.resolve(null),
+    ]);
+    const { tls, managers } = tlsAndManagers;
 
     if (client && isObjId(client)) {
-      clientDoc = await ClientInfo.findById(client)
-        .populate("assignedTo", "_id role")
-        .select("supervision assignedTo supervisedBy")
-        .lean();
+      clientDoc = clientDocFetched;
 
       if (clientDoc) {
         clientSupervisionMode = clientDoc.supervision || "direct";
@@ -1164,7 +1217,7 @@ exports.createMessage = async function createMessage(req, res) {
         // delivered to the CRM (manager) — NOT the assigned junior/sub-junior.
         // Only when the sender IS assigned (their own client), or is themselves
         // the sole/top CRM, do we keep adding the assigned team members.
-        const { managers: ownerManagerIds } = await findTLsAndManagersByOwner(owner);
+        const ownerManagerIds = managers;
         const otherManagerIds = ownerManagerIds.filter((id) => id !== String(sender));
         // CRM authority is access-based, not role-based: the sender may hold CRM
         // access (ownerManagerIds = CRM-access users + rootManager) without the
@@ -1173,7 +1226,7 @@ exports.createMessage = async function createMessage(req, res) {
         // another (top) CRM. The old role-only `senderIsTopCrm` check failed for
         // access-based CRM users, which is why a reply to the assigned employee
         // also got delivered to the top CRM (rootManager).
-        const senderHasCrmAccess = ownerManagerIds.includes(String(sender));
+        senderHasCrmAccess = ownerManagerIds.includes(String(sender));
         const senderIsTopCrm =
           (senderRole === "manager" || senderHasCrmAccess) &&
           otherManagerIds.length === 0;
@@ -1216,13 +1269,15 @@ exports.createMessage = async function createMessage(req, res) {
       if (
         inheritedIsFromClient ||
         inheritedIsFromCompanyEmployee ||
-        isFromClient ||
-        isFromCompanyEmployee
+        ((isFromClient || isFromCompanyEmployee) &&
+          (senderRole === "manager" || senderHasCrmAccess))
       ) {
         // Client-originated emails are outside the approval flow entirely —
         // store null (like inbound IMAP client emails), not "approved".
-        // Checked on the raw body flags too: inherited* is manager-gated, but
-        // CRM-access senders with other roles also send on the client's behalf.
+        // The raw body flags only count for manager/CRM-access senders: the
+        // reply composer inherits isFromClient from the original message, so
+        // an ungated check let a junior's reply to a client-inbound email
+        // skip the needs_approval → pending supervision path below.
         approvalStatus = null;
       } else if (clientSupervisionMode === "needs_approval" &&
                  (isSenderAssigned || senderRole === "employee")) {
@@ -1253,7 +1308,7 @@ exports.createMessage = async function createMessage(req, res) {
     // Simplified assignedTo handling - already handled above in the consolidated clientDoc fetch
     let assignedTeamMemberId = assignedToIds[0] || null;
 
-    const { tls, managers } = await findTLsAndManagersByOwner(owner);
+    // tls/managers already fetched above (single findTLsAndManagersByOwner call)
 
     // Re-evaluate threadHasTeamLead now that tls is available
     if (threadMessages.length > 0) {
@@ -2215,8 +2270,11 @@ exports.approveMessage = async function approveMessage(req, res) {
     let approvedClientEmployeeMessages = [];
     if (approvalFinalized && msg.threadId) {
       try {
-        // Find all messages in the same thread from client employees that are pending
-        const clientEmployeeMessages = await AssignmentMessage.find({
+        // Auto-approve pending client/client-employee messages in the thread.
+        // Single updateMany instead of load-full-doc + save per message: those
+        // docs carry base64 attachment data, so the old loop pulled megabytes
+        // and wrote them back one by one — a major part of the approve delay.
+        const pendingClientQuery = {
           threadId: msg.threadId,
           approvalStatus: "pending",
           $or: [
@@ -2225,17 +2283,23 @@ exports.approveMessage = async function approveMessage(req, res) {
             { senderType: "client" }
           ],
           _id: { $ne: msg._id } // Exclude the current message being approved
-        });
+        };
+        const pendingIds = await AssignmentMessage.find(pendingClientQuery)
+          .select("_id")
+          .lean();
 
-        if (clientEmployeeMessages.length > 0) {
-          // Update all client employee messages to approved
-          for (const clientMsg of clientEmployeeMessages) {
-            clientMsg.approvalStatus = "approved";
-            clientMsg.approvedAt = new Date();
-            clientMsg.approvedBy = req.employee._id;
-            await clientMsg.save();
-            approvedClientEmployeeMessages.push(clientMsg._id);
-          }
+        if (pendingIds.length > 0) {
+          await AssignmentMessage.updateMany(
+            { _id: { $in: pendingIds.map((d) => d._id) } },
+            {
+              $set: {
+                approvalStatus: "approved",
+                approvedAt: new Date(),
+                approvedBy: req.employee._id,
+              },
+            }
+          );
+          approvedClientEmployeeMessages = pendingIds.map((d) => d._id);
         }
       } catch (err) {
         console.error("❌ Error auto-approving client employee messages:", err);
@@ -2257,6 +2321,10 @@ exports.approveMessage = async function approveMessage(req, res) {
         populate: { path: "approver", select: "_id name role designation", model: "Employee" },
       },
     ]);
+
+    // Full doc (with real attachments) goes to SMTP; sockets/response get the
+    // slim copy so ten approvals don't broadcast megabytes of base64 each.
+    const slimPopulated = slimEmailDoc(populated);
 
     // Final approval reached: deliver the reply to the client's real mailbox via
     // SMTP. Fire-and-forget — an SMTP failure must not fail the approval itself.
@@ -2294,7 +2362,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           });
         }
         // Also emit to the client-specific room if anyone is joined
-        io.to(`assignment_client_${clientId}`).emit("new_assignment_message", populated);
+        io.to(`assignment_client_${clientId}`).emit("new_assignment_message", slimPopulated);
       }
 
       // Add all current receivers (could be next level supervisors)
@@ -2313,7 +2381,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       // Emit status-update events to ALL involved users (including the approver)
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("assignment_message_updated", {
-          message: populated,
+          message: slimPopulated,
           type: "message_updated",
           action: hasNextLevel ? "approved_to_next_level" : "approved",
           approvedBy: req.employee._id,
@@ -2325,7 +2393,7 @@ exports.approveMessage = async function approveMessage(req, res) {
         io.to(`employee_${userId}`).emit("assignment_message_approved", {
           messageId: populated._id,
           approvalStatus: populated.approvalStatus,
-          message: populated,
+          message: slimPopulated,
           isNewMessage: true,
           approvedBy: {
             _id: req.employee._id,
@@ -2341,7 +2409,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       // The approver already knows about this message; sending it to them creates a spurious notification
       allInvolvedUsers.forEach((userId) => {
         if (userId === approverId) return;
-        io.to(`employee_${userId}`).emit("new_assignment_message", populated);
+        io.to(`employee_${userId}`).emit("new_assignment_message", slimPopulated);
       });
 
       // Notify assignment managers if completely finalized
@@ -2349,7 +2417,7 @@ exports.approveMessage = async function approveMessage(req, res) {
         io.to("assignment_managers").emit("assignment_message_approved", {
           messageId: populated._id,
           approvalStatus: "approved",
-          message: populated,
+          message: slimPopulated,
           action: "approved",
           isNewMessage: true,
           timestamp: new Date(),
@@ -2360,7 +2428,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     return res.json({
       success: true,
       message: responseStatusMessage,
-      data: populated,
+      data: slimPopulated,
       hasNextLevel: hasNextLevel,
       nextSupervisors: hasNextLevel ? nextSupervisors : [],
     });
@@ -2493,6 +2561,10 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       },
     ]);
 
+    // Sockets/response get the slim copy (base64 attachment data replaced by
+    // streaming-endpoint URLs) — same reason as approveMessage.
+    const slimPopulated = slimEmailDoc(populated);
+
     // 🔥 FIXED: Emit specific disapproval event
     const io = getIO(req);
     if (io) {
@@ -2527,7 +2599,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
       const disapprovalPayload = {
         messageId: String(populated._id),
         approvalStatus: "disapproved",
-        message: populated,
+        message: slimPopulated,
         disapprovedBy: {
           _id: req.employee._id,
           name: req.employee.name,
@@ -2545,7 +2617,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         );
 
         // Also update the email list view
-        io.to(`employee_${participantId}`).emit("new_assignment_message", populated);
+        io.to(`employee_${participantId}`).emit("new_assignment_message", slimPopulated);
       });
 
       await emitMessageUpdate(io, msg, "disapproved");
@@ -2554,7 +2626,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
     res.json({
       success: true,
       message: "Message disapproved successfully",
-      data: populated,
+      data: slimPopulated,
       disapprovalNote: msg.disapprovalNote,
     });
   } catch (e) {
