@@ -246,6 +246,7 @@ exports.updateTask = async (req, res) => {
 
     // Remember who was already assigned so we only notify NEW assignees.
     const prevAssignees = (task.assignees || []).map((a) => String(a));
+    const prevDone = task.done;
 
     const { title, details, dueAt, assignees, done } = req.body;
     if (typeof title === "string" && title.trim()) task.title = title.trim();
@@ -275,6 +276,16 @@ exports.updateTask = async (req, res) => {
           `Assigned a task to ${names} (via Tasks)`
         );
       }
+    }
+    // Announce completion/reopen in the task's thread, Google-Chat style
+    if (typeof done === "boolean" && done !== prevDone) {
+      await postTaskThreadEntry(
+        req,
+        populated,
+        done
+          ? `Completed a task (via Tasks)\n${populated.title}`
+          : `Reopened a task (via Tasks)\n${populated.title}`
+      );
     }
     return res.json({ task: populated });
   } catch (e) {
