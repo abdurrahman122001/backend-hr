@@ -110,11 +110,17 @@ cron.schedule("45 23 * * *", async () => {
                     const available = totalEntitled - usedPaid;
 
                     if (available < daysToDeduct) {
-                        // Not enough leave balance - Mark as Absent as per user request
-                        attendanceStatus = "Absent";
-                        sessionStatus = "absent";
                         finalIsPaid = false;
-                        console.log(`[LeaveSync] Employee ${employeeId} has insufficient balance (${available}). Marking as Absent.`);
+                        if (dateEntry.type === "half") {
+                            // Zero-leave employees stay UNPAID half day even when the
+                            // leave was approved by all seniors — do not flip to Absent.
+                            console.log(`[LeaveSync] Employee ${employeeId} has insufficient balance (${available}). Half day stays UNPAID.`);
+                        } else {
+                            // Not enough leave balance - Mark as Absent as per user request
+                            attendanceStatus = "Absent";
+                            sessionStatus = "absent";
+                            console.log(`[LeaveSync] Employee ${employeeId} has insufficient balance (${available}). Marking as Absent.`);
+                        }
                     }
                 }
 

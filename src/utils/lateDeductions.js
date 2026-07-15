@@ -6,6 +6,7 @@ const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const SalarySlip = require("../models/SalarySlip");
 const Employee = require("../models/Employees");
+const ApplyLeave = require("../models/ApplyLeave");
 const { decrypt, encrypt } = require("./encryption");
 const { logAttendanceChange } = require("./attendanceLogger");
 
@@ -613,6 +614,42 @@ async function applyRealTimeLateDeduction(employeeId, ownerId, userId, attendanc
 }
 
 /**
+ * Check if the employee has a fully-approved leave request covering the given
+ * date. A half day triggered by late login / early logout is only PAID when a
+ * leave was applied and approved through the full senior approval chain
+ * (status "approved" / "auto_approved"); otherwise it defaults to UNPAID.
+ */
+async function hasApprovedLeaveForDate(employeeId, attendanceDate) {
+  try {
+    const dateStr = new Date(attendanceDate).toISOString().split("T")[0];
+    const dayStart = new Date(`${dateStr}T00:00:00.000Z`);
+    const dayEnd = new Date(`${dateStr}T23:59:59.999Z`);
+
+    const leaves = await ApplyLeave.find({
+      employee: employeeId,
+      status: { $in: ["approved", "auto_approved"] },
+      isTrashed: { $ne: true },
+      isPaid: true,
+      startDate: { $lte: dayEnd },
+      endDate: { $gte: dayStart },
+    }).lean();
+
+    return (
+      leaves.find((leave) =>
+        (leave.dates || []).some((d) => {
+          const dStr = new Date(d.date).toISOString().split("T")[0];
+          // half-day or full-day approved leave covering this date counts
+          return dStr === dateStr && (d.type === "half" || d.type === "full");
+        })
+      ) || null
+    );
+  } catch (err) {
+    console.error("[HALF-DAY] Error checking approved leave:", err);
+    return null;
+  }
+}
+
+/**
  * Apply real-time half-day deduction (0.5 leave or salary)
  * @param {ObjectId} attendanceId - The ID of the attendance record (optional)
  */
@@ -697,24 +734,44 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
       console.log(`[HALF-DAY] Previous deduction was reversed for ${employeeId} on ${attendanceDate}. Creating new deduction.`);
     }
 
-    // ✅ LOGIC: Check leave balance
-    // If employee has NO leaves (entitlementLeft < 0.5) → Mark as UNPAID & Deduct from Salary
-    // If employee HAS leaves (entitlementLeft >= 0.5) → Mark as PAID & Deduct from Leaves
-    const hasLeaves = entitlementLeft >= 0.5;
-    
-    if (!forceUnpaid && hasLeaves) {
-      // Employee HAS leaves → Use paid leave (0.5 day)
-      balance.usedPaid += 0.5;
-      await LeaveTransaction.create({
-        owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
-        year: leaveYear, date: new Date(attendanceDate), type: "PAID_LEAVE_USED", value: 0.5,
-        reason: "Half Day Login",
-        sourceModel: "Attendance",
-        sourceId: attendanceId,
-        createdBy: userId
-      });
+    // ✅ LOGIC: Default is UNPAID half day.
+    // Only mark PAID (deduct from leave balance) when the employee applied a
+    // leave for this date AND it was approved by all seniors, AND they have
+    // leave balance. An employee with ZERO leaves stays UNPAID even when the
+    // leave was approved by all seniors.
+    const approvedLeave = await hasApprovedLeaveForDate(employeeId, attendanceDate);
+    const hasApprovedLeave = !!approvedLeave;
+
+    // If approveLeave already consumed the balance for this leave, the 0.5 is
+    // reflected in usedPaid — so "has balance" means not in debt (>= 0);
+    // otherwise the employee must still have 0.5 available to consume now.
+    const alreadyDeductedAtApproval = hasApprovedLeave
+      ? await LeaveTransaction.exists({
+          employee: employeeId,
+          sourceModel: "ApplyLeave",
+          sourceId: approvedLeave._id,
+          type: "PAID_LEAVE_USED",
+        })
+      : false;
+    const hasLeaves = alreadyDeductedAtApproval ? entitlementLeft >= 0 : entitlementLeft >= 0.5;
+
+    if (!forceUnpaid && hasLeaves && hasApprovedLeave) {
+      // Approved leave covers this date → PAID half day. If the balance was
+      // already consumed at approval time, only stamp the attendance as Paid —
+      // do NOT deduct another 0.5.
+      if (!alreadyDeductedAtApproval) {
+        balance.usedPaid += 0.5;
+        await LeaveTransaction.create({
+          owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
+          year: leaveYear, date: new Date(attendanceDate), type: "PAID_LEAVE_USED", value: 0.5,
+          reason: "Half Day Login",
+          sourceModel: "Attendance",
+          sourceId: attendanceId,
+          createdBy: userId
+        });
+      }
       await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Paid" } });
-      console.log(`[HALF-DAY] ${employee.name}: Used 0.5 paid leaves`);
+      console.log(`[HALF-DAY] ${employee.name}: Paid half day${alreadyDeductedAtApproval ? " (balance already deducted at approval)" : " — used 0.5 paid leaves"}`);
     } else {
       // Employee has ZERO leaves OR forced unpaid → Deduct from salary & Mark as UNPAID
       const Salaries = require("../models/Salaries");
@@ -731,14 +788,20 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
         await LeaveTransaction.create({
           owner: ownerId, employee: employeeId, leaveYearBalance: balance._id,
           year: leaveYear, date: new Date(attendanceDate), type: "UNPAID_LEAVE_USED", value: 0.5,
-          reason: !hasLeaves ? "Half Day (Zero Leave Balance - Unpaid)" : forceUnpaid ? "Half Day (Forced Unpaid)" : "Half Day Login",
+          reason: !hasLeaves
+          ? "Half Day (Zero Leave Balance - Unpaid)"
+          : forceUnpaid
+            ? "Half Day (Forced Unpaid)"
+            : !hasApprovedLeave
+              ? "Half Day (No Approved Leave - Unpaid)"
+              : "Half Day Login",
           sourceModel: "System",
           sourceId: attendanceId,
           createdBy: userId
         });
       }
       await Attendance.updateOne({ owner: ownerId, employee: employeeId, date: attendanceDate }, { $set: { leaveType: "Unpaid" } });
-      const reason = !hasLeaves ? "(No leave balance)" : forceUnpaid ? "(FORCED UNPAID)" : "";
+      const reason = !hasLeaves ? "(No leave balance)" : forceUnpaid ? "(FORCED UNPAID)" : !hasApprovedLeave ? "(No approved leave)" : "";
       console.log(`[HALF-DAY] ${employee.name}: Deducted 0.5 day salary ${reason}`);
     }
     await balance.save();

@@ -194,19 +194,32 @@ cron.schedule("*/10 * * * * *", async () => {
         }
 
         // Update attendance record
+        const attendanceUpdate = {
+          logoutTime: logoutTimeUTC,
+          checkOut: actualLogoutTime,
+          status: finalStatus,
+          totalHours: parseFloat(totalHours.toFixed(2)),
+          // If finalStatus is Half Day (penalised), save the pre-penalty status so reactivation
+          // restores the employee to what they were before the half-day was applied.
+          // If finalStatus was upgraded (e.g. Half Day → Present), save the upgraded status
+          // so reactivation doesn't roll it back to the old Half Day.
+          originalStatus: finalStatus === "Half Day" ? originalStatusBeforeLogout : finalStatus
+        };
+
+        // Default a Half Day to UNPAID unless the deduction logic already marked
+        // it Paid (which only happens when a leave was applied for this date and
+        // approved by all seniors — see applyRealTimeHalfDayDeduction).
+        if (finalStatus === "Half Day") {
+          const freshLeaveType = await Attendance.findById(attendance._id).select("leaveType").lean();
+          if (!freshLeaveType?.leaveType) {
+            attendanceUpdate.leaveType = "Unpaid";
+            console.log(`ℹ️ [SESSION-TIMEOUT-CRON] ${employeeName} Half Day defaulted to Unpaid (no approved leave / no deduction marker)`);
+          }
+        }
+
         const updatedAttendance = await Attendance.findByIdAndUpdate(
           attendance._id,
-          {
-            logoutTime: logoutTimeUTC,
-            checkOut: actualLogoutTime,
-            status: finalStatus,
-            totalHours: parseFloat(totalHours.toFixed(2)),
-            // If finalStatus is Half Day (penalised), save the pre-penalty status so reactivation
-            // restores the employee to what they were before the half-day was applied.
-            // If finalStatus was upgraded (e.g. Half Day → Present), save the upgraded status
-            // so reactivation doesn't roll it back to the old Half Day.
-            originalStatus: finalStatus === "Half Day" ? originalStatusBeforeLogout : finalStatus
-          },
+          attendanceUpdate,
           { new: true }
         );
 

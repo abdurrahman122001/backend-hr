@@ -1160,6 +1160,35 @@ exports.approveLeave = async (req, res) => {
     }
 
     // FINAL APPROVAL LOGIC
+
+    // Zero-balance rule: an employee with no (or insufficient) leave balance
+    // stays UNPAID even when the leave was approved by all seniors — full-day
+    // and half-day alike. The approval itself still goes through; only the
+    // payment status is forced to unpaid (salary deduction instead of balance).
+    if (finalIsPaid) {
+      try {
+        const balanceYear = getLeaveYear(leave.startDate);
+        const bal = await LeaveYearBalance.findOne({
+          employee: leave.employee._id || leave.employee,
+          year: balanceYear,
+        }).lean();
+        const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
+        const availableBalance = totalEntitled - Number(bal?.usedPaid || 0);
+        const willConsume = (leave.dates || []).reduce((sum, d) => {
+          if (d.type === "early_leave" || d.type === "late") return sum;
+          return sum + (d.type === "half" ? 0.5 : 1);
+        }, 0);
+
+        if (willConsume > 0 && availableBalance < willConsume) {
+          finalIsPaid = false;
+          paymentNotes = `Auto-converted to UNPAID: insufficient leave balance (available ${availableBalance}, needed ${willConsume})`;
+          console.log(`[LEAVE-APPROVE] ${leave.employee?.name || leave.employee}: ${paymentNotes}`);
+        }
+      } catch (balErr) {
+        console.error("⚠️ Error checking leave balance for zero-balance rule:", balErr);
+      }
+    }
+
     leave.status = "approved";
     leave.approvedBy = approverId;
     leave.approvedDate = new Date();
@@ -1339,6 +1368,70 @@ exports.approveLeave = async (req, res) => {
         // 0.5, not promoted to a full "Leave"/paid day.
         const isHalfDay = dateObj.type === "half";
         const leaveStatus = isHalfDay ? "Half Day" : "Leave";
+
+        // Existing half-day attendance handling:
+        // - UNPAID half day (auto default from late login / early logout):
+        //   reverse the prior salary deduction and upgrade to PAID below —
+        //   the approval flow already applied its own paid consumption.
+        // - Already PAID half day: leave the attendance record exactly as-is
+        //   (no reversal, no re-save) so it isn't double-touched.
+        const isExistingHalfDay = attendance && attendance.status === "Half Day";
+        const isAlreadyPaidHalfDay = isExistingHalfDay && attendance.leaveType === "Paid";
+        const isUnpaidHalfDay = isExistingHalfDay && attendance.leaveType === "Unpaid";
+
+        if (isAlreadyPaidHalfDay) {
+          // Status stays the same — nothing to change for this date.
+          continue;
+        }
+
+        // Half-day leave dates are NOT pre-marked at approval time. The paid
+        // half day is stamped when the actual trigger happens — login after
+        // 6 PM or logout before 9 PM — by applyRealTimeHalfDayDeduction, which
+        // sees the approved leave and marks it Paid. If the employee never
+        // triggers a half day, leaveSyncCron settles the day at 23:45.
+        // The only exception is an existing UNPAID half day (deduction already
+        // applied before approval) — that one is reversed and upgraded below.
+        if (isHalfDay && !isUnpaidHalfDay) {
+          continue;
+        }
+
+        if (isUnpaidHalfDay) {
+          // Zero-leave employees stay UNPAID even when all seniors approved:
+          // only upgrade to Paid when the leave is paid AND the balance isn't
+          // exhausted (approval consumption above already counted in usedPaid,
+          // so "has balance" = not in debt).
+          let hasBalanceForUpgrade = false;
+          if (finalIsPaid) {
+            try {
+              const upgradeYear = getLeaveYear(dateStr);
+              const bal = await LeaveYearBalance.findOne({
+                employee: leave.employee._id || leave.employee,
+                year: upgradeYear,
+              }).lean();
+              const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
+              hasBalanceForUpgrade = totalEntitled - Number(bal?.usedPaid || 0) >= 0;
+            } catch (balErr) {
+              console.error("⚠️ Error checking balance for half-day upgrade:", balErr);
+            }
+          }
+
+          if (!finalIsPaid || !hasBalanceForUpgrade) {
+            console.log(`[LEAVE-APPROVE] Half day on ${dateStr} stays UNPAID (${!finalIsPaid ? "leave is unpaid" : "zero leave balance"})`);
+            continue;
+          }
+
+          try {
+            const { reverseHalfDayDeduction } = require("../utils/lateDeductions");
+            await reverseHalfDayDeduction(
+              leave.employee._id || leave.employee,
+              leave.employee.owner || ownerId,
+              approverId,
+              dateStr
+            );
+          } catch (revErr) {
+            console.error("⚠️ Error reversing prior half-day deduction:", revErr);
+          }
+        }
 
         if (attendance) {
           // Update existing attendance - preserve original status if needed
