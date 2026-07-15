@@ -86,7 +86,7 @@ exports.createBug = async (req, res) => {
     // Populate reporter info for response
     await bug.populate({
       path: "reportedBy",
-      select: "name companyEmail department balance owner",
+      select: "name companyEmail department balance photographUrl owner",
       populate: {
         path: "owner",
         select: "name email",
@@ -240,7 +240,7 @@ exports.getBugs = async (req, res) => {
         Bug.find(query)
           .populate({
             path: "reportedBy",
-            select: "name companyEmail department balance owner",
+            select: "name companyEmail department balance photographUrl owner",
             populate: {
               path: "owner",
               select: "name email",
@@ -366,7 +366,7 @@ exports.getBugsByOwner = async (req, res) => {
     const bugs = await Bug.find(query)
       .populate({
         path: "reportedBy",
-        select: "name companyEmail department balance",
+        select: "name companyEmail department balance photographUrl",
         model: "Employee",
       })
       .sort({ createdAt: -1 })
@@ -522,7 +522,7 @@ exports.getBugById = async (req, res) => {
 
     const bug = await Bug.findById(id).populate({
       path: "reportedBy",
-      select: "name companyEmail department balance owner",
+      select: "name companyEmail department balance photographUrl owner",
       populate: {
         path: "owner",
         select: "name email",
@@ -665,7 +665,7 @@ exports.updateBug = async (req, res) => {
     await bug.save();
     await bug.populate({
       path: "reportedBy",
-      select: "name companyEmail department balance owner",
+      select: "name companyEmail department balance photographUrl owner",
       populate: {
         path: "owner",
         select: "name email",
@@ -821,7 +821,7 @@ exports.resolveBug = async (req, res) => {
 
       await bug.populate({
         path: "reportedBy",
-        select: "name companyEmail department balance owner",
+        select: "name companyEmail department balance photographUrl owner",
         populate: {
           path: "owner",
           select: "name email",
@@ -848,7 +848,7 @@ exports.resolveBug = async (req, res) => {
 
       await bug.populate({
         path: "reportedBy",
-        select: "name companyEmail department balance owner",
+        select: "name companyEmail department balance photographUrl owner",
         populate: {
           path: "owner",
           select: "name email",
@@ -883,7 +883,7 @@ exports.resolveBug = async (req, res) => {
 
       await bug.populate({
         path: "reportedBy",
-        select: "name companyEmail department balance owner",
+        select: "name companyEmail department balance photographUrl owner",
         populate: {
           path: "owner",
           select: "name email",
@@ -976,7 +976,7 @@ exports.approveBug = async (req, res) => {
 
     await bug.populate({
       path: "reportedBy",
-      select: "name companyEmail department balance owner",
+      select: "name companyEmail department balance photographUrl owner",
       populate: {
         path: "owner",
         select: "name email",
@@ -1053,7 +1053,7 @@ exports.updatePriority = async (req, res) => {
 
     await bug.populate({
       path: "reportedBy",
-      select: "name companyEmail department balance owner",
+      select: "name companyEmail department balance photographUrl owner",
       populate: {
         path: "owner",
         select: "name email",
@@ -1300,7 +1300,7 @@ exports.getOwnerDashboard = async (req, res) => {
     })
       .populate({
         path: "reportedBy",
-        select: "name department",
+        select: "name department photographUrl",
         model: "Employee",
       })
       .sort({ createdAt: -1 })

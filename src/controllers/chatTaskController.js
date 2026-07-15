@@ -7,6 +7,7 @@ const ChatTaskComment = require("../models/ChatTaskComment");
 const POPULATE = [
   { path: "assignees", select: "_id name companyEmail photographUrl avatar" },
   { path: "createdBy", select: "_id name companyEmail photographUrl avatar" },
+  { path: "reviewRequestedBy", select: "_id name companyEmail photographUrl avatar" },
 ];
 
 const emit = (req, event, chatId, payload) => {
@@ -247,6 +248,7 @@ exports.updateTask = async (req, res) => {
     // Remember who was already assigned so we only notify NEW assignees.
     const prevAssignees = (task.assignees || []).map((a) => String(a));
     const prevDone = task.done;
+    const prevInReview = !!task.inReview;
 
     const { title, details, dueAt, assignees, done } = req.body;
     if (typeof title === "string" && title.trim()) task.title = title.trim();
@@ -255,8 +257,26 @@ exports.updateTask = async (req, res) => {
     if (Array.isArray(assignees))
       task.assignees = assignees.filter((a) => mongoose.isValidObjectId(a));
     if (typeof done === "boolean") {
-      task.done = done;
-      task.completedAt = done ? new Date() : null;
+      const isCreator = String(task.createdBy) === String(req.employee._id);
+      if (done && !isCreator) {
+        // An assignee (or any non-creator) completing the task sends it to
+        // REVIEW — only the creator's completion actually closes it.
+        task.inReview = true;
+        task.reviewRequestedBy = req.employee._id;
+        task.reviewRequestedAt = new Date();
+        task.done = false;
+        task.completedAt = null;
+      } else {
+        // Creator completing (approving a review or closing directly), or
+        // anyone un-checking → also clears any pending review.
+        task.done = done;
+        task.completedAt = done ? new Date() : null;
+        task.inReview = false;
+        if (!done) {
+          task.reviewRequestedBy = null;
+          task.reviewRequestedAt = null;
+        }
+      }
     }
     await task.save();
     const populated = await task.populate(POPULATE);
@@ -277,14 +297,43 @@ exports.updateTask = async (req, res) => {
         );
       }
     }
-    // Announce completion/reopen in the task's thread, Google-Chat style
-    if (typeof done === "boolean" && done !== prevDone) {
+    // Announce completion / review / reopen in the task's thread, Google-Chat style
+    if (populated.inReview && !prevInReview) {
       await postTaskThreadEntry(
         req,
         populated,
-        done
+        `Submitted a task for review (via Tasks)\n${populated.title}`
+      );
+      // Ping the creator that this task awaits their review
+      try {
+        const io = req.app.get("io");
+        const creatorId = String(
+          populated.createdBy?._id || populated.createdBy
+        );
+        if (io && creatorId !== String(req.employee._id)) {
+          io.to(`user_${creatorId}`).emit("chat_task_review_requested", {
+            chatId: String(populated.chatId),
+            taskId: String(populated._id),
+            title: populated.title,
+            requestedByName: req.employee?.name || "Someone",
+          });
+        }
+      } catch (e) {
+        /* non-fatal */
+      }
+    } else if (typeof done === "boolean" && populated.done !== prevDone) {
+      await postTaskThreadEntry(
+        req,
+        populated,
+        populated.done
           ? `Completed a task (via Tasks)\n${populated.title}`
           : `Reopened a task (via Tasks)\n${populated.title}`
+      );
+    } else if (prevInReview && !populated.inReview && !populated.done) {
+      await postTaskThreadEntry(
+        req,
+        populated,
+        `Returned a task for changes (via Tasks)\n${populated.title}`
       );
     }
     return res.json({ task: populated });

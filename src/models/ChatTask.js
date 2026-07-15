@@ -19,6 +19,16 @@ const chatTaskSchema = new mongoose.Schema(
     assignees: [{ type: mongoose.Schema.Types.ObjectId, ref: "Employee" }],
     done: { type: Boolean, default: false },
     completedAt: { type: Date, default: null },
+    // Review stage: when an ASSIGNEE (not the creator) marks the task complete
+    // it goes "in review" instead of done — the creator then reviews and
+    // completes (or reopens) it.
+    inReview: { type: Boolean, default: false },
+    reviewRequestedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    reviewRequestedAt: { type: Date, default: null },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Employee",
