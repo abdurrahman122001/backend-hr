@@ -1,5 +1,5 @@
 const ChatThread = require("../models/ChatThread");
-const { Message, Conversation } = require("../models/Chat");
+const { Message, Conversation, Space } = require("../models/Chat");
 const Employee = require("../models/Employees");
 const mongoose = require("mongoose");
 const chatController = require("./chatController");
@@ -116,6 +116,18 @@ exports.createThreadReply = async (req, res) => {
     // Mark as read by sender
     await reply.markAsRead(sender);
 
+    // A new participation or mention resumes following for those employees.
+    const resumedFollowerIds = [
+      sender,
+      ...finalMentions.map((mention) => mention.employee),
+    ].filter(Boolean);
+    if (resumedFollowerIds.length > 0) {
+      await Message.updateOne(
+        { _id: parentMessageId },
+        { $pull: { threadUnfollowers: { $in: resumedFollowerIds } } }
+      );
+    }
+
     const populatedReply = await ChatThread.findById(reply._id)
       .populate("sender", "name photographUrl avatar companyEmail role")
       .populate("reactions.employee", "name photographUrl avatar")
@@ -207,7 +219,8 @@ exports.getRecentActiveThreads = async (req, res) => {
   try {
     const employeeId = req.employee?._id;
     const owner = req.employee?.owner;
-    const { conversationId, spaceId } = req.query;
+    const { conversationId, spaceId, home } = req.query;
+    const employeeObjectId = new mongoose.Types.ObjectId(employeeId);
 
     // 1. Find all threads where the user is a participant or has access via owner
     // For simplicity, we'll find all unique parentMessageIds in ChatThread for this owner
@@ -219,11 +232,29 @@ exports.getRecentActiveThreads = async (req, res) => {
 
     const activeThreadsAggregation = [
       { $match: matchQuery },
+      { $sort: { createdAt: -1 } },
       {
         $group: {
           _id: "$parentMessageId",
           replyCount: { $sum: 1 },
-          lastReplyAt: { $max: "$createdAt" },
+          lastReplyAt: { $first: "$createdAt" },
+          latestReplyId: { $first: "$_id" },
+          participantIds: { $addToSet: "$sender" },
+          replyMentionIds: { $push: "$mentions.employee" },
+          unreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $in: [
+                    employeeObjectId,
+                    { $ifNull: ["$readBy.employee", []] },
+                  ],
+                },
+                0,
+                1,
+              ],
+            },
+          },
         },
       },
       {
@@ -248,10 +279,7 @@ exports.getRecentActiveThreads = async (req, res) => {
       });
     }
 
-    activeThreadsAggregation.push(
-      { $sort: { lastReplyAt: -1 } },
-      { $limit: 20 }
-    );
+    activeThreadsAggregation.push({ $sort: { lastReplyAt: -1 } });
 
     const activeThreads = await ChatThread.aggregate(activeThreadsAggregation);
 
@@ -259,20 +287,64 @@ exports.getRecentActiveThreads = async (req, res) => {
       return res.json({ success: true, data: [] });
     }
 
-    // 2. Populate parent message sender details (since aggregate lookup doesn't populate nested fields easily)
+    const allNotificationSpaces = await Space.find({
+      members: employeeObjectId,
+      notificationSettings: {
+        $elemMatch: { employee: employeeObjectId, level: "all" },
+      },
+    }).select("_id").lean();
+    const allNotificationSpaceIds = new Set(
+      allNotificationSpaces.map((space) => String(space._id))
+    );
+
+    // 2. Populate parent and latest reply details, then apply Home eligibility.
     const populatedThreads = await Promise.all(
       activeThreads.map(async (thread) => {
-        const parentMessage = await Message.findById(thread._id)
-          .populate("sender", "name photographUrl avatar")
-          .populate("reactions.users", "name photographUrl avatar")
-          .lean();
+        const [parentMessage, latestReply] = await Promise.all([
+          Message.findById(thread._id)
+            .populate("sender", "name photographUrl avatar")
+            .populate("reactions.users", "name photographUrl avatar")
+            .lean(),
+          ChatThread.findById(thread.latestReplyId)
+            .populate("sender", "name photographUrl avatar companyEmail role")
+            .lean(),
+        ]);
         
-        if (!parentMessage) return null;
+        if (!parentMessage || !latestReply) return null;
+
+        const isExplicitlyUnfollowed = (parentMessage.threadUnfollowers || [])
+          .some((id) => String(id) === String(employeeId));
+        const isManuallyFollowed = (parentMessage.threadFollowers || [])
+          .some((entry) => String(entry.employee) === String(employeeId));
+        const startedByUser = String(parentMessage.sender?._id || parentMessage.sender) === String(employeeId);
+        const participated = (thread.participantIds || [])
+          .some((id) => String(id) === String(employeeId));
+        const mentionedInParent = (parentMessage.mentions || [])
+          .some((mention) => String(mention.employee) === String(employeeId));
+        const mentionedInReplies = (thread.replyMentionIds || [])
+          .flat()
+          .some((id) => String(id) === String(employeeId));
+        const followsAllSpaceThreads = parentMessage.space
+          ? allNotificationSpaceIds.has(String(parentMessage.space))
+          : false;
+        const isFollowing = !isExplicitlyUnfollowed && (
+          isManuallyFollowed ||
+          startedByUser ||
+          participated ||
+          mentionedInParent ||
+          mentionedInReplies ||
+          followsAllSpaceThreads
+        );
+
+        if (home === "true" && !isFollowing) return null;
 
         return {
           parentMessage,
+          latestReply,
           replyCount: thread.replyCount,
           lastReplyAt: thread.lastReplyAt,
+          unreadCount: thread.unreadCount,
+          isFollowing,
         };
       })
     );
@@ -284,6 +356,156 @@ exports.getRecentActiveThreads = async (req, res) => {
   } catch (error) {
     console.error("Error fetching recent active threads:", error);
     res.status(500).json({ error: "Failed to fetch active threads" });
+  }
+};
+
+const canAccessThread = async (parentMessage, employeeId) => {
+  if (parentMessage.space) {
+    return Boolean(await Space.exists({
+      _id: parentMessage.space,
+      members: employeeId,
+    }));
+  }
+  return Boolean(await Conversation.exists({
+    _id: parentMessage.conversation,
+    participants: employeeId,
+  }));
+};
+
+exports.getThreadFollowStatus = async (req, res) => {
+  try {
+    const { parentMessageId } = req.params;
+    const employeeId = req.employee?._id;
+    if (!isObjId(parentMessageId)) {
+      return res.status(400).json({ error: "Invalid parent message ID" });
+    }
+
+    const parentMessage = await Message.findById(parentMessageId)
+      .select("conversation space sender mentions threadFollowers threadUnfollowers")
+      .lean();
+    if (!parentMessage || !(await canAccessThread(parentMessage, employeeId))) {
+      return res.status(404).json({ error: "Thread not found" });
+    }
+
+    const explicitlyUnfollowed = (parentMessage.threadUnfollowers || [])
+      .some((id) => String(id) === String(employeeId));
+    const manuallyFollowed = (parentMessage.threadFollowers || [])
+      .some((entry) => String(entry.employee) === String(employeeId));
+    const started = String(parentMessage.sender) === String(employeeId);
+    const participated = Boolean(await ChatThread.exists({
+      parentMessageId,
+      sender: employeeId,
+      isDeleted: false,
+    }));
+    const mentionedInParent = (parentMessage.mentions || [])
+      .some((mention) => String(mention.employee) === String(employeeId));
+    const mentionedInReply = Boolean(await ChatThread.exists({
+      parentMessageId,
+      "mentions.employee": employeeId,
+      isDeleted: false,
+    }));
+    let followsAllSpaceThreads = false;
+    if (parentMessage.space) {
+      followsAllSpaceThreads = Boolean(await Space.exists({
+        _id: parentMessage.space,
+        notificationSettings: {
+          $elemMatch: { employee: employeeId, level: "all" },
+        },
+      }));
+    }
+
+    const isFollowing = !explicitlyUnfollowed && (
+      manuallyFollowed || started || participated || mentionedInParent ||
+      mentionedInReply || followsAllSpaceThreads
+    );
+    res.json({ success: true, isFollowing });
+  } catch (error) {
+    console.error("Error fetching thread follow status:", error);
+    res.status(500).json({ error: "Failed to fetch thread follow status" });
+  }
+};
+
+exports.setThreadFollowStatus = async (req, res) => {
+  try {
+    const { parentMessageId } = req.params;
+    const employeeId = req.employee?._id;
+    const follow = req.body?.follow === true;
+    if (!isObjId(parentMessageId)) {
+      return res.status(400).json({ error: "Invalid parent message ID" });
+    }
+
+    const parentMessage = await Message.findById(parentMessageId)
+      .select("conversation space")
+      .lean();
+    if (!parentMessage || !(await canAccessThread(parentMessage, employeeId))) {
+      return res.status(404).json({ error: "Thread not found" });
+    }
+
+    if (follow) {
+      await Message.updateOne(
+        { _id: parentMessageId },
+        {
+          $pull: {
+            threadUnfollowers: employeeId,
+            threadFollowers: { employee: employeeId },
+          },
+        }
+      );
+      await Message.updateOne(
+        { _id: parentMessageId },
+        { $push: { threadFollowers: { employee: employeeId, followedAt: new Date() } } }
+      );
+    } else {
+      await Message.updateOne(
+        { _id: parentMessageId },
+        {
+          $pull: { threadFollowers: { employee: employeeId } },
+          $addToSet: { threadUnfollowers: employeeId },
+        }
+      );
+    }
+
+    res.json({ success: true, isFollowing: follow });
+  } catch (error) {
+    console.error("Error updating thread follow status:", error);
+    res.status(500).json({ error: "Failed to update thread follow status" });
+  }
+};
+
+/**
+ * Mark every reply in one thread as read for the current employee.
+ */
+exports.markThreadAsRead = async (req, res) => {
+  try {
+    const { parentMessageId } = req.params;
+    const employeeId = req.employee?._id;
+    const owner = req.employee?.owner;
+
+    if (!isObjId(parentMessageId)) {
+      return res.status(400).json({ error: "Invalid parent message ID" });
+    }
+
+    await ChatThread.updateMany(
+      {
+        parentMessageId: new mongoose.Types.ObjectId(parentMessageId),
+        owner: new mongoose.Types.ObjectId(owner),
+        isDeleted: false,
+        "readBy.employee": { $ne: employeeId },
+      },
+      {
+        $push: {
+          readBy: {
+            employee: employeeId,
+            readAt: new Date(),
+          },
+        },
+      }
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error marking thread as read:", error);
+    res.status(500).json({ error: "Failed to mark thread as read" });
   }
 };
 

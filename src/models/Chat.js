@@ -91,6 +91,25 @@ const messageSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    threadFollowers: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        followedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+    threadUnfollowers: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
     replyTo: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Message",
@@ -441,6 +460,24 @@ const spaceSchema = new mongoose.Schema(
         default: "all",
       },
     },
+    notificationSettings: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        level: {
+          type: String,
+          enum: ["all", "main", "none"],
+          default: "main",
+        },
+        updatedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
     // Pinned functionality for spaces
     pinnedBy: [
       {
@@ -649,9 +686,13 @@ messageSchema.index({ "starredBy.employee": 1 });
 messageSchema.index({ "pinnedBy.employee": 1 }); // ✅ ADDED: Index for pinned messages
 messageSchema.index({ isPinned: 1 }); // ✅ ADDED: Index for pinned status
 
+messageSchema.index({ "threadFollowers.employee": 1 });
+messageSchema.index({ threadUnfollowers: 1 });
+
 spaceSchema.index({ members: 1 });
 spaceSchema.index({ createdBy: 1 });
 spaceSchema.index({ "pinnedBy.employee": 1 });
+spaceSchema.index({ "notificationSettings.employee": 1, "notificationSettings.level": 1 });
 
 const Message = mongoose.model("Message", messageSchema);
 const Conversation = mongoose.model("Conversation", conversationSchema);

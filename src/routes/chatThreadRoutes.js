@@ -22,6 +22,21 @@ router.post("/", upload.array("attachments", 10), chatThreadController.createThr
  */
 router.get("/recent/active", chatThreadController.getRecentActiveThreads);
 
+router.get(
+  "/:parentMessageId/follow-status",
+  chatThreadController.getThreadFollowStatus
+);
+router.put(
+  "/:parentMessageId/follow",
+  chatThreadController.setThreadFollowStatus
+);
+
+/**
+ * @route   PUT /api/chat-threads/:parentMessageId/read
+ * @desc    Mark all replies in a thread as read
+ */
+router.put("/:parentMessageId/read", chatThreadController.markThreadAsRead);
+
 /**
  * @route   GET /api/chat-threads/:parentMessageId
  * @desc    Get all replies for a thread
