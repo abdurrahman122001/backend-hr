@@ -4404,20 +4404,23 @@ exports.addReaction = async (req, res) => {
 
     await message.save();
 
-    // Populate the updated message
+    // Only reactions are read below — skip the heavy full-message populate.
     const updatedMessage = await Message.findById(messageId)
-      .populate("sender", "name companyEmail avatar photographUrl")
+      .select("reactions")
       .populate("reactions.users", "name companyEmail avatar")
-      .populate("receivers", "name companyEmail avatar")
-      .populate("space")
-      .populate("conversation");
+      .lean();
+    // ObjectIds must be stringified before going over socket.io, otherwise
+    // they serialize as binary and break === checks on the client.
+    const plainReactions = JSON.parse(
+      JSON.stringify(updatedMessage?.reactions || [])
+    );
 
     // ✅ EMIT SOCKET EVENT FOR REACTION UPDATE
     const io = req.app.get("io");
     if (io) {
       const payload = {
         messageId,
-        reactions: updatedMessage.reactions,
+        reactions: plainReactions,
         updatedBy: req.employee._id.toString(),
         updatedAt: new Date(),
       };
@@ -4443,7 +4446,7 @@ exports.addReaction = async (req, res) => {
     res.json({
       success: true,
       message: "Reaction updated successfully",
-      reactions: updatedMessage.reactions,
+      reactions: plainReactions,
     });
   } catch (error) {
     console.error("Add reaction error:", error);

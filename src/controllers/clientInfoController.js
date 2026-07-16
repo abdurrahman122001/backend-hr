@@ -3,6 +3,10 @@ const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
+const {
+  createClientSpace,
+  syncClientSpaceMembers,
+} = require("../services/clientSpaceService");
 
 // ⚠️ DEPRECATED role check — kept only for reference. CRM/manager powers are now
 // access-based: use `await hasCrmAccess(req.employee)` instead of isManagerLike.
@@ -63,6 +67,14 @@ exports.createClientInfo = async (req, res) => {
       companyEmployees: validatedEmployees,
     });
 
+    // Auto-create a Google-Chat space named after the client with the
+    // assigned + supervising employees as members. Fire-and-forget: a space
+    // failure must never fail client creation.
+    createClientSpace({
+      client: doc,
+      creatorId: emp._id,
+      io: req.app.get("io"),
+    });
 
     res.status(201).json(doc);
   } catch (err) {
@@ -1119,6 +1131,12 @@ exports.updateClientSupervision = async (req, res) => {
       .populate("supervisedBy", "_id name companyEmail")
       .populate("assignedTo", "_id name companyEmail role");
 
+    // Keep the client's Google-Chat space membership in sync (fire-and-forget).
+    syncClientSpaceMembers({
+      clientId: id,
+      actorId: me._id,
+      io: req.app.get("io"),
+    });
 
     return res.json({
       status: "success",

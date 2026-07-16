@@ -5,6 +5,7 @@ const ClientInfo = require("../models/ClientInfo");
 const AssignmentMessage = require("../models/AssignmentMessage");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess } = require("../utils/crmAccess");
+const { syncClientSpaceMembers } = require("../services/clientSpaceService");
 
 // ⚠️ DEPRECATED role check — CRM/manager powers are now access-based.
 // Use `await hasCrmAccess(req.employee)` instead of isManagerLike.
@@ -766,6 +767,14 @@ exports.assignClient = async (req, res) => {
         console.error("❌ Error sharing historical messages:", historyError);
       }
     }
+
+    // Keep the client's Google-Chat space in sync with the new assignment —
+    // adds the new assignees + their supervision chain (fire-and-forget).
+    syncClientSpaceMembers({
+      clientId,
+      actorId: me._id,
+      io: req.app.get("io"),
+    });
 
     // Handle employees who were removed
     const removedEmployeeIds = previousEmployeeIds.filter(

@@ -28,10 +28,17 @@ const ChatThreadSchema = new Schema(
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
     
     // Sender of the reply
-    sender: { 
-      type: Schema.Types.ObjectId, 
-      ref: "Employee", 
-      required: true 
+    sender: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      required: true
+    },
+
+    // Quote-reply to another reply in the same thread (like main chat).
+    replyTo: {
+      type: Schema.Types.ObjectId,
+      ref: "ChatThread",
+      default: null,
     },
     
     // Message content

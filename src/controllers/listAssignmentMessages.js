@@ -2914,40 +2914,29 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
     }
 
-    // 🔥 HIERARCHY-BASED SEARCH VISIBILITY:
-    // Managers/Owners (top of hierarchy) see all search results.
-    // Everyone else sees their own messages PLUS those of their juniors
-    // (recursively), so seniority is determined by the hierarchy, not role.
+    // 🛡️ SEARCH VISIBILITY — participant-only.
+    // A regular employee can only search emails they are a participant of
+    // (sender or receiver). This is enforced UNCONDITIONALLY — passing
+    // ?sender=/&receiver= no longer bypasses the scope, and neither the
+    // hierarchy-junior nor shared-client visibility widens search results.
+    // Only owners and CRM-access holders keep org-wide search.
     const currentEmployeeId = req.employee?._id;
     const currentUserRole = normalizeRole(req.employee?.role || "");
-    const ownerForJuniors = req.employee?.owner;
-    const isManagerOrOwner = ["manager", "owner"].includes(currentUserRole);
+    const isPrivilegedSearcher =
+      currentUserRole === "owner" || (await hasCrmAccess(req.employee));
 
-    if (currentEmployeeId && !isObjId(sender) && !isObjId(receiver) && !isManagerOrOwner) {
+    if (currentEmployeeId && !isPrivilegedSearcher) {
       const me = oid(String(currentEmployeeId));
-      // Juniors of the current user (their subtree in the hierarchy)
-      const juniorIds = await getCachedJuniors(ownerForJuniors, currentEmployeeId);
-      const seniorScopeIds = [me, ...juniorIds.map((id) => oid(String(id)))];
-      // Add participant filter: employee (or any of their juniors) is sender OR receiver
-      q.$or = q.$or || [];
       const participantFilter = {
-        $or: [
-          { sender: { $in: seniorScopeIds } },
-          { receiver: { $in: seniorScopeIds } },
-          { isFromClient: true, receiver: { $in: seniorScopeIds } } // client emails to the user/their juniors
-        ]
+        $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
       };
-      
-      // If there's already an $or condition, combine them
-      if (q.$or.length > 0) {
-        const existingOr = q.$or;
+      q.$and = q.$and || [];
+      // Preserve any $or already built (e.g. the receiver param filter).
+      if (q.$or) {
+        q.$and.push({ $or: q.$or });
         delete q.$or;
-        q.$and = q.$and || [];
-        q.$and.push({ $or: existingOr });
-        q.$and.push(participantFilter);
-      } else {
-        q.$or = participantFilter.$or;
       }
+      q.$and.push(participantFilter);
     }
 
     // ✅ Apply visibility rules

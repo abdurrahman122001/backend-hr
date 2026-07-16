@@ -41,7 +41,7 @@ function groupReactions(flatReactions) {
  */
 exports.createThreadReply = async (req, res) => {
   try {
-    const { parentMessageId, content, messageType = "text", mentions: mentionsRaw, gifUrl } = req.body;
+    const { parentMessageId, content, messageType = "text", mentions: mentionsRaw, gifUrl, replyTo } = req.body;
     const sender = req.employee?._id;
     const owner = req.employee?.owner;
     
@@ -110,7 +110,8 @@ exports.createThreadReply = async (req, res) => {
       messageType: finalMessageType,
       attachments: uploadedAttachments,
       mentions: finalMentions,
-      gifUrl
+      gifUrl,
+      replyTo: isObjId(replyTo) ? replyTo : null
     });
 
     // Mark as read by sender
@@ -132,6 +133,11 @@ exports.createThreadReply = async (req, res) => {
       .populate("sender", "name photographUrl avatar companyEmail role")
       .populate("reactions.employee", "name photographUrl avatar")
       .populate("attachments.uploadedBy", "name")
+      .populate({
+        path: "replyTo",
+        select: "content messageType sender",
+        populate: { path: "sender", select: "name" },
+      })
       .lean();
 
     // Emit via socket
@@ -194,6 +200,11 @@ exports.getThreadReplies = async (req, res) => {
       .populate("sender", "name photographUrl avatar companyEmail role")
       .populate("reactions.employee", "name photographUrl avatar")
       .populate("attachments.uploadedBy", "name")
+      .populate({
+        path: "replyTo",
+        select: "content messageType sender",
+        populate: { path: "sender", select: "name" },
+      })
       .lean();
 
     const formattedReplies = replies.map(r => ({

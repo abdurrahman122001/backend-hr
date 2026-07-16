@@ -140,6 +140,13 @@ const ClientInfoSchema = new Schema(
       },
     ],
 
+    // Google-Chat space auto-created for this client (see clientSpaceService).
+    chatSpace: {
+      type: Schema.Types.ObjectId,
+      ref: "Space",
+      default: null,
+    },
+
     readBy: [
       {
         employee: { type: Schema.Types.ObjectId, ref: "Employee" },
