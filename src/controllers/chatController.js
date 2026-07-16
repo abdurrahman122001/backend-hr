@@ -390,6 +390,7 @@ exports.getConversations = async (req, res) => {
           memberCount: space.members.length,
           unreadCount: unreadCount,
           type: "space",
+          kind: space.kind || "space",
         };
       }),
       pinnedCount: pinnedConversations.length,
@@ -652,6 +653,7 @@ exports.getSpaces = async (req, res) => {
           memberCount: space.members.length,
           unreadCount,
           type: "space",
+          kind: space.kind || "space",
 
           // ✅ FIX: attach lastMessage
           lastMessage: conversation ? conversation.lastMessage : null,
@@ -2106,7 +2108,7 @@ exports.getConversationByParticipant = async (req, res) => {
 
 exports.createSpace = async (req, res) => {
   try {
-    const { name, description, avatar, emoji, memberIds, isPrivate, settings } =
+    const { name, description, avatar, emoji, memberIds, isPrivate, settings, kind } =
       req.body;
 
     if (!name) {
@@ -2115,9 +2117,10 @@ exports.createSpace = async (req, res) => {
         .json({ success: false, error: "Space name is required" });
     }
 
-    // Create space
+    // Create space (or group — identical behavior, listed separately)
     const space = new Space({
       name,
+      kind: kind === "group" ? "group" : "space",
       description,
       avatar,
       emoji: emoji || "💡",

@@ -10,14 +10,14 @@ const SESSION_TIMEOUT_MINUTES = 3; // Auto-logout if no heartbeat for 3 minutes
 
 /**
  * Session Timeout Cron Job
- * 
- * Runs every 10 seconds (for testing) and checks for active sessions where lastSeen is older than 3 minutes.
- * For those sessions, triggers auto-logout by calling the existing logout logic.
+ *
+ * Runs every minute and checks for active sessions where lastSeen is older
+ * than 3 minutes. For those sessions, triggers auto-logout by calling the
+ * existing logout logic. (Was every 10 seconds during testing — that hammered
+ * the DB with populate queries ~8,640 times/day and pinned CPU.)
  */
-cron.schedule("*/10 * * * * *", async () => {
+cron.schedule("* * * * *", async () => {
   try {
-    console.log("🕐 [SESSION-TIMEOUT-CRON] Starting session timeout check...");
-
     const now = moment().tz(TIMEZONE);
     const timeoutThreshold = moment(now).subtract(SESSION_TIMEOUT_MINUTES, "minutes").toDate();
 
@@ -28,7 +28,6 @@ cron.schedule("*/10 * * * * *", async () => {
     }).populate("employeeId", "name companyEmail owner");
 
     if (staleSessions.length === 0) {
-      console.log("✅ [SESSION-TIMEOUT-CRON] No stale sessions found");
       return;
     }
 

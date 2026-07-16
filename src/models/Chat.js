@@ -418,6 +418,15 @@ const spaceSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    // "space" (default) or "group" — groups share the exact same behavior
+    // (messages, threads, tasks, realtime) but are listed separately in the
+    // chat UI for team-internal communication.
+    kind: {
+      type: String,
+      enum: ["space", "group"],
+      default: "space",
+      index: true,
+    },
     description: {
       type: String,
       trim: true,

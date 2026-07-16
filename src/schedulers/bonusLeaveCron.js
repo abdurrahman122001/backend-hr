@@ -23,7 +23,10 @@ function getLeaveYear(dateInput) {
 }
 
 // ---------- CRON ----------
-cron.schedule("*/1 * * * *", async () => {
+// Nightly at 23:30 (was every minute, which both burned CPU scanning a full
+// month of attendance per payroll and re-credited the same bonus days on
+// every run because there was no dedup against prior BONUS_EARNED credits).
+cron.schedule("30 23 * * *", async () => {
   const session = await mongoose.startSession();
   try {
     console.log("=== Bonus Leave Cron Started ===", new Date());
@@ -65,10 +68,33 @@ cron.schedule("*/1 * * * *", async () => {
         }
       }
 
-      for (const [employeeId, bonusDays] of Object.entries(grouped)) {
-        if (bonusDays <= 0) continue;
+      for (const [employeeId, earnedDays] of Object.entries(grouped)) {
+        if (earnedDays <= 0) continue;
 
         const year = getLeaveYear(new Date());
+
+        // Only credit the delta over what this cron already credited for the
+        // current payroll period — otherwise every run re-adds the full total.
+        const priorCredits = await LeaveTransaction.aggregate([
+          {
+            $match: {
+              owner: payroll.owner,
+              employee: new mongoose.Types.ObjectId(employeeId),
+              type: "BONUS_EARNED",
+              sourceModel: "Cron",
+              date: {
+                $gte: periodStart,
+                // periodEnd is midnight on the period's last day — include
+                // credits written later that day.
+                $lt: new Date(periodEnd.getTime() + 24 * 60 * 60 * 1000),
+              },
+            },
+          },
+          { $group: { _id: null, total: { $sum: "$value" } } },
+        ]);
+        const alreadyCredited = priorCredits[0]?.total || 0;
+        const bonusDays = earnedDays - alreadyCredited;
+        if (bonusDays <= 0) continue;
 
         let balance = await LeaveYearBalance.findOne({
           owner: payroll.owner,
