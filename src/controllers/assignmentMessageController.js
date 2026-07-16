@@ -1635,9 +1635,14 @@ exports.createMessage = async function createMessage(req, res) {
     if (io && !isScheduled) {
       await emitToAssignmentClients(io, msg, "new_assignment_message");
 
-      // 🔥 HIERARCHY-BASED: Notify THE specific supervisor(s) about the thread update
-      if (senderRole === "employee" && clientSupervisionMode === "needs_approval") {
-        const supervisorsToNotify = targetSupervisor ? [String(targetSupervisor)] : [];
+      // 🔥 HIERARCHY-BASED: Notify THE specific supervisor(s) about the thread
+      // update. Gate on the actual outcome (pending) rather than sender role /
+      // client mode — inherited-flag replies and non-"employee" senders also
+      // produce pending messages, and their approvers need the realtime event.
+      if (approvalStatus === "pending") {
+        const supervisorsToNotify = targetSupervisor
+          ? [String(targetSupervisor)]
+          : (Array.isArray(msg.receiver) ? msg.receiver.map(String) : []);
 
         supervisorsToNotify.forEach(supervisorId => {
           io.to(`employee_${supervisorId}`).emit("thread_updated_for_supervision", {
