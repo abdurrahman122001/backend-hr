@@ -28,17 +28,6 @@ function formatTo12Hour(time24) {
   return `${hours12}:${String(minutes).padStart(2, '0')} ${ampm}`;
 }
 
-function appendAttendanceNote(existingNotes, note) {
-  const cleanExisting = String(existingNotes || "").trim();
-  const cleanNote = String(note || "").trim();
-  if (!cleanNote) return cleanExisting;
-  return cleanExisting ? `${cleanExisting}\n${cleanNote}` : cleanNote;
-}
-
-function buildAttendanceReviewNote(challengeStatus) {
-  return `- Request ${String(challengeStatus || "").toLowerCase()}.`;
-}
-
 async function resolveReviewerEmployeeId(req) {
   const accountId =
     req.employee?._id ||
@@ -2159,15 +2148,13 @@ exports.updateChallengeStatus = async (req, res) => {
           resolvedStatus = overrideStatus || challenge.requestedStatus || computedStatus;
         }
 
-        const approvalNote = buildAttendanceReviewNote("Approved");
-
         // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
         req.body.employeeId = String(attendance.employee._id || attendance.employee);
         req.body.date = attendance.date;
         req.body.status = resolvedStatus;
         req.body.checkIn = resolvedCheckIn || null;
         req.body.checkOut = resolvedCheckOut || null;
-        req.body.notes = appendAttendanceNote(attendance.notes, approvalNote);
+        req.body.notes = String(challenge.challengeReason || "").trim() || null;
         req.body.leaveType = attendance.leaveType;
         req.body.challengeStatus = "Approved";
         req.body.challengeAdminNotes = challengeAdminNotes || "";
@@ -2204,9 +2191,7 @@ exports.updateChallengeStatus = async (req, res) => {
         attendance.challengeAdminNotes = challengeAdminNotes || "";
         attendance.challengeAt = new Date();
 
-        const rejectionNote = buildAttendanceReviewNote(challengeStatus);
-
-        attendance.notes = appendAttendanceNote(attendance.notes, rejectionNote);
+        attendance.notes = String(challenge.challengeReason || "").trim() || null;
 
         await attendance.save();
 
@@ -2301,15 +2286,13 @@ exports.updateChallengeStatus = async (req, res) => {
         resolvedStatus = overrideStatus || attendance.requestedStatus || computedStatus;
       }
 
-      const approvalNote = buildAttendanceReviewNote("Approved");
-
       // Mutate req.body to call markAttendance logic which takes care of all side-effects (leaves, loans, bonuses, logs, etc.)
       req.body.employeeId = String(attendance.employee._id || attendance.employee);
       req.body.date = attendance.date;
       req.body.status = resolvedStatus;
       req.body.checkIn = resolvedCheckIn || null;
       req.body.checkOut = resolvedCheckOut || null;
-      req.body.notes = appendAttendanceNote(attendance.notes, approvalNote);
+      req.body.notes = String(attendance.challengeReason || "").trim() || null;
       req.body.leaveType = attendance.leaveType;
       req.body.challengeStatus = "Approved";
       req.body.challengeAdminNotes = challengeAdminNotes || "";
@@ -2345,9 +2328,7 @@ exports.updateChallengeStatus = async (req, res) => {
       attendance.challengeAdminNotes = challengeAdminNotes || "";
       attendance.challengeAt = new Date();
 
-      const rejectionNote = buildAttendanceReviewNote(challengeStatus);
-
-      attendance.notes = appendAttendanceNote(attendance.notes, rejectionNote);
+      attendance.notes = String(attendance.challengeReason || "").trim() || null;
 
       await attendance.save();
 

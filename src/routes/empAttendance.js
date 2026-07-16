@@ -196,12 +196,8 @@ router.post('/acknowledge-absence', async (req, res) => {
       return res.status(404).json({ error: "Attendance record not found for this date" });
     }
 
-    // Add acknowledgment note but keep status as "Absent"
-    const acknowledgmentNote = `Employee acknowledged absence on ${date} as UNPAID. Reason: ${reason}`;
-    
-    attendance.notes = attendance.notes 
-      ? `${attendance.notes}; ${acknowledgmentNote}`
-      : acknowledgmentNote;
+    // Attendance notes should contain only the employee-provided reason.
+    attendance.notes = String(reason).trim();
     
     // Mark as acknowledged by employee
     attendance.acknowledgedByEmployee = true;
@@ -228,35 +224,6 @@ router.post('/acknowledge-absence', async (req, res) => {
     res.status(500).json({ error: "Failed to acknowledge absence" });
   }
 });
-
-// Helper function to convert 24-hour format to 12-hour format
-function formatTo12Hour(time24) {
-  if (!time24) return '';
-  const [hours, minutes] = time24.split(':').map(Number);
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const hours12 = hours % 12 || 12;
-  return `${hours12}:${String(minutes).padStart(2, '0')} ${ampm}`;
-}
-
-function appendAttendanceNote(existingNotes, note) {
-  const cleanExisting = String(existingNotes || "").trim();
-  const cleanNote = String(note || "").trim();
-  if (!cleanNote) return cleanExisting;
-  return cleanExisting ? `${cleanExisting}\n${cleanNote}` : cleanNote;
-}
-
-function formatAttendanceTime(time) {
-  return time ? formatTo12Hour(time) : "not provided";
-}
-
-function buildAttendanceRequestNote(employeeName, requestedCheckIn, requestedCheckOut) {
-  const checkoutPart = requestedCheckOut ? `; check-out: ${formatAttendanceTime(requestedCheckOut)}` : "";
-  return `- ${employeeName || "Employee"} requested a change to check-in: ${formatAttendanceTime(requestedCheckIn)}${checkoutPart}.`;
-}
-
-function buildAttendanceReviewNote(action) {
-  return `- Request ${String(action || "").toLowerCase()}.`;
-}
 
 async function reviewAttendanceChallenge(req, res, id, action, notes = "") {
   if (!req.employee?.isAdmin) {
@@ -361,12 +328,7 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
     attendance.requestedCheckOut = requestedCheckOut || null;
     attendance.challengeAt = new Date();
 
-    const challengeNote = buildAttendanceRequestNote(
-      req.employee.name,
-      requestedCheckIn,
-      requestedCheckOut
-    );
-    attendance.notes = appendAttendanceNote(attendance.notes, challengeNote);
+    attendance.notes = String(reason).trim();
 
     await attendance.save();
 
@@ -618,6 +580,7 @@ router.put('/challenge/:id', async (req, res) => {
       const attendance = await Attendance.findById(challenge.attendance);
       if (attendance) {
         attendance.challengeReason = reason;
+        attendance.notes = String(reason).trim();
         if (requestedCheckIn !== undefined) attendance.requestedCheckIn = requestedCheckIn;
         if (requestedCheckOut !== undefined) attendance.requestedCheckOut = requestedCheckOut;
         attendance.challengeAt = challenge.challengeAt;
@@ -652,6 +615,7 @@ router.put('/challenge/:id', async (req, res) => {
     }
 
     attendance.challengeReason = reason;
+    attendance.notes = String(reason).trim();
     if (requestedCheckIn !== undefined) attendance.requestedCheckIn = requestedCheckIn;
     if (requestedCheckOut !== undefined) attendance.requestedCheckOut = requestedCheckOut;
     attendance.challengeAt = new Date();
