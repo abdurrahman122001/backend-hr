@@ -1932,20 +1932,55 @@ exports.starMessage = async function starMessage(req, res) {
 exports.getUnreadCount = async function getUnreadCount(req, res) {
   try {
     const userId = req.employee._id;
+    const owner = req.employee.owner;
 
-    const unreadCount = await AssignmentMessage.countDocuments({
-      receiver: userId, // Only count messages where user is receiver
-      "readBy.employee": { $ne: userId },
-      trashedBy: { $ne: userId },
-      spamReporters: { $ne: userId },
-      // Globally trashed/spam messages are hidden from every list view, so
-      // they must not keep the sidebar badge alive either.
-      isTrashed: { $ne: true },
-      isSpam: { $ne: true },
-      status: "sent",
-      // 🔥 FIX: Include pending messages in unread count for supervisors
-      // approvalStatus: { $ne: "pending" },
-    });
+    // Mirror getMessageCounts' "unread" (the EmailSidebar Inbox badge):
+    // thread-level, MY inbox only. Pending approvals, approver-only copies
+    // and unassigned clients' mail never clear from the inbox, so counting
+    // them left the Mail-icon badge permanently stuck.
+    const myAssignedClients = await ClientInfo.find({
+      owner,
+      assignedTo: userId,
+    })
+      .select("_id")
+      .lean();
+    const assignedClientIds = myAssignedClients.map((c) => c._id);
+    const inboxClientScope = {
+      $or: [
+        { client: { $exists: false } },
+        { client: null },
+        ...(assignedClientIds.length > 0
+          ? [{ client: { $in: assignedClientIds } }]
+          : []),
+      ],
+    };
+
+    const result = await AssignmentMessage.aggregate([
+      {
+        $match: {
+          $and: [
+            { $or: [{ receiver: userId }, { receiver: { $in: [userId] } }] },
+            {
+              $or: [
+                { "approvalChain.approver": { $ne: userId } },
+                { intendedRecipients: userId },
+              ],
+            },
+            inboxClientScope,
+          ],
+          status: "sent",
+          approvalStatus: { $ne: "pending" },
+          trashedBy: { $ne: userId },
+          spamReporters: { $ne: userId },
+          isTrashed: { $ne: true },
+          isSpam: { $ne: true },
+          "readBy.employee": { $ne: userId },
+        },
+      },
+      { $group: { _id: { $ifNull: ["$threadId", { $toString: "$_id" }] } } },
+      { $count: "count" },
+    ]);
+    const unreadCount = result[0]?.count || 0;
 
     res.json({
       success: true,

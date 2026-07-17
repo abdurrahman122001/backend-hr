@@ -7161,8 +7161,12 @@ exports.getChatUnreadCount = async (req, res) => {
 
     const unreadCount = await Conversation.aggregate([
       {
+        // Mirror getConversations' visibility: hidden/archived chats are not in
+        // the sidebar, so their stale unread counts must not badge the icon.
         $match: {
           participants: userId,
+          archivedBy: { $ne: userId },
+          hiddenBy: { $ne: userId },
         },
       },
       {
