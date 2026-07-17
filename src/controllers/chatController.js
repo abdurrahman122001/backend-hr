@@ -269,7 +269,7 @@ exports.getConversations = async (req, res) => {
       .populate("lastMessage")
       .populate("admins", "name companyEmail avatar photographUrl")
       .populate("pinnedBy.employee", "name companyEmail")
-      .populate("space", "name description avatar")
+      .populate("space", "name description avatar kind")
       .sort({ updatedAt: -1 });
 
     // Get spaces for the spaces section
@@ -551,7 +551,7 @@ exports.getSpaceConversations = async (req, res) => {
       .populate("lastMessage")
       .populate("admins", "name companyEmail avatar photographUrl")
       .populate("pinnedBy.employee", "name companyEmail")
-      .populate("space", "name description avatar") // Populate space details
+      .populate("space", "name description avatar kind") // Populate space details
       .sort({ updatedAt: -1 });
 
     // Separate pinned and unpinned space conversations
@@ -5880,7 +5880,7 @@ exports.searchMessages = async (req, res) => {
     const messages = await Message.find(searchQuery)
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("conversation", "isGroup groupName space")
-      .populate("space", "name description avatar")
+      .populate("space", "name description avatar kind")
       .populate("attachments")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
@@ -6173,7 +6173,7 @@ exports.getStarredMessages = async (req, res) => {
     const messages = await Message.find(query)
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("conversation", "isGroup groupName space")
-      .populate("space", "name description avatar")
+      .populate("space", "name description avatar kind")
       .populate("starredBy.employee", "name companyEmail avatar")
       .populate("attachments")
       .sort({ "starredBy.starredAt": -1 })
@@ -6852,7 +6852,7 @@ exports.getMentionedMessages = async (req, res) => {
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("mentions.employee", "name companyEmail avatar photographUrl")
       .populate("conversation", "isGroup groupName space participants")
-      .populate("space", "name description avatar emoji")
+      .populate("space", "name description avatar emoji kind")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
       .skip((page - 1) * limit)

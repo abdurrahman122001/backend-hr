@@ -3099,11 +3099,26 @@ exports.deleteMessage = async function deleteMessage(req, res) {
         }
       }
 
-      // Notify ALL participants in real-time
+      // Notify ALL participants in real-time. `receiver` alone is not enough:
+      // on approval-flow messages (the ones with comments) it only holds the
+      // CURRENT approver, so past approvers / CRM / other assigned employees
+      // who see the message in their chat would keep a stale copy.
       if (io) {
         const participants = new Set([senderId]);
-        if (Array.isArray(msg.receiver)) {
-          msg.receiver.forEach((r) => participants.add(String(r._id || r)));
+        const add = (v) => {
+          const uid = String((v && (v._id || v.approver)) || v || "");
+          if (uid && uid !== "null" && uid !== "undefined") participants.add(uid);
+        };
+        if (Array.isArray(msg.receiver)) msg.receiver.forEach(add);
+        (msg.approvalChain || []).forEach((a) => add(a && a.approver));
+        (msg.plannedApprovalChain || []).forEach(add);
+        (msg.intendedRecipients || []).forEach(add);
+        (populated.client?.assignedTo || []).forEach(add);
+        try {
+          const { getCrmUserIds } = require("../utils/crmAccess");
+          (await getCrmUserIds(msg.owner)).forEach(add);
+        } catch (err) {
+          console.error("delete-for-everyone CRM audience lookup failed:", err);
         }
         participants.forEach((uid) => {
           io.to(`employee_${uid}`).emit("new_message", {
