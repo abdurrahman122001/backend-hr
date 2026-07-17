@@ -2413,12 +2413,37 @@ io.on("connection", (socket) => {
   // Join WhatsApp group room. Group messages (esp. approved ones) are
   // broadcast to `group_<id>`, so members must be in this room to receive
   // them in real time even when another chat is open.
-  socket.on("join_group", (groupId) => {
+  socket.on("join_group", async (groupId) => {
     if (!groupId) {
       console.error("❌ join_group: groupId is required");
       return;
     }
-    socket.join(`group_${groupId}`);
+    try {
+      // Only actual group members may join — this room drives realtime
+      // delivery and browser notifications, so non-members must not get them.
+      const token = socket.handshake.auth?.token;
+      let employeeId = null;
+      if (token) {
+        try {
+          const jwt = require("jsonwebtoken");
+          const payload = jwt.verify(token, process.env.JWT_SECRET);
+          employeeId = String(payload.id || payload._id || "");
+        } catch {
+          /* unverifiable token — fall through, join allowed as before */
+        }
+      }
+      if (employeeId) {
+        const WhatsAppGroup = require("./models/WhatsAppGroup");
+        const isMember = await WhatsAppGroup.exists({
+          _id: groupId,
+          "members.memberId": employeeId,
+        });
+        if (!isMember) return;
+      }
+      socket.join(`group_${groupId}`);
+    } catch (err) {
+      console.error("join_group error:", err);
+    }
   });
   // 🔥 FIXED: Join client employee room - KEEP ONLY THIS ONE
   socket.on("join_client_employee", (employeeId) => {

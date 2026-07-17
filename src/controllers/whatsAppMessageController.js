@@ -1938,21 +1938,10 @@ exports.approveMessage = async function approveMessage(req, res) {
       // - When finalized: broadcast to ALL group members + managers + TLs (message is approved)
       // - When escalating: only notify sender + current approver + next receiver in chain
       //   (CRM/manager should NOT see it until the message actually reaches them)
-      if (msg.isGroupMessage && msg.groupId) {
-        try {
-          if (approvalFinalized) {
-            // Fully approved — add managers/TLs to allInvolvedUsers for individual room emit.
-            // Group members are notified via the group_${groupId} room emit below (no duplication).
-            const { managers: orgManagers, tls } = await findTLsAndManagersByOwner(msg.owner);
-            orgManagers.forEach(id => allInvolvedUsers.add(String(id)));
-            tls.forEach(id => allInvolvedUsers.add(String(id)));
-          }
-          // When NOT finalized (escalation): only sender + current approver + next receiver
-          // are notified. Managers/TLs should not see it until the message reaches them.
-        } catch (err) {
-          console.error("Error fetching group members for approval emission:", err);
-        }
-      }
+      // Group messages are strictly member-scoped: finalized messages reach the
+      // group via the group_${groupId} room emit below (membership-validated on
+      // join). Org-wide managers/TLs who are NOT group members must not be
+      // notified — same rule as normal client chats (assigned only).
 
       allInvolvedUsers.forEach((userId) => {
         io.to(`employee_${userId}`).emit("new_message", {
@@ -4683,8 +4672,15 @@ exports.createMessage = async function createMessage(req, res) {
         });
       }
 
-      // Notify hierarchy seniors of the sender so they receive real-time updates
-      if (!isScheduled && (responseWithSupervision.approvalStatus === null || responseWithSupervision.approvalStatus === "approved")) {
+      // Notify hierarchy seniors of the sender so they receive real-time updates.
+      // Group messages are strictly member-scoped (group_<id> room) — seniors who
+      // are not group members must not be notified.
+      if (
+        !isScheduled &&
+        !isGroupMessage &&
+        !groupId &&
+        (responseWithSupervision.approvalStatus === null || responseWithSupervision.approvalStatus === "approved")
+      ) {
         const hierarchySeniors = await getManagementChainFromHierarchy(owner, String(sender));
         hierarchySeniors.forEach((seniorId) => {
           const sid = String(seniorId);
