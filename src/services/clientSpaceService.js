@@ -15,6 +15,7 @@
 const mongoose = require("mongoose");
 const { Conversation, Space } = require("../models/Chat");
 const ClientInfo = require("../models/ClientInfo");
+require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 
 const isObjId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
