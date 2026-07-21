@@ -243,6 +243,10 @@ EmployeeSchema.statics.getBlockStatus = async function (user1Id, user2Id) {
 
 // Update timestamp for experiences when saving
 EmployeeSchema.pre("save", function (next) {
+  this.$locals.removeFromChatMemberships =
+    this.isModified("status") &&
+    String(this.status || "").toLowerCase() !== "active";
+
   if (this.experiences && this.isModified("experiences")) {
     this.experiences.forEach((exp) => {
       exp.updatedAt = new Date();
@@ -262,6 +266,53 @@ EmployeeSchema.pre("save", function (next) {
   }
 
   next();
+});
+
+const getStatusFromUpdate = (update = {}) =>
+  update.status ?? update.$set?.status ?? update.$setOnInsert?.status;
+
+const captureEmployeesLeavingActiveStatus = async function (next) {
+  try {
+    const status = getStatusFromUpdate(this.getUpdate());
+    if (
+      status === undefined ||
+      String(status || "").toLowerCase() === "active"
+    ) {
+      this._removeFromChatMembershipIds = [];
+      return next();
+    }
+
+    this._removeFromChatMembershipIds = await this.model
+      .find(this.getQuery())
+      .distinct("_id");
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+const removeCapturedEmployeesFromChat = async function () {
+  const employeeIds = this._removeFromChatMembershipIds || [];
+  if (employeeIds.length === 0) return;
+
+  const {
+    removeEmployeesFromChatMemberships,
+  } = require("../services/chatMembershipService");
+  await removeEmployeesFromChatMemberships(employeeIds);
+};
+
+EmployeeSchema.post("save", async function () {
+  if (!this.$locals.removeFromChatMemberships) return;
+
+  const {
+    removeEmployeesFromChatMemberships,
+  } = require("../services/chatMembershipService");
+  await removeEmployeesFromChatMemberships([this._id]);
+});
+
+["findOneAndUpdate", "updateOne", "updateMany"].forEach((operation) => {
+  EmployeeSchema.pre(operation, captureEmployeesLeavingActiveStatus);
+  EmployeeSchema.post(operation, removeCapturedEmployeesFromChat);
 });
 
 module.exports = model("Employee", EmployeeSchema);

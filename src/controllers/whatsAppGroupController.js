@@ -295,6 +295,7 @@ exports.sendGroupMessage = async function (req, res) {
       repliedTo,
       replyContent,
       mentions,
+      clientTempId,
     } = req.body;
 
     if (!isObjId(groupId))
@@ -469,6 +470,7 @@ exports.sendGroupMessage = async function (req, res) {
         intendedReceiverIds.length > 0 ? intendedReceiverIds : receiverIds,
       note: noteContent,
       subject: subject || `Group: ${group.name}`,
+      clientTempId: clientTempId || null,
       mentions: Array.isArray(mentions)
         ? mentions
             .filter((m) => m && m.refId && m.name)

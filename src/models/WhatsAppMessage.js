@@ -97,6 +97,8 @@ const WhatsAppMessageSchema = new Schema(
 
     subject: { type: String },
     note: { type: String },
+    // Correlates the sender's optimistic UI row with the persisted message.
+    clientTempId: { type: String, default: null },
     approvalStatus: {
       type: String,
       enum: ["pending", "approved", "disapproved"],
