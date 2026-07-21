@@ -383,6 +383,17 @@ mongoose.set("strictQuery", false);
 mongoose
   .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(async () => {
+    try {
+      const {
+        removeAllInactiveEmployeesFromChatMemberships,
+      } = require("./services/chatMembershipService");
+      await removeAllInactiveEmployeesFromChatMemberships();
+    } catch (error) {
+      console.error(
+        "Failed to reconcile inactive Chat members:",
+        error?.message || error,
+      );
+    }
     console.log("▶ MongoDB connected");
     // Start IMAP watcher once DB is up (wrap to avoid crashing if it throws)
     try {

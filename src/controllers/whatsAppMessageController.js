@@ -4061,6 +4061,7 @@ exports.createMessage = async function createMessage(req, res) {
       chatType,
       // @mentions referenced in the message text
       mentions,
+      clientTempId,
     } = req.body;
 
     const owner = ownerBody || req.employee?.owner;
@@ -4455,6 +4456,7 @@ exports.createMessage = async function createMessage(req, res) {
       receiver: receivers,
       subject: subject || "",
       note: note || "",
+      clientTempId: clientTempId || null,
       approvalStatus: approvalStatus,
       mentions: Array.isArray(mentions)
         ? mentions

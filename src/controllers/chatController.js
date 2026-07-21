@@ -2117,6 +2117,38 @@ exports.createSpace = async (req, res) => {
         .json({ success: false, error: "Space name is required" });
     }
 
+    const creatorIsActive = await Employee.exists({
+      _id: req.employee._id,
+      status: "active",
+    });
+    if (!creatorIsActive) {
+      return res.status(403).json({
+        success: false,
+        error: "Only active employees can create spaces or groups",
+      });
+    }
+
+    const requestedMemberIds = Array.from(
+      new Set((memberIds || []).map(String))
+    );
+    if (requestedMemberIds.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+      return res.status(400).json({
+        success: false,
+        error: "One or more employee IDs are invalid",
+      });
+    }
+
+    const activeMemberCount = await Employee.countDocuments({
+      _id: { $in: requestedMemberIds },
+      status: "active",
+    });
+    if (activeMemberCount !== requestedMemberIds.length) {
+      return res.status(400).json({
+        success: false,
+        error: "Only active employees can be added to spaces or groups",
+      });
+    }
+
     // Create space (or group — identical behavior, listed separately)
     const space = new Space({
       name,
@@ -2127,7 +2159,7 @@ exports.createSpace = async (req, res) => {
       createdBy: req.employee._id,
       admins: [req.employee._id],
       members: Array.from(
-        new Set([req.employee._id.toString(), ...(memberIds || []).map(String)])
+        new Set([req.employee._id.toString(), ...requestedMemberIds])
       ),
       isPrivate: isPrivate || false,
       settings: settings || {},
@@ -2297,6 +2329,28 @@ exports.addSpaceMembers = async (req, res) => {
         .json({ success: false, error: "Member IDs are required" });
     }
 
+    const requestedMemberIds = Array.from(new Set(memberIds.map(String)));
+    if (
+      requestedMemberIds.length === 0 ||
+      requestedMemberIds.some((id) => !mongoose.Types.ObjectId.isValid(id))
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: "Valid member IDs are required",
+      });
+    }
+
+    const activeMembers = await Employee.find({
+      _id: { $in: requestedMemberIds },
+      status: "active",
+    }).select("_id");
+    if (activeMembers.length !== requestedMemberIds.length) {
+      return res.status(400).json({
+        success: false,
+        error: "Only active employees can be added to spaces or groups",
+      });
+    }
+
     const space = await Space.findById(spaceId);
 
     if (!space) {
@@ -2320,7 +2374,7 @@ exports.addSpaceMembers = async (req, res) => {
     }
 
     // Add new members
-    const newMembers = memberIds.filter(
+    const newMembers = requestedMemberIds.filter(
       (id) =>
         !space.members.some((memberId) => memberId.toString() === id.toString())
     );
@@ -3644,22 +3698,46 @@ exports.deleteMessage = async (req, res) => {
     message.pinnedBy = [];
     await message.save();
 
+    const deletedAt = new Date();
+    const deletedThreadReplies = await ChatThread.updateMany(
+      { parentMessageId: message._id, isDeleted: false },
+      {
+        $set: {
+          isDeleted: true,
+          deletedBy: req.employee._id,
+          deletedAt,
+          content: "",
+          attachments: [],
+          reactions: [],
+          mentions: [],
+        },
+      }
+    );
+
     // Notify connected clients so the deleted message renders as a tombstone
     const io = req.app.get("io");
     if (io) {
+      io.to(`thread_${message._id}`).emit("chat_thread_deleted", {
+        parentMessageId: message._id,
+        deletedBy: req.employee._id,
+        deletedAt,
+      });
+
       if (space) {
         io.to(`space_${space._id}`).emit("message_deleted", {
           messageId,
           deletedBy: req.employee._id,
-          deletedAt: new Date(),
+          deletedAt,
           spaceId: space._id,
+          threadDeleted: true,
         });
       } else {
         io.to(`conversation_${conversation._id}`).emit("message_deleted", {
           messageId,
           deletedBy: req.employee._id,
-          deletedAt: new Date(),
+          deletedAt,
           conversationId: conversation._id,
+          threadDeleted: true,
         });
       }
     }
@@ -3668,6 +3746,7 @@ exports.deleteMessage = async (req, res) => {
       success: true,
       message: "Message deleted successfully",
       deletedMessageId: messageId,
+      deletedThreadReplyCount: deletedThreadReplies.modifiedCount,
     });
   } catch (error) {
     console.error("Delete message error:", error);
@@ -4345,67 +4424,83 @@ exports.addReaction = async (req, res) => {
       });
     }
 
-    // Find the message
-    const message = await Message.findById(messageId);
-    if (!message) {
-      return res.status(404).json({
-        success: false,
-        error: "Message not found",
-      });
-    }
+    let message;
+    let conversation;
 
-    // Check if user has access to this message
-    const conversation = await Conversation.findOne({
-      _id: message.conversation,
-      participants: req.employee._id,
-    });
+    // Two people can react to the same message simultaneously. Retry a
+    // Mongoose version collision so one reaction does not fail randomly.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      message = await Message.findById(messageId);
+      if (!message) {
+        return res.status(404).json({
+          success: false,
+          error: "Message not found",
+        });
+      }
 
-    if (!conversation) {
-      return res.status(403).json({
-        success: false,
-        error: "Access denied to this message",
-      });
-    }
+      if (message.space) {
+        const space = await Space.findOne({
+          _id: message.space,
+          members: req.employee._id,
+        }).select("_id");
+        if (!space) {
+          return res.status(403).json({
+            success: false,
+            error: "Access denied to this message",
+          });
+        }
+        conversation = await Conversation.findById(message.conversation).select(
+          "participants"
+        );
+      } else {
+        conversation = await Conversation.findOne({
+          _id: message.conversation,
+          participants: req.employee._id,
+        }).select("participants");
+        if (!conversation) {
+          return res.status(403).json({
+            success: false,
+            error: "Access denied to this message",
+          });
+        }
+      }
 
-    // Find existing reaction for this emoji
-    const existingReaction = message.reactions.find(
-      (reaction) => reaction.emoji === emoji
-    );
-
-    if (existingReaction) {
-      // Check if user already reacted with this emoji
-      const userAlreadyReacted = existingReaction.users.some(
-        (userId) => userId.toString() === req.employee._id.toString()
+      const existingReaction = message.reactions.find(
+        (reaction) => reaction.emoji === emoji
       );
 
-      if (userAlreadyReacted) {
-        // Remove user's reaction
-        existingReaction.users = existingReaction.users.filter(
-          (userId) => userId.toString() !== req.employee._id.toString()
+      if (existingReaction) {
+        const userAlreadyReacted = existingReaction.users.some(
+          (userId) => userId.toString() === req.employee._id.toString()
         );
-        existingReaction.count = Math.max(0, existingReaction.count - 1);
 
-        // Remove reaction if no users left
+        existingReaction.users = userAlreadyReacted
+          ? existingReaction.users.filter(
+              (userId) => userId.toString() !== req.employee._id.toString()
+            )
+          : [...existingReaction.users, req.employee._id];
+        existingReaction.count = existingReaction.users.length;
+
         if (existingReaction.count === 0) {
           message.reactions = message.reactions.filter(
             (reaction) => reaction.emoji !== emoji
           );
         }
       } else {
-        // Add user to existing reaction
-        existingReaction.users.push(req.employee._id);
-        existingReaction.count += 1;
+        message.reactions.push({
+          emoji,
+          users: [req.employee._id],
+          count: 1,
+        });
       }
-    } else {
-      // Create new reaction
-      message.reactions.push({
-        emoji,
-        users: [req.employee._id],
-        count: 1,
-      });
-    }
 
-    await message.save();
+      try {
+        await message.save();
+        break;
+      } catch (error) {
+        if (error?.name !== "VersionError" || attempt === 2) throw error;
+      }
+    }
 
     // Only reactions are read below — skip the heavy full-message populate.
     const updatedMessage = await Message.findById(messageId)
