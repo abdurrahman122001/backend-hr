@@ -35,5 +35,8 @@ const EmployeeSessionSchema = new mongoose.Schema(
 // Compound index to ensure only one active session per employee per day
 EmployeeSessionSchema.index({ employeeId: 1, date: 1, active: true }, { unique: true });
 EmployeeSessionSchema.index({ employeeId: 1, date: 1 });
+// Covers the every-minute session-timeout cron's { active, lastSeen } query so
+// it uses an index instead of scanning the collection each run.
+EmployeeSessionSchema.index({ active: 1, lastSeen: 1 });
 
 module.exports = mongoose.model("EmployeeSession", EmployeeSessionSchema);

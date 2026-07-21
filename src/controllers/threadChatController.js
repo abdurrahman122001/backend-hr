@@ -1148,3 +1148,45 @@ exports.getUnreadCount = async function (req, res) {
     res.status(500).json({ error: "Failed to fetch unread count" });
   }
 };
+
+// Bulk unread counts for many threads at once — used by the email list to show
+// a red dot on the thread-chat icon without one request per row. One indexed
+// aggregation (threadId is indexed) keyed by thread.
+exports.getUnreadCountsBulk = async function (req, res) {
+  try {
+    const currentUser = req.employee._id;
+    const { threadIds } = req.body || {};
+    if (!Array.isArray(threadIds) || threadIds.length === 0) {
+      return res.json({ success: true, counts: {} });
+    }
+
+    const rows = await ThreadChatMessage.aggregate([
+      {
+        $match: {
+          threadId: { $in: threadIds.map(String) },
+          isDeleted: false,
+          // Only messages from someone else, that the current user hasn't read,
+          // and that were actually addressed TO this user — otherwise a comment
+          // between two other people on a thread would wrongly badge everyone.
+          sender: { $ne: currentUser },
+          "readBy.employee": { $ne: currentUser },
+          $or: [
+            { receiver: currentUser },
+            { receiver: { $in: [currentUser] } },
+          ],
+        },
+      },
+      { $group: { _id: "$threadId", count: { $sum: 1 } } },
+    ]);
+
+    const counts = {};
+    rows.forEach((r) => {
+      counts[String(r._id)] = r.count;
+    });
+
+    res.json({ success: true, counts });
+  } catch (e) {
+    console.error("❌ Error in getUnreadCountsBulk:", e);
+    res.status(500).json({ error: "Failed to fetch unread counts" });
+  }
+};

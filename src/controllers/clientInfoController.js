@@ -55,7 +55,9 @@ exports.createClientInfo = async (req, res) => {
           department: empData.department ? empData.department.trim() : undefined,
           isPrimaryContact: empData.isPrimaryContact || false,
           notes: empData.notes ? empData.notes.trim() : undefined,
-          addedAt: new Date()
+          emailSignature: empData.emailSignature || "",
+          photographUrl: empData.photographUrl || undefined,
+          addedAt: empData.addedAt || new Date()
         });
       }
     }
@@ -376,7 +378,7 @@ exports.addCompanyEmployee = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
-    const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
+    const { name, designation, email, phone, department, isPrimaryContact, notes, emailSignature } = req.body;
 
     if (!name || !designation) {
       return res.status(400).json({ error: "Name and designation are required" });
@@ -403,6 +405,7 @@ exports.addCompanyEmployee = async (req, res) => {
       department: department ? department.trim() : undefined,
       isPrimaryContact: isPrimaryContact || false,
       notes: notes ? notes.trim() : undefined,
+      emailSignature: emailSignature || "",
       addedAt: new Date()
     };
 
@@ -468,7 +471,7 @@ exports.updateCompanyEmployee = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id, employeeIndex } = req.params;
-    const { name, designation, email, phone, department, isPrimaryContact, notes } = req.body;
+    const { name, designation, email, phone, department, isPrimaryContact, notes, emailSignature } = req.body;
 
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
@@ -496,6 +499,7 @@ exports.updateCompanyEmployee = async (req, res) => {
     if (department !== undefined) client.companyEmployees[index].department = department ? department.trim() : undefined;
     if (isPrimaryContact !== undefined) client.companyEmployees[index].isPrimaryContact = isPrimaryContact;
     if (notes !== undefined) client.companyEmployees[index].notes = notes ? notes.trim() : undefined;
+    if (emailSignature !== undefined) client.companyEmployees[index].emailSignature = emailSignature || "";
 
     await client.save();
 

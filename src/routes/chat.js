@@ -128,6 +128,11 @@ router.get(
   empAuth,
   chatController.getUnreadMentionsCount
 );
+router.post(
+  "/mentions/mark-seen",
+  empAuth,
+  chatController.markMentionsSeen
+);
 
 // File serving
 router.get("/uploads/:filename", chatController.serveFile);

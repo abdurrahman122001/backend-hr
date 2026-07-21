@@ -30,14 +30,20 @@ const COMPANY_WEBSITE = process.env.COMPANY_WEBSITE || "www.mavensadvisor.com";
 const DEFAULT_OWNER_ID =
   process.env.DEFAULT_OWNER_ID || "6838b0b708e8629ffab534ee";
 
-// MongoDB Connection
-mongoose
-  .connect(process.env.MONGODB_URI)
-  .then(() => console.log("Connected to MongoDB"))
-  .catch((err) => {
-    console.error("MongoDB connection error:", err);
-    process.exit(1);
-  });
+// MongoDB Connection — reuse the app's existing connection when the watcher is
+// required into the main process (index.js already connected). Only open our
+// own connection when running standalone, so we don't hold a second Mongo pool.
+if (mongoose.connection.readyState === 0) {
+  mongoose
+    .connect(process.env.MONGODB_URI, { maxPoolSize: 20 })
+    .then(() => console.log("Connected to MongoDB"))
+    .catch((err) => {
+      console.error("MongoDB connection error:", err);
+      process.exit(1);
+    });
+} else {
+  console.log("♻️  [watcher] Reusing existing MongoDB connection");
+}
 
 // Track processed emails
 const processedEmails = new Map();
@@ -790,7 +796,11 @@ function startWatcher() {
           setTimeout(checkLatest, 1000);
         });
         checkLatest();
-        setInterval(checkLatest, 30000);
+        // Real-time delivery is handled by the IMAP `mail` (IDLE) event above;
+        // this is only a safety sweep in case an IDLE notification is missed.
+        // Was 30s, which re-fetched + MIME-parsed on the single vCPU twice a
+        // minute for no benefit — 5 minutes is plenty as a fallback.
+        setInterval(checkLatest, 5 * 60 * 1000);
       };
 
       imap.search(["ALL"], (searchErr, allUids) => {

@@ -1781,11 +1781,14 @@ exports.approveMessage = async function approveMessage(req, res) {
       currentUserId
     );
 
-    // Record this approval step
+    // Record this approval step. The message's effective (sent/display) time is
+    // bumped to this time at EVERY level — each approval, low or high, updates
+    // the message's timestamp to when it was approved.
+    const approvalTime = new Date();
     if (!msg.approvalChain) msg.approvalChain = [];
     msg.approvalChain.push({
       approver: req.employee._id,
-      approvedAt: new Date(),
+      approvedAt: approvalTime,
       hierarchyLevel: currentHierarchyLevel,
     });
 
@@ -1808,12 +1811,12 @@ exports.approveMessage = async function approveMessage(req, res) {
       msg.receiver = [immediateSeniors[0]];
       responseStatusMessage = "Message approved and escalated to next-level supervisor";
     } else {
-      // Top of hierarchy reached — finalize as approved
+      // Top of hierarchy reached — finalize as approved.
       msg.approvalStatus = "approved";
       msg.approvedBy = req.employee._id;
-      msg.approvedAt = new Date();
+      msg.approvedAt = approvalTime;
       msg.status = "sent";
-      msg.sentAt = new Date();
+      msg.sentAt = approvalTime;
       approvalFinalized = true;
     }
 
@@ -1875,6 +1878,20 @@ exports.approveMessage = async function approveMessage(req, res) {
     }
 
     await msg.save();
+
+    // Bump the message's createdAt to THIS approval time at every level, so its
+    // sent/display time (and timeline position) reflects the latest approval —
+    // lower senior approves → that time; upper senior approves → updated again.
+    // createdAt is immutable via Mongoose timestamps, so use the raw driver.
+    try {
+      await WhatsAppMessage.collection.updateOne(
+        { _id: msg._id },
+        { $set: { createdAt: approvalTime } },
+      );
+      msg.createdAt = approvalTime;
+    } catch (e) {
+      console.warn("Failed to set approval createdAt:", e?.message || e);
+    }
 
     const populatedMsg = await WhatsAppMessage.findById(id).populate([
       { path: "owner", select: "_id name companyEmail" },

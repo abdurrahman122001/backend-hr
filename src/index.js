@@ -381,7 +381,14 @@ if (!MONGODB_URI) {
 }
 mongoose.set("strictQuery", false);
 mongoose
-  .connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+  .connect(MONGODB_URI, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    // Cap the pool: default is 100 sockets/connection, and with the change
+    // stream + email services this process was holding far more Mongo
+    // connections than a 1-vCPU box needs. 20 is ample for this workload.
+    maxPoolSize: 20,
+  })
   .then(async () => {
     try {
       const {

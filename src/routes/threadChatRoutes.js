@@ -20,6 +20,9 @@ router.get("/threads/:threadId/info", empAuth, threadChatController.getThreadInf
 // Get unread count
 router.get("/threads/:threadId/unread-count", empAuth, threadChatController.getUnreadCount);
 
+// Bulk unread counts for many threads (email list red-dot indicator)
+router.post("/threads/unread-counts", empAuth, threadChatController.getUnreadCountsBulk);
+
 // Edit a message
 router.patch("/messages/:id/edit", empAuth, threadChatController.editMessage);
 

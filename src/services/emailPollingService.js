@@ -2,7 +2,11 @@
 const emailReceiverService = require('./emailReceiverService');
 
 class EmailPollingService {
-  constructor(checkInterval = 30000) {
+  // This is only a SAFETY NET — new mail is already handled in real time via
+  // the IMAP `mail` (IDLE) event in emailReceiverService. A tight 30s poll made
+  // the single vCPU re-fetch + MIME-parse every 30s for no benefit, so the
+  // fallback sweep runs every 5 minutes instead.
+  constructor(checkInterval = 5 * 60 * 1000) {
     this.checkInterval = checkInterval;
     this.pollingInterval = null;
   }

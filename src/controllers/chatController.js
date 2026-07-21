@@ -68,35 +68,45 @@ const processMentions = async (content, senderId) => {
   if (!content) return [];
 
   const mentions = [];
+  const seen = new Set();
 
-  // Only the explicit picker format @[Name](userId) counts as a mention.
-  // Plain "@word" text must NOT be resolved by fuzzy name/email search —
-  // it misattributes mentions (e.g. a typed email address like
-  // "x@company.com" matched every employee's companyEmail domain and
-  // pinned a mention on an unrelated employee).
-  const mentionRegex = /@\[([^\]]+)\]\(([^)]+)\)/g;
-  let match;
-
-  while ((match = mentionRegex.exec(content)) !== null) {
-    const [, mentionText, userId] = match;
-
-    // Validate user exists and is not the sender
+  // Resolve one candidate mention (dedupe + validate + DB check).
+  const addMention = async (userId, mentionText) => {
     if (
-      userId &&
-      userId !== senderId.toString() &&
-      mongoose.Types.ObjectId.isValid(userId)
+      !userId ||
+      userId === senderId.toString() ||
+      !mongoose.Types.ObjectId.isValid(userId) ||
+      seen.has(String(userId))
     ) {
-      const user = await Employee.findById(userId).select(
-        "name companyEmail"
-      );
-      if (user) {
-        mentions.push({
-          employee: userId,
-          mentionedAt: new Date(),
-          mentionText: mentionText || `@${user.name}`,
-        });
-      }
+      return;
     }
+    seen.add(String(userId));
+    const user = await Employee.findById(userId).select("name companyEmail");
+    if (user) {
+      mentions.push({
+        employee: userId,
+        mentionedAt: new Date(),
+        mentionText: mentionText || `@${user.name}`,
+      });
+    }
+  };
+
+  // Format 1: the markdown picker format @[Name](userId).
+  // Plain "@word" text is intentionally NOT fuzzy-matched (it misattributed
+  // mentions from typed email addresses).
+  const mdRegex = /@\[([^\]]+)\]\(([^)]+)\)/g;
+  let match;
+  while ((match = mdRegex.exec(content)) !== null) {
+    await addMention(match[2], match[1]);
+  }
+
+  // Format 2: the GoogleChat composer inserts mentions as an HTML element
+  // <a data-mention-id="userId" data-mention-name="Name">@Name</a>, so parse
+  // that too — otherwise chat/space mentions never registered at all.
+  const htmlRegex =
+    /data-mention-id=["']([^"']+)["'][^>]*?(?:data-mention-name=["']([^"']+)["'])?/g;
+  while ((match = htmlRegex.exec(content)) !== null) {
+    await addMention(match[1], match[2]);
   }
 
   return mentions;
@@ -6964,15 +6974,29 @@ exports.getMentionedMessages = async (req, res) => {
           mention.employee._id.toString() === req.employee._id.toString()
       );
 
-      // Get conversation name
+      // Get a display name. Space messages may have a null `conversation`, so
+      // guard every access — a single unguarded deref here used to throw and
+      // 500 the whole endpoint, hiding ALL mentions (space ones especially).
+      const conv = message.conversation || null;
+      const space = message.space || null;
+
       let conversationName = "Direct Message";
-      if (message.conversation.isGroup) {
-        conversationName = message.conversation.groupName;
-      } else {
-        const otherParticipant = message.conversation.participants.find(
-          (p) => p.toString() !== req.employee._id.toString()
-        );
-        conversationName = `Chat with User`;
+      let isGroup = false;
+      let isSpace = false;
+
+      if (space) {
+        conversationName = space.name || "Space";
+        isSpace = true;
+      } else if (conv) {
+        if (conv.isGroup) {
+          conversationName = conv.groupName || "Group";
+          isGroup = true;
+        } else if (conv.space) {
+          isSpace = true;
+          conversationName = "Space";
+        } else {
+          conversationName = "Chat with User";
+        }
       }
 
       return {
@@ -6981,23 +7005,23 @@ exports.getMentionedMessages = async (req, res) => {
         messageType: message.messageType,
         attachments: message.attachments || [],
         sender: {
-          _id: message.sender._id,
-          name: message.sender.name,
-          email: message.sender.companyEmail,
-          avatar: message.sender.photographUrl || message.sender.avatar,
+          _id: message.sender?._id,
+          name: message.sender?.name,
+          email: message.sender?.companyEmail,
+          avatar: message.sender?.photographUrl || message.sender?.avatar,
         },
         conversation: {
-          _id: message.conversation._id,
+          _id: conv?._id || null,
           name: conversationName,
-          isGroup: message.conversation.isGroup,
-          isSpace: !!message.conversation.space,
+          isGroup,
+          isSpace,
         },
-        space: message.space
+        space: space
           ? {
-            _id: message.space._id,
-            name: message.space.name,
-            emoji: message.space.emoji || null,
-            avatar: message.space.avatar || null,
+            _id: space._id,
+            name: space.name,
+            emoji: space.emoji || null,
+            avatar: space.avatar || null,
           }
           : null,
         mentionedAt: userMention ? userMention.mentionedAt : null,
@@ -7028,12 +7052,19 @@ exports.getMentionedMessages = async (req, res) => {
 // ✅ GET UNREAD MENTIONS COUNT
 exports.getUnreadMentionsCount = async (req, res) => {
   try {
+    // Unread = mentions of me created AFTER I last opened the Mentions view.
+    // Falls back to a 30-day window for users who've never opened it.
+    const emp = await Employee.findById(req.employee._id)
+      .select("mentionsSeenAt")
+      .lean();
+    const since =
+      emp?.mentionsSeenAt ||
+      new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
     const count = await Message.countDocuments({
       "mentions.employee": req.employee._id,
-      createdAt: {
-        $gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
-      },
-      // You can add read status logic here if you track read mentions
+      sender: { $ne: req.employee._id }, // don't count my own messages
+      createdAt: { $gt: since },
     });
 
     res.json({
@@ -7047,6 +7078,20 @@ exports.getUnreadMentionsCount = async (req, res) => {
       error: "Failed to get unread mentions count",
       details: error.message,
     });
+  }
+};
+
+// Mark all mentions as seen (called when the user opens the Mentions view).
+exports.markMentionsSeen = async (req, res) => {
+  try {
+    await Employee.updateOne(
+      { _id: req.employee._id },
+      { $set: { mentionsSeenAt: new Date() } },
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Mark mentions seen error:", error);
+    res.status(500).json({ success: false, error: "Failed to mark mentions seen" });
   }
 };
 exports.getMessageViews = async (req, res) => {

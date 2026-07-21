@@ -125,12 +125,25 @@ const ClientInfoSchema = new Schema(
         photographUrl: {
           type: String,
         },
+        // Separate email signature for this client employee — auto-inserted
+        // when composing an email addressed to this specific employee.
+        emailSignature: {
+          type: String,
+          default: "",
+        },
         addedAt: {
           type: Date,
           default: Date.now,
         },
       },
     ],
+
+    // Email signature for the CLIENT (company) — auto-inserted when composing an
+    // email to the client's main address (separate from per-employee signatures).
+    emailSignature: {
+      type: String,
+      default: "",
+    },
 
     assignedTo: [
       {

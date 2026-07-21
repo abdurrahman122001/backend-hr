@@ -163,6 +163,10 @@ const EmployeeSchema = new Schema(
     // NOTE: trusted devices were moved to their own `TrustedDevice` collection
     // (models/TrustedDevice.js). Do not re-add them here.
     permissions: PermissionSchema,
+    // Timestamp of when this employee last opened the GoogleChat "Mentions"
+    // view. Mentions created after this are counted as unread (drives the
+    // sidebar Mentions badge / bold state).
+    mentionsSeenAt: { type: Date, default: null },
     status: {
       type: String,
       enum: [
