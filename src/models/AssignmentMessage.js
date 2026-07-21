@@ -47,6 +47,13 @@ const AssignmentMessageSchema = new Schema(
       default: null,
     },
 
+    // Forwarded message: delivered ONLY to its explicit receivers, never
+    // shared org-wide / by role hierarchy / to everyone assigned to the client.
+    isForward: {
+      type: Boolean,
+      default: false,
+    },
+
     // New fields for tracking client/company employee messages
     isFromClient: {
       type: Boolean,

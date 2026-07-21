@@ -310,9 +310,10 @@ exports.getBugsByOwner = async (req, res) => {
     }
 
     // Get all employees owned by this owner
-    const ownedEmployees = await Employee.find({ owner: ownerId }).select(
-      "_id name companyEmail department balance"
-    );
+    const ownedEmployees = await Employee.find({
+      owner: ownerId,
+      status: "active",
+    }).select("_id name companyEmail department balance");
 
     if (!ownedEmployees || ownedEmployees.length === 0) {
       return res.status(200).json({
@@ -1262,7 +1263,7 @@ exports.getOwnerDashboard = async (req, res) => {
     const ownerId = currentEmployee.owner._id;
 
     // Get all employees owned by this user
-    const ownedEmployees = await Employee.find({ owner: ownerId })
+    const ownedEmployees = await Employee.find({ owner: ownerId, status: "active" })
       .select("name companyEmail department designation balance status")
       .sort({ balance: -1 });
 

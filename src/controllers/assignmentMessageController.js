@@ -435,6 +435,9 @@ async function applyVisibility(q, req) {
       {
         $and: [
           { approvalStatus: { $ne: "pending" } },
+          // Forwards are private to their explicit recipients — they must never
+          // appear via org-wide / role-hierarchy / client-assignment visibility.
+          { isForward: { $ne: true } },
           {
             $or: [
               roleHierarchyFilter,
@@ -555,8 +558,13 @@ async function emitToSpecificReceivers(
     // Add anyone assigned to the client so it shows in their external inbox.
     // CRM-access/root sends are stored with approvalStatus null, while approved
     // employee replies use "approved"; both are deliverable. Pending messages
-    // must stay limited to their approval receivers.
-    if (populatedMessage.client && populatedMessage.approvalStatus !== "pending") {
+    // must stay limited to their approval receivers. Forwards are private to
+    // their explicit recipients, so they are never fanned out to the client team.
+    if (
+      populatedMessage.client &&
+      populatedMessage.approvalStatus !== "pending" &&
+      !populatedMessage.isForward
+    ) {
       const clientId = populatedMessage.client._id || populatedMessage.client;
       const clientDoc = await ClientInfo.findById(clientId)
         .select("assignedTo")
@@ -995,7 +1003,10 @@ exports.createMessage = async function createMessage(req, res) {
       .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
 
-    let threadId = providedThreadId;
+    // Forwards must not inherit the original thread — keeping them private to
+    // their selected recipients means starting their own thread, even if the
+    // client provided the source threadId for linkage.
+    let threadId = isForward ? undefined : providedThreadId;
     let originalMessage = null;
     let threadMessages = [];
     let isNewThread = true;
@@ -1583,6 +1594,7 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt: !isScheduled ? new Date() : undefined,
       threadId,
       replyTo: replyTo || undefined,
+      isForward: !!isForward,
       intendedRecipients: (approvalStatus === "pending") ? originalIntendedReceivers : [],
       isFromClient: inheritedIsFromClient,
       isFromCompanyEmployee: inheritedIsFromCompanyEmployee,

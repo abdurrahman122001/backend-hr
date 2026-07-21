@@ -13,7 +13,13 @@ const POPULATE = [
 const emit = (req, event, chatId, payload) => {
   try {
     const io = req.app.get("io");
-    io?.to(`space_${chatId}`).emit(event, { chatId: String(chatId), ...payload });
+    // chatId is a space id for space tasks and a conversation id for 1:1 DM
+    // tasks. Members join `space_<id>` for spaces and `conversation_<id>` for
+    // DMs, so broadcast to both rooms (the irrelevant one is simply empty).
+    io
+      ?.to(`space_${chatId}`)
+      .to(`conversation_${chatId}`)
+      .emit(event, { chatId: String(chatId), ...payload });
   } catch (e) {
     /* non-fatal — realtime is best-effort */
   }
@@ -139,11 +145,11 @@ exports.createTask = async (req, res) => {
       });
 
       // Mirror Google Chat: the task creation shows up inside the message's
-      // thread ("Created a task (via Tasks)"), so the thread chat covers it.
+      // thread ("Created a task (via Chat)"), so the thread chat covers it.
       await postTaskThreadEntry(
         req,
         task,
-        `Created a task (via Tasks)\n${task.title}`
+        `Created a task (via Chat)\n${task.title}`
       );
       // Assigned right at creation → announce that in the thread too
       if (Array.isArray(task.assignees) && task.assignees.length > 0) {
@@ -153,12 +159,12 @@ exports.createTask = async (req, res) => {
         await postTaskThreadEntry(
           req,
           task,
-          `Assigned a task to ${names} (via Tasks)`
+          `Assigned a task to ${names} (via Chat)`
         );
       }
     } else {
       // Task created straight from the Tasks panel → announce it as a message
-      // in the space conversation ("Created a task (via Tasks)" + title)
+      // in the space conversation ("Created a task (via Chat)" + title)
       try {
         const { Conversation, Message, Space } = require("../models/Chat");
         const space = await Space.findById(chatId).select("members");
@@ -172,7 +178,7 @@ exports.createTask = async (req, res) => {
             sender: req.employee._id,
             receivers,
             space: chatId,
-            content: `Created a task (via Tasks)\n${task.title}`,
+            content: `Created a task (via Chat)\n${task.title}`,
             messageType: "text",
             isGroupMessage: true,
             readBy: [{ employee: req.employee._id, readAt: new Date() }],
@@ -220,7 +226,7 @@ exports.createTask = async (req, res) => {
             await postTaskThreadEntry(
               req,
               task,
-              `Assigned a task to ${names} (via Tasks)`
+              `Assigned a task to ${names} (via Chat)`
             );
           }
         }
@@ -242,11 +248,18 @@ exports.createTask = async (req, res) => {
 exports.updateTask = async (req, res) => {
   try {
     const { taskId } = req.params;
-    const task = await ChatTask.findById(taskId);
+    // Populate assignees so we know the PREVIOUS assignees' names — needed to
+    // describe reassignments ("from @X to @Y") and unassignments in the thread.
+    const task = await ChatTask.findById(taskId).populate("assignees", "_id name");
     if (!task) return res.status(404).json({ error: "Task not found" });
 
-    // Remember who was already assigned so we only notify NEW assignees.
-    const prevAssignees = (task.assignees || []).map((a) => String(a));
+    // Remember who was already assigned so we only notify NEW assignees and can
+    // report who was removed.
+    const prevAssigneeObjs = (task.assignees || []).map((a) => ({
+      _id: String(a?._id || a),
+      name: a?.name,
+    }));
+    const prevAssignees = prevAssigneeObjs.map((a) => a._id);
     const prevDone = task.done;
     const prevInReview = !!task.inReview;
 
@@ -283,18 +296,32 @@ exports.updateTask = async (req, res) => {
 
     emit(req, "chat_task_updated", task.chatId, { task: populated });
     if (Array.isArray(assignees)) {
-      const newlyAdded = (populated.assignees || []).filter(
+      const newAssignees = populated.assignees || [];
+      const newIds = newAssignees.map((a) => String(a._id));
+      const added = newAssignees.filter(
         (a) => !prevAssignees.includes(String(a._id)),
       );
-      notifyAssignees(req, populated, newlyAdded, req.employee._id);
-      // Announce (re)assignment in the source message's thread, Google-Chat style
-      if (newlyAdded.length > 0) {
-        const names = newlyAdded.map((a) => `@${a.name || "member"}`).join(", ");
-        await postTaskThreadEntry(
-          req,
-          populated,
-          `Assigned a task to ${names} (via Tasks)`
-        );
+      const removed = prevAssigneeObjs.filter(
+        (a) => !newIds.includes(a._id),
+      );
+
+      // Notify only the newly added assignees.
+      notifyAssignees(req, populated, added, req.employee._id);
+
+      // Announce the assignee change in the source message's thread, Google-Chat
+      // style: assign / reassign / unassign.
+      const fmt = (list) =>
+        list.map((a) => `@${a.name || "member"}`).join(", ");
+      let activity = null;
+      if (added.length > 0 && removed.length > 0) {
+        activity = `Changed task assignee from ${fmt(removed)} to ${fmt(added)} (via Chat)`;
+      } else if (added.length > 0) {
+        activity = `Assigned a task to ${fmt(added)} (via Chat)`;
+      } else if (removed.length > 0) {
+        activity = `Unassigned a task from ${fmt(removed)} (via Chat)`;
+      }
+      if (activity) {
+        await postTaskThreadEntry(req, populated, activity);
       }
     }
     // Announce completion / review / reopen in the task's thread, Google-Chat style
@@ -302,7 +329,7 @@ exports.updateTask = async (req, res) => {
       await postTaskThreadEntry(
         req,
         populated,
-        `Submitted a task for review (via Tasks)\n${populated.title}`
+        `Submitted a task for review (via Chat)\n${populated.title}`
       );
       // Ping the creator that this task awaits their review
       try {
@@ -326,14 +353,14 @@ exports.updateTask = async (req, res) => {
         req,
         populated,
         populated.done
-          ? `Completed a task (via Tasks)\n${populated.title}`
-          : `Reopened a task (via Tasks)\n${populated.title}`
+          ? `Completed a task (via Chat)\n${populated.title}`
+          : `Reopened a task (via Chat)\n${populated.title}`
       );
     } else if (prevInReview && !populated.inReview && !populated.done) {
       await postTaskThreadEntry(
         req,
         populated,
-        `Returned a task for changes (via Tasks)\n${populated.title}`
+        `Returned a task for changes (via Chat)\n${populated.title}`
       );
     }
     return res.json({ task: populated });
