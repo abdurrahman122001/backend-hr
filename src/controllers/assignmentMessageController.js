@@ -278,8 +278,38 @@ function parseCCEmails(ccBody) {
       ];
     }
   }
+  return ccEmails;
+}
+
+// The own-mailbox filter exists to stop the system's own inbound/outbound
+// mailbox being CC'd on client mail (which would loop). But a real EMPLOYEE can
+// legitimately use one of those addresses — CC'ing them was silently dropping
+// the whole entry, so the message reached nobody. Only strip an own-mailbox
+// address when it does NOT belong to an employee.
+async function parseCCEmailsForOwner(ccBody, ownerId) {
+  const ccEmails = parseCCEmails(ccBody);
+  if (!ccEmails.length) return ccEmails;
+
   const ownMailboxes = getOwnMailboxAddresses();
-  return ccEmails.filter((cc) => !ownMailboxes.includes(cc.email));
+  const collisions = ccEmails.filter((cc) => ownMailboxes.includes(cc.email));
+  if (!collisions.length) return ccEmails;
+
+  const employeeAddresses = new Set();
+  if (isObjId(ownerId)) {
+    const matches = await findEmployeesByEmails(
+      ownerId,
+      collisions.map((cc) => cc.email)
+    );
+    matches.forEach((emp) => {
+      if (emp.email) employeeAddresses.add(emp.email.trim().toLowerCase());
+      if (emp.companyEmail)
+        employeeAddresses.add(emp.companyEmail.trim().toLowerCase());
+    });
+  }
+
+  return ccEmails.filter(
+    (cc) => !ownMailboxes.includes(cc.email) || employeeAddresses.has(cc.email)
+  );
 }
 
 async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId, approvalStatus) {
@@ -1574,7 +1604,7 @@ exports.createMessage = async function createMessage(req, res) {
       sentAt = null;
     }
 
-    let ccEmails = parseCCEmails(ccBody);
+    let ccEmails = await parseCCEmailsForOwner(ccBody, owner);
 
     // 🔥 NEW: Check CC emails against employee database and add matching employees as receivers
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, approvalStatus);
@@ -2211,18 +2241,29 @@ exports.approveMessage = async function approveMessage(req, res) {
           (entry) => String(entry.approver?._id || entry.approver)
         );
 
+        // CC'd internal employees have to become receivers, otherwise the
+        // message never reaches them. syncCCWithReceivers() does this at
+        // creation time but bails out for pending messages, so for a supervised
+        // sender this is the ONLY point where the CC list gets delivered.
+        let ccMatchingEmployees = [];
+        if (doc.cc && doc.cc.length > 0) {
+          const ccEmailAddresses = doc.cc.map((c) => c.email);
+          ccMatchingEmployees = await findEmployeesByEmails(
+            doc.owner,
+            ccEmailAddresses
+          );
+        }
+        const ccReceiverIds = ccMatchingEmployees.map((e) => String(e._id));
+
         const finalReceivers = Array.from(
-          new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients, ...chainApprovers])
+          new Set([...currentReceivers, ...managers, ...crmIds, ...intendedRecipients, ...chainApprovers, ...ccReceiverIds])
         ).filter((rid) => rid !== String(doc.sender?._id || doc.sender));
 
         doc.receiver = finalReceivers;
 
         // Filter CCs on approval to ensure Managers/CRM are not in the CC header
         if (doc.cc && doc.cc.length > 0) {
-          const ccEmailAddresses = doc.cc.map((c) => c.email);
-          const matchingEmployees = await findEmployeesByEmails(doc.owner, ccEmailAddresses);
-
-          matchingEmployees.forEach((employee) => {
+          ccMatchingEmployees.forEach((employee) => {
             const role = (employee.role || "").toLowerCase();
             if (role.includes("manager") || role.includes("crm")) {
               const index = doc.cc.findIndex((c) => {
@@ -2980,7 +3021,7 @@ exports.createDraft = async function createDraft(req, res) {
       (id) => id !== String(sender)
     );
 
-    let ccEmails = parseCCEmails(ccBody);
+    let ccEmails = await parseCCEmailsForOwner(ccBody, owner);
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, null);
 
     // Note: Drafts can be saved without receivers. 
@@ -3148,7 +3189,7 @@ exports.updateMessage = async function updateMessage(req, res) {
     }
 
     if (ccBody) {
-      const ccEmails = parseCCEmails(ccBody);
+      const ccEmails = await parseCCEmailsForOwner(ccBody, msg.owner);
       msg.cc = ccEmails;
 
       // Sync updated CC with receivers
@@ -3327,7 +3368,7 @@ exports.sendDraft = async function sendDraft(req, res) {
 
     // Process CC and sync with receivers if CC is provided during send
     if (ccBody) {
-      const ccEmails = parseCCEmails(ccBody);
+      const ccEmails = await parseCCEmailsForOwner(ccBody, msg.owner);
       msg.cc = ccEmails;
 
       const updatedReceivers = await syncCCWithReceivers(

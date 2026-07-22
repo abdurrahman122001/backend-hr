@@ -427,7 +427,7 @@ exports.getMessage = async function getMessage(req, res) {
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       {
         path: "receiver",
-        select: "_id name companyEmail role designation",
+        select: "_id name companyEmail email role designation",
         options: { allowNull: true },
       },
     ]);
@@ -1096,7 +1096,7 @@ exports.listMessages = async function listMessages(req, res) {
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           // client photo + contacts travel with the thread list so detail
           // view avatars render instantly without extra requests; assignedTo
           // feeds the Unread/Unresponded badge (read-by-assignee check)
@@ -1139,7 +1139,7 @@ exports.listMessages = async function listMessages(req, res) {
             path: "sender",
             select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl",
           }, // 🔥 ADDED supervisionMode
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName photographUrl companyEmployees" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -1241,7 +1241,7 @@ exports.listMessagesForManager = async function listMessagesForManager(
       .populate([
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role designation" },
-        { path: "receiver", select: "_id name companyEmail role designation" },
+        { path: "receiver", select: "_id name companyEmail email role designation" },
         { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       ])
@@ -1489,7 +1489,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         ])
         .lean();
@@ -1527,7 +1527,7 @@ exports.getExternalCommunications = async function getExternalCommunications(
             path: "sender",
             select: "_id name companyEmail role designation supervisionMode",
           },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
         ])
         .lean(),
@@ -1751,7 +1751,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
         ])
         .lean();
 
@@ -1785,7 +1785,7 @@ exports.getInternalCommunications = async function getInternalCommunications(
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
@@ -1901,7 +1901,7 @@ exports.starMessage = async function starMessage(req, res) {
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
+      { path: "receiver", select: "_id name companyEmail email role designation" },
       { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
       { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
       { path: "approvedBy", select: "_id name companyEmail role designation" },
@@ -2103,10 +2103,12 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation photographUrl imageUrl" },
-          { path: "receiver", select: "_id name companyEmail role designation photographUrl imageUrl" },
+          { path: "receiver", select: "_id name companyEmail email role designation photographUrl imageUrl" },
           // photographUrl + companyEmployees ride along so the client/contact
-          // avatars render without a separate client-info request
-          { path: "client", select: "_id clientName photographUrl companyEmployees" },
+          // avatars render without a separate client-info request.
+          // emailSignature (client-level; the per-employee one is already inside
+          // companyEmployees) lets the reply box auto-insert the right signature.
+          { path: "client", select: "_id clientName photographUrl companyEmployees emailSignature" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "approvedBy", select: "_id name companyEmail role designation" },
@@ -2510,7 +2512,7 @@ exports.getReviewMessages = async function getReviewMessages(req, res) {
         .limit(lim)
         .populate([
           { path: "sender", select: "name supervisionMode" },
-          { path: "receiver", select: "name companyEmail role designation" },
+          { path: "receiver", select: "name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "name companyEmail" },
         ])
@@ -2639,7 +2641,7 @@ exports.getStarredMessages = async function getStarredMessages(req, res) {
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -2704,7 +2706,7 @@ exports.getTrashMessages = async function getTrashMessages(req, res) {
     const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 1000);
     const populateFields = [
       { path: "sender", select: "_id name companyEmail" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
+      { path: "receiver", select: "_id name companyEmail email role designation" },
       { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
       { path: "trashedBy", select: "_id name companyEmail" },
     ];
@@ -2799,7 +2801,7 @@ async function _getSpamMessages_disabled(req, res) {
           .populate([
             { path: "owner", select: "_id name companyEmail" },
             { path: "sender", select: "_id name companyEmail role designation" },
-            { path: "receiver", select: "_id name companyEmail role designation" },
+            { path: "receiver", select: "_id name companyEmail email role designation" },
             { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
             { path: "attachments.uploadedBy", select: "_id name companyEmail" },
             { path: "spamReportedBy", select: "_id name companyEmail" },
@@ -3048,7 +3050,7 @@ exports.searchMessages = async function searchMessages(req, res) {
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -3132,7 +3134,7 @@ exports.listDrafts = async function listDrafts(req, res) {
         .populate([
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation" },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
         ])
@@ -3218,7 +3220,7 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
     const populateFields = [
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation supervisionMode" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
+      { path: "receiver", select: "_id name companyEmail email role designation" },
       { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
       { path: "approvalChain.approver", select: "_id name companyEmail role designation" },
       { path: "approvedBy", select: "_id name companyEmail role designation" },
@@ -3432,7 +3434,7 @@ exports.getTeamLeadPendingApprovals =
             path: "sender",
             select: "_id name companyEmail role designation supervisionMode",
           },
-          { path: "receiver", select: "_id name companyEmail role designation" },
+          { path: "receiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName legalBusinessName dba assignedTo" },
           { path: "readBy.employee", select: "_id name companyEmail" },
           { path: "starredBy", select: "_id name companyEmail" },

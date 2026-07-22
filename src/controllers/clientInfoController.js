@@ -340,6 +340,14 @@ exports.updateClientInfo = async (req, res) => {
           });
         }
 
+        // This rebuild REPLACES the whole array, so every field a client may
+        // not echo back has to be carried over from the stored doc — otherwise
+        // saving the client form wipes it. emailSignature is set by its own
+        // add/update-employee endpoints and was being erased here.
+        const existing = empData._id
+          ? client.companyEmployees.id(empData._id)
+          : null;
+
         validatedEmployees.push({
           _id: empData._id,
           name: empData.name.trim(),
@@ -349,8 +357,15 @@ exports.updateClientInfo = async (req, res) => {
           department: empData.department ? empData.department.trim() : undefined,
           isPrimaryContact: empData.isPrimaryContact || false,
           notes: empData.notes ? empData.notes.trim() : undefined,
-          photographUrl: empData.photographUrl || undefined,
-          addedAt: empData.addedAt || new Date()
+          emailSignature:
+            empData.emailSignature !== undefined
+              ? empData.emailSignature || ""
+              : existing?.emailSignature || "",
+          photographUrl:
+            empData.photographUrl !== undefined
+              ? empData.photographUrl || undefined
+              : existing?.photographUrl || undefined,
+          addedAt: empData.addedAt || existing?.addedAt || new Date()
         });
       }
 
