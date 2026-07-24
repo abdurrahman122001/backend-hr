@@ -354,10 +354,22 @@ exports.sendGroupMessage = async function (req, res) {
       }
     }
 
+    // Fallback: a group with no direct client member can still be tied to a
+    // client through a client_employee member. Without this the message would
+    // carry no `client`, and every client-scoped rule downstream (assigned-only
+    // delivery, the browser-notification gate) would fall open.
+    if (!messageClientId) {
+      const ceMember = group.members.find(
+        (m) => m.memberType === "client_employee" && isObjId(m.parentClientId),
+      );
+      if (ceMember) messageClientId = oid(ceMember.parentClientId);
+    }
+
     // ── Check ClientInfo supervision settings ─────────────────────
     let needsApproval = false;
     let supervisedByList = [];
     let clientManagers = [];
+    let assignedEmployeeIds = [];
 
     if (messageClientId) {
       const ClientInfo = require("../models/ClientInfo");
@@ -371,7 +383,16 @@ exports.sendGroupMessage = async function (req, res) {
       supervisedByList = (clientDoc?.supervisedBy || []).map((id) =>
         String(id)
       );
-      
+      assignedEmployeeIds = (
+        Array.isArray(clientDoc?.assignedTo)
+          ? clientDoc.assignedTo
+          : clientDoc?.assignedTo
+            ? [clientDoc.assignedTo]
+            : []
+      )
+        .map((a) => String(a?._id || a))
+        .filter(Boolean);
+
       // We no longer automatically push supervisedBy supervisors to clientManagers.
       // Group messages should strictly stay within the group. Supervisors must be added to the group to see them.
     }
@@ -454,10 +475,28 @@ exports.sendGroupMessage = async function (req, res) {
     
     intendedReceiverIds = Array.from(fullIntendedSet).filter(isObjId).map(id => oid(id));
 
+    // CRM/manager messages on a client group are DELIVERED only to the client's
+    // assigned employees (+ CRM). Supervisors stay in `intendedReceivers` and
+    // still see the message — group visibility is by groupId, not receiver —
+    // but they get no unread badge and no browser notification for it. They are
+    // notified only for messages that need THEIR approval.
+    const isCrmSend =
+      senderRole === "manager" || senderRole === "admin" || senderRole === "owner";
+    const restrictToAssigned =
+      isCrmSend && messageClientId && assignedEmployeeIds.length > 0;
+
     if (approvalStatus === null) {
       // No approval required, OR the sender is the top of this client's approval
       // chain → deliver to everyone in the group immediately.
       receiverIds = intendedReceiverIds;
+
+      if (restrictToAssigned) {
+        const deliverSet = new Set([...assignedEmployeeIds, ...clientManagers]);
+        deliverSet.delete(String(senderId));
+        receiverIds = intendedReceiverIds.filter((id) =>
+          deliverSet.has(String(id)),
+        );
+      }
     }
 
     // ── Build & save message document ─────────────────────────────
