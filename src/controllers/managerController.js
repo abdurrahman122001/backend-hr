@@ -307,7 +307,8 @@ exports.getEmployeeRoster = async (req, res) => {
         .status(400)
         .json({ error: "Your profile is missing owner id" });
 
-    const { name } = req.query; // optional name search
+    const { name, q } = req.query; // optional name/text search (mentions use `q`)
+    const search = String(q || name || "").trim();
 
     const isManagerRole =
       me.role?.toLowerCase() === "manager" ||
@@ -329,7 +330,7 @@ exports.getEmployeeRoster = async (req, res) => {
     const isHierarchySenior = juniorIds.length > 0;
 
     // --- Employees Query ---
-    const employees = await Employee.find({
+    const employeeFilter = {
       owner: me.owner,
       status: "active",
       _id: { $ne: me._id },
@@ -337,12 +338,38 @@ exports.getEmployeeRoster = async (req, res) => {
         { department: "Operations" },
         { role: { $in: ["Employee", "Manager", "Team Lead"] } },
       ],
-    })
+    };
+
+    // When a search term is supplied (e.g. @mentions), narrow to matching
+    // name / email / employeeId. Absent search → unchanged full roster.
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      employeeFilter.$and = [
+        {
+          $or: [
+            { name: rx },
+            { companyEmail: rx },
+            { email: rx },
+            { employeeId: rx },
+          ],
+        },
+      ];
+    }
+
+    let employeeQuery = Employee.find(employeeFilter)
       .select(
         "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl isAdmin",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });
+
+    // Optional cap (e.g. @mention dropdowns pass ?limit=10). Absent → no cap.
+    const limitNum = parseInt(req.query.limit, 10);
+    if (Number.isFinite(limitNum) && limitNum > 0) {
+      employeeQuery = employeeQuery.limit(limitNum);
+    }
+
+    const employees = await employeeQuery;
 
     // --- Clients Query ---
     const clientQuery = { owner: me.owner, isActive: { $ne: false } };
