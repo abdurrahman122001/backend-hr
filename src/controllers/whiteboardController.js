@@ -14,6 +14,19 @@ function scope(req) {
   return { owner, me };
 }
 
+/* Boards the requesting employee is allowed to see: ones they created or ones
+ * explicitly shared with them (a grant). Combined with the tenant `owner` scope,
+ * this stops normal employees from seeing every board in the workspace — they
+ * only get their own boards plus anything shared via the ShareDialog. The board
+ * creator always holds a "full" grant (set on create/seed/duplicate), so this
+ * also covers authorship. */
+function accessCond(req) {
+  const emp = req.employee || {};
+  return {
+    $or: [{ createdByEmployee: emp._id }, { "grants.userId": String(emp._id) }],
+  };
+}
+
 function token() {
   return crypto.randomBytes(9).toString("hex");
 }
@@ -22,7 +35,11 @@ function token() {
 exports.list = async (req, res) => {
   try {
     const { owner } = scope(req);
-    const boards = await Whiteboard.find({ owner, deletedAt: null }).sort({
+    const boards = await Whiteboard.find({
+      owner,
+      deletedAt: null,
+      ...accessCond(req),
+    }).sort({
       updatedAt: -1,
     });
     res.json({ whiteboards: boards.map((b) => b.toClient()) });
@@ -36,7 +53,11 @@ exports.list = async (req, res) => {
 exports.trash = async (req, res) => {
   try {
     const { owner } = scope(req);
-    const boards = await Whiteboard.find({ owner, deletedAt: { $ne: null } }).sort({
+    const boards = await Whiteboard.find({
+      owner,
+      deletedAt: { $ne: null },
+      ...accessCond(req),
+    }).sort({
       deletedAt: -1,
     });
     res.json({ whiteboards: boards.map((b) => b.toClient()) });
@@ -50,7 +71,11 @@ exports.trash = async (req, res) => {
 exports.getOne = async (req, res) => {
   try {
     const { owner } = scope(req);
-    const board = await Whiteboard.findOne({ _id: req.params.id, owner });
+    const board = await Whiteboard.findOne({
+      _id: req.params.id,
+      owner,
+      ...accessCond(req),
+    });
     if (!board) return res.status(404).json({ error: "Whiteboard not found" });
     res.json({ whiteboard: board.toClient() });
   } catch (err) {
@@ -101,9 +126,17 @@ exports.create = async (req, res) => {
 exports.seed = async (req, res) => {
   try {
     const { owner, me } = scope(req);
-    const existing = await Whiteboard.countDocuments({ owner });
+    // Seed is per-employee: only skip (and return the employee's OWN boards) when
+    // THIS employee already has accessible boards. A workspace full of other
+    // people's boards must not suppress this employee's starter set or leak into
+    // their Hub.
+    const existing = await Whiteboard.countDocuments({ owner, ...accessCond(req) });
     if (existing > 0) {
-      const boards = await Whiteboard.find({ owner, deletedAt: null }).sort({ updatedAt: -1 });
+      const boards = await Whiteboard.find({
+        owner,
+        deletedAt: null,
+        ...accessCond(req),
+      }).sort({ updatedAt: -1 });
       return res.json({ whiteboards: boards.map((b) => b.toClient()), seeded: false });
     }
     const incoming = Array.isArray(req.body?.boards) ? req.body.boards : [];
@@ -139,7 +172,11 @@ exports.seed = async (req, res) => {
 exports.update = async (req, res) => {
   try {
     const { owner } = scope(req);
-    const board = await Whiteboard.findOne({ _id: req.params.id, owner });
+    const board = await Whiteboard.findOne({
+      _id: req.params.id,
+      owner,
+      ...accessCond(req),
+    });
     if (!board) return res.status(404).json({ error: "Whiteboard not found" });
 
     const allowed = [
@@ -170,7 +207,7 @@ exports.updateItems = async (req, res) => {
     const { owner } = scope(req);
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const board = await Whiteboard.findOneAndUpdate(
-      { _id: req.params.id, owner },
+      { _id: req.params.id, owner, ...accessCond(req) },
       { $set: { items, viewedAt: new Date() } },
       { new: true }
     );
@@ -186,7 +223,11 @@ exports.updateItems = async (req, res) => {
 exports.toggleFavorite = async (req, res) => {
   try {
     const { owner, me } = scope(req);
-    const board = await Whiteboard.findOne({ _id: req.params.id, owner });
+    const board = await Whiteboard.findOne({
+      _id: req.params.id,
+      owner,
+      ...accessCond(req),
+    });
     if (!board) return res.status(404).json({ error: "Whiteboard not found" });
     const has = board.favoriteUserIds.includes(me.id);
     board.favoriteUserIds = has
@@ -204,7 +245,11 @@ exports.toggleFavorite = async (req, res) => {
 exports.duplicate = async (req, res) => {
   try {
     const { owner, me } = scope(req);
-    const src = await Whiteboard.findOne({ _id: req.params.id, owner });
+    const src = await Whiteboard.findOne({
+      _id: req.params.id,
+      owner,
+      ...accessCond(req),
+    });
     if (!src) return res.status(404).json({ error: "Whiteboard not found" });
     const copy = await Whiteboard.create({
       owner,
@@ -234,11 +279,11 @@ exports.remove = async (req, res) => {
   try {
     const { owner } = scope(req);
     if (req.query.permanent === "true") {
-      await Whiteboard.deleteOne({ _id: req.params.id, owner });
+      await Whiteboard.deleteOne({ _id: req.params.id, owner, ...accessCond(req) });
       return res.json({ ok: true, permanent: true });
     }
     const board = await Whiteboard.findOneAndUpdate(
-      { _id: req.params.id, owner },
+      { _id: req.params.id, owner, ...accessCond(req) },
       { $set: { deletedAt: new Date() } },
       { new: true }
     );
@@ -255,7 +300,7 @@ exports.restore = async (req, res) => {
   try {
     const { owner } = scope(req);
     const board = await Whiteboard.findOneAndUpdate(
-      { _id: req.params.id, owner },
+      { _id: req.params.id, owner, ...accessCond(req) },
       { $set: { deletedAt: null } },
       { new: true }
     );
