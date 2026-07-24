@@ -1767,6 +1767,16 @@ exports.markAsRead = async (req, res) => {
             : undefined,
         });
       });
+
+      // Also notify the reader's own personal room — mirrors what
+      // markSpaceAsRead already does — so the chat-unread badge (which only
+      // listens on `user_<id>`) clears instantly instead of waiting for the
+      // next 30s poll.
+      io.to(`user_${req.employee._id}`).emit("conversation_marked_read", {
+        conversationId: conversationId,
+        userId: req.employee._id,
+        unreadCount: 0,
+      });
     }
 
     res.json({
@@ -7299,6 +7309,9 @@ exports.getChatUnreadCount = async (req, res) => {
   try {
     const userId = req.employee._id;
 
+    // Badge count = number of chats with at least one unread message, not the
+    // sum of unread messages — a chat with 20 unread messages should still
+    // only contribute 1 to this total, same as a chat with 1 unread message.
     const unreadCount = await Conversation.aggregate([
       {
         // Mirror getConversations' visibility: hidden/archived chats are not in
@@ -7317,10 +7330,10 @@ exports.getChatUnreadCount = async (req, res) => {
         },
       },
       {
-        $group: {
-          _id: null,
-          totalUnread: { $sum: "$unreadForUser" },
-        },
+        $match: { unreadForUser: { $gt: 0 } },
+      },
+      {
+        $count: "totalUnread",
       },
     ]);
 
