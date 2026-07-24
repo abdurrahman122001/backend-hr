@@ -521,6 +521,7 @@ exports.updateEmployeeAndSalarySlip = async (req, res) => {
 
     const employeeSet = {};
     const shallowKeys = [
+      'isNonAttendanceEmployee',
       "name",
       "cnic",
       "email",

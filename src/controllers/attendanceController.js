@@ -238,6 +238,27 @@ function getAttendanceBaseQuery(req) {
   return query;
 }
 
+async function excludeNonAttendanceEmployees(query, req) {
+  const ownerId = resolveOwnerId(req.user);
+  const userId = req.user._id;
+  const ownerCandidates = [ownerId, userId].filter(Boolean);
+
+  const employeeIds = await Employee.distinct("_id", {
+    owner: { $in: ownerCandidates },
+    isNonAttendanceEmployee: true,
+  });
+
+  if (employeeIds.length === 0) return query;
+
+  return {
+    ...query,
+    $and: [
+      ...(Array.isArray(query.$and) ? query.$and : []),
+      { employee: { $nin: employeeIds } },
+    ],
+  };
+}
+
 function oid(id) {
   return new mongoose.Types.ObjectId(id);
 }
@@ -1062,6 +1083,12 @@ exports.markAttendance = async (req, res) => {
         .json({ error: "Employee not found for this owner or unauthorized." });
     }
 
+    if (employee.isNonAttendanceEmployee) {
+      return res.status(400).json({
+        error: "Attendance is disabled for this employee.",
+      });
+    }
+
     // ========= Existing record (for reversals) =========
     const oldRec = await Attendance.findOne({
       owner: ownerId,
@@ -1783,13 +1810,16 @@ exports.getRecordsByDate = async (req, res) => {
   }
   try {
     const ownerId = resolveOwnerId(req.user);
-    const query = {
-      ...getAttendanceBaseQuery(req),
-      date,
-    };
+    const query = await excludeNonAttendanceEmployees(
+      {
+        ...getAttendanceBaseQuery(req),
+        date,
+      },
+      req
+    );
 
     const records = await Attendance.find(query)
-      .populate("employee", "name designation department email status _id photographUrl imageUrl employeeId")
+      .populate("employee", "name designation department email status isNonAttendanceEmployee _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1812,11 +1842,16 @@ exports.getRecordsByDateRange = async (req, res) => {
     const ownerId = resolveOwnerId(req.user);
     const userId = req.user._id;
 
-    const records = await Attendance.find({
-      owner: { $in: [oid(ownerId), oid(userId)] },
-      date: { $gte: start, $lte: end },
-    })
-      .populate("employee", "name position department email status _id photographUrl imageUrl employeeId")
+    const query = await excludeNonAttendanceEmployees(
+      {
+        owner: { $in: [oid(ownerId), oid(userId)] },
+        date: { $gte: start, $lte: end },
+      },
+      req
+    );
+
+    const records = await Attendance.find(query)
+      .populate("employee", "name position department email status isNonAttendanceEmployee _id photographUrl imageUrl employeeId")
       .lean();
 
     res.json(records);
@@ -1830,10 +1865,13 @@ exports.getRecordsByDateRange = async (req, res) => {
 exports.getStats = async (req, res) => {
   try {
     const { date } = req.query;
-    const query = {
-      ...getAttendanceBaseQuery(req),
-      date
-    };
+    const query = await excludeNonAttendanceEmployees(
+      {
+        ...getAttendanceBaseQuery(req),
+        date,
+      },
+      req
+    );
 
     const stats = await Attendance.aggregate([
       {
@@ -1877,6 +1915,10 @@ exports.getRecordsByEmployee = async (req, res) => {
         .json({ error: "Employee not found or unauthorized (check delegation scope)" });
     }
 
+    if (emp.isNonAttendanceEmployee) {
+      return res.json([]);
+    }
+
     const query = {
       ...getAttendanceBaseQuery(req),
       employee: oid(id),
@@ -1916,6 +1958,16 @@ exports.getStatsByEmployee = async (req, res) => {
       return res
         .status(404)
         .json({ error: "Employee not found or unauthorized" });
+    }
+
+    if (emp.isNonAttendanceEmployee) {
+      return res.json({
+        present: 0,
+        late: 0,
+        halfDay: 0,
+        absent: 0,
+        total: 0,
+      });
     }
 
     const match = {

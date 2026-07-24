@@ -101,6 +101,8 @@ const EmployeeSchema = new Schema(
 
     rt: { type: String, default: "15:00" },
 
+    isNonAttendanceEmployee: { type: Boolean, default: false },
+
     // EMPLOYMENT DETAILS
     department: { type: String },
     subDepartment: { type: String },

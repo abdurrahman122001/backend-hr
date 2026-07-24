@@ -84,6 +84,7 @@ const whatsAppMessageController = require("./controllers/whatsAppMessageControll
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
+const whiteboardRoutes = require("./routes/whiteboards");
 const offerEmail = require("./routes/offerEmail");
 const eventRoutes = require("./routes/eventRoutes");
 const upcomingEventsRoutes = require("./routes/upcomingEvents");
@@ -331,6 +332,7 @@ const whistleblowingReportRoutes = require("./routes/whistleblowingReportRoutes"
 app.use("/api/whistle-reports", whistleblowingReportRoutes);
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/whiteboards", whiteboardRoutes);
 app.use("/api/offer-email", anyPayrollAuth, offerEmail);
 app.use("/api/events", anyPayrollAuth, eventRoutes);
 app.use("/api/upcoming-events", empAuth, upcomingEventsRoutes);
@@ -2801,6 +2803,89 @@ io.on("connection", (socket) => {
     console.error("🔴 Socket error:", error);
   });
 });
+
+// ── Whiteboards realtime: presence, live ops, cursors, meta, share ─────────
+// Presence is tracked per board room so viewers see each other live.
+const whiteboardPresence = new Map(); // boardId -> Map<socketId, user>
+
+function emitWhiteboardPresence(boardId) {
+  const room = whiteboardPresence.get(boardId);
+  const seen = new Map();
+  if (room) {
+    for (const u of room.values()) {
+      if (u && u.id) seen.set(String(u.id), u);
+    }
+  }
+  io.to(`whiteboard_${boardId}`).emit("whiteboard_presence", {
+    boardId,
+    users: Array.from(seen.values()),
+  });
+}
+
+io.on("connection", (socket) => {
+  // Join a board room and register presence.
+  socket.on("whiteboard_join", ({ boardId, user } = {}) => {
+    if (!boardId) return;
+    socket.join(`whiteboard_${boardId}`);
+    socket.data.wbBoardId = boardId;
+    if (!whiteboardPresence.has(boardId)) whiteboardPresence.set(boardId, new Map());
+    whiteboardPresence.get(boardId).set(socket.id, user || {});
+    emitWhiteboardPresence(boardId);
+  });
+
+  socket.on("whiteboard_leave", ({ boardId } = {}) => {
+    const id = boardId || socket.data.wbBoardId;
+    if (!id) return;
+    socket.leave(`whiteboard_${id}`);
+    whiteboardPresence.get(id)?.delete(socket.id);
+    if (socket.data.wbBoardId === id) socket.data.wbBoardId = null;
+    emitWhiteboardPresence(id);
+  });
+
+  // Relay a full-items snapshot to the other viewers (origin excluded).
+  socket.on("whiteboard_op", ({ boardId, items, by } = {}) => {
+    if (!boardId || !Array.isArray(items)) return;
+    socket.to(`whiteboard_${boardId}`).emit("whiteboard_op", { boardId, items, by });
+  });
+
+  // Relay board meta changes (title, grants, preferences…) to viewers.
+  socket.on("whiteboard_meta", ({ boardId, patch, by } = {}) => {
+    if (!boardId || !patch) return;
+    socket.to(`whiteboard_${boardId}`).emit("whiteboard_meta", { boardId, patch, by });
+  });
+
+  // Relay a live cursor position.
+  socket.on("whiteboard_cursor", ({ boardId, x, y, user } = {}) => {
+    if (!boardId) return;
+    socket.to(`whiteboard_${boardId}`).emit("whiteboard_cursor", {
+      boardId,
+      x,
+      y,
+      user,
+      socketId: socket.id,
+    });
+  });
+
+  // Share a board with specific employees — notify each in realtime.
+  socket.on("whiteboard_share", ({ boardId, boardName, userIds, by } = {}) => {
+    if (!boardId || !Array.isArray(userIds)) return;
+    for (const uid of userIds) {
+      io.to(`user_${uid}`)
+        .to(`employee_${uid}`)
+        .to(`emp_${uid}`)
+        .emit("whiteboard_shared", { boardId, boardName, by });
+    }
+  });
+
+  socket.on("disconnect", () => {
+    const id = socket.data.wbBoardId;
+    if (id) {
+      whiteboardPresence.get(id)?.delete(socket.id);
+      emitWhiteboardPresence(id);
+    }
+  });
+});
+
 io.on("connection", (socket) => {
   socket.on("join_user", (userId) => {
     if (!userId) {
