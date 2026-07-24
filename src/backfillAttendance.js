@@ -48,7 +48,8 @@ async function backfillForDate(dateStr, ownerId) {
 
   // 1) Get active employees
   const employees = await Employee.find(
-    { owner: ownerId, status: 'active', isTrashed: false },
+    // Non-attendance employees are excluded from auto absent-marking.
+    { owner: ownerId, status: 'active', isTrashed: false, isNonAttendanceEmployee: { $ne: true } },
     '_id'
   ).lean();
 
