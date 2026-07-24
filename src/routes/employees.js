@@ -3,6 +3,7 @@ const router = express.Router();
 const mongoose = require("mongoose");
 
 const Employee = require("../models/Employees");
+const Attendance = require("../models/Attendance");
 const TrustedDevice = require("../models/TrustedDevice");
 const {
   getUpcomingBirthdays,
@@ -151,7 +152,10 @@ router.get("/attendance", attendanceAuth, async (req, res) => {
     const showOffboarded = includeOffboarded === "true";
 
     const scope = buildEmployeeScope(req.user, includeTrashed);
-    const query = { ...scope };
+    const query = {
+      ...scope,
+      isNonAttendanceEmployee: { $ne: true },
+    };
 
     // If not including offboarded, filter by status
     if (!showOffboarded) {
@@ -327,6 +331,17 @@ router.patch("/:id", requireAuth, async (req, res) => {
     }
 
     const scope = buildEmployeeScope(req.user);
+    const currentEmp = await Employee.findOne({ _id: id, ...scope }).lean();
+
+    if (!currentEmp) {
+      return res
+        .status(404)
+        .json({ error: "Employee not found or unauthorized" });
+    }
+
+    const shouldRemoveAttendance =
+      req.body.isNonAttendanceEmployee === true &&
+      currentEmp.isNonAttendanceEmployee !== true;
 
     // If updating experiences, handle them properly
     if (req.body.experiences) {
@@ -360,6 +375,11 @@ router.patch("/:id", requireAuth, async (req, res) => {
         .status(404)
         .json({ error: "Employee not found or unauthorized" });
     }
+
+    if (shouldRemoveAttendance) {
+      await Attendance.deleteMany({ employee: id });
+    }
+
     res.json(emp);
   } catch (err) {
     res.status(400).json({ error: err.message });
