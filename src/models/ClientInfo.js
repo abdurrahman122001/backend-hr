@@ -1,6 +1,94 @@
 const mongoose = require("mongoose");
 const { Schema, model } = mongoose;
 
+// A contact person inside the client's organisation. Used both at client level
+// (ClientInfo.companyEmployees — the legacy/company-wide contacts) and per
+// business (ClientInfo.businesses[].companyEmployees), so the shape stays
+// identical wherever a client contact is edited.
+const CompanyEmployeeSchema = new Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  designation: {
+    type: String,
+    required: true,
+    trim: true,
+  },
+  email: {
+    type: String,
+    trim: true,
+    lowercase: true,
+  },
+  phone: {
+    type: String,
+    trim: true,
+  },
+  department: {
+    type: String,
+    trim: true,
+  },
+  isPrimaryContact: {
+    type: Boolean,
+    default: false,
+  },
+  notes: {
+    type: String,
+    trim: true,
+  },
+  photographUrl: {
+    type: String,
+  },
+  // Separate email signature for this client employee — auto-inserted
+  // when composing an email addressed to this specific employee.
+  emailSignature: {
+    type: String,
+    default: "",
+  },
+  addedAt: {
+    type: Date,
+    default: Date.now,
+  },
+});
+
+// One client can operate several businesses (separate trading entities under
+// the same relationship). Each business carries its OWN email, its OWN assigned
+// team members and its OWN contacts at the client's side.
+const BusinessSchema = new Schema({
+  businessName: { type: String, required: true, trim: true },
+  legalBusinessName: { type: String, trim: true },
+  dba: { type: String, trim: true },
+
+  // Business-specific email — used instead of the client-level clientEmail when
+  // corresponding about this business.
+  email: { type: String, trim: true, lowercase: true },
+  phone: { type: String, trim: true },
+
+  industry: { type: String, trim: true },
+  natureOfBusiness: { type: String, trim: true },
+  companyLocation: { type: String, trim: true },
+
+  // Our team members responsible for THIS business (independent of the
+  // client-level ClientInfo.assignedTo).
+  assignedTo: [
+    {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+    },
+  ],
+
+  // The client's own staff for this business.
+  companyEmployees: [CompanyEmployeeSchema],
+
+  // Signature auto-inserted when composing to this business's email.
+  emailSignature: { type: String, default: "" },
+
+  notes: { type: String, trim: true },
+  isActive: { type: Boolean, default: true },
+  addedAt: { type: Date, default: Date.now },
+});
+
 const ClientInfoSchema = new Schema(
   {
     owner: {
@@ -89,62 +177,26 @@ const ClientInfoSchema = new Schema(
     ],
 
     // 🔹 CLIENT'S COMPANY EMPLOYEES (NEW)
-    companyEmployees: [
-      {
-        name: {
-          type: String,
-          required: true,
-          trim: true,
-        },
-        designation: {
-          type: String,
-          required: true,
-          trim: true,
-        },
-        email: {
-          type: String,
-          trim: true,
-          lowercase: true,
-        },
-        phone: {
-          type: String,
-          trim: true,
-        },
-        department: {
-          type: String,
-          trim: true,
-        },
-        isPrimaryContact: {
-          type: Boolean,
-          default: false,
-        },
-        notes: {
-          type: String,
-          trim: true,
-        },
-        photographUrl: {
-          type: String,
-        },
-        // Separate email signature for this client employee — auto-inserted
-        // when composing an email addressed to this specific employee.
-        emailSignature: {
-          type: String,
-          default: "",
-        },
-        addedAt: {
-          type: Date,
-          default: Date.now,
-        },
-      },
-    ],
+    companyEmployees: [CompanyEmployeeSchema],
 
-    // Email signature for the CLIENT (company) — auto-inserted when composing an
-    // email to the client's main address (separate from per-employee signatures).
+    // 🔹 CLIENT'S BUSINESSES — a client may run multiple businesses, each with
+    // its own email, its own assigned team members and its own contacts.
+    businesses: [BusinessSchema],
+
+    // NOTE: the client-level emailSignature has moved to the business
+    // (businesses[].emailSignature) — signatures belong to the business whose
+    // address the mail is sent from. Kept only so existing records are readable
+    // during migration; nothing writes it any more.
     emailSignature: {
       type: String,
       default: "",
     },
 
+    // ⚠️ DERIVED — do not assign to this directly. Employees are assigned per
+    // business (businesses[].assignedTo); this array is the union of those and
+    // is rebuilt by syncClientAssignees() on every business-assignment change.
+    // It stays because the rest of the app keys off it: WhatsApp chat lists,
+    // email routing, client visibility queries and chat-space membership.
     assignedTo: [
       {
         type: Schema.Types.ObjectId,
@@ -198,5 +250,9 @@ ClientInfoSchema.index({ owner: 1, assignedTo: 1 });
 // Supports the $or supervisedBy branch in getChatList (was a collection scan)
 ClientInfoSchema.index({ owner: 1, supervisedBy: 1 });
 ClientInfoSchema.index({ owner: 1, "lastWhatsAppMessage.at": -1 });
+// Per-business assignment lookups ("which businesses am I assigned to")
+ClientInfoSchema.index({ owner: 1, "businesses.assignedTo": 1 });
+// Inbound email routing can match a business address as well as clientEmail
+ClientInfoSchema.index({ owner: 1, "businesses.email": 1 });
 
 module.exports = model("ClientInfo", ClientInfoSchema);

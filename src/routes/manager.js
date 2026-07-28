@@ -44,4 +44,7 @@ router.post(
   managerCtrl.assignClient
 );
 
+// Assign team members to a single business of a client (contacts panel).
+router.post("/assign-business", requireAuth, managerCtrl.assignBusiness);
+
 module.exports = router;

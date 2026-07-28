@@ -1032,6 +1032,13 @@ exports.createMessage = async function createMessage(req, res) {
       .select("_id role supervisor supervisionMode owner isAdmin")
       .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
+    // The client/company-employee context below used to be preserved only for
+    // role === "manager". CRM powers are access-based now, so a CRM-access
+    // sender whose role is "Employee" had the context nulled and their reply
+    // showed their own name instead of the company employee they addressed
+    // it to. Gate on CRM access (or the legacy role) instead.
+    const senderCanActAsClient =
+      senderRole === "manager" || (await hasCrmAccess(req.employee));
 
     // Forwards must not inherit the original thread — keeping them private to
     // their selected recipients means starting their own thread, even if the
@@ -1134,7 +1141,7 @@ exports.createMessage = async function createMessage(req, res) {
     let inheritedClientEmployeeEmail = null;
     let inheritedClientName = null;
 
-    if (senderRole === "manager") {
+    if (senderCanActAsClient) {
       if (isFromClient || isFromCompanyEmployee) {
         inheritedIsFromClient = isFromClient || false;
         inheritedIsFromCompanyEmployee = isFromCompanyEmployee || false;
@@ -3036,6 +3043,10 @@ exports.createDraft = async function createDraft(req, res) {
 
     const senderDoc = await Employee.findById(sender).select("_id role").lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
+    // Same reasoning as the send path: a CRM-access sender must keep the
+    // company-employee context they explicitly chose, whatever their role.
+    const senderCanActAsClient =
+      senderRole === "manager" || (await hasCrmAccess(req.employee));
 
     // Resolve client employee tracking fields — only managers may set them
     let inheritedIsFromClient = false;
@@ -3044,7 +3055,7 @@ exports.createDraft = async function createDraft(req, res) {
     let inheritedClientEmployeeEmail = null;
     let inheritedClientName = null;
 
-    if (senderRole === "manager") {
+    if (senderCanActAsClient) {
       if (isFromClient || isFromCompanyEmployee) {
         inheritedIsFromClient = isFromClient || false;
         inheritedIsFromCompanyEmployee = isFromCompanyEmployee || false;

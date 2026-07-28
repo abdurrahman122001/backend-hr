@@ -2149,9 +2149,16 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "receiver", select: "_id name companyEmail email role designation photographUrl imageUrl" },
           // photographUrl + companyEmployees ride along so the client/contact
           // avatars render without a separate client-info request.
-          // emailSignature (client-level; the per-employee one is already inside
-          // companyEmployees) lets the reply box auto-insert the right signature.
-          { path: "client", select: "_id clientName photographUrl companyEmployees emailSignature" },
+          // Signatures now live on the business (businesses[].emailSignature,
+          // and per-contact inside businesses[].companyEmployees) so the reply
+          // box can pick the one matching the address being replied to. The
+          // client-level emailSignature/companyEmployees stay in the projection
+          // only for records created before that move.
+          {
+            path: "client",
+            select:
+              "_id clientName photographUrl companyEmployees emailSignature businesses",
+          },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "approvedBy", select: "_id name companyEmail role designation" },

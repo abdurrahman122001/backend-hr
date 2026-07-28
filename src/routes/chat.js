@@ -18,6 +18,8 @@ router.get(
   chatController.getSpaceConversations
 );
 router.get("/spaces", empAuth, chatController.getSpaces);
+// Must stay above "/spaces/:spaceId" routes so "hidden" is not read as an id
+router.get("/spaces/hidden", empAuth, chatController.getHiddenSpaces);
 router.get(
   "/conversations/:conversationId/pinned-messages",
   empAuth,
@@ -221,6 +223,7 @@ router.put(
   chatController.updateSpaceNotificationSettings
 );
 router.post("/spaces/:spaceId/leave", empAuth, chatController.leaveSpace);
+router.post("/spaces/:spaceId/unhide", empAuth, chatController.unhideSpace);
 router.post(
   "/spaces/:spaceId/transfer-ownership",
   empAuth,
