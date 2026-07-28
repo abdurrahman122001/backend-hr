@@ -261,6 +261,7 @@ exports.getConversations = async (req, res) => {
       isGroup: false,
       space: { $exists: false },
       archivedBy: { $ne: req.employee._id },
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
@@ -285,6 +286,7 @@ exports.getConversations = async (req, res) => {
     // Get spaces for the spaces section
     const spaces = await Space.find({
       members: req.employee._id,
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("createdBy", "name companyEmail avatar photographUrl")
       .populate("admins", "name companyEmail avatar photographUrl")
@@ -629,6 +631,7 @@ exports.getSpaces = async (req, res) => {
   try {
     const spaces = await Space.find({
       members: req.employee._id,
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("createdBy", "name companyEmail avatar photographUrl")
       .populate("admins", "name companyEmail avatar photographUrl")
@@ -2484,6 +2487,14 @@ exports.sendSpaceMessage = async (req, res) => {
         .json({ success: false, error: "Space not found or access denied" });
     }
 
+    // New activity restores a space/group hidden by any member, matching the
+    // existing direct-message behavior.
+    const hiddenMemberIds = (space.hiddenBy || []).map((id) => String(id));
+    if (hiddenMemberIds.length > 0) {
+      space.hiddenBy = [];
+      await space.save();
+    }
+
     // Check message permissions
     if (
       space.settings.messagePermissions === "admins_only" &&
@@ -2641,6 +2652,13 @@ exports.sendSpaceMessage = async (req, res) => {
     // ✅ CRITICAL FIX: Use io.to() for broadcasting
     const io = req.app.get("io");
     if (io) {
+      hiddenMemberIds.forEach((employeeId) => {
+        const payload = { spaceId, unhiddenAt: new Date() };
+        io.to(`user_${employeeId}`)
+          .to(`employee_${employeeId}`)
+          .emit("space_unhidden", payload);
+      });
+
       // Broadcast to ALL users in the space room
       io.to(`space_${spaceId}`).emit("receive_space_message", populatedMessage);
 
@@ -4388,25 +4406,28 @@ exports.deleteSpace = async (req, res) => {
       });
     }
 
-    // Add hiddenBy field if it doesn't exist in your schema
-    if (!space.hiddenBy) {
-      space.hiddenBy = [];
-    }
-
-    if (!space.hiddenBy.includes(req.employee._id)) {
+    if (
+      !(space.hiddenBy || []).some(
+        (employeeId) =>
+          employeeId.toString() === req.employee._id.toString()
+      )
+    ) {
       space.hiddenBy.push(req.employee._id);
       await space.save();
     }
 
     const io = req.app.get("io");
     if (io) {
-      io.to(`employee_${req.employee._id}`).emit("space_hidden", {
+      const payload = {
         spaceId,
         spaceName: space.name,
         hiddenBy: req.employee._id,
         permanent: false,
         hiddenAt: new Date(),
-      });
+      };
+      io.to(`user_${req.employee._id}`)
+        .to(`employee_${req.employee._id}`)
+        .emit("space_hidden", payload);
     }
 
     res.json({

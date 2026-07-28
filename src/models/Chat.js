@@ -454,6 +454,12 @@ const spaceSchema = new mongoose.Schema(
         required: true,
       },
     ],
+    hiddenBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
     isPrivate: {
       type: Boolean,
       default: false,
