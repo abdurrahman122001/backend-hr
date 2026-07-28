@@ -1373,15 +1373,33 @@ exports.getExternalCommunications = async function getExternalCommunications(
           .lean();
         const myAssignedClientIds = myAssignedClients.map((c) => c._id);
 
+        // Which clients' mail I may see in my Client Box (my assigned clients).
+        let assignedClientConstraint;
         if (myAssignedClientIds.length === 0) {
-          q.client = { $in: [] };
+          assignedClientConstraint = { $in: [] };
         } else if (isObjId(client)) {
-          q.client = myAssignedClientIds.some((id) => String(id) === String(client))
+          assignedClientConstraint = myAssignedClientIds.some(
+            (id) => String(id) === String(client),
+          )
             ? oid(String(client))
             : { $in: [] };
         } else {
-          q.client = { $in: myAssignedClientIds };
+          assignedClientConstraint = { $in: myAssignedClientIds };
         }
+
+        // A client email FORWARDED directly to me belongs in my Client Box even
+        // when I'm not assigned to that client — forwards are private to their
+        // explicit recipients. Allow those alongside my assigned-client mail
+        // instead of hard-restricting q.client (which excluded them entirely).
+        q.$and = [
+          ...(q.$and || []),
+          {
+            $or: [
+              { client: assignedClientConstraint },
+              { isForward: true, receiver: me },
+            ],
+          },
+        ];
       }
 
       q.approvalStatus = { $ne: "pending" };
@@ -1945,39 +1963,64 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
       .select("_id")
       .lean();
     const assignedClientIds = myAssignedClients.map((c) => c._id);
-    const inboxClientScope = {
-      $or: [
-        { client: { $exists: false } },
-        { client: null },
-        ...(assignedClientIds.length > 0
-          ? [{ client: { $in: assignedClientIds } }]
-          : []),
-      ],
-    };
 
+    // Count by the thread's ABSOLUTE latest message so this matches the list's
+    // per-thread bold state (and getMessageCounts' "unread"): a thread is
+    // unread iff its latest message is addressed to me and I haven't read it.
+    // Counting "any unread message in the thread" left an old unread message
+    // (buried under a newer read/own reply) stuck on the Mail-icon badge.
+    const meId = oid(String(userId));
     const result = await AssignmentMessage.aggregate([
       {
         $match: {
-          $and: [
-            { $or: [{ receiver: userId }, { receiver: { $in: [userId] } }] },
-            {
-              $or: [
-                { "approvalChain.approver": { $ne: userId } },
-                { intendedRecipients: userId },
-              ],
-            },
-            inboxClientScope,
-          ],
+          owner: oid(String(owner)),
           status: "sent",
           approvalStatus: { $ne: "pending" },
-          trashedBy: { $ne: userId },
-          spamReporters: { $ne: userId },
-          isTrashed: { $ne: true },
-          isSpam: { $ne: true },
-          "readBy.employee": { $ne: userId },
         },
       },
-      { $group: { _id: { $ifNull: ["$threadId", { $toString: "$_id" }] } } },
+      { $sort: { createdAt: -1 } },
+      {
+        $group: {
+          _id: { $ifNull: ["$threadId", { $toString: "$_id" }] },
+          latestSender: { $first: "$sender" },
+          latestReceiver: { $first: "$receiver" },
+          latestReadBy: { $first: { $ifNull: ["$readBy.employee", []] } },
+          latestClient: { $first: "$client" },
+          latestTrashedBy: { $first: { $ifNull: ["$trashedBy", []] } },
+          latestSpam: { $first: { $ifNull: ["$spamReporters", []] } },
+          latestApprover: {
+            $first: { $ifNull: ["$approvalChain.approver", []] },
+          },
+          latestIntended: { $first: { $ifNull: ["$intendedRecipients", []] } },
+        },
+      },
+      {
+        $match: {
+          $and: [
+            { latestReceiver: meId },
+            { latestSender: { $ne: meId } },
+            { latestReadBy: { $ne: meId } },
+            { latestTrashedBy: { $ne: meId } },
+            { latestSpam: { $ne: meId } },
+            {
+              $or: [
+                { latestApprover: { $ne: meId } },
+                { latestIntended: meId },
+              ],
+            },
+            // Assigned-clients-only client scope (this endpoint is used by the
+            // non-CRM apps' Mail rail; internal mail always counts).
+            {
+              $or: [
+                { latestClient: null },
+                ...(assignedClientIds.length > 0
+                  ? [{ latestClient: { $in: assignedClientIds } }]
+                  : []),
+              ],
+            },
+          ],
+        },
+      },
       { $count: "count" },
     ]);
     const unreadCount = result[0]?.count || 0;
@@ -2265,6 +2308,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
     // app (no scope=crm), client mail only counts for MY assigned clients.
     const isCrmScope = String(req.query.scope || "") === "crm";
     let inboxClientScope = null;
+    let assignedClientIds = [];
     if (!isCrmScope) {
       // Strictly assignedTo — matches the Primary list (supervisedBy would
       // count every downline client's mail for hierarchy seniors).
@@ -2274,7 +2318,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       })
         .select("_id")
         .lean();
-      const assignedClientIds = myAssignedClients.map((c) => c._id);
+      assignedClientIds = myAssignedClients.map((c) => c._id);
       inboxClientScope = {
         $or: [
           { client: { $exists: false } },
@@ -2293,6 +2337,73 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       const result = await AssignmentMessage.aggregate([
         { $match: query },
         { $group: { _id: { $ifNull: ["$threadId", { $toString: "$_id" }] } } },
+        { $count: "count" },
+      ]);
+      return result[0]?.count || 0;
+    };
+
+    // Primary-inbox unread that mirrors what the LIST actually bolds: the list
+    // shows ONE row per thread (its latest message) and marks it unread only
+    // when that latest message is addressed to me and I haven't read it. The
+    // old "any unread message in the thread" count left the badge stuck at a
+    // phantom number when an old unread message sat under a newer message I had
+    // already read or sent myself (I'd never re-open a thread that doesn't look
+    // unread, so it never cleared). This counts by the thread's ABSOLUTE latest
+    // message instead.
+    const meId = oid(String(currentUser));
+    const countInboxUnreadByLatest = async () => {
+      const latestMatch = {
+        $and: [
+          { latestReceiver: meId }, // I'm a receiver of the latest message
+          { latestSender: { $ne: meId } }, // …and it isn't my own message
+          { latestReadBy: { $ne: meId } }, // …and I haven't read it
+          { latestTrashedBy: { $ne: meId } },
+          { latestSpam: { $ne: meId } },
+          {
+            $or: [
+              { latestApprover: { $ne: meId } },
+              { latestIntended: meId },
+            ],
+          },
+        ],
+      };
+      // Non-CRM apps: client mail only counts for my assigned clients (mirrors
+      // inboxClientScope, remapped onto the grouped `latestClient`).
+      if (inboxClientScope) {
+        latestMatch.$and.push({
+          $or: [
+            { latestClient: null },
+            ...(assignedClientIds.length > 0
+              ? [{ latestClient: { $in: assignedClientIds } }]
+              : []),
+          ],
+        });
+      }
+      const result = await AssignmentMessage.aggregate([
+        {
+          $match: {
+            owner: oid(String(owner)),
+            status: "sent",
+            approvalStatus: { $ne: "pending" },
+          },
+        },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: { $ifNull: ["$threadId", { $toString: "$_id" }] },
+            latestSender: { $first: "$sender" },
+            latestReceiver: { $first: "$receiver" },
+            latestReadBy: { $first: { $ifNull: ["$readBy.employee", []] } },
+            latestClient: { $first: "$client" },
+            latestTrashedBy: { $first: { $ifNull: ["$trashedBy", []] } },
+            latestSpam: { $first: { $ifNull: ["$spamReporters", []] } },
+            latestApprover: {
+              $first: { $ifNull: ["$approvalChain.approver", []] },
+            },
+            latestIntended: { $first: { $ifNull: ["$intendedRecipients", []] } },
+          },
+        },
+        { $match: latestMatch },
         { $count: "count" },
       ]);
       return result[0]?.count || 0;
@@ -2378,30 +2489,19 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
           },
           ...(inboxClientScope ? [inboxClientScope] : []),
         ],
+        // My OWN messages are never in my inbox (the list uses isReceiver &&
+        // !isSender). Supervision $addToSet / CC-sync can add me as a receiver
+        // of a message I sent, which otherwise leaked into this count.
+        sender: { $ne: currentUser },
         status: "sent",
         approvalStatus: { $ne: "pending" },
         trashedBy: { $ne: currentUser },
         spamReporters: { $ne: currentUser },
       }),
 
-      // Unread: inbox threads where the current user has at least one unread message
-      countUnreadThreads({
-        $and: [
-          { $or: [{ receiver: currentUser }, { receiver: { $in: [currentUser] } }] },
-          {
-            $or: [
-              { "approvalChain.approver": { $ne: currentUser } },
-              { intendedRecipients: currentUser },
-            ],
-          },
-          ...(inboxClientScope ? [inboxClientScope] : []),
-        ],
-        status: "sent",
-        approvalStatus: { $ne: "pending" },
-        trashedBy: { $ne: currentUser },
-        spamReporters: { $ne: currentUser },
-        "readBy.employee": { $ne: currentUser },
-      }),
+      // Unread: Primary-inbox threads whose LATEST message is unread & addressed
+      // to me — mirrors the list's per-thread bold state (see helper above).
+      countInboxUnreadByLatest(),
 
       // Starred: messages starred by current user
       AssignmentMessage.countDocuments({

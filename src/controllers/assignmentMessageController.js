@@ -1272,38 +1272,45 @@ exports.createMessage = async function createMessage(req, res) {
           (senderRole === "manager" || senderHasCrmAccess) &&
           otherManagerIds.length === 0;
 
-        if (
-          !isSenderAssigned &&
-          !senderIsTopCrm &&
-          !senderHasCrmAccess &&
-          otherManagerIds.length > 0
-        ) {
-          // Non-CRM senior composing to a downline client: route to the CRM
-          // (manager); do NOT add the assigned junior.
-          otherManagerIds.forEach((id) => {
-            if (!receivers.includes(id) && id !== String(sender)) {
-              receivers.push(id);
-            }
-          });
-        } else {
-          // Own client, sender is the top CRM, or sender holds CRM access:
-          // add assigned team members (and never reroute to another CRM).
-          assignedToIds.forEach((id) => {
-            if (!receivers.includes(id) && id !== String(sender)) {
-              receivers.push(id);
-            }
-          });
-        }
+        // A FORWARD is private to the recipients the sender explicitly chose —
+        // it must NOT fan out to the client's assigned team / CRM / admin
+        // broadcast the way a normal client reply does. Skip all receiver
+        // augmentation for forwards (the variables above are still computed
+        // because approvalStatus logic below relies on them).
+        if (!isForward) {
+          if (
+            !isSenderAssigned &&
+            !senderIsTopCrm &&
+            !senderHasCrmAccess &&
+            otherManagerIds.length > 0
+          ) {
+            // Non-CRM senior composing to a downline client: route to the CRM
+            // (manager); do NOT add the assigned junior.
+            otherManagerIds.forEach((id) => {
+              if (!receivers.includes(id) && id !== String(sender)) {
+                receivers.push(id);
+              }
+            });
+          } else {
+            // Own client, sender is the top CRM, or sender holds CRM access:
+            // add assigned team members (and never reroute to another CRM).
+            assignedToIds.forEach((id) => {
+              if (!receivers.includes(id) && id !== String(sender)) {
+                receivers.push(id);
+              }
+            });
+          }
 
-        // 👑 ADMIN CRM BROADCAST: a client compose from an isAdmin employee
-        // who holds CRM access is delivered to ALL CRM-access users (not just
-        // the client's assigned employees), so every CRM user receives it.
-        if (senderHasCrmAccess && senderDoc?.isAdmin === true) {
-          otherManagerIds.forEach((id) => {
-            if (!receivers.includes(id) && id !== String(sender)) {
-              receivers.push(id);
-            }
-          });
+          // 👑 ADMIN CRM BROADCAST: a client compose from an isAdmin employee
+          // who holds CRM access is delivered to ALL CRM-access users (not just
+          // the client's assigned employees), so every CRM user receives it.
+          if (senderHasCrmAccess && senderDoc?.isAdmin === true) {
+            otherManagerIds.forEach((id) => {
+              if (!receivers.includes(id) && id !== String(sender)) {
+                receivers.push(id);
+              }
+            });
+          }
         }
       }
 
