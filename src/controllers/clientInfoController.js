@@ -3,6 +3,7 @@ const ClientInfo = require("../models/ClientInfo");
 const Employee = require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
+const { syncClientAssignees } = require("../utils/clientAssignees");
 const {
   createClientSpace,
   syncClientSpaceMembers,
@@ -13,6 +14,93 @@ const {
 const isManagerLike = (role) => {
   const r = String(role || "").toLowerCase();
   return /\bmanager\b/.test(r) || /team\s*lead/.test(r) || /\bcrm\b/.test(r);
+};
+
+// Normalize one client-contact payload. `existing` is the stored sub-document
+// (when editing) so fields the client doesn't echo back — emailSignature and
+// photographUrl are managed by their own endpoints — survive a form save.
+const normalizeCompanyEmployee = (empData, existing = null) => {
+  if (!empData || !empData.name || !empData.designation) {
+    throw new Error("Each company employee must have name and designation");
+  }
+  return {
+    ...(empData._id ? { _id: empData._id } : {}),
+    name: empData.name.trim(),
+    designation: empData.designation.trim(),
+    email: empData.email ? empData.email.trim().toLowerCase() : undefined,
+    phone: empData.phone ? empData.phone.trim() : undefined,
+    department: empData.department ? empData.department.trim() : undefined,
+    isPrimaryContact: empData.isPrimaryContact || false,
+    notes: empData.notes ? empData.notes.trim() : undefined,
+    emailSignature:
+      empData.emailSignature !== undefined
+        ? empData.emailSignature || ""
+        : existing?.emailSignature || "",
+    photographUrl:
+      empData.photographUrl !== undefined
+        ? empData.photographUrl || undefined
+        : existing?.photographUrl || undefined,
+    addedAt: empData.addedAt || existing?.addedAt || new Date(),
+  };
+};
+
+// Normalize the businesses array. Each business owns its email, its assigned
+// team members and its own contacts, so the whole array is rebuilt from the
+// payload — `existingClient` supplies the stored business (matched by _id) so
+// unsent fields aren't wiped. Throws on invalid input; callers turn that into a
+// 400 so the message reaches the form.
+const normalizeBusinesses = (businesses, existingClient = null) => {
+  if (!Array.isArray(businesses)) {
+    throw new Error("businesses must be an array");
+  }
+
+  return businesses.map((biz) => {
+    if (!biz || !String(biz.businessName || "").trim()) {
+      throw new Error("Each business must have a business name");
+    }
+
+    const existing = biz._id && existingClient?.businesses?.id
+      ? existingClient.businesses.id(biz._id)
+      : null;
+
+    const assignedTo = (Array.isArray(biz.assignedTo) ? biz.assignedTo : [])
+      // Accept either raw ids or populated { _id } objects coming back from the UI
+      .map((e) => (e && typeof e === "object" ? e._id : e))
+      .filter((eid) => eid && mongoose.Types.ObjectId.isValid(String(eid)))
+      .map((eid) => new mongoose.Types.ObjectId(String(eid)));
+
+    const contacts = (
+      Array.isArray(biz.companyEmployees) ? biz.companyEmployees : []
+    ).map((empData) =>
+      normalizeCompanyEmployee(
+        empData,
+        empData._id && existing?.companyEmployees?.id
+          ? existing.companyEmployees.id(empData._id)
+          : null,
+      ),
+    );
+
+    return {
+      ...(biz._id ? { _id: biz._id } : {}),
+      businessName: biz.businessName.trim(),
+      legalBusinessName: biz.legalBusinessName?.trim() || undefined,
+      dba: biz.dba?.trim() || undefined,
+      email: biz.email ? biz.email.trim().toLowerCase() : undefined,
+      phone: biz.phone?.trim() || undefined,
+      industry: biz.industry?.trim() || undefined,
+      natureOfBusiness: biz.natureOfBusiness?.trim() || undefined,
+      companyLocation: biz.companyLocation?.trim() || undefined,
+      assignedTo,
+      companyEmployees: contacts,
+      emailSignature:
+        biz.emailSignature !== undefined
+          ? biz.emailSignature || ""
+          : existing?.emailSignature || "",
+      notes: biz.notes?.trim() || undefined,
+      isActive: biz.isActive !== false,
+      addedAt: biz.addedAt || existing?.addedAt || new Date(),
+    };
+  });
 };
 
 exports.createClientInfo = async (req, res) => {
@@ -33,33 +121,22 @@ exports.createClientInfo = async (req, res) => {
       return res.status(403).json({ error: "Only Managers/Team Leads or the top-level senior can create client info" });
     }
 
-    const { ownerId, companyEmployees = [], ...rest } = req.body;
+    const { ownerId, companyEmployees = [], businesses = [], ...rest } = req.body;
 
     if (!ownerId) return res.status(400).json({ error: "ownerId is required" });
 
-    // Validate companyEmployees if provided during creation
-    const validatedEmployees = [];
-    if (Array.isArray(companyEmployees) && companyEmployees.length > 0) {
-      for (const empData of companyEmployees) {
-        if (!empData.name || !empData.designation) {
-          return res.status(400).json({
-            error: "Each company employee must have name and designation"
-          });
-        }
-
-        validatedEmployees.push({
-          name: empData.name.trim(),
-          designation: empData.designation.trim(),
-          email: empData.email ? empData.email.trim().toLowerCase() : undefined,
-          phone: empData.phone ? empData.phone.trim() : undefined,
-          department: empData.department ? empData.department.trim() : undefined,
-          isPrimaryContact: empData.isPrimaryContact || false,
-          notes: empData.notes ? empData.notes.trim() : undefined,
-          emailSignature: empData.emailSignature || "",
-          photographUrl: empData.photographUrl || undefined,
-          addedAt: empData.addedAt || new Date()
-        });
-      }
+    // Validate companyEmployees / businesses if provided during creation
+    let validatedEmployees = [];
+    let validatedBusinesses = [];
+    try {
+      validatedEmployees = (Array.isArray(companyEmployees) ? companyEmployees : []).map(
+        (empData) => normalizeCompanyEmployee(empData),
+      );
+      validatedBusinesses = normalizeBusinesses(
+        Array.isArray(businesses) ? businesses : [],
+      );
+    } catch (validationErr) {
+      return res.status(400).json({ error: validationErr.message });
     }
 
     const doc = await ClientInfo.create({
@@ -67,6 +144,11 @@ exports.createClientInfo = async (req, res) => {
       owner: ownerId,
       createdBy: emp._id,
       companyEmployees: validatedEmployees,
+      businesses: validatedBusinesses,
+      // Derived from the businesses — never taken from the request body, since
+      // employees are assigned per business, not to the client.
+      assignedTo: syncClientAssignees({ businesses: validatedBusinesses })
+        .assignedTo,
     });
 
     // Auto-create a Google-Chat space named after the client with the
@@ -102,14 +184,21 @@ exports.getClientInfo = async (req, res) => {
         return res.status(400).json({ error: "Your profile is missing owner id." });
       q = { owner: emp.owner };
     } else {
-      // regular employee
-      q = { assignedTo: emp._id };
+      // Regular employee: clients assigned to them directly, PLUS clients where
+      // they are assigned to one of the businesses (per-business assignment).
+      q = {
+        $or: [
+          { assignedTo: emp._id },
+          { "businesses.assignedTo": emp._id },
+        ],
+      };
     }
 
     const clients = await ClientInfo.find(q)
       .sort({ createdAt: -1 })
       .populate("assignedTo", "_id name companyEmail role")
-      .populate("supervisedBy", "_id name companyEmail role");
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
 
 
     res.json(clients);
@@ -142,22 +231,50 @@ exports.getAllCompanyEmployees = async (req, res) => {
         return res.status(400).json({ error: "Your profile is missing owner id." });
       q = { owner: emp.owner };
     } else {
-      q = { assignedTo: emp._id };
+      // Assignment can be at client level or on one of the client's businesses.
+      q = {
+        $or: [
+          { assignedTo: emp._id },
+          { "businesses.assignedTo": emp._id },
+        ],
+      };
     }
 
     // Only pull client employees that belong to active clients — an inactive
     // client's contacts should not appear in the group member picker.
     const clients = await ClientInfo.find({ ...q, isActive: { $ne: false } })
-      .select("_id clientName companyEmployees")
+      .select("_id clientName companyEmployees businesses")
       .lean();
 
+    // Contacts live under each business now; records predating businesses still
+    // carry them at client level, so both are returned. Business contacts get a
+    // `business` reference so the picker can group and label them.
     const clientEmployees = [];
     for (const client of clients) {
+      const clientRef = { _id: client._id, clientName: client.clientName };
+
+      for (const business of client.businesses || []) {
+        if (business.isActive === false) continue;
+        for (const ce of business.companyEmployees || []) {
+          clientEmployees.push({
+            ...ce,
+            clientEmployeeName: ce.name,
+            client: clientRef,
+            business: {
+              _id: business._id,
+              businessName: business.businessName,
+              email: business.email,
+            },
+          });
+        }
+      }
+
       for (const ce of client.companyEmployees || []) {
         clientEmployees.push({
           ...ce,
           clientEmployeeName: ce.name,
-          client: { _id: client._id, clientName: client.clientName },
+          client: clientRef,
+          business: null,
         });
       }
     }
@@ -177,7 +294,8 @@ exports.getMyClients = async (req, res) => {
     const clients = await ClientInfo.find({ assignedTo: asObjectId })
       .sort({ createdAt: -1 })
       .populate("assignedTo", "_id name companyEmail role")
-      .populate("supervisedBy", "_id name companyEmail role");
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
 
     res.json(clients);
   } catch (err) {
@@ -267,7 +385,8 @@ exports.getMyAssignedClients = async (req, res) => {
     const clients = await ClientInfo.find({ assignedTo: { $in: subtreeIds } })
       .sort({ createdAt: -1 })
       .populate("assignedTo", "_id name companyEmail role")
-      .populate("supervisedBy", "_id name companyEmail role");
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
 
     res.json({ clients });
   } catch (err) {
@@ -311,7 +430,7 @@ exports.updateClientInfo = async (req, res) => {
     if (!emp) return res.status(404).json({ error: "Employee not found" });
 
     const { id } = req.params;
-    const { companyEmployees, ...updates } = req.body;
+    const { companyEmployees, businesses, ...updates } = req.body;
 
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
@@ -326,50 +445,44 @@ exports.updateClientInfo = async (req, res) => {
       return res.status(403).json({ error: "Not authorized to update this client info" });
     }
 
-    // If companyEmployees is provided in update, replace the entire array
-    if (companyEmployees !== undefined) {
-      if (!Array.isArray(companyEmployees)) {
-        return res.status(400).json({ error: "companyEmployees must be an array" });
-      }
-
-      const validatedEmployees = [];
-      for (const empData of companyEmployees) {
-        if (!empData.name || !empData.designation) {
-          return res.status(400).json({
-            error: "Each company employee must have name and designation"
-          });
+    // If companyEmployees / businesses are provided in update, replace the
+    // entire array. Both rebuilds carry unsent fields over from the stored doc
+    // (matched by _id) — otherwise saving the client form wipes values that are
+    // managed by their own endpoints, e.g. emailSignature and photographUrl.
+    try {
+      if (companyEmployees !== undefined) {
+        if (!Array.isArray(companyEmployees)) {
+          return res.status(400).json({ error: "companyEmployees must be an array" });
         }
-
-        // This rebuild REPLACES the whole array, so every field a client may
-        // not echo back has to be carried over from the stored doc — otherwise
-        // saving the client form wipes it. emailSignature is set by its own
-        // add/update-employee endpoints and was being erased here.
-        const existing = empData._id
-          ? client.companyEmployees.id(empData._id)
-          : null;
-
-        validatedEmployees.push({
-          _id: empData._id,
-          name: empData.name.trim(),
-          designation: empData.designation.trim(),
-          email: empData.email ? empData.email.trim().toLowerCase() : undefined,
-          phone: empData.phone ? empData.phone.trim() : undefined,
-          department: empData.department ? empData.department.trim() : undefined,
-          isPrimaryContact: empData.isPrimaryContact || false,
-          notes: empData.notes ? empData.notes.trim() : undefined,
-          emailSignature:
-            empData.emailSignature !== undefined
-              ? empData.emailSignature || ""
-              : existing?.emailSignature || "",
-          photographUrl:
-            empData.photographUrl !== undefined
-              ? empData.photographUrl || undefined
-              : existing?.photographUrl || undefined,
-          addedAt: empData.addedAt || existing?.addedAt || new Date()
-        });
+        updates.companyEmployees = companyEmployees.map((empData) =>
+          normalizeCompanyEmployee(
+            empData,
+            empData._id ? client.companyEmployees.id(empData._id) : null,
+          ),
+        );
       }
 
-      updates.companyEmployees = validatedEmployees;
+      if (businesses !== undefined) {
+        updates.businesses = normalizeBusinesses(businesses, client);
+        // assignedTo is the union of the businesses' assignees, never a value
+        // the client sends — assignment happens per business. When no business
+        // has assignees yet, leave the stored list untouched: the form posts
+        // its whole businesses array on every save, so overwriting here would
+        // wipe the assignees of clients that predate businesses.
+        const derived = syncClientAssignees({
+          businesses: updates.businesses,
+        }).assignedTo;
+        if (Array.isArray(derived) && derived.length > 0) {
+          updates.assignedTo = derived;
+        } else {
+          delete updates.assignedTo;
+        }
+      } else {
+        // Guard against a stale client-level assignment sneaking back in.
+        delete updates.assignedTo;
+      }
+    } catch (validationErr) {
+      return res.status(400).json({ error: validationErr.message });
     }
 
     const updated = await ClientInfo.findByIdAndUpdate(
@@ -377,7 +490,8 @@ exports.updateClientInfo = async (req, res) => {
       updates,
       { new: true }
     ).populate("assignedTo", "_id name companyEmail role")
-      .populate("supervisedBy", "_id name companyEmail role");
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
 
     res.json(updated);
   } catch (err) {
@@ -529,6 +643,58 @@ exports.updateCompanyEmployee = async (req, res) => {
   }
 };
 
+// Replace the team members assigned to ONE business of a client. Mirrors the
+// client-level assignment flow but scoped to businesses[businessId], so a
+// business can be handled by a different set of people than its parent client.
+exports.assignBusinessEmployees = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id, businessId } = req.params;
+    const { employeeIds } = req.body;
+
+    if (!Array.isArray(employeeIds)) {
+      return res.status(400).json({ error: "employeeIds must be an array" });
+    }
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const business = client.businesses.id(businessId);
+    if (!business) return res.status(404).json({ error: "Business not found" });
+
+    const invalid = employeeIds.find(
+      (eid) => !mongoose.Types.ObjectId.isValid(String(eid)),
+    );
+    if (invalid) {
+      return res.status(400).json({ error: `Invalid employee id: ${invalid}` });
+    }
+
+    // Only employees under the same owner may be assigned.
+    const validIds = await Employee.find({
+      _id: { $in: employeeIds },
+      owner: client.owner,
+    }).distinct("_id");
+
+    business.assignedTo = validIds;
+    // Client-level assignedTo is the union of all business assignees — keep it
+    // in step so chat lists, email routing and visibility queries stay correct.
+    syncClientAssignees(client);
+    await client.save();
+
+    const updated = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
+
+    res.json(updated);
+  } catch (err) {
+    console.error("assignBusinessEmployees error:", err);
+    res.status(500).json({ error: "Failed to assign business team members" });
+  }
+};
+
 exports.getClientById = async (req, res) => {
   try {
     const emp = await Employee.findById(req.employee._id).select("role");
@@ -554,7 +720,8 @@ exports.getClientById = async (req, res) => {
 
     const client = await ClientInfo.findById(id)
       .populate("assignedTo", "_id name companyEmail role")
-      .populate("supervisedBy", "_id name companyEmail role");
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
 
     if (!client) return res.status(404).json({ error: "Client not found" });
 
@@ -960,12 +1127,17 @@ exports.searchClientByEmail = async (req, res) => {
       query.assignedTo = { $in: subtreeIds };
     }
 
-    // Add email search
-    query.clientEmail = { $regex: email, $options: "i" };
+    // Match the client's own address OR any of its businesses' addresses —
+    // each business has its own email and is a valid recipient.
+    query.$or = [
+      { clientEmail: { $regex: email, $options: "i" } },
+      { "businesses.email": { $regex: email, $options: "i" } },
+    ];
 
     const clients = await ClientInfo.find(query)
       .populate("assignedTo", "_id name companyEmail role")
       .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl")
       .limit(10);
 
     res.json(clients);
@@ -995,27 +1167,53 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
       query.assignedTo = { $in: subtreeIds };
     }
 
-    // Add email search for company employees
-    query["companyEmployees.email"] = { $regex: email, $options: "i" };
+    // Contacts now live under a business; older records still carry them at
+    // client level, so match either place.
+    query.$or = [
+      { "companyEmployees.email": { $regex: email, $options: "i" } },
+      { "businesses.companyEmployees.email": { $regex: email, $options: "i" } },
+    ];
 
     const clients = await ClientInfo.find(query)
       .populate("assignedTo", "_id name companyEmail role")
       .populate("supervisedBy", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl")
       .limit(10);
 
+    const needle = email.toLowerCase();
     const results = [];
-    clients.forEach(client => {
-      client.companyEmployees.forEach(employee => {
-        if (employee.email && employee.email.toLowerCase().includes(email.toLowerCase())) {
-          results.push({
-            client: {
-              _id: client._id,
-              clientName: client.clientName,
-              dba: client.dba,
-              assignedTo: client.assignedTo
-            },
-            employee: employee
-          });
+
+    clients.forEach((client) => {
+      const clientRef = {
+        _id: client._id,
+        clientName: client.clientName,
+        dba: client.dba,
+        assignedTo: client.assignedTo,
+      };
+
+      // Contacts under each business — the business carries its own email and
+      // its own assigned team, both of which the composer needs.
+      (client.businesses || []).forEach((business) => {
+        (business.companyEmployees || []).forEach((employee) => {
+          if (employee.email && employee.email.toLowerCase().includes(needle)) {
+            results.push({
+              client: clientRef,
+              business: {
+                _id: business._id,
+                businessName: business.businessName,
+                email: business.email,
+                assignedTo: business.assignedTo,
+              },
+              employee,
+            });
+          }
+        });
+      });
+
+      // Legacy client-level contacts
+      (client.companyEmployees || []).forEach((employee) => {
+        if (employee.email && employee.email.toLowerCase().includes(needle)) {
+          results.push({ client: clientRef, business: null, employee });
         }
       });
     });
@@ -1181,6 +1379,45 @@ exports.uploadClientPhoto = async (req, res) => {
     res.json({ photographUrl: client.photographUrl });
   } catch (err) {
     console.error("uploadClientPhoto error:", err);
+    res.status(500).json({ error: "Failed to upload photo" });
+  }
+};
+
+// Photo for a contact that belongs to a BUSINESS
+// (businesses[businessIndex].companyEmployees[employeeIndex]). Mirrors
+// uploadCompanyEmployeePhoto, which only reaches the legacy client-level list.
+exports.uploadBusinessEmployeePhoto = async (req, res) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+    const { id, businessIndex, employeeIndex } = req.params;
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+
+    const bIndex = parseInt(businessIndex, 10);
+    if (isNaN(bIndex) || bIndex < 0 || bIndex >= (client.businesses || []).length) {
+      return res.status(400).json({ error: "Invalid business index" });
+    }
+
+    const business = client.businesses[bIndex];
+    const eIndex = parseInt(employeeIndex, 10);
+    if (
+      isNaN(eIndex) ||
+      eIndex < 0 ||
+      eIndex >= (business.companyEmployees || []).length
+    ) {
+      return res.status(400).json({ error: "Invalid employee index" });
+    }
+
+    business.companyEmployees[eIndex].photographUrl = `/uploads/${req.file.filename}`;
+    client.markModified("businesses");
+    await client.save();
+
+    res.json({
+      photographUrl: business.companyEmployees[eIndex].photographUrl,
+    });
+  } catch (err) {
+    console.error("uploadBusinessEmployeePhoto error:", err);
     res.status(500).json({ error: "Failed to upload photo" });
   }
 };

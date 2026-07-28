@@ -6,6 +6,7 @@ const AssignmentMessage = require("../models/AssignmentMessage");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
 const { hasCrmAccess } = require("../utils/crmAccess");
 const { syncClientSpaceMembers } = require("../services/clientSpaceService");
+const { syncClientAssignees } = require("../utils/clientAssignees");
 
 // ⚠️ DEPRECATED role check — CRM/manager powers are now access-based.
 // Use `await hasCrmAccess(req.employee)` instead of isManagerLike.
@@ -85,12 +86,16 @@ exports.getRoster = async (req, res) => {
       const myId = new mongoose.Types.ObjectId(me._id);
       const targetIds = [myId, ...juniorObjIds];
 
+      // Assignment can be at client level OR on one of the client's businesses,
+      // so both are checked — otherwise someone assigned only to a business
+      // would not see that client at all.
       if (isSenior) {
         // Seniors see: own clients, juniors' clients, AND unassigned clients
         clientQuery = {
           ...clientQuery,
           $or: [
             { assignedTo: { $in: targetIds } },
+            { "businesses.assignedTo": { $in: targetIds } },
             { assignedTo: { $size: 0 } },
             { assignedTo: null },
           ],
@@ -98,7 +103,10 @@ exports.getRoster = async (req, res) => {
       } else {
         clientQuery = {
           ...clientQuery,
-          assignedTo: { $in: targetIds },
+          $or: [
+            { assignedTo: { $in: targetIds } },
+            { "businesses.assignedTo": { $in: targetIds } },
+          ],
         };
       }
     }
@@ -127,9 +135,10 @@ exports.getRoster = async (req, res) => {
         .sort({ name: 1 }),
       ClientInfo.find(clientQuery)
         .select(
-          "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees clientEmail photographUrl createdAt updatedAt"
+          "_id clientName bookkeepingSoftware legalBusinessName dba industry taxStatus companyLocation isActive phone email assignedTo supervision supervisedBy owner readBy companyEmployees businesses clientEmail photographUrl createdAt updatedAt"
         )
         .populate("assignedTo", "_id name companyEmail role")
+        .populate("businesses.assignedTo", "_id name companyEmail role photographUrl")
         .populate("owner", "_id name companyEmail")
         .sort({ isActive: -1, createdAt: -1 }),
       juniorIds.length > 0
@@ -225,14 +234,13 @@ exports.getRoster = async (req, res) => {
       : null;
 
     clients.forEach((client) => {
-      if (!client.companyEmployees?.length) return;
-
       // Filter for regular employees
       if (allowedClientIds && !allowedClientIds.includes(client._id.toString())) {
         return;
       }
 
-      client.companyEmployees.forEach((emp) => {
+      // `business` is null for legacy client-level contacts.
+      const pushContact = (emp, business) => {
         clientEmployees.push({
           _id: `${client._id}_${emp.email || emp.name.replace(/\s+/g, "_")}`,
           name: emp.name,
@@ -247,10 +255,27 @@ exports.getRoster = async (req, res) => {
           clientEmail: client.clientEmail,
           clientPhotographUrl: client.photographUrl || null,
           clientEmployeeId: emp._id,
+          // Which business this contact belongs to, so the picker can label
+          // people who exist under several businesses of the same client.
+          businessId: business ? business._id : null,
+          businessName: business ? business.businessName : null,
+          businessEmail: business ? business.email : null,
           type: "company_employee",
           addedAt: emp.addedAt,
         });
+      };
+
+      // Contacts belong to a business now; older records still hold them at
+      // client level. Both are listed. (This used to `return` early when the
+      // client-level array was empty, which hid every business contact.)
+      (client.businesses || []).forEach((business) => {
+        if (business.isActive === false) return;
+        (business.companyEmployees || []).forEach((emp) =>
+          pushContact(emp, business),
+        );
       });
+
+      (client.companyEmployees || []).forEach((emp) => pushContact(emp, null));
     });
 
     /* ------------------ DIRECT JUNIOR MAP (for ContactsPanel supervised count) ----------- */
@@ -307,7 +332,8 @@ exports.getEmployeeRoster = async (req, res) => {
         .status(400)
         .json({ error: "Your profile is missing owner id" });
 
-    const { name } = req.query; // optional name search
+    const { name, q } = req.query; // optional name/text search (mentions use `q`)
+    const search = String(q || name || "").trim();
 
     const isManagerRole =
       me.role?.toLowerCase() === "manager" ||
@@ -329,7 +355,7 @@ exports.getEmployeeRoster = async (req, res) => {
     const isHierarchySenior = juniorIds.length > 0;
 
     // --- Employees Query ---
-    const employees = await Employee.find({
+    const employeeFilter = {
       owner: me.owner,
       status: "active",
       _id: { $ne: me._id },
@@ -337,12 +363,38 @@ exports.getEmployeeRoster = async (req, res) => {
         { department: "Operations" },
         { role: { $in: ["Employee", "Manager", "Team Lead"] } },
       ],
-    })
+    };
+
+    // When a search term is supplied (e.g. @mentions), narrow to matching
+    // name / email / employeeId. Absent search → unchanged full roster.
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      employeeFilter.$and = [
+        {
+          $or: [
+            { name: rx },
+            { companyEmail: rx },
+            { email: rx },
+            { employeeId: rx },
+          ],
+        },
+      ];
+    }
+
+    let employeeQuery = Employee.find(employeeFilter)
       .select(
         "_id name email companyEmail role department designation employeeId supervisionMode supervisor photographUrl isAdmin",
       )
       .populate("supervisor", "_id name companyEmail")
       .sort({ name: 1 });
+
+    // Optional cap (e.g. @mention dropdowns pass ?limit=10). Absent → no cap.
+    const limitNum = parseInt(req.query.limit, 10);
+    if (Number.isFinite(limitNum) && limitNum > 0) {
+      employeeQuery = employeeQuery.limit(limitNum);
+    }
+
+    const employees = await employeeQuery;
 
     // --- Clients Query ---
     const clientQuery = { owner: me.owner, isActive: { $ne: false } };
@@ -513,6 +565,132 @@ exports.getEmployeeSupervisionStatus = async (req, res) => {
   }
 };
 
+// The employees `me` is allowed to assign work to: themselves plus their whole
+// hierarchy subtree (juniors at any depth, and direct supervisor reports).
+// Mirrors the set getRoster shows them, so the UI and the API agree.
+async function resolveAssignableScope(me) {
+  const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
+  const [pathLinks, directLinks, supervisorReports] = await Promise.all([
+    EmployeeHierarchy.find({ owner: me.owner, path: pathRegex })
+      .select("junior")
+      .lean(),
+    EmployeeHierarchy.find({ owner: me.owner, senior: me._id })
+      .select("junior")
+      .lean(),
+    Employee.find({ owner: me.owner, supervisor: me._id }).select("_id").lean(),
+  ]);
+  const allowedIds = new Set([
+    String(me._id),
+    ...pathLinks.map((l) => String(l.junior)),
+    ...directLinks.map((l) => String(l.junior)),
+    ...supervisorReports.map((e) => String(e._id)),
+  ]);
+  return { allowedIds, isSenior: allowedIds.size > 1 };
+}
+
+// Assign team members to ONE business of a client. Same authorization as
+// assignClient (admin, or a senior acting within their subtree) so team leads
+// and seniors can manage business assignment from the contacts panel — the
+// CRM-only route on /client-info is for the CRM client form.
+exports.assignBusiness = async (req, res) => {
+  try {
+    const me = await Employee.findById(req.employee._id);
+    if (!me) return res.status(404).json({ error: "Employee not found" });
+    if (!me.owner)
+      return res.status(400).json({ error: "Your profile is missing owner id" });
+
+    const clientId = String(req.body.clientId || "").trim();
+    const businessId = String(req.body.businessId || "").trim();
+    const employeeIds = Array.isArray(req.body.employeeIds)
+      ? req.body.employeeIds.map(String)
+      : [];
+
+    if (!clientId || !businessId) {
+      return res
+        .status(400)
+        .json({ error: "clientId and businessId are required" });
+    }
+
+    const client = await ClientInfo.findOne({ _id: clientId, owner: me.owner });
+    if (!client)
+      return res
+        .status(404)
+        .json({ error: "Client not found or not under your owner" });
+
+    const business = client.businesses.id(businessId);
+    if (!business) return res.status(404).json({ error: "Business not found" });
+
+    const previousIds = (business.assignedTo || []).map((e) =>
+      String(e._id || e),
+    );
+    let requestedIds = employeeIds;
+
+    if (!me.isAdmin) {
+      const { allowedIds, isSenior } = await resolveAssignableScope(me);
+      if (!isSenior) {
+        return res.status(403).json({
+          error: "Unauthorized: only admins or seniors can assign businesses",
+        });
+      }
+
+      // The business must be within reach: unassigned, or already assigned to
+      // someone in the senior's subtree.
+      const inReach =
+        previousIds.length === 0 || previousIds.some((id) => allowedIds.has(id));
+      if (!inReach) {
+        return res.status(403).json({
+          error: "You can only assign businesses within your hierarchy",
+        });
+      }
+
+      // Reject only NEW assignees outside the subtree — the UI echoes back
+      // existing assignees, who may sit outside it.
+      const outside = requestedIds.filter(
+        (id) => !allowedIds.has(id) && !previousIds.includes(id),
+      );
+      if (outside.length > 0) {
+        return res.status(403).json({
+          error: "You can only assign businesses to juniors in your hierarchy",
+        });
+      }
+
+      // Preserve assignees the senior doesn't manage so they can't drop them.
+      const preserved = previousIds.filter((id) => !allowedIds.has(id));
+      requestedIds = [...new Set([...requestedIds, ...preserved])];
+    }
+
+    const validIds = await Employee.find({
+      _id: { $in: requestedIds },
+      owner: me.owner,
+    }).distinct("_id");
+
+    business.assignedTo = validIds;
+    // Client-level assignedTo is the union of all business assignees — keep it
+    // in step so chat lists, email routing and visibility queries stay correct.
+    syncClientAssignees(client);
+    await client.save();
+
+    const updated = await ClientInfo.findById(clientId)
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("businesses.assignedTo", "_id name companyEmail role photographUrl");
+
+    // Keep other open panels in sync, same as client-level assignment does.
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`owner_${me.owner}`).emit("client_business_assigned", {
+        clientId,
+        businessId,
+        businesses: updated.businesses,
+      });
+    }
+
+    res.json({ success: true, client: updated });
+  } catch (err) {
+    console.error("assignBusiness error:", err);
+    res.status(500).json({ error: "Failed to assign business" });
+  }
+};
+
 exports.assignClient = async (req, res) => {
   try {
     const me = await Employee.findById(req.employee._id);
@@ -554,25 +732,7 @@ exports.assignClient = async (req, res) => {
       : [];
 
     if (!me.isAdmin) {
-      const pathRegex = new RegExp(`(^|\\.)${String(me._id)}(\\.|$)`);
-      const [pathLinks, directLinks, supervisorReports] = await Promise.all([
-        EmployeeHierarchy.find({ owner: me.owner, path: pathRegex })
-          .select("junior")
-          .lean(),
-        EmployeeHierarchy.find({ owner: me.owner, senior: me._id })
-          .select("junior")
-          .lean(),
-        Employee.find({ owner: me.owner, supervisor: me._id })
-          .select("_id")
-          .lean(),
-      ]);
-      const allowedIds = new Set([
-        String(me._id),
-        ...pathLinks.map((l) => String(l.junior)),
-        ...directLinks.map((l) => String(l.junior)),
-        ...supervisorReports.map((e) => String(e._id)),
-      ]);
-      const isSenior = allowedIds.size > 1;
+      const { allowedIds, isSenior } = await resolveAssignableScope(me);
 
       if (!isSenior) {
         return res.status(403).json({

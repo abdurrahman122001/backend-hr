@@ -454,6 +454,12 @@ const spaceSchema = new mongoose.Schema(
         required: true,
       },
     ],
+    hiddenBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+    ],
     isPrivate: {
       type: Boolean,
       default: false,
@@ -499,6 +505,15 @@ const spaceSchema = new mongoose.Schema(
           type: Date,
           default: Date.now,
         },
+      },
+    ],
+    // Members who hid this space from their own chat list. Hiding is per-user
+    // and non-destructive: the space stays intact for everyone else and comes
+    // back for the hider on new activity (see sendSpaceMessage).
+    hiddenBy: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
       },
     ],
   },
@@ -701,6 +716,7 @@ messageSchema.index({ threadUnfollowers: 1 });
 spaceSchema.index({ members: 1 });
 spaceSchema.index({ createdBy: 1 });
 spaceSchema.index({ "pinnedBy.employee": 1 });
+spaceSchema.index({ hiddenBy: 1 });
 spaceSchema.index({ "notificationSettings.employee": 1, "notificationSettings.level": 1 });
 
 const Message = mongoose.model("Message", messageSchema);

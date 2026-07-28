@@ -561,41 +561,75 @@ class EmailReceiverService {
       const emailAddress = email.toLowerCase().trim();
       console.log(`🔍 [EmailReceiver] Looking for client with email: ${emailAddress}`);
 
-      // First check by client's main email
+      // Every lookup below needs the businesses: a client runs several, each
+      // with its own address and its own contacts, and mail may arrive at any
+      // of them rather than the client's main address.
+      const CLIENT_FIELDS =
+        "_id owner clientName clientEmail assignedTo companyEmployees businesses supervision";
+
+      // First check the client's main email, then any of its businesses'.
       const clientByEmail = await ClientInfo.findOne({
-        clientEmail: emailAddress,
+        $or: [
+          { clientEmail: emailAddress },
+          { "businesses.email": emailAddress },
+        ],
       })
         .populate("owner assignedTo")
-        .select(
-          "_id owner clientName clientEmail assignedTo companyEmployees supervision"
-        );
+        .select(CLIENT_FIELDS);
 
       if (clientByEmail) {
-        console.log(`✅ [EmailReceiver] Found client by main email: ${clientByEmail.clientName}`);
+        // Mail addressed to a business is attributed to that business, so the
+        // thread shows the business rather than the client's main identity.
+        const business = (clientByEmail.businesses || []).find(
+          (b) => b.email && b.email.toLowerCase() === emailAddress
+        );
+
+        console.log(
+          `✅ [EmailReceiver] Found client by ${business ? "business" : "main"} email: ${clientByEmail.clientName}`
+        );
         return {
           client: clientByEmail,
           clientEmployee: {
-            name: clientByEmail.clientName,
-            email: clientByEmail.clientEmail,
+            name: business
+              ? business.businessName || clientByEmail.clientName
+              : clientByEmail.clientName,
+            email: business ? business.email : clientByEmail.clientEmail,
             isPrimaryContact: true,
             clientId: clientByEmail._id,
+            businessId: business ? business._id : undefined,
           },
         };
       }
 
-      // Then check by company employees
+      // Then check contacts — under a business first, falling back to the
+      // legacy client-level list for records that predate businesses.
       const clientWithEmployee = await ClientInfo.findOne({
-        "companyEmployees.email": emailAddress,
+        $or: [
+          { "businesses.companyEmployees.email": emailAddress },
+          { "companyEmployees.email": emailAddress },
+        ],
       })
         .populate("owner assignedTo")
-        .select(
-          "_id owner clientName clientEmail assignedTo companyEmployees supervision"
-        );
+        .select(CLIENT_FIELDS);
 
       if (clientWithEmployee) {
-        const employee = clientWithEmployee.companyEmployees.find(
-          (emp) => emp.email && emp.email.toLowerCase() === emailAddress
-        );
+        let employee = null;
+        let ownerBusiness = null;
+        for (const business of clientWithEmployee.businesses || []) {
+          const match = (business.companyEmployees || []).find(
+            (emp) => emp.email && emp.email.toLowerCase() === emailAddress
+          );
+          if (match) {
+            employee = match;
+            ownerBusiness = business;
+            break;
+          }
+        }
+        if (!employee) {
+          employee = (clientWithEmployee.companyEmployees || []).find(
+            (emp) => emp.email && emp.email.toLowerCase() === emailAddress
+          );
+        }
 
         if (employee) {
           console.log(`✅ [EmailReceiver] Found client by company employee: ${clientWithEmployee.clientName}`);
@@ -608,6 +642,7 @@ class EmailReceiverService {
               department: employee.department,
               isPrimaryContact: employee.isPrimaryContact || false,
               clientId: clientWithEmployee._id,
+              businessId: ownerBusiness ? ownerBusiness._id : undefined,
             },
           };
         }

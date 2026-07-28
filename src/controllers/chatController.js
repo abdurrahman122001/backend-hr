@@ -261,6 +261,7 @@ exports.getConversations = async (req, res) => {
       isGroup: false,
       space: { $exists: false },
       archivedBy: { $ne: req.employee._id },
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("participants", "name companyEmail avatar photographUrl")
       .populate("lastMessage")
@@ -285,6 +286,7 @@ exports.getConversations = async (req, res) => {
     // Get spaces for the spaces section
     const spaces = await Space.find({
       members: req.employee._id,
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("createdBy", "name companyEmail avatar photographUrl")
       .populate("admins", "name companyEmail avatar photographUrl")
@@ -629,6 +631,7 @@ exports.getSpaces = async (req, res) => {
   try {
     const spaces = await Space.find({
       members: req.employee._id,
+      hiddenBy: { $ne: req.employee._id },
     })
       .populate("createdBy", "name companyEmail avatar photographUrl")
       .populate("admins", "name companyEmail avatar photographUrl")
@@ -1767,6 +1770,16 @@ exports.markAsRead = async (req, res) => {
             : undefined,
         });
       });
+
+      // Also notify the reader's own personal room — mirrors what
+      // markSpaceAsRead already does — so the chat-unread badge (which only
+      // listens on `user_<id>`) clears instantly instead of waiting for the
+      // next 30s poll.
+      io.to(`user_${req.employee._id}`).emit("conversation_marked_read", {
+        conversationId: conversationId,
+        userId: req.employee._id,
+        unreadCount: 0,
+      });
     }
 
     res.json({
@@ -2474,6 +2487,14 @@ exports.sendSpaceMessage = async (req, res) => {
         .json({ success: false, error: "Space not found or access denied" });
     }
 
+    // New activity restores a space/group hidden by any member, matching the
+    // existing direct-message behavior.
+    const hiddenMemberIds = (space.hiddenBy || []).map((id) => String(id));
+    if (hiddenMemberIds.length > 0) {
+      space.hiddenBy = [];
+      await space.save();
+    }
+
     // Check message permissions
     if (
       space.settings.messagePermissions === "admins_only" &&
@@ -2631,6 +2652,13 @@ exports.sendSpaceMessage = async (req, res) => {
     // ✅ CRITICAL FIX: Use io.to() for broadcasting
     const io = req.app.get("io");
     if (io) {
+      hiddenMemberIds.forEach((employeeId) => {
+        const payload = { spaceId, unhiddenAt: new Date() };
+        io.to(`user_${employeeId}`)
+          .to(`employee_${employeeId}`)
+          .emit("space_unhidden", payload);
+      });
+
       // Broadcast to ALL users in the space room
       io.to(`space_${spaceId}`).emit("receive_space_message", populatedMessage);
 
@@ -4258,7 +4286,10 @@ exports.deleteSpace = async (req, res) => {
     const isSpaceAdmin = space.admins?.some(
       (admin) => admin._id.toString() === req.employee._id.toString()
     );
-    const canDelete = isSystemAdmin || isSpaceAdmin;
+    // The creator owns the space even if they were somehow dropped from admins.
+    const isSpaceOwner =
+      space.createdBy?.toString() === req.employee._id.toString();
+    const canDelete = isSystemAdmin || isSpaceAdmin || isSpaceOwner;
 
     // Find linked conversation
     const conversation = await Conversation.findOne({ space: spaceId });
@@ -4270,7 +4301,7 @@ exports.deleteSpace = async (req, res) => {
         return res.status(403).json({
           success: false,
           error:
-            "Only space administrators or system admins can delete spaces",
+            "Only the space owner, space administrators or system admins can delete spaces",
         });
       }
 
@@ -4378,25 +4409,28 @@ exports.deleteSpace = async (req, res) => {
       });
     }
 
-    // Add hiddenBy field if it doesn't exist in your schema
-    if (!space.hiddenBy) {
-      space.hiddenBy = [];
-    }
-
-    if (!space.hiddenBy.includes(req.employee._id)) {
+    if (
+      !(space.hiddenBy || []).some(
+        (employeeId) =>
+          employeeId.toString() === req.employee._id.toString()
+      )
+    ) {
       space.hiddenBy.push(req.employee._id);
       await space.save();
     }
 
     const io = req.app.get("io");
     if (io) {
-      io.to(`employee_${req.employee._id}`).emit("space_hidden", {
+      const payload = {
         spaceId,
         spaceName: space.name,
         hiddenBy: req.employee._id,
         permanent: false,
         hiddenAt: new Date(),
-      });
+      };
+      io.to(`user_${req.employee._id}`)
+        .to(`employee_${req.employee._id}`)
+        .emit("space_hidden", payload);
     }
 
     res.json({
@@ -5504,6 +5538,93 @@ exports.unhideConversation = async (req, res) => {
       error: "Failed to unhide conversation",
       details: error.message,
     });
+  }
+};
+
+// ✅ UNHIDE SPACE — puts a space the user hid back in their list
+exports.unhideSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    space.hiddenBy = (space.hiddenBy || []).filter(
+      (employeeId) => employeeId.toString() !== req.employee._id.toString()
+    );
+    await space.save();
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`employee_${req.employee._id}`).emit("space_unhidden", {
+        spaceId,
+        unhiddenBy: req.employee._id,
+        unhiddenAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Space unhidden successfully",
+      spaceId,
+    });
+  } catch (error) {
+    console.error("Unhide space error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unhide space",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET HIDDEN SPACES (spaces/groups this user hid)
+exports.getHiddenSpaces = async (req, res) => {
+  try {
+    const spaces = await Space.find({
+      members: req.employee._id,
+      hiddenBy: req.employee._id,
+    })
+      .populate("createdBy", "name companyEmail avatar photographUrl")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .sort({ updatedAt: -1 });
+
+    res.json({
+      success: true,
+      hiddenSpaces: spaces.map((space) => ({
+        _id: space._id,
+        name: space.name,
+        description: space.description,
+        avatar: space.avatar,
+        emoji: space.emoji,
+        createdBy: space.createdBy,
+        admins: space.admins,
+        memberCount: space.members.length,
+        unreadCount: 0,
+        type: "space",
+        kind: space.kind || "space",
+        updatedAt: space.updatedAt,
+        isHidden: true,
+      })),
+      count: spaces.length,
+    });
+  } catch (error) {
+    console.error("Get hidden spaces error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch hidden spaces" });
   }
 };
 
@@ -6956,7 +7077,7 @@ exports.getMentionedMessages = async (req, res) => {
     })
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("mentions.employee", "name companyEmail avatar photographUrl")
-      .populate("conversation", "isGroup groupName space participants")
+      .populate("conversation", "isGroup groupName groupAvatar space participants")
       .populate("space", "name description avatar emoji kind")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
@@ -7015,6 +7136,7 @@ exports.getMentionedMessages = async (req, res) => {
           name: conversationName,
           isGroup,
           isSpace,
+          avatar: conv?.groupAvatar || null,
         },
         space: space
           ? {
@@ -7022,12 +7144,20 @@ exports.getMentionedMessages = async (req, res) => {
             name: space.name,
             emoji: space.emoji || null,
             avatar: space.avatar || null,
+            kind: space.kind || "space",
           }
           : null,
         mentionedAt: userMention ? userMention.mentionedAt : null,
         mentionText: userMention ? userMention.mentionText : null,
         createdAt: message.createdAt,
         hasMentions: message.hasMentions,
+        isUnread:
+          message.sender?._id?.toString() !== req.employee._id.toString() &&
+          !(message.readBy || []).some(
+            (read) =>
+              (read.employee?._id || read.employee)?.toString() ===
+              req.employee._id.toString()
+          ),
       };
     });
 
@@ -7299,6 +7429,9 @@ exports.getChatUnreadCount = async (req, res) => {
   try {
     const userId = req.employee._id;
 
+    // Badge count = number of chats with at least one unread message, not the
+    // sum of unread messages — a chat with 20 unread messages should still
+    // only contribute 1 to this total, same as a chat with 1 unread message.
     const unreadCount = await Conversation.aggregate([
       {
         // Mirror getConversations' visibility: hidden/archived chats are not in
@@ -7317,10 +7450,10 @@ exports.getChatUnreadCount = async (req, res) => {
         },
       },
       {
-        $group: {
-          _id: null,
-          totalUnread: { $sum: "$unreadForUser" },
-        },
+        $match: { unreadForUser: { $gt: 0 } },
+      },
+      {
+        $count: "totalUnread",
       },
     ]);
 
