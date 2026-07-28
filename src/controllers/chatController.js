@@ -6987,7 +6987,7 @@ exports.getMentionedMessages = async (req, res) => {
     })
       .populate("sender", "name companyEmail avatar photographUrl")
       .populate("mentions.employee", "name companyEmail avatar photographUrl")
-      .populate("conversation", "isGroup groupName space participants")
+      .populate("conversation", "isGroup groupName groupAvatar space participants")
       .populate("space", "name description avatar emoji kind")
       .sort({ createdAt: -1 })
       .limit(parseInt(limit))
@@ -7046,6 +7046,7 @@ exports.getMentionedMessages = async (req, res) => {
           name: conversationName,
           isGroup,
           isSpace,
+          avatar: conv?.groupAvatar || null,
         },
         space: space
           ? {
@@ -7053,12 +7054,20 @@ exports.getMentionedMessages = async (req, res) => {
             name: space.name,
             emoji: space.emoji || null,
             avatar: space.avatar || null,
+            kind: space.kind || "space",
           }
           : null,
         mentionedAt: userMention ? userMention.mentionedAt : null,
         mentionText: userMention ? userMention.mentionText : null,
         createdAt: message.createdAt,
         hasMentions: message.hasMentions,
+        isUnread:
+          message.sender?._id?.toString() !== req.employee._id.toString() &&
+          !(message.readBy || []).some(
+            (read) =>
+              (read.employee?._id || read.employee)?.toString() ===
+              req.employee._id.toString()
+          ),
       };
     });
 
