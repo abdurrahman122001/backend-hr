@@ -234,14 +234,13 @@ exports.getRoster = async (req, res) => {
       : null;
 
     clients.forEach((client) => {
-      if (!client.companyEmployees?.length) return;
-
       // Filter for regular employees
       if (allowedClientIds && !allowedClientIds.includes(client._id.toString())) {
         return;
       }
 
-      client.companyEmployees.forEach((emp) => {
+      // `business` is null for legacy client-level contacts.
+      const pushContact = (emp, business) => {
         clientEmployees.push({
           _id: `${client._id}_${emp.email || emp.name.replace(/\s+/g, "_")}`,
           name: emp.name,
@@ -256,10 +255,27 @@ exports.getRoster = async (req, res) => {
           clientEmail: client.clientEmail,
           clientPhotographUrl: client.photographUrl || null,
           clientEmployeeId: emp._id,
+          // Which business this contact belongs to, so the picker can label
+          // people who exist under several businesses of the same client.
+          businessId: business ? business._id : null,
+          businessName: business ? business.businessName : null,
+          businessEmail: business ? business.email : null,
           type: "company_employee",
           addedAt: emp.addedAt,
         });
+      };
+
+      // Contacts belong to a business now; older records still hold them at
+      // client level. Both are listed. (This used to `return` early when the
+      // client-level array was empty, which hid every business contact.)
+      (client.businesses || []).forEach((business) => {
+        if (business.isActive === false) return;
+        (business.companyEmployees || []).forEach((emp) =>
+          pushContact(emp, business),
+        );
       });
+
+      (client.companyEmployees || []).forEach((emp) => pushContact(emp, null));
     });
 
     /* ------------------ DIRECT JUNIOR MAP (for ContactsPanel supervised count) ----------- */
