@@ -4286,7 +4286,10 @@ exports.deleteSpace = async (req, res) => {
     const isSpaceAdmin = space.admins?.some(
       (admin) => admin._id.toString() === req.employee._id.toString()
     );
-    const canDelete = isSystemAdmin || isSpaceAdmin;
+    // The creator owns the space even if they were somehow dropped from admins.
+    const isSpaceOwner =
+      space.createdBy?.toString() === req.employee._id.toString();
+    const canDelete = isSystemAdmin || isSpaceAdmin || isSpaceOwner;
 
     // Find linked conversation
     const conversation = await Conversation.findOne({ space: spaceId });
@@ -4298,7 +4301,7 @@ exports.deleteSpace = async (req, res) => {
         return res.status(403).json({
           success: false,
           error:
-            "Only space administrators or system admins can delete spaces",
+            "Only the space owner, space administrators or system admins can delete spaces",
         });
       }
 
@@ -5535,6 +5538,93 @@ exports.unhideConversation = async (req, res) => {
       error: "Failed to unhide conversation",
       details: error.message,
     });
+  }
+};
+
+// ✅ UNHIDE SPACE — puts a space the user hid back in their list
+exports.unhideSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findOne({
+      _id: spaceId,
+      members: req.employee._id,
+    });
+
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    space.hiddenBy = (space.hiddenBy || []).filter(
+      (employeeId) => employeeId.toString() !== req.employee._id.toString()
+    );
+    await space.save();
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`employee_${req.employee._id}`).emit("space_unhidden", {
+        spaceId,
+        unhiddenBy: req.employee._id,
+        unhiddenAt: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Space unhidden successfully",
+      spaceId,
+    });
+  } catch (error) {
+    console.error("Unhide space error:", error);
+    res.status(500).json({
+      success: false,
+      error: "Failed to unhide space",
+      details: error.message,
+    });
+  }
+};
+
+// ✅ GET HIDDEN SPACES (spaces/groups this user hid)
+exports.getHiddenSpaces = async (req, res) => {
+  try {
+    const spaces = await Space.find({
+      members: req.employee._id,
+      hiddenBy: req.employee._id,
+    })
+      .populate("createdBy", "name companyEmail avatar photographUrl")
+      .populate("admins", "name companyEmail avatar photographUrl")
+      .sort({ updatedAt: -1 });
+
+    res.json({
+      success: true,
+      hiddenSpaces: spaces.map((space) => ({
+        _id: space._id,
+        name: space.name,
+        description: space.description,
+        avatar: space.avatar,
+        emoji: space.emoji,
+        createdBy: space.createdBy,
+        admins: space.admins,
+        memberCount: space.members.length,
+        unreadCount: 0,
+        type: "space",
+        kind: space.kind || "space",
+        updatedAt: space.updatedAt,
+        isHidden: true,
+      })),
+      count: spaces.length,
+    });
+  } catch (error) {
+    console.error("Get hidden spaces error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch hidden spaces" });
   }
 };
 

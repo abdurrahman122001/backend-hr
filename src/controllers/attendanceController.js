@@ -2175,10 +2175,11 @@ exports.updateChallengeStatus = async (req, res) => {
           if (resolvedCheckIn) {
             const checkInMin = toMin(resolvedCheckIn);
             if (checkInMin !== null) {
-              if (checkInMin <= reportingTimeMinutes) {
+              // Approving a challenge forgives lateness: any check-in before the
+              // half-day cutoff resolves to Present (not Late). Only a check-in
+              // after the cutoff remains a Half Day.
+              if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
                 computedStatus = "Present";
-              } else if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
-                computedStatus = "Late";
               } else {
                 computedStatus = "Half Day";
               }
@@ -2313,10 +2314,11 @@ exports.updateChallengeStatus = async (req, res) => {
         if (resolvedCheckIn) {
           const checkInMin = toMin(resolvedCheckIn);
           if (checkInMin !== null) {
-            if (checkInMin <= reportingTimeMinutes) {
+            // Approving a challenge forgives lateness: any check-in before the
+            // half-day cutoff resolves to Present (not Late). Only a check-in
+            // after the cutoff remains a Half Day.
+            if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
               computedStatus = "Present";
-            } else if (checkInMin < HALF_DAY_CHECKIN_THRESHOLD) {
-              computedStatus = "Late";
             } else {
               computedStatus = "Half Day";
             }

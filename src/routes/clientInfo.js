@@ -58,9 +58,24 @@ router.post("/:id/company-employees", requireAuth, requireCrmAccess, clientInfoC
 router.delete("/:id/company-employees/:employeeIndex", requireAuth, requireCrmAccess, clientInfoCtrl.removeCompanyEmployee);
 router.put("/:id/company-employees/:employeeIndex", requireAuth, requireCrmAccess, clientInfoCtrl.updateCompanyEmployee);
 
+// Per-business team assignment — 🔑 CRM-only (CRM app only)
+router.patch(
+  "/:id/businesses/:businessId/assign",
+  requireAuth,
+  requireCrmAccess,
+  clientInfoCtrl.assignBusinessEmployees,
+);
+
 // Photo uploads
 router.post("/:id/upload-photo", requireAuth, upload.single("photo"), clientInfoCtrl.uploadClientPhoto);
 router.post("/:id/company-employees/:employeeIndex/upload-photo", requireAuth, upload.single("photo"), clientInfoCtrl.uploadCompanyEmployeePhoto);
+// Photo for a contact belonging to one of the client's businesses
+router.post(
+  "/:id/businesses/:businessIndex/company-employees/:employeeIndex/upload-photo",
+  requireAuth,
+  upload.single("photo"),
+  clientInfoCtrl.uploadBusinessEmployeePhoto,
+);
 
 // WhatsApp flags
 router.patch(

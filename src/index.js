@@ -31,6 +31,7 @@ const employeesRouter = require("./routes/employees");
 const attendanceRouter = require("./routes/attendance");
 const leavesRouter = require("./routes/leaves");
 const settingsRouter = require("./routes/settings");
+const storageUsageRouter = require("./routes/storageUsage");
 const payrollPeriodsRouter = require("./routes/payrollPeriod");
 const staffRouter = require("./routes/staff");
 const salarySlipsRouter = require("./routes/salarySlips");
@@ -237,6 +238,7 @@ app.use("/api/admin/attendances", anyPayrollAuth, attendanceRouter); // Allowed 
 app.use("/api/leaves", anyPayrollAuth, leavesRouter);
 app.use("/api/settings", anyPayrollAuth, settingsRouter);
 app.use("/api/admin/settings", anyPayrollAuth, settingsRouter);
+app.use("/api/admin/storage-usage", anyPayrollAuth, storageUsageRouter);
 app.use("/api/payroll-periods", anyPayrollAuth, payrollPeriodsRouter);
 app.use("/api/admin/payroll-periods", anyPayrollAuth, payrollPeriodsRouter);
 app.use("/api/staff", anyPayrollAuth, staffRouter);
