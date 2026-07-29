@@ -80,6 +80,19 @@ const normalizeBusinesses = (businesses, existingClient = null) => {
       ),
     );
 
+    const websites = (Array.isArray(biz.websites) ? biz.websites : [])
+      .map((w) => String(w || "").trim())
+      .filter(Boolean);
+
+    const scopeOfWork = (Array.isArray(biz.scopeOfWork) ? biz.scopeOfWork : [])
+      .filter((s) => s && String(s.service || "").trim())
+      .map((s) => ({
+        service: String(s.service).trim(),
+        // Anything other than an explicit one-off is billed as recurring,
+        // matching the schema default.
+        billing: s.billing === "one_off" ? "one_off" : "recurring",
+      }));
+
     return {
       ...(biz._id ? { _id: biz._id } : {}),
       businessName: biz.businessName.trim(),
@@ -90,6 +103,12 @@ const normalizeBusinesses = (businesses, existingClient = null) => {
       industry: biz.industry?.trim() || undefined,
       natureOfBusiness: biz.natureOfBusiness?.trim() || undefined,
       companyLocation: biz.companyLocation?.trim() || undefined,
+      bookkeepingSoftware: biz.bookkeepingSoftware?.trim() || undefined,
+      nameInAccountingSoftware:
+        biz.nameInAccountingSoftware?.trim() || undefined,
+      naicsOrSic: biz.naicsOrSic?.trim() || undefined,
+      websites,
+      scopeOfWork,
       assignedTo,
       companyEmployees: contacts,
       emailSignature:
@@ -231,22 +250,50 @@ exports.getAllCompanyEmployees = async (req, res) => {
         return res.status(400).json({ error: "Your profile is missing owner id." });
       q = { owner: emp.owner };
     } else {
-      q = { assignedTo: emp._id };
+      // Assignment can be at client level or on one of the client's businesses.
+      q = {
+        $or: [
+          { assignedTo: emp._id },
+          { "businesses.assignedTo": emp._id },
+        ],
+      };
     }
 
     // Only pull client employees that belong to active clients — an inactive
     // client's contacts should not appear in the group member picker.
     const clients = await ClientInfo.find({ ...q, isActive: { $ne: false } })
-      .select("_id clientName companyEmployees")
+      .select("_id clientName companyEmployees businesses")
       .lean();
 
+    // Contacts live under each business now; records predating businesses still
+    // carry them at client level, so both are returned. Business contacts get a
+    // `business` reference so the picker can group and label them.
     const clientEmployees = [];
     for (const client of clients) {
+      const clientRef = { _id: client._id, clientName: client.clientName };
+
+      for (const business of client.businesses || []) {
+        if (business.isActive === false) continue;
+        for (const ce of business.companyEmployees || []) {
+          clientEmployees.push({
+            ...ce,
+            clientEmployeeName: ce.name,
+            client: clientRef,
+            business: {
+              _id: business._id,
+              businessName: business.businessName,
+              email: business.email,
+            },
+          });
+        }
+      }
+
       for (const ce of client.companyEmployees || []) {
         clientEmployees.push({
           ...ce,
           clientEmployeeName: ce.name,
-          client: { _id: client._id, clientName: client.clientName },
+          client: clientRef,
+          business: null,
         });
       }
     }

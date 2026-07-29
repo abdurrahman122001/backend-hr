@@ -3272,6 +3272,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       clientEmployeeName,
       clientEmployeeEmail,
       clientName,
+      sender: senderBody,
     } = req.body;
 
     const msg = await AssignmentMessage.findById(id);
@@ -3284,6 +3285,32 @@ exports.sendDraft = async function sendDraft(req, res) {
       return res
         .status(403)
         .json({ error: "You can only send your own drafts" });
+    }
+
+    // A CRM user may send this on behalf of an isAdmin employee, chosen in the
+    // composer's From field. Drafts are always saved under their real author
+    // (so ownership above and the drafts listing stay correct) — the override
+    // is applied here, at send time, before senderDoc/routing/receivers are
+    // derived below so every one of them follows the chosen identity, exactly
+    // as createMessage does for a message sent without a draft.
+    if (
+      senderBody &&
+      isObjId(senderBody) &&
+      String(senderBody) !== String(msg.sender)
+    ) {
+      const canSendAs =
+        (await hasCrmAccess(req.employee)) &&
+        (await Employee.exists({
+          _id: senderBody,
+          owner: msg.owner,
+          isAdmin: true,
+        }));
+      if (!canSendAs) {
+        return res
+          .status(403)
+          .json({ error: "Not allowed to send as that employee" });
+      }
+      msg.sender = senderBody;
     }
 
     // Check if draft is already sent or in an invalid state

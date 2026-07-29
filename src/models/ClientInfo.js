@@ -69,6 +69,26 @@ const BusinessSchema = new Schema({
   natureOfBusiness: { type: String, trim: true },
   companyLocation: { type: String, trim: true },
 
+  // Trading detail that differs per business — the same client can run one
+  // business on Xero and another on QuickBooks, under different SIC codes and
+  // with a different engagement. Mirrors the client-level fields of the same
+  // name, which now describe the client as a whole.
+  bookkeepingSoftware: { type: String, trim: true },
+  nameInAccountingSoftware: { type: String, trim: true },
+  naicsOrSic: { type: String, trim: true },
+  websites: [{ type: String }],
+  scopeOfWork: [
+    {
+      _id: false,
+      service: { type: String, required: true },
+      billing: {
+        type: String,
+        enum: ["one_off", "recurring"],
+        default: "recurring",
+      },
+    },
+  ],
+
   // Our team members responsible for THIS business (independent of the
   // client-level ClientInfo.assignedTo).
   assignedTo: [

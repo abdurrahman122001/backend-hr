@@ -538,6 +538,7 @@ if (
 }
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
+const { registerCallHandlers } = require("./socket/callSignaling");
 const io = new Server(primaryServer, {
   cors: {
     origin: "*",
@@ -620,6 +621,9 @@ io.on("connection", (socket) => {
     }
     socket.join(`employee_${employeeId}`);
   });
+
+  // 1:1 audio calls (WebRTC). Rides on the employee_<id> rooms joined above.
+  registerCallHandlers(io, socket);
 
   const clearThingsToDoRooms = async () => {
     const rooms = Array.isArray(socket.data.thingsToDoRooms)
