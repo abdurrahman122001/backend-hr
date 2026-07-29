@@ -85,6 +85,7 @@ const whatsAppMessageController = require("./controllers/whatsAppMessageControll
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
+const callRoutes = require("./routes/calls");
 const whiteboardRoutes = require("./routes/whiteboards");
 const offerEmail = require("./routes/offerEmail");
 const eventRoutes = require("./routes/eventRoutes");
@@ -334,6 +335,7 @@ const whistleblowingReportRoutes = require("./routes/whistleblowingReportRoutes"
 app.use("/api/whistle-reports", whistleblowingReportRoutes);
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/calls", callRoutes);
 app.use("/api/whiteboards", whiteboardRoutes);
 app.use("/api/offer-email", anyPayrollAuth, offerEmail);
 app.use("/api/events", anyPayrollAuth, eventRoutes);

@@ -12,6 +12,7 @@
  */
 const jwt = require("jsonwebtoken");
 const Employee = require("../models/Employees");
+const CallLog = require("../models/CallLog");
 
 // callId -> { callerId, calleeId, callerSocketId, calleeSocketId, state, ringTimer }
 const activeCalls = new Map();
@@ -19,8 +20,9 @@ const activeCalls = new Map();
 // a "busy" instead of a phone ringing in the middle of another conversation.
 const callByEmployee = new Map();
 
-// How long an unanswered call rings before both sides give up.
-const RING_TIMEOUT_MS = 45000;
+// How long an unanswered call rings before both sides give up. The caller's
+// phone stops ringing, the callee's stops too, and it is logged as missed.
+const RING_TIMEOUT_MS = 60000;
 
 function iceServers() {
   const servers = [
@@ -80,6 +82,41 @@ async function resolveEmployee(socket) {
 
   socket.data.callEmployee = resolved;
   return resolved;
+}
+
+/**
+ * Record how a call finished. Logging must never take a call down with it, so
+ * every failure here is swallowed after being reported.
+ *
+ * `answeredOnly` statuses are ignored for a call that was never picked up —
+ * "completed" on an unanswered call would quietly erase a missed call.
+ */
+async function finishLog(callId, status) {
+  try {
+    const log = await CallLog.findOne({ callId });
+    if (!log || log.endedAt) return;
+
+    const endedAt = new Date();
+    log.endedAt = endedAt;
+
+    if (log.answeredAt) {
+      log.status = status === "failed" ? "failed" : "completed";
+      log.durationSec = Math.max(
+        0,
+        Math.round((endedAt - log.answeredAt) / 1000),
+      );
+    } else {
+      // Never answered: keep why. A caller who gave up is "cancelled", an
+      // explicit decline is "declined", anything else stays "missed".
+      log.status =
+        status === "declined" || status === "cancelled" ? status : "missed";
+      log.durationSec = 0;
+    }
+
+    await log.save();
+  } catch (err) {
+    console.error("[call] could not write call log:", err.message);
+  }
 }
 
 function clearCall(callId) {
@@ -178,12 +215,26 @@ function registerCallHandlers(io, socket) {
             callId,
             reason: "no_answer",
           });
+          finishLog(callId, "missed");
           clearCall(callId);
         }, RING_TIMEOUT_MS),
       };
       activeCalls.set(callId, call);
       callByEmployee.set(callerId, callId);
       callByEmployee.set(calleeId, callId);
+
+      // Written now, not at hang-up, so a call that never ends cleanly still
+      // leaves a record (it reads as missed, which is the truthful default).
+      CallLog.create({
+        owner: me.owner,
+        callId,
+        caller: callerId,
+        callee: calleeId,
+        video: !!payload.video,
+        startedAt: new Date(),
+      }).catch((err) =>
+        console.error("[call] could not create call log:", err.message),
+      );
 
       // Ack the caller BEFORE ringing the callee. The caller only learns its
       // callId from this ack, so ringing first leaves a window where a very
@@ -216,6 +267,14 @@ function registerCallHandlers(io, socket) {
       if (call.ringTimer) clearTimeout(call.ringTimer);
       call.ringTimer = null;
 
+      // Talk time is measured from here, not from when it started ringing.
+      CallLog.updateOne(
+        { callId, answeredAt: null },
+        { $set: { answeredAt: new Date(), status: "answered" } },
+      ).catch((err) =>
+        console.error("[call] could not mark answered:", err.message),
+      );
+
       // Stop the other tabs of the person who answered from ringing.
       io.to(`employee_${call.calleeId}`).emit("call:handled", {
         callId,
@@ -236,6 +295,7 @@ function registerCallHandlers(io, socket) {
         callId,
         reason: reason || "declined",
       });
+      finishLog(callId, reason === "busy" ? "missed" : "declined");
       clearCall(callId);
     });
   });
@@ -247,6 +307,7 @@ function registerCallHandlers(io, socket) {
         callId,
         reason: "cancelled",
       });
+      finishLog(callId, "cancelled");
       clearCall(callId);
     });
   });
@@ -266,6 +327,7 @@ function registerCallHandlers(io, socket) {
         callId,
         reason: "ended",
       });
+      finishLog(callId, "ended");
       clearCall(callId);
     });
   });
@@ -288,6 +350,7 @@ function registerCallHandlers(io, socket) {
       callId,
       reason: "disconnected",
     });
+    finishLog(callId, "ended");
     clearCall(callId);
   });
 }
