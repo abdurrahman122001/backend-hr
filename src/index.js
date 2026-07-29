@@ -85,6 +85,7 @@ const whatsAppMessageController = require("./controllers/whatsAppMessageControll
 const WhatsAppMessageSchema = require("./models/WhatsAppMessage");
 const whatsAppMessageRoutes = require("./routes/whatsAppMessageRoute");
 const chatRoutes = require("./routes/chat");
+const callRoutes = require("./routes/calls");
 const whiteboardRoutes = require("./routes/whiteboards");
 const offerEmail = require("./routes/offerEmail");
 const eventRoutes = require("./routes/eventRoutes");
@@ -334,6 +335,7 @@ const whistleblowingReportRoutes = require("./routes/whistleblowingReportRoutes"
 app.use("/api/whistle-reports", whistleblowingReportRoutes);
 app.use("/api/whatsApp-messages", whatsAppMessageRoutes);
 app.use("/api/chat", chatRoutes);
+app.use("/api/calls", callRoutes);
 app.use("/api/whiteboards", whiteboardRoutes);
 app.use("/api/offer-email", anyPayrollAuth, offerEmail);
 app.use("/api/events", anyPayrollAuth, eventRoutes);
@@ -371,6 +373,7 @@ app.use(
 app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/crm-access", require("./routes/crmAccess"));
+app.use("/api/feedback-access", require("./routes/feedbackAccess"));
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);
@@ -538,6 +541,7 @@ if (
 }
 // ---------- Socket.IO on the primary server ----------
 const { Server } = require("socket.io");
+const { registerCallHandlers } = require("./socket/callSignaling");
 const io = new Server(primaryServer, {
   cors: {
     origin: "*",
@@ -620,6 +624,9 @@ io.on("connection", (socket) => {
     }
     socket.join(`employee_${employeeId}`);
   });
+
+  // 1:1 audio calls (WebRTC). Rides on the employee_<id> rooms joined above.
+  registerCallHandlers(io, socket);
 
   const clearThingsToDoRooms = async () => {
     const rooms = Array.isArray(socket.data.thingsToDoRooms)

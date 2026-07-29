@@ -80,6 +80,19 @@ const normalizeBusinesses = (businesses, existingClient = null) => {
       ),
     );
 
+    const websites = (Array.isArray(biz.websites) ? biz.websites : [])
+      .map((w) => String(w || "").trim())
+      .filter(Boolean);
+
+    const scopeOfWork = (Array.isArray(biz.scopeOfWork) ? biz.scopeOfWork : [])
+      .filter((s) => s && String(s.service || "").trim())
+      .map((s) => ({
+        service: String(s.service).trim(),
+        // Anything other than an explicit one-off is billed as recurring,
+        // matching the schema default.
+        billing: s.billing === "one_off" ? "one_off" : "recurring",
+      }));
+
     return {
       ...(biz._id ? { _id: biz._id } : {}),
       businessName: biz.businessName.trim(),
@@ -90,6 +103,12 @@ const normalizeBusinesses = (businesses, existingClient = null) => {
       industry: biz.industry?.trim() || undefined,
       natureOfBusiness: biz.natureOfBusiness?.trim() || undefined,
       companyLocation: biz.companyLocation?.trim() || undefined,
+      bookkeepingSoftware: biz.bookkeepingSoftware?.trim() || undefined,
+      nameInAccountingSoftware:
+        biz.nameInAccountingSoftware?.trim() || undefined,
+      naicsOrSic: biz.naicsOrSic?.trim() || undefined,
+      websites,
+      scopeOfWork,
       assignedTo,
       companyEmployees: contacts,
       emailSignature:
@@ -1171,7 +1190,9 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
     // client level, so match either place.
     query.$or = [
       { "companyEmployees.email": { $regex: email, $options: "i" } },
+      { "companyEmployees.name": { $regex: email, $options: "i" } },
       { "businesses.companyEmployees.email": { $regex: email, $options: "i" } },
+      { "businesses.companyEmployees.name": { $regex: email, $options: "i" } },
     ];
 
     const clients = await ClientInfo.find(query)
@@ -1195,7 +1216,10 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
       // its own assigned team, both of which the composer needs.
       (client.businesses || []).forEach((business) => {
         (business.companyEmployees || []).forEach((employee) => {
-          if (employee.email && employee.email.toLowerCase().includes(needle)) {
+          if (
+            employee.email?.toLowerCase().includes(needle) ||
+            employee.name?.toLowerCase().includes(needle)
+          ) {
             results.push({
               client: clientRef,
               business: {
@@ -1212,7 +1236,10 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
 
       // Legacy client-level contacts
       (client.companyEmployees || []).forEach((employee) => {
-        if (employee.email && employee.email.toLowerCase().includes(needle)) {
+        if (
+          employee.email?.toLowerCase().includes(needle) ||
+          employee.name?.toLowerCase().includes(needle)
+        ) {
           results.push({ client: clientRef, business: null, employee });
         }
       });
