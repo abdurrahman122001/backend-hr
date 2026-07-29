@@ -4,6 +4,7 @@ const Employee = require("../models/Employees");
 const fs = require("fs");
 const User = require("../models/Users");
 const path = require("path");
+const { hasFeedbackAccess } = require("../utils/feedbackAccess");
 
 // ---------------------
 // CREATE BUG
@@ -286,6 +287,23 @@ exports.getBugs = async (req, res) => {
 
 exports.getBugsByOwner = async (req, res) => {
   try {
+    // This returns EVERY feedback in the organisation, so it is gated. Owners
+    // and isAdmin employees qualify implicitly; anyone else needs an explicit
+    // FeedbackAccess grant. requireAuth alone is not enough — a plain employee
+    // token also satisfies it, which would have exposed the whole org.
+    const canSeeAll = await hasFeedbackAccess({
+      _id: req.user._id,
+      isAdmin: req.user.role === "admin" || req.user.role === "super-admin",
+      role: req.user.role,
+      owner: req.user.owner,
+    });
+    if (!canSeeAll) {
+      return res.status(403).json({
+        success: false,
+        message: "You don't have access to all feedbacks.",
+      });
+    }
+
     // Use the effective owner id, NOT req.user._id. For an isAdmin employee token
     // (requireAuth employee-fallback), req.user._id is the EMPLOYEE id and there is
     // no matching User record — keying off it returned a false 404 "User not found".
@@ -613,7 +631,7 @@ exports.updateBug = async (req, res) => {
     }
 
     // Check permissions
-    const emp = await Employee.findById(employeeId).select("department role");
+    const emp = await Employee.findById(employeeId).select("department role isAdmin");
     const isReporter = bug.reportedBy.toString() === employeeId.toString();
     const isRAndD =
       emp.department === "Research and Development" ||
@@ -898,6 +916,42 @@ exports.resolveBug = async (req, res) => {
       });
     }
 
+    // isAdmin employees close feedback outright, like the owner branch above.
+    // The R&D branch keys off `emp.role === "admin"` — the role STRING — which
+    // an isAdmin employee does not have (their role stays Employee/Manager and
+    // the admin rights live on the isAdmin flag), so they fell through to the
+    // 403 below and could not resolve anything. Resolving directly rather than
+    // parking it in pending_approval is deliberate: the same person is now
+    // allowed to approve, so the extra round trip would be theatre.
+    if (emp?.isAdmin === true) {
+      bug.status = "resolved";
+      bug.approvalRequired = false;
+      bug.approvedByReporter = true;
+
+      if (!bug.rewardAdded) {
+        await addRewardToReporter(bug.reportedBy, rewardAmount);
+        bug.rewardAdded = true;
+        bug.rewardAmount = rewardAmount;
+      }
+
+      await bug.save();
+
+      await bug.populate({
+        path: "reportedBy",
+        select: "name companyEmail department balance photographUrl owner",
+        populate: {
+          path: "owner",
+          select: "name email",
+        },
+      });
+
+      return res.json({
+        status: "success",
+        message: `Bug resolved by admin. Reward of ${rewardAmount} points added.`,
+        bug,
+      });
+    }
+
     return res.status(403).json({
       status: "error",
       message: "Not authorized to resolve this bug",
@@ -931,12 +985,25 @@ exports.approveBug = async (req, res) => {
       });
     }
 
-    // Only reporter can approve
-    if (bug.reportedBy.toString() !== employeeId.toString()) {
-      return res.status(403).json({
-        status: "error",
-        message: "Only the original reporter can approve bug resolution",
-      });
+    // The reporter can approve their own, and so can an admin — otherwise a
+    // resolution sits in "pending approval" forever whenever the reporter is
+    // away, and nobody else is able to close it out.
+    const isReporter = bug.reportedBy.toString() === employeeId.toString();
+    if (!isReporter) {
+      const approver = await Employee.findById(employeeId)
+        .select("isAdmin role")
+        .lean();
+      const approverRole = String(approver?.role || "").toLowerCase();
+      const isAdminApprover =
+        approver?.isAdmin === true ||
+        ["owner", "admin", "super-admin"].includes(approverRole);
+
+      if (!isAdminApprover) {
+        return res.status(403).json({
+          status: "error",
+          message: "Only the reporter or an admin can approve bug resolution",
+        });
+      }
     }
 
     if (!bug.approvalRequired) {

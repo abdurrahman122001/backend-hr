@@ -3264,6 +3264,11 @@ exports.listDrafts = async function listDrafts(req, res) {
       sender: sender,
       status: "draft",
       isScheduled: false, // Ensure we don't include scheduled messages
+      // Drafts you have binned belong in the Bin, not in Drafts. Without this
+      // they kept showing here after being moved, so selecting them again sent
+      // the trash request for a thread the API had already binned — which
+      // correctly answers 404, making the Bin look permanently broken.
+      trashedBy: { $ne: sender },
     };
 
     if (isObjId(client)) q.client = client;
@@ -3460,6 +3465,8 @@ exports.getDraftCount = async function getDraftCount(req, res) {
       sender: sender,
       status: "draft",
       isScheduled: false,
+      // Match listDrafts — a binned draft must not keep counting here.
+      trashedBy: { $ne: sender },
     });
 
     res.json({ count });

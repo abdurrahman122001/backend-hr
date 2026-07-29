@@ -373,6 +373,7 @@ app.use(
 app.use("/api/attendance-access", attendanceAccessRouter);
 app.use("/api/payroll-access", payrollAccessRouter);
 app.use("/api/crm-access", require("./routes/crmAccess"));
+app.use("/api/feedback-access", require("./routes/feedbackAccess"));
 app.use("/api/chat-threads", chatThreadRoutes);
 app.use("/api/payroll-estimates", anyPayrollAuth, payrollEstimateRouter);
 app.use("/api/scheduled-allowances", anyPayrollAuth, payrollSchedule);
