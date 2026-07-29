@@ -2949,6 +2949,7 @@ exports.searchMessages = async function searchMessages(req, res) {
     const {
       q: searchQuery, // Main search term
       client,
+      participantEmail,
       sender,
       receiver,
       owner,
@@ -3086,6 +3087,28 @@ exports.searchMessages = async function searchMessages(req, res) {
     // ✅ Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
+    // Match every message where a selected person participated, regardless of
+    // whether they were the sender, a direct recipient, CC, or BCC.
+    if (participantEmail && participantEmail.trim()) {
+      const escapeParticipantRegex = (s) =>
+        s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const participantPattern = new RegExp(
+        `^${escapeParticipantRegex(participantEmail.trim())}$`,
+        "i",
+      );
+      qFinal.$and = qFinal.$and || [];
+      qFinal.$and.push({
+        $or: [
+          { clientEmployeeEmail: participantPattern },
+          { "emailMetadata.from": participantPattern },
+          { "emailMetadata.to": participantPattern },
+          { "emailMetadata.cc": participantPattern },
+          { "emailMetadata.bcc": participantPattern },
+          { "cc.email": participantPattern },
+        ],
+      });
+    }
+
     // ✅ SEARCH LOGIC - Only add search conditions if searchQuery is provided
     if (searchQuery && searchQuery.trim().length > 0) {
       const searchTerm = searchQuery.trim();
@@ -3112,6 +3135,23 @@ exports.searchMessages = async function searchMessages(req, res) {
 
       if (searchFields.includes("note") || searchFields.includes("all")) {
         searchConditions.push(fieldMatchesAllWords("note"));
+      }
+
+      if (searchFields.includes("all")) {
+        [
+          "clientName",
+          "clientEmployeeName",
+          "clientEmployeeEmail",
+          "emailMetadata.from",
+          "emailMetadata.fromName",
+          "emailMetadata.to",
+          "emailMetadata.cc",
+          "emailMetadata.bcc",
+          "cc.name",
+          "cc.email",
+        ].forEach((field) => {
+          searchConditions.push(fieldMatchesAllWords(field));
+        });
       }
 
       // Search in attachment filenames
@@ -3185,6 +3225,7 @@ exports.searchMessages = async function searchMessages(req, res) {
       searchQuery: searchQuery || null,
       filters: {
         client,
+        participantEmail,
         sender,
         receiver,
         status,

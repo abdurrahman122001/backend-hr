@@ -263,7 +263,7 @@ exports.getConversations = async (req, res) => {
       archivedBy: { $ne: req.employee._id },
       hiddenBy: { $ne: req.employee._id },
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
       .sort({ updatedAt: -1 });
@@ -276,7 +276,7 @@ exports.getConversations = async (req, res) => {
       hiddenBy: { $ne: req.employee._id },
       space: { $exists: true },
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("admins", "name companyEmail avatar photographUrl")
       .populate("pinnedBy.employee", "name companyEmail")
@@ -474,7 +474,7 @@ exports.getDirectMessages = async (req, res) => {
       archivedBy: { $ne: req.employee._id },
       hiddenBy: { $ne: req.employee._id },
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail")
       .populate("mutedBy.employee", "name companyEmail") // ✅ ADD: Populate mutedBy
@@ -559,7 +559,7 @@ exports.getSpaceConversations = async (req, res) => {
       space: { $exists: true }, // Only conversations with space reference
       archivedBy: { $ne: req.employee._id },
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("admins", "name companyEmail avatar photographUrl")
       .populate("pinnedBy.employee", "name companyEmail")
@@ -710,7 +710,7 @@ exports.getMessages = async (req, res) => {
     const conversation = await Conversation.findOne({
       _id: conversationId,
       participants: req.employee._id,
-    }).populate("participants", "name companyEmail avatar");
+    }).populate("participants", "name companyEmail employeeId avatar");
 
     if (!conversation) {
       return res.status(404).json({
@@ -928,7 +928,7 @@ exports.startConversation = async (req, res) => {
       isGroup: false, // ✅ Ensure we only look for direct messages
       space: { $exists: false }, // ✅ Ensure no space reference
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage");
 
     if (!conversation) {
@@ -945,7 +945,7 @@ exports.startConversation = async (req, res) => {
 
       // Populate after save
       conversation = await Conversation.findById(conversation._id)
-        .populate("participants", "name companyEmail avatar photographUrl")
+        .populate("participants", "name companyEmail employeeId avatar photographUrl")
         .populate("lastMessage");
 
       // ✅ UPDATED: Use consistent socket events
@@ -1027,7 +1027,7 @@ exports.sendMessage = async (req, res) => {
     const conversation = await Conversation.findOne({
       _id: conversationId,
       participants: req.employee._id,
-    }).populate("participants", "name companyEmail avatar");
+    }).populate("participants", "name companyEmail employeeId avatar");
 
     if (!conversation) {
       return res
@@ -1372,7 +1372,7 @@ exports.forwardMessage = async (req, res) => {
 
           if (io) {
             const populatedConv = await Conversation.findById(conversation._id)
-              .populate("participants", "name companyEmail avatar photographUrl")
+              .populate("participants", "name companyEmail employeeId avatar photographUrl")
               .populate("lastMessage");
             [req.employee._id.toString(), participantId].forEach((userId) => {
               io.to(`user_${userId}`).emit("conversation_created", {
@@ -2089,7 +2089,7 @@ exports.getConversationByParticipant = async (req, res) => {
     const conversation = await Conversation.findOne({
       participants: { $all: [req.employee._id, participantId] },
     })
-      .populate("participants", "name companyEmail avatar")
+      .populate("participants", "name companyEmail employeeId avatar")
       .populate("lastMessage");
 
     if (!conversation) {
@@ -2213,7 +2213,7 @@ exports.createSpace = async (req, res) => {
       .populate("members", "name companyEmail avatar");
 
     const populatedConversation = await Conversation.findById(conversation._id)
-      .populate("participants", "name companyEmail avatar")
+      .populate("participants", "name companyEmail employeeId avatar")
       .populate("admins", "name companyEmail avatar");
 
     // ✅ EMIT SOCKET EVENT FOR NEW SPACE CREATION
@@ -5226,7 +5226,7 @@ exports.pinConversation = async (req, res) => {
     if (isAlreadyPinned) {
       // Return success with current state instead of error
       const updatedConversation = await Conversation.findById(conversationId)
-        .populate("participants", "name companyEmail avatar photographUrl")
+        .populate("participants", "name companyEmail employeeId avatar photographUrl")
         .populate("lastMessage")
         .populate("pinnedBy.employee", "name companyEmail");
 
@@ -5262,7 +5262,7 @@ exports.pinConversation = async (req, res) => {
 
     // Populate the updated conversation
     const updatedConversation = await Conversation.findById(conversationId)
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("pinnedBy.employee", "name companyEmail");
 
@@ -5348,7 +5348,7 @@ exports.unpinConversation = async (req, res) => {
 
     // Populate the updated conversation
     const updatedConversation = await Conversation.findById(conversationId)
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage");
 
     // ✅ EMIT SOCKET EVENT FOR UNPIN
@@ -5395,7 +5395,7 @@ exports.getPinnedConversations = async (req, res) => {
       "pinnedBy.employee": req.employee._id, // only pinned by current user
       archivedBy: { $ne: req.employee._id },
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .populate("admins", "name companyEmail avatar photographUrl")
       .populate("pinnedBy.employee", "name companyEmail")
@@ -5635,7 +5635,7 @@ exports.getHiddenConversations = async (req, res) => {
       participants: req.employee._id,
       hiddenBy: req.employee._id, // Only conversations hidden by current user
     })
-      .populate("participants", "name companyEmail avatar photographUrl")
+      .populate("participants", "name companyEmail employeeId avatar photographUrl")
       .populate("lastMessage")
       .sort({ updatedAt: -1 });
 
