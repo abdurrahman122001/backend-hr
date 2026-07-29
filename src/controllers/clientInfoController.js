@@ -1143,7 +1143,9 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
     // client level, so match either place.
     query.$or = [
       { "companyEmployees.email": { $regex: email, $options: "i" } },
+      { "companyEmployees.name": { $regex: email, $options: "i" } },
       { "businesses.companyEmployees.email": { $regex: email, $options: "i" } },
+      { "businesses.companyEmployees.name": { $regex: email, $options: "i" } },
     ];
 
     const clients = await ClientInfo.find(query)
@@ -1167,7 +1169,10 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
       // its own assigned team, both of which the composer needs.
       (client.businesses || []).forEach((business) => {
         (business.companyEmployees || []).forEach((employee) => {
-          if (employee.email && employee.email.toLowerCase().includes(needle)) {
+          if (
+            employee.email?.toLowerCase().includes(needle) ||
+            employee.name?.toLowerCase().includes(needle)
+          ) {
             results.push({
               client: clientRef,
               business: {
@@ -1184,7 +1189,10 @@ exports.searchCompanyEmployeeByEmail = async (req, res) => {
 
       // Legacy client-level contacts
       (client.companyEmployees || []).forEach((employee) => {
-        if (employee.email && employee.email.toLowerCase().includes(needle)) {
+        if (
+          employee.email?.toLowerCase().includes(needle) ||
+          employee.name?.toLowerCase().includes(needle)
+        ) {
           results.push({ client: clientRef, business: null, employee });
         }
       });
