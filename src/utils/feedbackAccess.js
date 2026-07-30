@@ -26,11 +26,30 @@ function toId(v) {
  * throwing, so a lookup failure denies rather than opening the org up.
  */
 async function hasFeedbackAccess(employeeOrId) {
+    const { hasAccess } = await getFeedbackAccess(employeeOrId);
+    return hasAccess;
+}
+
+/**
+ * getFeedbackAccess
+ * The full picture for one employee: { hasAccess, canResolve, isAdmin }.
+ *
+ *   • hasAccess  — may see every feedback in the organisation
+ *   • canResolve — may additionally resolve anyone's feedback
+ *
+ * isAdmin employees and owners get both implicitly. For a granted employee the
+ * rights come from the grant's accessTypes; a grant with none stored predates
+ * that field and was view-only, so it is read as ["view"].
+ *
+ * Never throws: a lookup failure denies rather than opening the org up.
+ */
+async function getFeedbackAccess(employeeOrId) {
+    const denied = { hasAccess: false, canResolve: false, isAdmin: false };
     try {
-        if (!employeeOrId) return false;
+        if (!employeeOrId) return denied;
 
         const employeeId = toId(employeeOrId._id || employeeOrId);
-        if (!employeeId) return false;
+        if (!employeeId) return denied;
 
         // Trust the caller's object when it already carries the flags, so the
         // common path costs no extra query.
@@ -40,28 +59,42 @@ async function hasFeedbackAccess(employeeOrId) {
                 .select('_id isAdmin role owner')
                 .lean();
         }
-        if (!employee) return false;
+        if (!employee) return denied;
 
-        if (employee.isAdmin === true) return true;
+        if (employee.isAdmin === true) {
+            return { hasAccess: true, canResolve: true, isAdmin: true };
+        }
 
         const role = String(employee.role || '').toLowerCase();
         if (role === 'owner' || role === 'admin' || role === 'super-admin') {
-            return true;
+            return { hasAccess: true, canResolve: true, isAdmin: false };
         }
 
         const ownerId = toId(employee.owner);
-        if (!ownerId) return false;
+        if (!ownerId) return denied;
 
-        const grant = await FeedbackAccess.exists({
+        const grant = await FeedbackAccess.findOne({
             owner: ownerId,
             grantedTo: employeeId,
             active: true,
-        });
-        return !!grant;
+        })
+            .select('accessTypes')
+            .lean();
+        if (!grant) return denied;
+
+        const types = Array.isArray(grant.accessTypes) && grant.accessTypes.length
+            ? grant.accessTypes
+            : ['view'];  // pre-accessTypes grants were view-only
+
+        return {
+            hasAccess: true,
+            canResolve: types.includes('resolve'),
+            isAdmin: false,
+        };
     } catch (err) {
-        console.error('[FEEDBACK-ACCESS] hasFeedbackAccess error:', err.message);
-        return false;
+        console.error('[FEEDBACK-ACCESS] getFeedbackAccess error:', err.message);
+        return denied;
     }
 }
 
-module.exports = { hasFeedbackAccess };
+module.exports = { hasFeedbackAccess, getFeedbackAccess };

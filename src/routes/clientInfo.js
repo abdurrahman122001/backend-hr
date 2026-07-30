@@ -53,6 +53,12 @@ router.get(
   requireAuth,
   clientInfoCtrl.searchTeamMembers
 );
+// Add one contact (client level or under a business) from wherever you happen
+// to be — the email screen uses this. Deliberately NOT behind requireCrmAccess:
+// the controller allows the client's own assigned/supervising employees too, who
+// are exactly the people reading that client's mail.
+router.post("/:id/contacts", requireAuth, clientInfoCtrl.addClientContact);
+
 // Manage company employees — 🔑 CRM-only (CRM app only)
 router.post("/:id/company-employees", requireAuth, requireCrmAccess, clientInfoCtrl.addCompanyEmployee);
 router.delete("/:id/company-employees/:employeeIndex", requireAuth, requireCrmAccess, clientInfoCtrl.removeCompanyEmployee);

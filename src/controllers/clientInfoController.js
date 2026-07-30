@@ -519,6 +519,126 @@ exports.updateClientInfo = async (req, res) => {
   }
 };
 
+/**
+ * Add one contact to a client — either at client level or under one of its
+ * businesses — without sending the whole client document back.
+ *
+ * This exists for the email screen: when a new person at the client's side turns
+ * up in a thread, whoever is working that thread can file them straight away
+ * instead of navigating to Client Information and re-saving the entire record
+ * (the only route to a business contact until now was a full `PUT /:id` carrying
+ * every business, which is both heavy and easy to clobber concurrently).
+ *
+ * Who may do it: an owner, anyone with CRM access, or an employee actually
+ * attached to this client (assigned to it or supervising it) — the same people
+ * who can already see and reply on the client's mail. Note this deliberately
+ * does NOT reuse addCompanyEmployee's check, which compares
+ * `String(client.assignedTo)` (an array) against a single id and therefore
+ * never matches once a client has more than one assignee.
+ */
+exports.addClientContact = async (req, res) => {
+  try {
+    const emp = await Employee.findById(req.employee._id);
+    if (!emp) return res.status(404).json({ error: "Employee not found" });
+
+    const { id } = req.params;
+    const { businessId, name, designation } = req.body;
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ error: "Name is required" });
+    }
+    if (!designation || !String(designation).trim()) {
+      return res.status(400).json({ error: "Designation is required" });
+    }
+
+    const client = await ClientInfo.findById(id);
+    if (!client) return res.status(404).json({ error: "Client not found" });
+    if (String(client.owner) !== String(emp.owner)) {
+      return res.status(403).json({ error: "Not authorized for this client" });
+    }
+
+    const meId = String(emp._id);
+    const inList = (list) =>
+      (Array.isArray(list) ? list : []).some(
+        (x) => String(x?._id || x) === meId,
+      );
+    const allowed =
+      String(emp.role || "").trim().toLowerCase() === "owner" ||
+      (await hasCrmAccess(req.employee)) ||
+      inList(client.assignedTo) ||
+      inList(client.supervisedBy) ||
+      (client.businesses || []).some((b) => inList(b?.assignedTo));
+
+    if (!allowed) {
+      return res
+        .status(403)
+        .json({ error: "Not authorized to add contacts to this client" });
+    }
+
+    let contact;
+    try {
+      contact = normalizeCompanyEmployee(req.body);
+    } catch (validationErr) {
+      return res.status(400).json({ error: validationErr.message });
+    }
+    // This endpoint only ever creates. normalizeCompanyEmployee passes an _id
+    // through when it sees one, and letting a caller choose the sub-document id
+    // is asking for a collision with an existing contact.
+    delete contact._id;
+    contact.addedAt = new Date();
+
+    // Where does it go — one business, or the client itself?
+    let business = null;
+    if (businessId) {
+      business = (client.businesses || []).id(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found on this client" });
+      }
+    }
+    const target = business ? business : client;
+
+    // A contact is identified by email everywhere else in the app (thread
+    // matching, reply re-addressing), so a duplicate address in the same bucket
+    // would make those lookups ambiguous.
+    if (contact.email) {
+      const clash = (target.companyEmployees || []).some(
+        (e) =>
+          String(e?.email || "").toLowerCase().trim() ===
+          String(contact.email).toLowerCase().trim(),
+      );
+      if (clash) {
+        return res
+          .status(409)
+          .json({ error: "A contact with this email already exists here" });
+      }
+    }
+
+    target.companyEmployees.push(contact);
+    await client.save();
+
+    const saved =
+      target.companyEmployees[target.companyEmployees.length - 1];
+
+    const updated = await ClientInfo.findById(id)
+      .populate("assignedTo", "_id name companyEmail role")
+      .populate("supervisedBy", "_id name companyEmail role")
+      .populate(
+        "businesses.assignedTo",
+        "_id name companyEmail role photographUrl",
+      );
+
+    res.status(201).json({
+      contact: saved,
+      businessId: business ? String(business._id) : null,
+      businessName: business ? business.businessName : null,
+      client: updated,
+    });
+  } catch (err) {
+    console.error("addClientContact error:", err);
+    res.status(500).json({ error: "Failed to add contact" });
+  }
+};
+
 // Add a single company employee to client
 exports.addCompanyEmployee = async (req, res) => {
   try {
