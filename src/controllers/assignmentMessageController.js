@@ -1663,6 +1663,79 @@ exports.createMessage = async function createMessage(req, res) {
 
     const msg = await AssignmentMessage.create(msgData);
 
+    // ── Forward carries the whole conversation ──────────────────────────────
+    // A forward starts its OWN thread (see the threadId decision above), so a
+    // recipient who is not assigned to the client has no other route to the
+    // history: whatever is not in this thread does not exist for them. Copy the
+    // source thread's messages into the new thread so they receive the
+    // conversation rather than a single message.
+    //
+    // Written straight through insertMany on purpose. These are copies of things
+    // already said, so they must not re-run the approval chain, re-notify the
+    // original participants, or re-send anything to the client's real mailbox —
+    // all of which createMessage would do.
+    if (isForward && providedThreadId && threadId && !isScheduled) {
+      try {
+        const sourceMessages = await AssignmentMessage.find({
+          owner,
+          threadId: providedThreadId,
+          status: "sent",
+          isScheduled: { $ne: true },
+          // Never forward something still awaiting approval — it has not been
+          // cleared to leave the hierarchy yet.
+          approvalStatus: { $ne: "pending" },
+        })
+          .sort({ createdAt: 1 })
+          .lean();
+
+        const copies = sourceMessages
+          // The message being forwarded is already quoted in the covering note.
+          .filter((m) => String(m._id) !== String(replyTo || ""))
+          .map((m) => ({
+            owner,
+            sender: m.sender,
+            receiver: receivers,
+            subject: m.subject || "",
+            note: m.note || "",
+            attachments: m.attachments || [],
+            cc: m.cc || [],
+            status: "sent",
+            approvalStatus: "approved",
+            isForward: true,
+            // Keeps these out of every list/count query — see the field's note
+            // in the model. They are readable only inside the forward's thread.
+            isForwardedCopy: true,
+            threadId,
+            // Keep the original timestamps so the copies sort into the same
+            // order they were written and the covering note stays newest.
+            createdAt: m.createdAt,
+            sentAt: m.sentAt || m.createdAt,
+            // Preserve who the message appears to be from, or every copied
+            // client message would read as an internal one.
+            ...(m.client ? { client: m.client } : {}),
+            isFromClient: !!m.isFromClient,
+            isFromCompanyEmployee: !!m.isFromCompanyEmployee,
+            clientEmployeeName: m.clientEmployeeName || null,
+            clientEmployeeEmail: m.clientEmployeeEmail || null,
+            clientName: m.clientName || null,
+            // Arrive unread, and carry none of the original thread's per-user
+            // state (bins, stars, spam reports belong to those participants).
+            readBy: [],
+          }));
+
+        if (copies.length > 0) {
+          await AssignmentMessage.insertMany(copies, { ordered: false });
+        }
+      } catch (err) {
+        // The forward itself already exists; failing to copy the history must
+        // not fail the send.
+        console.error(
+          "❌ [createMessage] Could not copy thread into forward:",
+          err.message,
+        );
+      }
+    }
+
     const populated = await msg.populate([
       { path: "owner", select: "_id name companyEmail" },
       { path: "sender", select: "_id name companyEmail role designation" },
