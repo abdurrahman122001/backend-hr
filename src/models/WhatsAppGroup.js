@@ -55,6 +55,9 @@ const WhatsAppGroupSchema = new Schema(
     // Last-message metadata (denormalized for sidebar speed)
     lastMessage: { type: String, default: null },
     lastMessageAt: { type: Date, default: null },
+    // True when the message behind the preview was deleted for everyone, so the
+    // sidebar shows the "This message was deleted" placeholder instead of text.
+    lastMessageDeleted: { type: Boolean, default: false },
     lastMessageBy: {
       type: Schema.Types.ObjectId,
       ref: "Employee",

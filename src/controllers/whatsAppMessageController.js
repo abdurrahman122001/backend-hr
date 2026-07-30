@@ -2012,6 +2012,7 @@ exports.approveMessage = async function approveMessage(req, res) {
           lastMessage: groupText,
           lastMessageAt: msg.approvedAt || new Date(),
           lastMessageBy: msg.sender?._id || msg.sender,
+          lastMessageDeleted: false,
         },
       }, { timestamps: false }).catch(() => {});
     }
@@ -3064,6 +3065,42 @@ exports.deleteMessage = async function deleteMessage(req, res) {
       // A client-employee sub-chat and its PARENT client chat are separate rows,
       // so a CE deletion must only affect the CE row — never the parent client.
       let previewDeleted = false;
+      // Group chats keep their own denormalized preview on WhatsAppGroup and
+      // their audience is the member list (see sendGroupMessage) — `receiver`
+      // only holds approvers/CRM here, so members must be resolved explicitly.
+      let groupMemberIds = [];
+      let groupIdVal = null;
+      if (msg.isGroupMessage && msg.groupId) {
+        groupIdVal = String(msg.groupId?._id || msg.groupId);
+        const groupDoc = await WhatsAppGroup.findById(groupIdVal)
+          .select("members")
+          .lean()
+          .catch(() => null);
+        groupMemberIds = (groupDoc?.members || [])
+          .filter((m) => m && m.memberType === "employee" && m.memberId)
+          .map((m) => String(m.memberId));
+
+        // Was this the group's latest message? If so the sidebar row must show
+        // the "This message was deleted" placeholder (WhatsApp behaviour).
+        const latestGroupMsg = await WhatsAppMessage.findOne({
+          groupId: groupIdVal,
+          isGroupMessage: true,
+          status: { $ne: "draft" },
+          $or: [{ approvalStatus: null }, { approvalStatus: "approved" }],
+        })
+          .sort({ createdAt: -1 })
+          .select("_id")
+          .lean()
+          .catch(() => null);
+        if (latestGroupMsg && String(latestGroupMsg._id) === String(msg._id)) {
+          previewDeleted = true;
+          await WhatsAppGroup.findByIdAndUpdate(
+            groupIdVal,
+            { $set: { lastMessage: "", lastMessageDeleted: true } },
+            { timestamps: false }
+          ).catch(() => {});
+        }
+      }
       if (msg.client && !msg.isGroupMessage) {
         const clientId = msg.client?._id || msg.client;
 
@@ -3119,12 +3156,28 @@ exports.deleteMessage = async function deleteMessage(req, res) {
         (msg.approvalChain || []).forEach((a) => add(a && a.approver));
         (msg.plannedApprovalChain || []).forEach(add);
         (msg.intendedRecipients || []).forEach(add);
-        (populated.client?.assignedTo || []).forEach(add);
-        try {
-          const { getCrmUserIds } = require("../utils/crmAccess");
-          (await getCrmUserIds(msg.owner)).forEach(add);
-        } catch (err) {
-          console.error("delete-for-everyone CRM audience lookup failed:", err);
+        if (msg.isGroupMessage) {
+          // Group messages are strictly member-scoped: no client-assigned /
+          // CRM-wide fan-out, just the members who can actually see them.
+          groupMemberIds.forEach(add);
+        } else {
+          (populated.client?.assignedTo || []).forEach(add);
+          try {
+            const { getCrmUserIds } = require("../utils/crmAccess");
+            (await getCrmUserIds(msg.owner)).forEach(add);
+          } catch (err) {
+            console.error("delete-for-everyone CRM audience lookup failed:", err);
+          }
+        }
+        // Members viewing the group also sit in the group room (joined when the
+        // chat is opened) — mirror the send path so the open conversation and
+        // the sidebar both update, whichever room the viewer is in.
+        if (groupIdVal) {
+          io.to(`group_${groupIdVal}`).emit("new_message", {
+            message: populated,
+            type: "message_deleted_for_everyone",
+            previewDeleted,
+          });
         }
         participants.forEach((uid) => {
           io.to(`employee_${uid}`).emit("new_message", {
@@ -3283,7 +3336,7 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
               { lastMessageAt: { $lte: effAt } },
             ],
           },
-          { $set: { lastMessage: label.slice(0, 100) } },
+          { $set: { lastMessage: label.slice(0, 100), lastMessageDeleted: false } },
           { timestamps: false },
         ).catch(() => {});
       } else if (msg.client && !msg.isClientEmployeeMessage) {
@@ -4921,7 +4974,7 @@ exports.getChatList = async function getChatList(req, res) {
     // ── Kick off groups + unread queries immediately — they don't depend on
     // the client list, so they run in parallel with steps 1 and 2 below.
     const groupsPromise = WhatsAppGroup.find(groupQuery)
-      .select("_id name avatar lastMessage lastMessageAt members")
+      .select("_id name avatar lastMessage lastMessageAt lastMessageDeleted members")
       .sort({ lastMessageAt: -1 })
       .limit(60)
       .lean();
@@ -5345,7 +5398,10 @@ exports.getChatList = async function getChatList(req, res) {
         (!g.lastMessageAt ||
           new Date(gPending.at).getTime() >
             new Date(g.lastMessageAt).getTime());
-      if (!g.lastMessageAt && !g.lastMessage && !useGPending) continue;
+      const gDeleted = !useGPending && !!g.lastMessageDeleted;
+      // A group whose only/latest message was deleted still belongs in the list
+      // (it shows the tombstone placeholder), so keep it when the flag is set.
+      if (!g.lastMessageAt && !g.lastMessage && !useGPending && !gDeleted) continue;
       chats.push({
         chatId: `group_${gid}`,
         groupId: gid,
@@ -5359,7 +5415,10 @@ exports.getChatList = async function getChatList(req, res) {
                   { mimetype: gPending.attType, filename: gPending.attName },
                 ])
               : "")
-          : g.lastMessage || "",
+          : gDeleted
+            ? ""
+            : g.lastMessage || "",
+        lastMessageDeleted: gDeleted,
         lastMessageAt: useGPending ? gPending.at : g.lastMessageAt || null,
         unreadCount: unreadMap.get(gid) || 0,
         hasUnreadMessages: !!(unreadMap.get(gid)),
