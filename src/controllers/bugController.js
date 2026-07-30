@@ -4,7 +4,10 @@ const Employee = require("../models/Employees");
 const fs = require("fs");
 const User = require("../models/Users");
 const path = require("path");
-const { hasFeedbackAccess } = require("../utils/feedbackAccess");
+const {
+  hasFeedbackAccess,
+  getFeedbackAccess,
+} = require("../utils/feedbackAccess");
 
 // ---------------------
 // CREATE BUG
@@ -805,7 +808,17 @@ exports.resolveBug = async (req, res) => {
       });
     }
 
-    const emp = await Employee.findById(employeeId).select("department role");
+    // isAdmin is REQUIRED here — the branch below keys off it, and without it in
+    // the projection it read as undefined and every isAdmin employee fell
+    // through to the 403.
+    const emp = await Employee.findById(employeeId).select(
+      "department role isAdmin owner",
+    );
+
+    // Granted right to resolve anyone's feedback (Settings → Access → Feedback).
+    const { canResolve: canResolveAnyFeedback } = await getFeedbackAccess(
+      emp || req.employee,
+    );
 
     // Calculate reward based on priority
     const calculateReward = (priority) => {
@@ -923,7 +936,9 @@ exports.resolveBug = async (req, res) => {
     // 403 below and could not resolve anything. Resolving directly rather than
     // parking it in pending_approval is deliberate: the same person is now
     // allowed to approve, so the extra round trip would be theatre.
-    if (emp?.isAdmin === true) {
+    // Same for an employee holding the "resolve" feedback right: they were given
+    // it precisely so they can close other people's feedback.
+    if (emp?.isAdmin === true || canResolveAnyFeedback) {
       bug.status = "resolved";
       bug.approvalRequired = false;
       bug.approvedByReporter = true;

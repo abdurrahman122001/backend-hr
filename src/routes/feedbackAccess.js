@@ -8,7 +8,27 @@ const router = express.Router();
 const FeedbackAccess = require('../models/FeedbackAccess');
 const requireAuth = require('../middleware/auth');
 const requireEmpAuth = require('../middleware/empAuth');
-const { hasFeedbackAccess } = require('../utils/feedbackAccess');
+const { getFeedbackAccess } = require('../utils/feedbackAccess');
+
+/** Rights this module understands. */
+const VALID_TYPES = ['view', 'resolve'];
+
+/**
+ * Normalise an accessTypes payload. Returns null when the caller sent values but
+ * none were recognised (so it can be answered with a 400 rather than silently
+ * downgraded), and ['view'] when nothing was sent at all.
+ */
+function normaliseTypes(input) {
+    const list = Array.isArray(input) ? input : input ? [input] : [];
+    const cleaned = [
+        ...new Set(list.map((t) => String(t).trim().toLowerCase())),
+    ].filter((t) => VALID_TYPES.includes(t));
+    if (list.length && !cleaned.length) return null;
+    // "resolve" without "view" makes no sense: the resolve button lives in the
+    // All Feedbacks list, so being able to act implies being able to look.
+    if (cleaned.includes('resolve') && !cleaned.includes('view')) cleaned.push('view');
+    return cleaned.length ? cleaned : ['view'];
+}
 
 /**
  * Only an owner or an isAdmin employee may hand this right out. requireAuth
@@ -36,9 +56,15 @@ router.get('/', requireAuth, requireGrantor, async (req, res) => {
             .populate('grantedTo', 'name companyEmail designation department')
             .sort({ createdAt: -1 })
             .lean();
-        // All-or-nothing, like CRM access: surface a synthetic accessTypes so
-        // the shared manager renders a single badge.
-        const normalised = grants.map((g) => ({ ...g, accessTypes: ['access'], scope: [] }));
+        // Grants written before accessTypes existed were view-only.
+        const normalised = grants.map((g) => ({
+            ...g,
+            accessTypes:
+                Array.isArray(g.accessTypes) && g.accessTypes.length
+                    ? g.accessTypes
+                    : ['view'],
+            scope: [],
+        }));
         res.json(normalised);
     } catch (err) {
         console.error('[FEEDBACK-ACCESS] GET error:', err);
@@ -53,10 +79,17 @@ router.get('/', requireAuth, requireGrantor, async (req, res) => {
 router.post('/', requireAuth, requireGrantor, async (req, res) => {
     try {
         const ownerId = req.user.owner || req.user._id;
-        const { grantedTo, notes } = req.body;
+        const { grantedTo, notes, accessTypes } = req.body;
 
         if (!grantedTo) {
             return res.status(400).json({ error: 'grantedTo (employee) is required.' });
+        }
+
+        const types = normaliseTypes(accessTypes);
+        if (!types) {
+            return res
+                .status(400)
+                .json({ error: 'accessTypes must be any of: ' + VALID_TYPES.join(', ') });
         }
 
         const grantedToList = Array.isArray(grantedTo) ? grantedTo : [grantedTo];
@@ -70,6 +103,7 @@ router.post('/', requireAuth, requireGrantor, async (req, res) => {
                         owner: ownerId,
                         grantedTo: empId,
                         notes: notes || '',
+                        accessTypes: types,
                         grantedBy: req.user._id,
                         active: true,
                     },
@@ -94,11 +128,20 @@ router.post('/', requireAuth, requireGrantor, async (req, res) => {
 router.patch('/:id', requireAuth, requireGrantor, async (req, res) => {
     try {
         const ownerId = req.user.owner || req.user._id;
-        const { notes, active } = req.body;
+        const { notes, active, accessTypes } = req.body;
 
         const update = {};
         if (notes !== undefined) update.notes = notes;
         if (active !== undefined) update.active = active;
+        if (accessTypes !== undefined) {
+            const types = normaliseTypes(accessTypes);
+            if (!types) {
+                return res
+                    .status(400)
+                    .json({ error: 'accessTypes must be any of: ' + VALID_TYPES.join(', ') });
+            }
+            update.accessTypes = types;
+        }
 
         const grant = await FeedbackAccess.findOneAndUpdate(
             { _id: req.params.id, owner: ownerId },
@@ -134,11 +177,11 @@ router.delete('/:id', requireAuth, requireGrantor, async (req, res) => {
 // EMPLOYEE ROUTE — drives the "All Feedbacks" tab
 // ─────────────────────────────────────────────────────────────
 
-/** GET /api/feedback-access/my-access → { hasAccess, isAdmin } */
+/** GET /api/feedback-access/my-access → { hasAccess, canResolve, isAdmin } */
 router.get('/my-access', requireEmpAuth, async (req, res) => {
     try {
-        const hasAccess = await hasFeedbackAccess(req.employee);
-        res.json({ hasAccess, isAdmin: req.employee?.isAdmin === true });
+        const { hasAccess, canResolve } = await getFeedbackAccess(req.employee);
+        res.json({ hasAccess, canResolve, isAdmin: req.employee?.isAdmin === true });
     } catch (err) {
         console.error('[FEEDBACK-ACCESS] my-access error:', err);
         res.status(500).json({ error: 'Server error' });

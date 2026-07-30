@@ -54,6 +54,23 @@ const AssignmentMessageSchema = new Schema(
       default: false,
     },
 
+    /**
+     * A copy of an earlier message, duplicated into a forward's own thread so
+     * the recipient receives the whole conversation rather than one orphaned
+     * message.
+     *
+     * These carry their ORIGINAL sender so the transcript reads correctly, which
+     * means every list query keyed on `sender` (the Sent folder above all) would
+     * otherwise show them to people who never sent them, and the client-scoped
+     * Client Box would show the client's mail twice. So: list queries exclude
+     * them, and only the thread view (getMessagesByThread) reads them back.
+     */
+    isForwardedCopy: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+
     // New fields for tracking client/company employee messages
     isFromClient: {
       type: Boolean,

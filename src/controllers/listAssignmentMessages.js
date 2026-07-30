@@ -545,6 +545,13 @@ exports.listMessages = async function listMessages(req, res) {
 
     const q = {};
 
+    // Forwarded copies belong to their forward's thread only: they carry the
+    // ORIGINAL sender, so leaving them in would put them in that person's Sent
+    // folder and show the client's mail twice in the Client Box.
+    // getMessagesByThread deliberately does NOT apply this — that is where they
+    // are meant to be read.
+    q.isForwardedCopy = { $ne: true };
+
     // Thread scope: narrows the query to a single thread so clients don't
     // have to download a large page and filter locally.
     if (threadId) q.threadId = String(threadId);
@@ -1288,6 +1295,13 @@ exports.getExternalCommunications = async function getExternalCommunications(
 
       // ❌ no drafts
       status: { $ne: "draft" },
+
+    // Forwarded copies belong to their forward's thread only: they carry the
+    // ORIGINAL sender, so leaving them in would put them in that person's Sent
+    // folder and show the client's mail twice in the Client Box.
+    // getMessagesByThread deliberately does NOT apply this — that is where they
+    // are meant to be read.
+      isForwardedCopy: { $ne: true },
     };
 
     if (isObjId(client)) q.client = client;
@@ -1611,6 +1625,13 @@ exports.getInternalCommunications = async function getInternalCommunications(
 
       // ❌ no drafts
       status: { $ne: "draft" },
+
+    // Forwarded copies belong to their forward's thread only: they carry the
+    // ORIGINAL sender, so leaving them in would put them in that person's Sent
+    // folder and show the client's mail twice in the Client Box.
+    // getMessagesByThread deliberately does NOT apply this — that is where they
+    // are meant to be read.
+      isForwardedCopy: { $ne: true },
     };
 
     /* -------------------------------------------------- */
@@ -2305,6 +2326,9 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 
     const baseUnread = {
       status: "sent",
+      // Forwarded copies are excluded from every list, so counting them here
+      // would leave a badge that no list can ever account for.
+      isForwardedCopy: { $ne: true },
       // PER USER: exclude only what THIS user binned / marked as spam.
       trashedBy: { $ne: currentUser },
       spamReporters: { $ne: currentUser },
@@ -2504,6 +2528,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         approvalStatus: { $ne: "pending" },
         trashedBy: { $ne: currentUser },
         spamReporters: { $ne: currentUser },
+        // Not in the list (see the list queries), so not in the count either.
+        isForwardedCopy: { $ne: true },
       }),
 
       // Unread: Primary-inbox threads whose LATEST message is unread & addressed
@@ -2569,15 +2595,32 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       countUnreadLatestThreads(reviewQuery),
 
       // For-approval: threads with messages pending MY approval (I'm the
-      // current approver in the chain and haven't actioned them yet)
-      countUnreadThreads({
-        owner,
-        receiver: currentUser,
-        approvalStatus: "pending",
-        "approvalChain.approver": { $ne: currentUser },
-        trashedBy: { $ne: currentUser },
-        spamReporters: { $ne: currentUser },
-      }),
+      // current approver in the chain and haven't actioned them yet).
+      //
+      // Nobody below me in the hierarchy means nothing can be waiting on my
+      // approval — approvals only ever travel upward from a junior — so the
+      // whole query is skipped rather than counting mail that merely landed in
+      // my inbox. Mirrors the same rule in getTeamLeadPendingApprovals.
+      juniorIds.length === 0
+        ? Promise.resolve(0)
+        : countUnreadThreads({
+            owner,
+            receiver: currentUser,
+            approvalStatus: "pending",
+            "approvalChain.approver": { $ne: currentUser },
+            trashedBy: { $ne: currentUser },
+            spamReporters: { $ne: currentUser },
+            // Never my own message: a reply carries its sender in the receiver
+            // array as a thread participant, so without this my own message
+            // awaiting SOMEONE ELSE's approval sat in my approval badge.
+            sender: { $ne: currentUser },
+          }),
+
+      // NOTE: a "myPending" count (threads I SENT that are awaiting someone
+      // else's approval) used to be computed here and drove the Mail rail
+      // badge. It was removed: it is not an approval queue — there is nothing
+      // the viewer can do about those messages, and the number never cleared
+      // from their own badge. The only approval count is `supervision` above.
     ]);
 
     const payload = {
@@ -3493,10 +3536,10 @@ exports.getTeamLeadPendingApprovals =
         showThread = "true",
       } = req.query;
 
-      // Managers/owners see all org pending approvals (they are senior to all).
-      const currentUserRole = normalizeRole(req.employee?.role || "");
-      const isManager = currentUserRole === "manager" || currentUserRole === "owner";
-
+      // No role shortcut here on purpose. This used to let anyone whose role
+      // string said "manager"/"owner" through even with an empty hierarchy,
+      // which is how employees with no juniors ended up with a pending-approval
+      // badge. Eligibility is the hierarchy itself — see the isSenior check.
       const currentUserId = req.employee?._id;
       const ownerId = req.employee?.owner;
 
@@ -3509,11 +3552,37 @@ exports.getTeamLeadPendingApprovals =
 
       // Access is hierarchy-based (not role-based): anyone who is a senior to at
       // least one other employee can view pending approvals for their juniors.
-      // Managers/owners always qualify (they sit above everyone).
       const isSenior = Array.isArray(supervisedEmployeeIds) && supervisedEmployeeIds.length > 0;
-      if (!isManager && !isSenior) {
-        return res.status(403).json({
-          error: "Access denied. Only seniors can view pending approvals of their juniors.",
+
+      // Nobody below you in the hierarchy means nothing can be waiting on your
+      // approval — approvals only ever travel upward from a junior. This holds
+      // regardless of role: a manager with an empty hierarchy approves nothing,
+      // so the badge must read zero rather than counting mail that merely landed
+      // in their inbox.
+      //
+      // Answered as an empty result rather than the old 403: every app polls
+      // this for a sidebar badge, and a 403 there is not an error worth logging
+      // in six consoles — the honest answer is "you have none".
+      if (!isSenior) {
+        return res.json({
+          success: true,
+          items: [],
+          threads: [],
+          messages: [],
+          total: 0,
+          totalCount: 0,
+          page: 1,
+          pages: 0,
+          limit: Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100),
+          statistics: {
+            totalThreads: 0,
+            totalMessages: 0,
+            pendingMessages: 0,
+            directMessages: 0,
+            clientMessages: 0,
+            uniqueSenders: 0,
+          },
+          debug: { supervisedEmployeesCount: 0, reason: "no juniors in hierarchy" },
         });
       }
 
