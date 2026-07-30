@@ -867,11 +867,17 @@ exports.resolveBug = async (req, res) => {
       });
     }
 
-    // R&D department resolves → requires reporter approval
+    // R&D department resolves → requires reporter approval.
+    //
+    // Skipped for an admin or a holder of the feedback resolve grant: the grant
+    // says "close any employee's feedback", so routing a grantee who happens to
+    // sit in R&D back through reporter approval contradicts the right they were
+    // given. They fall through to the outright-resolve branch below.
     if (
-      emp.department === "Research and Development" ||
-      emp.department === "Research & Development" ||
-      emp.role === "admin"
+      !(emp?.isAdmin === true || canResolveAnyFeedback) &&
+      (emp.department === "Research and Development" ||
+        emp.department === "Research & Development" ||
+        emp.role === "admin")
     ) {
       bug.status = "pending_approval";
       bug.approvalRequired = true;
@@ -1003,25 +1009,38 @@ exports.approveBug = async (req, res) => {
     // The reporter can approve their own, and so can an admin — otherwise a
     // resolution sits in "pending approval" forever whenever the reporter is
     // away, and nobody else is able to close it out.
+    //
+    // An employee granted the feedback "resolve" right can approve any
+    // employee's pending resolution too: that grant exists precisely so someone
+    // other than an admin can close feedback out across the organisation, and
+    // being able to resolve but not to approve leaves them stuck at the last
+    // step of the very workflow they were given.
     const isReporter = bug.reportedBy.toString() === employeeId.toString();
     if (!isReporter) {
       const approver = await Employee.findById(employeeId)
-        .select("isAdmin role")
+        .select("isAdmin role owner")
         .lean();
       const approverRole = String(approver?.role || "").toLowerCase();
       const isAdminApprover =
         approver?.isAdmin === true ||
         ["owner", "admin", "super-admin"].includes(approverRole);
 
-      if (!isAdminApprover) {
+      const { canResolve } = await getFeedbackAccess(approver || req.employee);
+
+      if (!isAdminApprover && !canResolve) {
         return res.status(403).json({
           status: "error",
-          message: "Only the reporter or an admin can approve bug resolution",
+          message:
+            "Only the reporter, an admin, or someone with feedback resolve access can approve bug resolution",
         });
       }
     }
 
-    if (!bug.approvalRequired) {
+    // Anything sitting in pending_approval is approvable, even if the
+    // approvalRequired flag was never set (older rows, and any row whose
+    // resolution path set the status without the flag). Refusing those left
+    // feedback that shows an Approve button but answers 400 to it.
+    if (!bug.approvalRequired && bug.status !== "pending_approval") {
       return res.status(400).json({
         status: "error",
         message: "No approval required for this bug",
