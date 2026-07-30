@@ -715,6 +715,14 @@ exports.listMessages = async function listMessages(req, res) {
               { $or: [{ client: { $exists: false } }, { client: null }] },
             ],
           },
+          // A forward is private to the people it was explicitly sent to, so it
+          // reaches their Primary inbox whether or not they are assigned to the
+          // client. Without this, forwarding a client email to a colleague who
+          // is not on that client delivered it nowhere they could see: it has a
+          // `client`, so it failed the internal-mail branch, and it failed both
+          // assigned-client branches too. The Client Box query already carries
+          // the same exemption.
+          { $and: [receiverMe, { isForward: true }] },
           ...(myAssignedClientIds.length > 0
             ? [
                 {
