@@ -143,6 +143,7 @@ exports.getBugs = async (req, res) => {
       page = 1,
       limit = 10,
       viewType = "employee",
+      sort,
     } = req.query;
 
     const employeeId = req.employee._id;
@@ -250,7 +251,7 @@ exports.getBugs = async (req, res) => {
               select: "name email",
             },
           })
-          .sort({ createdAt: -1 })
+          .sort(resolveBugSort(sort))
           .skip(skip)
           .limit(limitNum)
           .lean(),
@@ -394,7 +395,7 @@ exports.getBugsByOwner = async (req, res) => {
       // This endpoint is the access-gated All Feedbacks view. Keep resolver
       // identity out of ordinary employee feedback responses.
       .populate({ path: "resolvedBy", select: Bug.ASSIGNEE_FIELDS })
-      .sort({ createdAt: -1 })
+      .sort(resolveBugSort(req.query.sort))
       .skip(skip)
       .limit(limit);
 
@@ -541,6 +542,29 @@ exports.getBugsByOwner = async (req, res) => {
 // ASSIGNMENT
 // ---------------------
 
+// Sort options offered by the Feedbacks pages. Sorting has to happen in the
+// DB, not on the client: the list is paginated, so ordering just the current
+// page would shuffle rows within a page while leaving the pages themselves in
+// creation order. `_id` is the tiebreaker so equal keys keep a stable order
+// across pages instead of drifting between queries.
+// Plain indexed fields only, so the existing find().populate().lean() path is
+// kept. Sorting by priority is deliberately absent: "high > medium > low" is
+// not the lexical order of the stored strings, so it would need an aggregation
+// with a computed rank — and priority is already a filter on these pages.
+const BUG_SORTS = {
+  newest: { createdAt: -1, _id: -1 },
+  oldest: { createdAt: 1, _id: 1 },
+  recently_updated: { updatedAt: -1, _id: -1 },
+  reward_high: { rewardAmount: -1, createdAt: -1, _id: -1 },
+  reward_low: { rewardAmount: 1, createdAt: -1, _id: -1 },
+};
+const DEFAULT_BUG_SORT = "newest";
+
+// Unknown values fall back to the default rather than 400-ing: a stale client
+// sending a retired option should still get a sensible list.
+const resolveBugSort = (sort) =>
+  BUG_SORTS[String(sort || "")] || BUG_SORTS[DEFAULT_BUG_SORT];
+
 const isRndDepartment = (department) =>
   /^research\s*(&|and)\s*development$/i.test(String(department || "").trim());
 
@@ -577,8 +601,14 @@ const getAssignmentScope = async (reqEmployee) => {
     department: subject.department,
     privileged,
     isRnd,
+    canReopen: hasAccess,
     canAssign: isRnd,
     canSeeAssignee: hasAccess || privileged || isRnd,
+    // May approve/close out ANY employee's feedback, not just their own.
+    // isAdmin employees and holders of organisation-wide feedback access
+    // qualify — otherwise a resolution waiting on an absent reporter sits in
+    // "pending approval" forever with nobody able to finish it.
+    canResolveAny: hasAccess || privileged,
   };
 };
 
@@ -625,7 +655,9 @@ exports.getAssignees = async (req, res) => {
       // allowed and is the first row of the list.
       meId: String(scope.subject._id),
       canAssign: scope.canAssign,
+      canReopen: scope.canReopen,
       canSeeAssignee: scope.canSeeAssignee,
+      canResolveAny: scope.canResolveAny,
     });
   } catch (err) {
     console.error("❌ Error fetching assignees:", err);
@@ -1213,13 +1245,19 @@ exports.approveBug = async (req, res) => {
         approver?.isAdmin === true ||
         ["owner", "admin", "super-admin"].includes(approverRole);
 
-      const { canResolve } = await getFeedbackAccess(approver || req.employee);
+      // hasAccess, not just canResolve: organisation-wide feedback access is
+      // the right that lets someone close out other people's feedback, and a
+      // holder who can see every pending resolution but cannot sign any of
+      // them off is stuck at the last step of that workflow.
+      const { canResolve, hasAccess } = await getFeedbackAccess(
+        approver || req.employee
+      );
 
-      if (!isAdminApprover && !canResolve) {
+      if (!isAdminApprover && !canResolve && !hasAccess) {
         return res.status(403).json({
           status: "error",
           message:
-            "Only the reporter, an admin, or someone with feedback resolve access can approve bug resolution",
+            "Only the reporter, an admin, or someone with feedback access can approve bug resolution",
         });
       }
     }
