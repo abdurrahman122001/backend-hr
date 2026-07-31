@@ -32,6 +32,34 @@ const bugSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Who is meant to act on this feedback. Set after the fact from the
+    // Feedbacks page by an admin / feedback-resolve grantee, not by the
+    // reporter at submit time. null = unassigned.
+    assignedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    assignedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    assignedAt: {
+      type: Date,
+      default: null,
+    },
+    // Employee who performed (or requested, for the R&D approval flow) the
+    // latest resolution. Cleared whenever feedback is reopened.
+    resolvedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    resolvedAt: {
+      type: Date,
+      default: null,
+    },
     images: [
       {
         filename: {
@@ -92,6 +120,18 @@ const bugSchema = new mongoose.Schema(
 bugSchema.index({ reportedBy: 1, status: 1, createdAt: -1 });
 bugSchema.index({ status: 1, createdAt: -1 });
 bugSchema.index({ createdAt: -1 });
+// "What is assigned to me / to this person" filtering on the Feedbacks page.
+bugSchema.index({ assignedTo: 1, createdAt: -1 });
+
+// Assignee is wanted on every read path (employee list, org-wide list, detail,
+// owner dashboard), so populate it here rather than repeating it at each of the
+// dozen call sites in the controller. Document-level .populate() calls after a
+// save are NOT queries and do not hit this hook — those populate explicitly.
+const ASSIGNEE_FIELDS = "name companyEmail department designation photographUrl";
+bugSchema.pre(/^find/, function autoPopulateAssignee(next) {
+  this.populate({ path: "assignedTo", select: ASSIGNEE_FIELDS });
+  next();
+});
 
 // Virtual for image URLs
 bugSchema.virtual("imageUrls").get(function () {
@@ -99,3 +139,4 @@ bugSchema.virtual("imageUrls").get(function () {
 });
 
 module.exports = mongoose.model("Bug", bugSchema);
+module.exports.ASSIGNEE_FIELDS = ASSIGNEE_FIELDS;

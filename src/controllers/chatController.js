@@ -2288,6 +2288,9 @@ exports.getSpaceMembers = async (req, res) => {
     // ✅ Precompute role sets
     const ownerId = space.createdBy?._id?.toString();
     const adminIds = new Set(space.admins?.map((a) => a._id.toString()) || []);
+    const pendingIds = new Set(
+      (space.pendingInvites || []).map((inv) => inv.employee?.toString())
+    );
 
     // ✅ Build formatted member list
     const members = space.members.map((member) => {
@@ -2306,6 +2309,8 @@ exports.getSpaceMembers = async (req, res) => {
         position: member.position || "N/A",
         isOnline: member.isOnline ?? false,
         statusColor: member.isOnline ? "#34a853" : "#9e9e9e",
+        // Invited but has not accepted yet — shown as "Invited" in the list
+        isPending: pendingIds.has(memberId),
       };
     });
 
@@ -2314,6 +2319,33 @@ exports.getSpaceMembers = async (req, res) => {
       const order = { Owner: 0, Admin: 1, Member: 2 };
       return order[a.role] - order[b.role];
     });
+
+    // Invitees are NOT members yet, so they are absent from space.members and
+    // have to be loaded separately to fill the "Invited" tab.
+    const invitedIds = (space.pendingInvites || [])
+      .map((inv) => inv.employee)
+      .filter(Boolean);
+    const invitedEmployees = invitedIds.length
+      ? await Employee.find({ _id: { $in: invitedIds } })
+          .select(
+            "name companyEmail avatar photographUrl department position isOnline"
+          )
+          .lean()
+      : [];
+
+    const invitedRows = invitedEmployees.map((emp) => ({
+      id: emp._id,
+      _id: emp._id,
+      name: emp.name,
+      email: emp.companyEmail || emp.email,
+      role: "Invited",
+      avatarUrl: emp.photographUrl || emp.avatar || null,
+      department: emp.department || "N/A",
+      position: emp.position || "N/A",
+      isOnline: emp.isOnline ?? false,
+      statusColor: emp.isOnline ? "#34a853" : "#9e9e9e",
+      isPending: true,
+    }));
 
     // ✅ Final response
     res.json({
@@ -2327,8 +2359,17 @@ exports.getSpaceMembers = async (req, res) => {
         totalMembers: members.length,
         isPrivate: space.isPrivate,
         settings: space.settings,
+        // Server decides who may add people, so the button gate cannot drift
+        // from what addSpaceMembers actually allows.
+        canInvite:
+          ownerId === req.employee._id.toString() ||
+          adminIds.has(req.employee._id.toString()) ||
+          space.settings?.allowMemberInvites !== false,
       },
-      members: sortedMembers,
+      // One list, flagged: the "Added" tab filters out isPending, the
+      // "Invited" tab keeps only those.
+      members: [...sortedMembers, ...invitedRows],
+      invited: invitedRows,
     });
   } catch (error) {
     console.error("❌ getSpaceMembers error:", error);
@@ -2337,6 +2378,75 @@ exports.getSpaceMembers = async (req, res) => {
       error: "Failed to fetch space members",
       details: error.message,
     });
+  }
+};
+
+/**
+ * Post a membership log line into a space ("X was invited by Y…", "X joined").
+ *
+ * Deliberately does NOT touch unreadCount: these are activity notes, not
+ * messages, and badging every member over them would be noise. It does move
+ * the conversation's lastMessage so the line is visible in the chat list.
+ *
+ * Never throws — a failed log line must not fail the invite/join itself.
+ */
+const postSpaceSystemEvent = async ({ req, spaceId, type, actor, target }) => {
+  try {
+    const conversation = await Conversation.findOne({ space: spaceId });
+    if (!conversation) return null;
+
+    const [actorEmp, targetEmp] = await Promise.all([
+      Employee.findById(actor).select("name").lean(),
+      Employee.findById(target).select("name").lean(),
+    ]);
+
+    const targetName = targetEmp?.name || "Someone";
+    const actorName = actorEmp?.name || "someone";
+    const content =
+      type === "member_invited"
+        ? `${targetName} was invited by ${actorName}, and hasn't joined yet`
+        : `${targetName} joined`;
+
+    const message = await Message.create({
+      conversation: conversation._id,
+      // Sender is required by the schema; the actor is the closest thing.
+      sender: actor,
+      space: spaceId,
+      isGroupMessage: true,
+      content,
+      messageType: "system",
+      systemEvent: { type, actor, target },
+    });
+
+    conversation.lastMessage = message._id;
+    conversation.updatedAt = new Date();
+    await conversation.save();
+
+    const populated = await Message.findById(message._id)
+      .populate("sender", "name companyEmail avatar photographUrl")
+      .populate("systemEvent.actor", "name")
+      .populate("systemEvent.target", "name");
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("receive_space_message", populated);
+
+      // Members who have never opened this space are not in its room, so the
+      // room emit alone never reaches them (same reason sendSpaceMessage
+      // fans out to personal rooms). Clients dedupe by message _id.
+      const space = await Space.findById(spaceId).select("members").lean();
+      (space?.members || []).forEach((memberId) => {
+        io.to(`user_${String(memberId)}`).emit(
+          "receive_space_message",
+          populated
+        );
+      });
+    }
+
+    return populated;
+  } catch (error) {
+    console.error("Space system event error:", error);
+    return null;
   }
 };
 
@@ -2383,34 +2493,52 @@ exports.addSpaceMembers = async (req, res) => {
       });
     }
 
-    const canUpdateSpace =
-      space.createdBy?.toString() === req.employee._id.toString() ||
-      space.admins?.some(
-        (adminId) => adminId.toString() === req.employee._id.toString()
-      );
+    const meId = req.employee._id.toString();
+    const isOwner = space.createdBy?.toString() === meId;
+    const isSpaceAdmin = space.admins?.some(
+      (adminId) => adminId.toString() === meId
+    );
+    const isSpaceMember = space.members?.some(
+      (memberId) => memberId.toString() === meId
+    );
 
-    if (!canUpdateSpace) {
+    // Any member can invite (Google Chat behaviour), unless the space has
+    // explicitly turned member invites off. Owner/admin can always invite.
+    const canInvite =
+      isOwner ||
+      isSpaceAdmin ||
+      (isSpaceMember && space.settings?.allowMemberInvites !== false);
+
+    if (!canInvite) {
       return res.status(403).json({
         success: false,
-        error: "Only space owners and admins can update space details",
+        error: "Only members of this space can add people",
       });
     }
 
-    // Add new members
+    // Adding someone only INVITES them. They are not members, are not
+    // conversation participants, cannot read or post, and the space does not
+    // appear in their sidebar until they accept — see acceptSpaceInvite.
     const newMembers = requestedMemberIds.filter(
       (id) =>
         !space.members.some((memberId) => memberId.toString() === id.toString())
     );
-    space.members.push(...newMembers);
-    await space.save();
 
-    // Update conversation participants — the conversation is linked to the
-    // space via its `space` field ({ _id: spaceId } never matched, which left
-    // added members out of `participants` and broke their space unread counts)
-    await Conversation.findOneAndUpdate(
-      { space: spaceId, isGroup: true },
-      { $addToSet: { participants: { $each: newMembers } } }
-    );
+    // Re-inviting someone who is already pending refreshes who invited them
+    // rather than duplicating the entry.
+    space.pendingInvites = space.pendingInvites || [];
+    newMembers.forEach((id) => {
+      space.pendingInvites = space.pendingInvites.filter(
+        (inv) => inv.employee?.toString() !== id.toString()
+      );
+      space.pendingInvites.push({
+        employee: id,
+        invitedBy: req.employee._id,
+        invitedAt: new Date(),
+      });
+    });
+
+    await space.save();
 
     const populatedSpace = await Space.findById(space._id).populate(
       "members",
@@ -2420,12 +2548,19 @@ exports.addSpaceMembers = async (req, res) => {
     // ✅ EMIT SOCKET EVENT FOR NEW MEMBERS
     const io = req.app.get("io");
     if (io) {
-      // Notify new members they were added
+      // NOT "added_to_space" — that inserts the space into their sidebar, and
+      // an invitee should see nothing but the invite until they accept.
       newMembers.forEach((memberId) => {
-        io.to(`employee_${memberId}`).emit("added_to_space", {
-          space: populatedSpace,
-          addedBy: req.employee._id,
-          addedAt: new Date(),
+        // Drives the "You were invited by X" popup without a reload
+        io.to(`employee_${memberId}`).emit("space_invite", {
+          spaceId: String(spaceId),
+          spaceName: space.name,
+          invitedBy: {
+            _id: req.employee._id,
+            name: req.employee.name,
+            email: req.employee.companyEmail || req.employee.email || "",
+          },
+          invitedAt: new Date(),
         });
       });
 
@@ -2438,16 +2573,401 @@ exports.addSpaceMembers = async (req, res) => {
       });
     }
 
+    // "X was invited by Y, and hasn't joined yet" — one line per person
+    for (const memberId of newMembers) {
+      await postSpaceSystemEvent({
+        req,
+        spaceId,
+        type: "member_invited",
+        actor: req.employee._id,
+        target: memberId,
+      });
+    }
+
     res.json({
       success: true,
       space: populatedSpace,
+      // They are invited, not added — kept under the old key so existing
+      // callers keep working.
       addedMembers: newMembers.length,
+      invitedMembers: newMembers.length,
     });
   } catch (error) {
     console.error("Add space members error:", error);
     res.status(500).json({ success: false, error: "Failed to add members" });
   }
 };
+
+// Pending invite for the CURRENT user in this space, or null. The conversation
+// view polls this on open to decide whether to show the join banner.
+exports.getMySpaceInvite = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findById(spaceId)
+      .select("name pendingInvites")
+      .populate("pendingInvites.invitedBy", "name companyEmail avatar photographUrl")
+      .lean();
+
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    const invite = (space.pendingInvites || []).find(
+      (inv) => inv.employee?.toString() === req.employee._id.toString()
+    );
+
+    res.json({
+      success: true,
+      invite: invite
+        ? {
+            spaceId: String(spaceId),
+            spaceName: space.name,
+            invitedAt: invite.invitedAt,
+            invitedBy: invite.invitedBy
+              ? {
+                  _id: invite.invitedBy._id,
+                  name: invite.invitedBy.name,
+                  email: invite.invitedBy.companyEmail || "",
+                }
+              : null,
+          }
+        : null,
+    });
+  } catch (error) {
+    console.error("Get space invite error:", error);
+    res.status(500).json({ success: false, error: "Failed to load invite" });
+  }
+};
+
+// Every pending invite for the current user, across all spaces. Drives the
+// global invite popup, which is shown wherever the user is in chat rather than
+// only inside the space they were invited to.
+exports.getMySpaceInvites = async (req, res) => {
+  try {
+    const spaces = await Space.find({
+      "pendingInvites.employee": req.employee._id,
+    })
+      .select("name emoji avatar kind pendingInvites")
+      .populate("pendingInvites.invitedBy", "name companyEmail")
+      .sort({ updatedAt: -1 })
+      .lean();
+
+    const invites = spaces
+      .map((space) => {
+        const invite = (space.pendingInvites || []).find(
+          (inv) => inv.employee?.toString() === req.employee._id.toString()
+        );
+        if (!invite) return null;
+        return {
+          spaceId: String(space._id),
+          spaceName: space.name,
+          emoji: space.emoji || "💡",
+          kind: space.kind || "space",
+          invitedAt: invite.invitedAt,
+          invitedBy: invite.invitedBy
+            ? {
+                _id: invite.invitedBy._id,
+                name: invite.invitedBy.name,
+                email: invite.invitedBy.companyEmail || "",
+              }
+            : null,
+        };
+      })
+      .filter(Boolean);
+
+    res.json({ success: true, invites });
+  } catch (error) {
+    console.error("Get space invites error:", error);
+    res.status(500).json({ success: false, error: "Failed to load invites" });
+  }
+};
+
+// Browse spaces: All / joined / not joined. "Not joined" deliberately covers
+// two cases — spaces the user is not a member of at all, and spaces they were
+// invited to but have not accepted (they are members under the hood, but from
+// their point of view they have not joined).
+exports.browseSpaces = async (req, res) => {
+  try {
+    const { filter = "all", query = "" } = req.query;
+    const meId = req.employee._id;
+
+    const q = String(query).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const search = q.length ? { name: { $regex: q, $options: "i" } } : {};
+
+    // Browsing is invite-driven, NOT open discovery: a space shows up only if
+    // the user is already in it or has been invited to it. Listing every
+    // public space here would surface spaces they have nothing to do with.
+    const discoverable = {
+      $or: [{ members: meId }, { "pendingInvites.employee": meId }],
+    };
+
+    const spaces = await Space.find({ $and: [discoverable, search] })
+      .select("name description emoji avatar kind isPrivate members pendingInvites createdBy")
+      .populate("createdBy", "name companyEmail")
+      .sort({ name: 1 })
+      .limit(200)
+      .lean();
+
+    const rows = spaces
+      .map((space) => {
+        const isMember = (space.members || []).some(
+          (m) => m.toString() === meId.toString()
+        );
+        const isInvited = (space.pendingInvites || []).some(
+          (inv) => inv.employee?.toString() === meId.toString()
+        );
+        // Invited-but-not-accepted counts as "not joined"
+        const isJoined = isMember && !isInvited;
+
+        return {
+          _id: String(space._id),
+          name: space.name,
+          description: space.description || "",
+          emoji: space.emoji || "💡",
+          avatar: space.avatar || null,
+          kind: space.kind || "space",
+          isPrivate: !!space.isPrivate,
+          memberCount: (space.members || []).length,
+          createdBy: space.createdBy || null,
+          isJoined,
+          isInvited,
+        };
+      })
+      .filter((row) => {
+        if (filter === "joined") return row.isJoined;
+        // "Haven't joined" means invited-but-not-accepted, nothing else
+        if (filter === "not-joined") return row.isInvited;
+        return true;
+      });
+
+    res.json({ success: true, spaces: rows });
+  } catch (error) {
+    console.error("Browse spaces error:", error);
+    res.status(500).json({ success: false, error: "Failed to browse spaces" });
+  }
+};
+
+// Join a discoverable space directly from Browse spaces (no invite involved).
+// An invited user hitting this lands in acceptSpaceInvite's behaviour anyway,
+// because the pending entry is cleared here too.
+exports.joinSpace = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findById(spaceId);
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    const meId = req.employee._id.toString();
+    const isMember = space.members.some((m) => m.toString() === meId);
+    const isInvited = (space.pendingInvites || []).some(
+      (inv) => inv.employee?.toString() === meId
+    );
+
+    // A private space can only be entered through an invite.
+    if (space.isPrivate && !isMember && !isInvited) {
+      return res.status(403).json({
+        success: false,
+        error: "This space is private. You need an invite to join.",
+      });
+    }
+
+    space.pendingInvites = (space.pendingInvites || []).filter(
+      (inv) => inv.employee?.toString() !== meId
+    );
+    if (!isMember) space.members.push(req.employee._id);
+    // Joining also un-hides it, or it would stay missing from their chat list
+    space.hiddenBy = (space.hiddenBy || []).filter(
+      (id) => id.toString() !== meId
+    );
+    await space.save();
+
+    await Conversation.findOneAndUpdate(
+      { space: spaceId, isGroup: true },
+      { $addToSet: { participants: req.employee._id } }
+    );
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId: String(spaceId),
+        joinedMember: req.employee._id,
+        updatedAt: new Date(),
+      });
+
+      if (!isMember) {
+        const populatedSpace = await Space.findById(spaceId).populate(
+          "members",
+          "name companyEmail avatar"
+        );
+        io.to(`employee_${meId}`).emit("added_to_space", {
+          space: populatedSpace,
+          addedBy: req.employee._id,
+          addedAt: new Date(),
+        });
+      }
+    }
+
+    // Only log a real transition. Hitting Join on a space you are already in
+    // (stale Browse list, second tab) must not add another "joined" line.
+    if (!isMember || isInvited) {
+      await postSpaceSystemEvent({
+        req,
+        spaceId,
+        type: "member_joined",
+        actor: req.employee._id,
+        target: req.employee._id,
+      });
+    }
+
+    res.json({ success: true, joined: true });
+  } catch (error) {
+    console.error("Join space error:", error);
+    res.status(500).json({ success: false, error: "Failed to join the space" });
+  }
+};
+
+// Accept: keep membership, just clear the pending flag.
+exports.acceptSpaceInvite = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findById(spaceId);
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    const meId = req.employee._id.toString();
+    const hadInvite = (space.pendingInvites || []).some(
+      (inv) => inv.employee?.toString() === meId
+    );
+    const wasMember = space.members.some((m) => m.toString() === meId);
+
+    space.pendingInvites = (space.pendingInvites || []).filter(
+      (inv) => inv.employee?.toString() !== meId
+    );
+
+    // An invite that was declined and then re-opened from a stale tab: make
+    // sure accepting always lands the user in the space.
+    if (!wasMember) {
+      space.members.push(req.employee._id);
+      await Conversation.findOneAndUpdate(
+        { space: spaceId, isGroup: true },
+        { $addToSet: { participants: req.employee._id } }
+      );
+    }
+
+    await space.save();
+
+    // Nothing actually changed — a stale popup or a second tab replaying the
+    // same accept. Return success but do NOT log another "joined" line.
+    if (!hadInvite && wasMember) {
+      return res.json({ success: true, joined: true, alreadyJoined: true });
+    }
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId: String(spaceId),
+        joinedMember: req.employee._id,
+        updatedAt: new Date(),
+      });
+
+      // Accepting is the moment the space becomes theirs, so this is where
+      // it enters their sidebar (the invite itself deliberately does not).
+      const populatedSpace = await Space.findById(spaceId).populate(
+        "members",
+        "name companyEmail avatar"
+      );
+      io.to(`employee_${meId}`).emit("added_to_space", {
+        space: populatedSpace,
+        addedBy: req.employee._id,
+        addedAt: new Date(),
+      });
+    }
+
+    await postSpaceSystemEvent({
+      req,
+      spaceId,
+      type: "member_joined",
+      actor: req.employee._id,
+      target: req.employee._id,
+    });
+
+    res.json({ success: true, joined: true });
+  } catch (error) {
+    console.error("Accept space invite error:", error);
+    res.status(500).json({ success: false, error: "Failed to join the space" });
+  }
+};
+
+// Decline: drop the invite AND the membership that came with it, so the space
+// disappears from their chat list.
+exports.declineSpaceInvite = async (req, res) => {
+  try {
+    const { spaceId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(spaceId)) {
+      return res.status(400).json({ success: false, error: "Invalid space ID" });
+    }
+
+    const space = await Space.findById(spaceId);
+    if (!space) {
+      return res.status(404).json({ success: false, error: "Space not found" });
+    }
+
+    const meId = req.employee._id.toString();
+    const hadInvite = (space.pendingInvites || []).some(
+      (inv) => inv.employee?.toString() === meId
+    );
+    if (!hadInvite) {
+      return res
+        .status(400)
+        .json({ success: false, error: "You have no pending invite here" });
+    }
+
+    // The owner can never be sitting on an invite, so there is no ownership
+    // transfer to worry about here (unlike leaveSpace).
+    space.pendingInvites = space.pendingInvites.filter(
+      (inv) => inv.employee?.toString() !== meId
+    );
+    space.members = space.members.filter((m) => m.toString() !== meId);
+    space.admins = (space.admins || []).filter((a) => a.toString() !== meId);
+    await space.save();
+
+    await Conversation.findOneAndUpdate(
+      { space: spaceId, isGroup: true },
+      { $pull: { participants: req.employee._id } }
+    );
+
+    const io = req.app.get("io");
+    if (io) {
+      io.to(`space_${spaceId}`).emit("space_members_updated", {
+        spaceId: String(spaceId),
+        removedMember: req.employee._id,
+        updatedAt: new Date(),
+      });
+    }
+
+    res.json({ success: true, declined: true });
+  } catch (error) {
+    console.error("Decline space invite error:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to decline the invite" });
+  }
+};
+
 exports.sendSpaceMessage = async (req, res) => {
   try {
     const { spaceId } = req.params;
@@ -3039,6 +3559,14 @@ exports.getSpaceDetails = async (req, res) => {
       totalMembers: space.members?.length || 0,
       isPrivate: space.isPrivate || false,
       settings: space.settings || {},
+      // Every member may add people unless the space turned that off; owner
+      // and admins always can. Mirrors the check in addSpaceMembers.
+      canInvite:
+        space.createdBy?._id?.toString() === req.employee._id.toString() ||
+        space.admins?.some(
+          (a) => a._id.toString() === req.employee._id.toString()
+        ) ||
+        space.settings?.allowMemberInvites !== false,
       createdAt: space.createdAt,
       updatedAt: space.updatedAt,
     };
@@ -3437,10 +3965,17 @@ exports.searchEmployees = async (req, res) => {
       });
     }
 
-    // Find space to get current members
-    const space = await Space.findById(spaceId).select("members");
+    // Find space to get current members. People with an invite still pending
+    // are excluded too — they are not members yet, but offering to "add" them
+    // again is noise.
+    const space = await Space.findById(spaceId).select("members pendingInvites");
     const currentMemberIds = space
-      ? space.members.map((m) => m.toString())
+      ? [
+          ...space.members.map((m) => m.toString()),
+          ...(space.pendingInvites || [])
+            .map((inv) => inv.employee?.toString())
+            .filter(Boolean),
+        ]
       : [];
 
     // Search employees (excluding current members)
@@ -3527,6 +4062,8 @@ exports.getSpaceMessages = async (req, res) => {
       .populate("receivers", "name companyEmail avatar")
       .populate("readBy.employee", "name companyEmail avatar")
       .populate("space")
+      .populate("systemEvent.actor", "name")
+      .populate("systemEvent.target", "name")
       .populate({
         path: "replyTo",
         populate: {

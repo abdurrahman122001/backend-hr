@@ -391,6 +391,9 @@ exports.getBugsByOwner = async (req, res) => {
         select: "name companyEmail department balance photographUrl",
         model: "Employee",
       })
+      // This endpoint is the access-gated All Feedbacks view. Keep resolver
+      // identity out of ordinary employee feedback responses.
+      .populate({ path: "resolvedBy", select: Bug.ASSIGNEE_FIELDS })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
@@ -534,6 +537,182 @@ exports.getBugsByOwner = async (req, res) => {
     });
   }
 };
+// ---------------------
+// ASSIGNMENT
+// ---------------------
+
+const isRndDepartment = (department) =>
+  /^research\s*(&|and)\s*development$/i.test(String(department || "").trim());
+
+/**
+ * Who this caller is allowed to assign feedback to.
+ *
+ * Assigning is an R&D-only action: they work the feedback queue, so they route
+ * items among themselves — within their OWN department, never across it. The
+ * control is not shown to anyone outside R&D, admins included.
+ *
+ * Seeing WHO holds an item is wider: admins and anyone with access to all
+ * feedback can read the assignee even though they cannot change it.
+ */
+const getAssignmentScope = async (reqEmployee) => {
+  const emp = await Employee.findById(reqEmployee._id)
+    .select("_id isAdmin role owner department")
+    .lean();
+  const subject = emp || reqEmployee;
+
+  const { hasAccess, canResolve, isAdmin } = await getFeedbackAccess(subject);
+  const role = String(subject.role || "").toLowerCase();
+  const privileged =
+    isAdmin ||
+    subject.isAdmin === true ||
+    reqEmployee.isAdmin === true ||
+    ["owner", "admin", "super-admin"].includes(role) ||
+    canResolve;
+
+  const isRnd = isRndDepartment(subject.department);
+
+  return {
+    subject,
+    ownerId: subject.owner || reqEmployee.owner || reqEmployee._id,
+    department: subject.department,
+    privileged,
+    isRnd,
+    canAssign: isRnd,
+    canSeeAssignee: hasAccess || privileged || isRnd,
+  };
+};
+
+// The assignable pool for a given scope: R&D teammates, and nobody otherwise.
+// The caller is always in it — taking an item yourself is the common case — and
+// is returned first so "assign to me" is the top of the list. They are also
+// added back explicitly if the department query misses them (a non-"active"
+// status on their own record must not stop them picking up work).
+const findAssigneesForScope = async (scope) => {
+  if (!scope.isRnd) return [];
+
+  const team = await Employee.find({
+    owner: scope.ownerId,
+    status: "active",
+    department: scope.department,
+  })
+    .select(Bug.ASSIGNEE_FIELDS)
+    .sort({ name: 1 })
+    .lean();
+
+  const meId = String(scope.subject._id);
+  let me = team.find((e) => String(e._id) === meId);
+  if (!me) {
+    me = await Employee.findById(meId).select(Bug.ASSIGNEE_FIELDS).lean();
+  }
+
+  return me
+    ? [me, ...team.filter((e) => String(e._id) !== meId)]
+    : team;
+};
+
+
+// GET /api/bugs/assignees — the dropdown source for the Feedbacks pages.
+// Returns the caller's own rights alongside the list so the UI needs one call
+// to decide between the picker, a read-only chip, and showing nothing.
+exports.getAssignees = async (req, res) => {
+  try {
+    const scope = await getAssignmentScope(req.employee);
+    const assignees = await findAssigneesForScope(scope);
+    return res.json({
+      status: "success",
+      assignees,
+      // So the UI can mark the caller's own entry "(You)" — self-assignment is
+      // allowed and is the first row of the list.
+      meId: String(scope.subject._id),
+      canAssign: scope.canAssign,
+      canSeeAssignee: scope.canSeeAssignee,
+    });
+  } catch (err) {
+    console.error("❌ Error fetching assignees:", err);
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while fetching assignees",
+    });
+  }
+};
+
+// PATCH /api/bugs/:id/assign  { assignedTo: <employeeId> | null }
+// Sending null (or an empty string) unassigns.
+exports.assignBug = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { assignedTo } = req.body;
+
+    // R&D only, and only within their own department. This is the same line
+    // the Feedbacks pages use to decide whether to render the control at all.
+    const scope = await getAssignmentScope(req.employee);
+    if (!scope.canAssign) {
+      return res.status(403).json({
+        status: "error",
+        message: "Only Research & Development can assign feedback",
+      });
+    }
+
+    const bug = await Bug.findById(id);
+    if (!bug) {
+      return res
+        .status(404)
+        .json({ status: "error", message: "Bug not found" });
+    }
+
+    // Unassign
+    if (!assignedTo) {
+      bug.assignedTo = null;
+      bug.assignedBy = null;
+      bug.assignedAt = null;
+      await bug.save();
+      return res.json({
+        status: "success",
+        message: "Feedback unassigned",
+        bug: bug.toObject(),
+      });
+    }
+
+    // Assign — the target must be in the caller's own assignable pool, not just
+    // any employee. This is what keeps an R&D assigner inside their department.
+    const eligible = await findAssigneesForScope(scope);
+    const target = eligible.find((e) => String(e._id) === String(assignedTo));
+    if (!target) {
+      return res.status(400).json({
+        status: "error",
+        message: `You can only assign feedback within ${scope.department || "your department"}.`,
+      });
+    }
+
+    bug.assignedTo = target._id;
+    bug.assignedBy = req.employee._id;
+    bug.assignedAt = new Date();
+    await bug.save();
+
+    const populated = bug.toObject();
+    populated.assignedTo = target;
+
+    return res.json({
+      status: "success",
+      message: `Feedback assigned to ${target.name}`,
+      bug: populated,
+    });
+  } catch (err) {
+    console.error("❌ Error assigning bug:", err);
+
+    if (err.name === "CastError") {
+      return res
+        .status(400)
+        .json({ status: "error", message: "Invalid bug or employee ID" });
+    }
+
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while assigning feedback",
+    });
+  }
+};
+
 // ---------------------
 // GET BUG BY ID
 // ---------------------
@@ -841,6 +1020,8 @@ exports.resolveBug = async (req, res) => {
       bug.status = "resolved";
       bug.approvalRequired = false;
       bug.approvedByReporter = true;
+      bug.resolvedBy = employeeId;
+      bug.resolvedAt = new Date();
 
       // Add reward if not already added
       if (!bug.rewardAdded) {
@@ -881,6 +1062,9 @@ exports.resolveBug = async (req, res) => {
     ) {
       bug.status = "pending_approval";
       bug.approvalRequired = true;
+      bug.approvedByReporter = false;
+      bug.resolvedBy = employeeId;
+      bug.resolvedAt = null;
       bug.rewardAmount = rewardAmount; // Store the reward amount even if pending
       await bug.save();
 
@@ -910,6 +1094,8 @@ exports.resolveBug = async (req, res) => {
       bug.status = "resolved";
       bug.approvalRequired = false;
       bug.approvedByReporter = true;
+      bug.resolvedBy = employeeId;
+      bug.resolvedAt = new Date();
 
       if (!bug.rewardAdded) {
         await addRewardToReporter(bug.reportedBy, rewardAmount);
@@ -948,6 +1134,8 @@ exports.resolveBug = async (req, res) => {
       bug.status = "resolved";
       bug.approvalRequired = false;
       bug.approvedByReporter = true;
+      bug.resolvedBy = employeeId;
+      bug.resolvedAt = new Date();
 
       if (!bug.rewardAdded) {
         await addRewardToReporter(bug.reportedBy, rewardAmount);
@@ -1050,6 +1238,10 @@ exports.approveBug = async (req, res) => {
     bug.status = "resolved";
     bug.approvalRequired = false;
     bug.approvedByReporter = true;
+    // Preserve the R&D employee who initiated the pending resolution. For
+    // legacy pending rows without attribution, fall back to the approver.
+    bug.resolvedBy = bug.resolvedBy || employeeId;
+    bug.resolvedAt = new Date();
 
     // Calculate reward if not already set
     const calculateReward = (priority) => {
@@ -1103,6 +1295,56 @@ exports.approveBug = async (req, res) => {
     return res.status(500).json({
       status: "error",
       message: "Server error while approving bug",
+    });
+  }
+};
+
+// Reopen a resolved (or pending-approval) feedback item. Any employee who can
+// access the organisation-wide feedback queue may do this; the same helper
+// also grants owners and isAdmin employees implicitly.
+exports.reopenBug = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const access = await getFeedbackAccess(req.employee);
+
+    if (!access.hasAccess) {
+      return res.status(403).json({
+        status: "error",
+        message: "Feedback access is required to reopen feedback",
+      });
+    }
+
+    const bug = await Bug.findById(id);
+    if (!bug) {
+      return res.status(404).json({ status: "error", message: "Bug not found" });
+    }
+
+    if (bug.status === "open") {
+      return res.status(400).json({ status: "error", message: "Feedback is already open" });
+    }
+
+    bug.status = "open";
+    bug.approvalRequired = false;
+    bug.approvedByReporter = false;
+    bug.resolvedBy = null;
+    bug.resolvedAt = null;
+    await bug.save();
+
+    await bug.populate({
+      path: "reportedBy",
+      select: "name companyEmail department balance photographUrl owner",
+      populate: { path: "owner", select: "name email" },
+    });
+
+    return res.json({ status: "success", message: "Feedback reopened", bug });
+  } catch (err) {
+    console.error("Error reopening bug:", err);
+    if (err.name === "CastError") {
+      return res.status(400).json({ status: "error", message: "Invalid bug ID" });
+    }
+    return res.status(500).json({
+      status: "error",
+      message: "Server error while reopening feedback",
     });
   }
 };

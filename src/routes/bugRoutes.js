@@ -33,6 +33,12 @@ router.get("/owner", requireAuth, bugController.getBugsByOwner);
 // @access  Private (Owner)
 router.get("/owner/dashboard", requireEmployeeAuth, bugController.getOwnerDashboard);
 
+// @route   GET /api/bugs/assignees
+// @desc    Employees eligible to be assigned feedback (R&D / admins / resolve grantees)
+// @access  Private (Employee)
+// NOTE: must stay above "/:id" or it is swallowed as a bug id.
+router.get("/assignees", requireEmployeeAuth, bugController.getAssignees);
+
 // @route   GET /api/bugs/:id
 // @desc    Get single bug by ID
 // @access  Private (Employee/Owner/Admin)
@@ -66,6 +72,16 @@ router.put("/resolve/:id", requireEmployeeAuth, bugController.resolveBug);
 // @desc    Approve bug resolution (reporter only)
 // @access  Private (Employee - Reporter)
 router.patch("/:id/approve", requireEmployeeAuth, bugController.approveBug);
+
+// @route   PATCH /api/bugs/:id/reopen
+// @desc    Reopen feedback (requires organisation-wide feedback access)
+// @access  Private (Feedback access / Admin / Owner)
+router.patch("/:id/reopen", requireEmployeeAuth, bugController.reopenBug);
+
+// @route   PATCH /api/bugs/:id/assign
+// @desc    Assign (or unassign, with a null body value) a feedback
+// @access  Private (Admin / feedback-resolve grantee)
+router.patch("/:id/assign", requireEmployeeAuth, bugController.assignBug);
 
 // @route   PATCH /api/bugs/:id/priority
 // @desc    Update bug priority

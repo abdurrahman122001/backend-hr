@@ -44,8 +44,26 @@ const messageSchema = new mongoose.Schema(
     },
     messageType: {
       type: String,
-      enum: ["text", "file", "image", "gif"],
+      enum: ["text", "file", "image", "gif", "system"],
       default: "text",
+    },
+    // Membership log lines ("X was invited by Y", "X joined"). Rendered
+    // centred in the thread instead of as a chat bubble. `content` always
+    // carries the same sentence in plain text so anything that only reads
+    // content (chat list preview, search) still shows something sensible.
+    systemEvent: {
+      type: {
+        type: String,
+        enum: ["member_invited", "member_joined"],
+      },
+      actor: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
+      target: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Employee",
+      },
     },
     attachments: [
       {
@@ -452,6 +470,28 @@ const spaceSchema = new mongoose.Schema(
         type: mongoose.Schema.Types.ObjectId,
         ref: "Employee",
         required: true,
+      },
+    ],
+    // Someone added by another member is a full member straight away (so their
+    // unread counts, mentions and message access all keep working) but stays
+    // listed here until they accept. The invite banner in the conversation is
+    // driven off this list, and declining removes them from `members` again.
+    // The space creator never gets an entry — they are in by definition.
+    pendingInvites: [
+      {
+        employee: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+          required: true,
+        },
+        invitedBy: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+        },
+        invitedAt: {
+          type: Date,
+          default: Date.now,
+        },
       },
     ],
     hiddenBy: [

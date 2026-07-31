@@ -210,6 +210,26 @@ router.get(
   chatController.searchEmployees
 );
 
+// Browse spaces + my pending invites. Named with their own path segments so
+// they can never be swallowed by "/spaces/:spaceId".
+router.get("/spaces-browse", empAuth, chatController.browseSpaces);
+router.get("/space-invites", empAuth, chatController.getMySpaceInvites);
+
+// Space invites — the join banner shown to someone who was added but has not
+// accepted yet
+router.post("/spaces/:spaceId/join", empAuth, chatController.joinSpace);
+router.get("/spaces/:spaceId/invite", empAuth, chatController.getMySpaceInvite);
+router.post(
+  "/spaces/:spaceId/invite/accept",
+  empAuth,
+  chatController.acceptSpaceInvite
+);
+router.post(
+  "/spaces/:spaceId/invite/decline",
+  empAuth,
+  chatController.declineSpaceInvite
+);
+
 // Space details
 router.get("/spaces/:spaceId/details", empAuth, chatController.getSpaceDetails);
 router.get(
