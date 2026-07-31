@@ -3953,12 +3953,13 @@ exports.transferSpaceOwnership = async (req, res) => {
 // ✅ SEARCH EMPLOYEES FOR ADDING TO SPACE
 exports.searchEmployees = async (req, res) => {
   try {
-    const { query } = req.query;
+    const { query, listAll } = req.query;
     const { spaceId } = req.params;
 
     // Trim (Enter/trailing space must not blank results) and escape regex chars
     const q = (query || "").trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (q.length < 2) {
+    const shouldListAll = listAll === "true" && q.length === 0;
+    if (!shouldListAll && q.length < 2) {
       return res.json({
         success: true,
         employees: [],
@@ -3978,22 +3979,28 @@ exports.searchEmployees = async (req, res) => {
         ]
       : [];
 
-    // Search employees (excluding current members)
-    const employees = await Employee.find({
-      $and: [
-        {
+    // Search active employees, excluding the current user and existing members.
+    const filters = [
+      { _id: { $ne: req.employee._id } },
+      { _id: { $nin: currentMemberIds } },
+      { status: "active" },
+    ];
+
+    if (!shouldListAll) {
+      filters.unshift({
           $or: [
             { name: { $regex: q, $options: "i" } },
             { companyEmail: { $regex: q, $options: "i" } },
           ],
-        },
-        { _id: { $ne: req.employee._id } }, // Exclude current user
-        { _id: { $nin: currentMemberIds } }, // Exclude current members
-        { status: "active" }, // Only active employees can be added to a space
-      ],
-    })
+      });
+    }
+
+    const employeeQuery = Employee.find({ $and: filters })
       .select("name companyEmail avatar photographUrl department position")
-      .limit(20);
+      .sort({ name: 1 });
+
+    if (!shouldListAll) employeeQuery.limit(20);
+    const employees = await employeeQuery;
 
     const formattedEmployees = employees.map((emp) => ({
       id: emp._id,
