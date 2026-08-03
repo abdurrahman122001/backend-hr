@@ -1,4 +1,6 @@
 const HrPolicy = require("../models/HrPolicy");
+const Employee = require("../models/Employees");
+const { sendHrPolicyToEmployee } = require("../services/hrPolicyDelivery");
 
 // 🟢 Create or Update HR Policy for logged-in user
 exports.saveOrUpdatePolicy = async (req, res) => {
@@ -55,6 +57,55 @@ exports.getMyPolicy = async (req, res) => {
     console.error("❌ Error fetching HR Policy:", error);
     res.status(500).json({
       message: "Server error while fetching HR Policy",
+      error: error.message,
+    });
+  }
+};
+
+// 📨 Assign the HR policy to an employee's in-app mailbox (Email module).
+// Runs automatically on offer acceptance; this endpoint is the manual/re-send
+// path for HR. Pass { force: true } to deliver again after the first time.
+exports.sendPolicyToEmployee = async (req, res) => {
+  try {
+    const owner = req.user?._id;
+    if (!owner) {
+      return res.status(401).json({ message: "Unauthorized: user not found in request" });
+    }
+
+    const { employeeId } = req.params;
+    const employee = await Employee.findOne({ _id: employeeId, owner });
+
+    if (!employee) {
+      return res.status(404).json({ message: "Employee not found" });
+    }
+
+    const result = await sendHrPolicyToEmployee({
+      employee,
+      ownerId: owner,
+      force: req.body?.force === true,
+    });
+
+    if (!result.success) {
+      const status = result.reason === "already_sent" ? 409 : 400;
+      return res.status(status).json({
+        message:
+          result.reason === "already_sent"
+            ? "HR policy was already sent to this employee"
+            : result.reason === "no_policy_configured"
+              ? "No HR policy has been configured yet"
+              : "Failed to send HR policy",
+        reason: result.reason,
+      });
+    }
+
+    res.status(200).json({
+      message: `✅ HR policy sent to ${employee.name || "employee"}`,
+      messageId: result.messageId,
+    });
+  } catch (error) {
+    console.error("❌ Error sending HR Policy:", error);
+    res.status(500).json({
+      message: "Server error while sending HR Policy",
       error: error.message,
     });
   }
