@@ -97,6 +97,115 @@ async function getManagementChainFromHierarchy(ownerId, employeeId) {
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
 
+const escapeSearchRegex = (value = "") =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const parseSearchSize = (value) => {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d+(?:\.\d+)?)([kmg])?b?$/i);
+  if (!match) return null;
+  const multiplier =
+    { k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[
+      String(match[2] || "").toLowerCase()
+    ] || 1;
+  return Math.round(Number(match[1]) * multiplier);
+};
+
+const parseGmailStyleSearch = (rawQuery = "") => {
+  let remaining = String(rawQuery || "").trim();
+  const parsed = {
+    from: [],
+    to: [],
+    subject: "",
+    excluded: [],
+    scope: "",
+    hasAttachments: null,
+    unread: null,
+    largerThan: null,
+    smallerThan: null,
+    dateFrom: null,
+    dateTo: null,
+  };
+
+  const takeOperators = (name) => {
+    const values = [];
+    const pattern = new RegExp(
+      `(?:^|\\s)${name}:(?:\"([^\"]*)\"|\\(([^)]*)\\)|(\\S+))`,
+      "gi",
+    );
+    remaining = remaining.replace(pattern, (_match, quoted, grouped, plain) => {
+      const value = String(quoted ?? grouped ?? plain ?? "").trim();
+      if (value) values.push(value);
+      return " ";
+    });
+    return values;
+  };
+
+  parsed.from = takeOperators("from");
+  parsed.to = takeOperators("to");
+  parsed.subject = takeOperators("subject").join(" ").trim();
+  parsed.scope = (takeOperators("in").pop() || "").toLowerCase();
+
+  const larger = takeOperators("larger").pop();
+  const smaller = takeOperators("smaller").pop();
+  const exactSize = takeOperators("size").pop();
+  parsed.largerThan = parseSearchSize(larger || exactSize);
+  parsed.smallerThan = parseSearchSize(smaller);
+
+  const after = takeOperators("after").pop();
+  const before = takeOperators("before").pop();
+  const newerThan = takeOperators("newer_than").pop();
+  if (after) {
+    const date = new Date(after.replace(/\//g, "-"));
+    if (!Number.isNaN(date.getTime())) parsed.dateFrom = date;
+  }
+  if (before) {
+    const date = new Date(before.replace(/\//g, "-"));
+    if (!Number.isNaN(date.getTime())) parsed.dateTo = date;
+  }
+  if (!parsed.dateFrom && newerThan) {
+    const match = newerThan.match(/^(\d+)([dmy])$/i);
+    if (match) {
+      const date = new Date();
+      const amount = Number(match[1]);
+      const unit = match[2].toLowerCase();
+      if (unit === "d") date.setDate(date.getDate() - amount);
+      if (unit === "m") date.setMonth(date.getMonth() - amount);
+      if (unit === "y") date.setFullYear(date.getFullYear() - amount);
+      parsed.dateFrom = date;
+    }
+  }
+
+  if (/(?:^|\s)has:attachment(?:\s|$)/i.test(remaining)) {
+    parsed.hasAttachments = true;
+    remaining = remaining.replace(/(?:^|\s)has:attachment(?=\s|$)/gi, " ");
+  }
+  if (/(?:^|\s)is:unread(?:\s|$)/i.test(remaining)) {
+    parsed.unread = true;
+    remaining = remaining.replace(/(?:^|\s)is:unread(?=\s|$)/gi, " ");
+  } else if (/(?:^|\s)is:read(?:\s|$)/i.test(remaining)) {
+    parsed.unread = false;
+    remaining = remaining.replace(/(?:^|\s)is:read(?=\s|$)/gi, " ");
+  }
+  remaining = remaining.replace(/(?:^|\s)-label:chats(?=\s|$)/gi, " ");
+
+  remaining = remaining.replace(
+    /(?:^|\s)-(?:"([^"]+)"|\(([^)]+)\)|(\S+))/g,
+    (_match, quoted, grouped, plain) => {
+      const value = String(quoted ?? grouped ?? plain ?? "").trim();
+      if (value) parsed.excluded.push(value);
+      return " ";
+    },
+  );
+
+  parsed.text = remaining
+    .replace(/"([^"]+)"/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  return parsed;
+};
+
 // ── In-process hierarchy cache (5-minute TTL per employee) ──────────────────
 // Hierarchy traversals hit the DB up to 10× per request. Caching per employee
 // for 5 min eliminates nearly all of that overhead on repeated list fetches.
@@ -2054,6 +2163,7 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
     ]);
     const unreadCount = result[0]?.count || 0;
 
+    res.set("Cache-Control", "no-store");
     res.json({
       success: true,
       data: {
@@ -2298,14 +2408,6 @@ exports.downloadInlineAttachment = async function downloadInlineAttachment(
     res.status(500).json({ error: "Failed to download attachment" });
   }
 };
-// Tiny in-memory cache for the sidebar/header badge counts. On the Email view
-// several components (list, sidebar, header) hit /count near-simultaneously at
-// mount and again on every unread tick — each call otherwise runs 12 count
-// queries. Badge counts tolerate a few seconds of staleness, so we collapse the
-// burst to a single DB pass per user+scope within a short window.
-const _messageCountsCache = new Map(); // key -> { at: number, payload: object }
-const MESSAGE_COUNTS_TTL_MS = 3000;
-
 exports.getMessageCounts = async function getMessageCounts(req, res) {
   try {
     const currentUser = req.employee?._id;
@@ -2313,12 +2415,6 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
 
     if (!isObjId(currentUser) || !isObjId(owner)) {
       return res.status(401).json({ error: "Unauthorized" });
-    }
-
-    const cacheKey = `${currentUser}:${req.query.scope || ""}`;
-    const cachedCounts = _messageCountsCache.get(cacheKey);
-    if (cachedCounts && Date.now() - cachedCounts.at < MESSAGE_COUNTS_TTL_MS) {
-      return res.json(cachedCounts.payload);
     }
 
     // ── Per-category unread (for the Gmail-style sidebar badges) ───────────
@@ -2646,9 +2742,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       review: reviewUnread,
       supervision: supervisionPending,
     };
-    // Bound the cache so it can't grow unbounded across many users.
-    if (_messageCountsCache.size > 2000) _messageCountsCache.clear();
-    _messageCountsCache.set(cacheKey, { at: Date.now(), payload });
+    res.set("Cache-Control", "no-store");
     res.json(payload);
   } catch (e) {
     console.error("Error in getMessageCounts:", e);
@@ -3021,6 +3115,9 @@ exports.searchMessages = async function searchMessages(req, res) {
       sortBy = "newest", // newest, oldest, relevance
     } = req.query;
 
+    const parsedSearch = parseGmailStyleSearch(searchQuery || "");
+    const effectiveSearchQuery = parsedSearch.text;
+
     const q = {};
 
     // ✅ Owner / client scope
@@ -3035,6 +3132,18 @@ exports.searchMessages = async function searchMessages(req, res) {
     ) {
       q.status = status;
       if (status === "draft") q.isScheduled = false;
+    }
+
+    if (parsedSearch.scope === "drafts" || parsedSearch.scope === "draft") {
+      q.status = "draft";
+      q.isScheduled = false;
+      if (req.employee?._id) q.sender = req.employee._id;
+    } else if (parsedSearch.scope === "sent") {
+      q.status = "sent";
+      if (req.employee?._id) q.sender = req.employee._id;
+    } else if (parsedSearch.scope === "inbox") {
+      q.status = "sent";
+      if (req.employee?._id) q.receiver = req.employee._id;
     }
 
     // ✅ Scheduled filter
@@ -3054,11 +3163,20 @@ exports.searchMessages = async function searchMessages(req, res) {
 
     // ✅ Trash/Spam filters — PER USER (only what THIS user binned / marked spam)
     const _meSearch = req.employee?._id;
-    if (isTrashed === "true" || isTrashed === true) {
+    const searchScope = parsedSearch.scope;
+    if (searchScope === "trash" || searchScope === "bin") {
+      q.trashedBy = _meSearch;
+    } else if (searchScope === "spam") {
+      q.spamReporters = _meSearch;
+    } else if (isTrashed === "true" || isTrashed === true) {
       q.trashedBy = _meSearch;
     } else if (isSpam === "true" || isSpam === true) {
       q.spamReporters = _meSearch;
-    } else if (isTrashed === "false" && isSpam === "false") {
+    } else if (
+      searchScope !== "anywhere" &&
+      isTrashed === "false" &&
+      isSpam === "false"
+    ) {
       // Default: exclude this user's own trash and spam from normal searches
       q.trashedBy = { $ne: _meSearch };
       q.spamReporters = { $ne: _meSearch };
@@ -3070,7 +3188,7 @@ exports.searchMessages = async function searchMessages(req, res) {
     }
 
     // ✅ Attachment filter
-    if (hasAttachments === "true") {
+    if (parsedSearch.hasAttachments === true || hasAttachments === "true") {
       q["attachments.0"] = { $exists: true };
     } else if (hasAttachments === "false") {
       q.attachments = { $size: 0 };
@@ -3078,16 +3196,46 @@ exports.searchMessages = async function searchMessages(req, res) {
 
     // ✅ Date range filter
     const dateFilter = {};
-    if (dateFrom) {
-      const fromDate = new Date(dateFrom);
+    if (parsedSearch.dateFrom || dateFrom) {
+      const fromDate = parsedSearch.dateFrom || new Date(dateFrom);
       if (!isNaN(fromDate)) dateFilter.$gte = fromDate;
     }
-    if (dateTo) {
-      const toDate = new Date(dateTo);
-      if (!isNaN(toDate)) dateFilter.$lte = toDate;
+    if (parsedSearch.dateTo || dateTo) {
+      const toDate = parsedSearch.dateTo || new Date(dateTo);
+      if (!isNaN(toDate)) {
+        if (parsedSearch.dateTo) dateFilter.$lt = toDate;
+        else dateFilter.$lte = toDate;
+      }
     }
     if (Object.keys(dateFilter).length) {
-      q.createdAt = dateFilter;
+      // Received/synced emails retain their real message date in
+      // emailMetadata.date. createdAt is only the time the local record was
+      // inserted, which can be much later and made Gmail-style date searches
+      // return the wrong results. Outbound/manual records fall back to sentAt
+      // and then createdAt.
+      const messageDateExpression = {
+        $ifNull: [
+          "$emailMetadata.date",
+          { $ifNull: ["$sentAt", "$createdAt"] },
+        ],
+      };
+      const dateComparisons = [];
+      if (dateFilter.$gte) {
+        dateComparisons.push({ $gte: [messageDateExpression, dateFilter.$gte] });
+      }
+      if (dateFilter.$lte) {
+        dateComparisons.push({ $lte: [messageDateExpression, dateFilter.$lte] });
+      }
+      if (dateFilter.$lt) {
+        dateComparisons.push({ $lt: [messageDateExpression, dateFilter.$lt] });
+      }
+      q.$and = q.$and || [];
+      q.$and.push({
+        $expr:
+          dateComparisons.length === 1
+            ? dateComparisons[0]
+            : { $and: dateComparisons },
+      });
     }
 
     // ✅ Scheduled date range filter
@@ -3138,6 +3286,113 @@ exports.searchMessages = async function searchMessages(req, res) {
     // ✅ Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
+    const addAndCondition = (condition) => {
+      qFinal.$and = qFinal.$and || [];
+      qFinal.$and.push(condition);
+    };
+
+    const resolveEmployeeClauses = async (values, direction) => {
+      const clauses = [];
+      const individualValues = values.flatMap((rawValue) =>
+        String(rawValue || "").split(","),
+      );
+      for (const rawValue of individualValues) {
+        const value = String(rawValue || "").trim();
+        if (!value) continue;
+        const pattern = new RegExp(escapeSearchRegex(value), "i");
+        const employeeQuery = {
+          $or: [
+            { companyEmail: pattern },
+            { email: pattern },
+            { name: pattern },
+          ],
+        };
+        if (qFinal.owner) employeeQuery.owner = qFinal.owner;
+        const employeeIds = await Employee.find(employeeQuery)
+          .select("_id")
+          .limit(50)
+          .lean();
+        const ids = employeeIds.map((employee) => employee._id);
+
+        if (direction === "from") {
+          if (ids.length) clauses.push({ sender: { $in: ids } });
+          clauses.push(
+            { clientEmployeeEmail: pattern },
+            { clientEmployeeName: pattern },
+            { "emailMetadata.from": pattern },
+            { "emailMetadata.fromName": pattern },
+          );
+        } else {
+          if (ids.length) clauses.push({ receiver: { $in: ids } });
+          clauses.push({ "emailMetadata.to": pattern });
+        }
+      }
+      return clauses;
+    };
+
+    if (parsedSearch.from.length) {
+      const fromClauses = await resolveEmployeeClauses(parsedSearch.from, "from");
+      if (fromClauses.length) addAndCondition({ $or: fromClauses });
+    }
+    if (parsedSearch.to.length) {
+      const toClauses = await resolveEmployeeClauses(parsedSearch.to, "to");
+      if (toClauses.length) addAndCondition({ $or: toClauses });
+    }
+    if (parsedSearch.subject) {
+      const subjectWords = parsedSearch.subject.split(/\s+/).filter(Boolean);
+      addAndCondition({
+        $and: subjectWords.map((word) => ({
+          subject: { $regex: escapeSearchRegex(word), $options: "i" },
+        })),
+      });
+    }
+    if (parsedSearch.unread === true && currentEmployeeId) {
+      addAndCondition({ "readBy.employee": { $ne: currentEmployeeId } });
+    } else if (parsedSearch.unread === false && currentEmployeeId) {
+      addAndCondition({ "readBy.employee": currentEmployeeId });
+    }
+    if (parsedSearch.largerThan !== null) {
+      addAndCondition({
+        $expr: {
+          $gt: [
+            { $sum: { $ifNull: ["$attachments.size", []] } },
+            parsedSearch.largerThan,
+          ],
+        },
+      });
+    }
+    if (parsedSearch.smallerThan !== null) {
+      addAndCondition({
+        $expr: {
+          $lt: [
+            { $sum: { $ifNull: ["$attachments.size", []] } },
+            parsedSearch.smallerThan,
+          ],
+        },
+      });
+    }
+    if (parsedSearch.excluded.length) {
+      const excludedFields = [
+        "subject",
+        "note",
+        "clientName",
+        "clientEmployeeName",
+        "clientEmployeeEmail",
+        "emailMetadata.from",
+        "emailMetadata.fromName",
+        "emailMetadata.to",
+        "emailMetadata.cc",
+        "emailMetadata.bcc",
+        "attachments.originalName",
+      ];
+      parsedSearch.excluded.forEach((value) => {
+        const pattern = new RegExp(escapeSearchRegex(value), "i");
+        addAndCondition({
+          $nor: excludedFields.map((field) => ({ [field]: pattern })),
+        });
+      });
+    }
+
     // Match every message where a selected person participated, regardless of
     // whether they were the sender, a direct recipient, CC, or BCC.
     if (participantEmail && participantEmail.trim()) {
@@ -3161,8 +3416,8 @@ exports.searchMessages = async function searchMessages(req, res) {
     }
 
     // ✅ SEARCH LOGIC - Only add search conditions if searchQuery is provided
-    if (searchQuery && searchQuery.trim().length > 0) {
-      const searchTerm = searchQuery.trim();
+    if (effectiveSearchQuery) {
+      const searchTerm = effectiveSearchQuery;
       const searchConditions = [];
 
       // Escape regex metacharacters — subjects like "Invoice (July)" or queries
