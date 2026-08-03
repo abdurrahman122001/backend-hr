@@ -9,7 +9,10 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
-const { generateEmployeeIdForCompany } = require("../utils/companyEmployeeId");
+const {
+  generateEmployeeIdForCompany,
+  ensureCompanyOwnerIndex,
+} = require("../utils/companyEmployeeId");
 
 // --- Company Info ---
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -314,8 +317,21 @@ router.put("/set-password", async (req, res) => {
       if (!company) {
         return res.status(400).json({ error: "Company profile not found for employee ID generation." });
       }
+
+      // ownerIndex is assigned lazily — companies created before that logic (or
+      // never re-saved from the company-profile screen since) simply don't have
+      // one yet. Mint it here instead of dead-ending the employee: the helper is
+      // idempotent and retries on the unique-index race, so concurrent
+      // set-password calls still end up with one shared index per company.
       if (!company.ownerIndex) {
-        return res.status(400).json({ error: "Company ownerIndex not found for employee ID generation." });
+        try {
+          company.ownerIndex = await ensureCompanyOwnerIndex(company);
+        } catch (indexErr) {
+          console.error("❌ ownerIndex generation failed:", indexErr);
+          return res.status(500).json({
+            error: "Could not generate the company employee-ID prefix. Please try again.",
+          });
+        }
       }
 
       emp.employeeId = await generateEmployeeIdForCompany(company);

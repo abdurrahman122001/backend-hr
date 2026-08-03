@@ -6,7 +6,9 @@ const mongoose = require("mongoose");
 const verifyEmail = require("./utils/verifyEmail");
 const { removeSignatureParagraphMargins } = require("./utils/removeSignatureParagraphMargins");
 
-const { sendEmail } = require("./services/mailService");
+// Every HR reply goes back out through the HR mailbox so the candidate's next
+// reply lands in the inbox this watcher reads.
+const { sendHrMail } = require("./services/mailService");
 const Employee = require("./models/Employees");
 const {
   generateAndSaveNda,
@@ -14,6 +16,11 @@ const {
   generateAndSaveSalaryCertificate,
 } = require("./services/ndaService");
 const { extractCNICUsingOpenAI, classifyEmailUsingOpenAI } = require("./services/deepseekService");
+const { sendHrPolicyToEmployee } = require("./services/hrPolicyDelivery");
+const {
+  notifySeniorOfOnboarding,
+} = require("./controllers/onboardingTaskController");
+const { getIo } = require("./socket/ioRegistry");
 const Signature = require("./models/Signature");
 const User = require("./models/Users");
 const CompanyProfile = require("./models/CompanyProfile");
@@ -65,6 +72,74 @@ const IGNORED_SENDERS = [
 ];
 
 // Cleanup function
+/**
+ * Strip quoted history from a reply so only what the sender actually typed is
+ * classified. A one-line "I accept the offer" reply carries the whole offer
+ * letter underneath it, and that letter talks about acceptance, deadlines and
+ * documents — feeding it to the classifier buries the actual intent.
+ */
+function stripQuotedReply(text = "") {
+  const lines = String(text).replace(/\r\n/g, "\n").split("\n");
+  const quoteStart = [
+    /^\s*On\s.+\swrote:\s*$/i,           // Gmail / Apple Mail
+    /^\s*On\s.+\s<[^>]+>\s*wrote:\s*$/i,
+    /^\s*-{2,}\s*Original Message\s*-{2,}/i,
+    /^\s*_{5,}\s*$/,                      // Outlook separator
+    /^\s*From:\s.+/i,                     // Outlook quoted header block
+    /^\s*Sent from my /i,
+  ];
+
+  const kept = [];
+  for (const line of lines) {
+    if (quoteStart.some((re) => re.test(line))) break;
+    if (/^\s*>/.test(line)) continue; // quoted line
+    kept.push(line);
+  }
+
+  const cleaned = kept.join("\n").trim();
+  // If stripping ate everything (unusual layouts), fall back to the original.
+  return cleaned || String(text).trim();
+}
+
+// Unambiguous, first-person intent. The offer letter itself says things like
+// "please confirm your acceptance of this offer", so every pattern here
+// requires the SENDER to be the one accepting/declining.
+const ACCEPTANCE_PATTERNS = [
+  /\bi\s+accept\b/i,
+  /\bi\s+(hereby\s+)?accept(ing)?\s+(the|your|this)\s+offer\b/i,
+  /\bi\s+(am|'m)\s+(happy|pleased|glad|delighted|willing)\s+to\s+accept\b/i,
+  /\bi\s+would\s+like\s+to\s+accept\b/i,
+  /\bi\s+(am|'m)\s+accepting\b/i,
+  /\baccepted\b[\s.!]*$/i,
+  /^\s*(i\s+)?accept(ed)?\s+(the\s+)?offer[\s.!]*$/i,
+];
+
+const REJECTION_PATTERNS = [
+  /\bi\s+(must\s+)?(decline|reject)\b/i,
+  /\bi\s+(am|'m)\s+(declining|rejecting)\b/i,
+  /\bi\s+(will\s+not|won'?t|cannot|can'?t)\s+(be\s+)?join(ing)?\b/i,
+  /\bi\s+have\s+decided\s+not\s+to\s+(join|accept)\b/i,
+  /\bturn(ing)?\s+down\s+(the|your|this)\s+offer\b/i,
+];
+
+/**
+ * Decide offer intent from the reply text alone, without the LLM. Returns
+ * "offer_acceptance", "offer_rejection", or null when it is not clear-cut.
+ *
+ * This runs BEFORE classifyEmailUsingOpenAI so a plain "I accept the offer"
+ * still works when the classifier API is unreachable — it fails closed to
+ * "hr_related", which silently stalls onboarding.
+ */
+function detectOfferIntent(replyText = "") {
+  const text = String(replyText).trim();
+  if (!text) return null;
+
+  // Rejection wins: "I accept that I cannot join" must not read as acceptance.
+  if (REJECTION_PATTERNS.some((re) => re.test(text))) return "offer_rejection";
+  if (ACCEPTANCE_PATTERNS.some((re) => re.test(text))) return "offer_acceptance";
+  return null;
+}
+
 function cleanupOldEntries() {
   const now = Date.now();
 
@@ -243,7 +318,7 @@ async function sendSafeEmail({ to, subject, html, ownerId, type = 'general' }) {
     }
 
     console.log(`📧 Sending email to ${to} (${type})`);
-    await sendEmail({ to, subject, html });
+    await sendHrMail({ to, subject, html });
 
     console.log(`✅ Email sent successfully to ${to}`);
     return { success: true };
@@ -526,15 +601,32 @@ async function processMessage(stream, uid) {
       );
     }
 
-    // Classify on subject + body so short replies like "Subject: Accepted" are
-    // detected even when the body is sparse.
-    const classifyText = `Subject: ${subject}\n\n${bodyText}`.trim();
-    console.log(`📝 Body for classification (${bodyText.length} chars): ${bodyText.slice(0, 160).replace(/\s+/g, " ")}`);
+    // Replies quote the whole offer letter underneath them. Classify only what
+    // the candidate actually wrote, otherwise the quoted letter (which itself
+    // talks about "acceptance", deadlines and documents) drowns out the intent.
+    const replyText = stripQuotedReply(bodyText);
 
-    const label = await classifyEmailUsingOpenAI(classifyText);
+    // Classify on subject + reply so short replies like "Subject: Accepted" are
+    // detected even when the body is sparse.
+    const classifyText = `Subject: ${subject}\n\n${replyText}`.trim();
+    console.log(
+      `📝 Reply text for classification (${replyText.length} of ${bodyText.length} chars): ` +
+      `${replyText.slice(0, 160).replace(/\s+/g, " ")}`
+    );
+
+    // A plain "I accept the offer" must not depend on the LLM being reachable —
+    // classifyEmailUsingOpenAI fails closed to "hr_related", which silently
+    // stalls onboarding. Check the unambiguous phrasings ourselves first.
+    const directIntent =
+      detectOfferIntent(replyText) || detectOfferIntent(subject);
+
+    const label = directIntent || (await classifyEmailUsingOpenAI(classifyText));
     const signatureBlock = await getSignatureBlock(ownerId);
 
-    console.log(`🏷️ Email classified as: ${label} → sending "${label}" reply to ${fromAddr}`);
+    console.log(
+      `🏷️ Email classified as: ${label}${directIntent ? " (matched directly)" : " (classifier)"}` +
+      ` → sending "${label}" reply to ${fromAddr}`
+    );
 
     // Handle different email types
     const responseHandlers = {
@@ -552,6 +644,31 @@ async function processMessage(stream, uid) {
         }
 
         const bestName = emp?.name || "Candidate";
+
+        // Onboarding policies: drop the HR policy (inline + PDF) into the new
+        // hire's in-app mailbox with their employee id as receiver. Not sent
+        // over SMTP. Non-blocking — a missing policy must not stall onboarding.
+        sendHrPolicyToEmployee({ employee: emp, ownerId })
+          .then((r) => {
+            if (!r.success && r.reason !== "already_sent") {
+              console.warn(`⚠️ HR policy not delivered to ${fromAddr}: ${r.reason}`);
+            }
+          })
+          .catch((err) =>
+            console.error("HR policy delivery failed:", err.message)
+          );
+
+        // Notify the manager: the senior this hire sits under gets a
+        // Things-to-do item to add them to their clients / projects.
+        notifySeniorOfOnboarding({ employee: emp, ownerId, io: getIo() })
+          .then((task) => {
+            if (!task) {
+              console.log(`ℹ️ ${bestName} has no senior in the hierarchy — no manager notified`);
+            }
+          })
+          .catch((err) =>
+            console.error("Senior onboarding notification failed:", err.message)
+          );
 
         // Send acceptance acknowledgement asking the candidate to reply with their
         // CNIC (front & back) and CV. Their reply with those attachments triggers
@@ -780,7 +897,28 @@ function startWatcher() {
         return;
       }
 
-      console.log(`📪 Connected to INBOX, ${box.messages.total} total messages`);
+      const imapConfig = require("./config/imapConfig");
+      const { getHrFromAddress } = require("./services/mailService");
+      const watchedMailbox = (imapConfig.user || "unknown").toLowerCase();
+      const offerFromAddress = (getHrFromAddress() || "").toLowerCase();
+
+      console.log(
+        `📪 Connected to INBOX of ${watchedMailbox}, ${box.messages.total} total messages`
+      );
+
+      // Offer replies go to whatever address the offer was sent FROM. If the HR
+      // watcher is pointed at a different mailbox it will never see them, and
+      // acceptances silently never progress to Onboarding.
+      if (offerFromAddress && watchedMailbox !== offerFromAddress) {
+        console.warn(
+          `⚠️ HR watcher is watching ${watchedMailbox} but recruiting mail is sent from ` +
+          `${offerFromAddress}. Candidate replies ("I accept the offer") land in ` +
+          `${offerFromAddress} and will NOT be processed. Point HR_IMAP_USER / ` +
+          `HR_IMAP_PASSWORD at ${offerFromAddress}, or change HR_MAIL_FROM_ADDRESS.`
+        );
+      } else {
+        console.log(`✅ Recruiting mail is sent from ${offerFromAddress} — replies land here`);
+      }
 
       // Start tracking from the current newest UID so the existing inbox isn't
       // reprocessed; only mail that arrives from now on (UID greater than this)
