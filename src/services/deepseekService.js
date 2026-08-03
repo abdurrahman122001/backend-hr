@@ -41,10 +41,97 @@ async function createChat(messages, maxTokens) {
   }
 }
 
+const MONTHS = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+
+/**
+ * Normalise a date read off a CNIC into the ISO `YYYY-MM-DD` the rest of the
+ * system stores and the complete-profile form parses.
+ *
+ * Pakistani CNICs print dates as `DD.MM.YYYY` (e.g. "24.01.2030"). That dotted
+ * form was being written to the database verbatim, and complete-profile's
+ * date parser only accepts `/` and `-` separators — so the issue/expiry pickers
+ * came up blank. Handles dots, slashes, dashes, already-ISO values, and the
+ * "24 Jan 2030" style some cards use.
+ *
+ * Day-first is assumed when ambiguous, which is the CNIC convention.
+ *
+ * @returns {string} `YYYY-MM-DD`, or "" when the value can't be understood.
+ */
+function toIsoDate(raw) {
+  const value = String(raw ?? "").trim();
+  if (!value) return "";
+
+  // Already ISO
+  const iso = value.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (iso) return buildIso(+iso[1], +iso[2], +iso[3]);
+
+  // DD.MM.YYYY | DD/MM/YYYY | DD-MM-YYYY  (also YYYY.MM.DD)
+  const parts = value.match(/^(\d{1,4})[.\-/\s](\d{1,2})[.\-/\s](\d{1,4})$/);
+  if (parts) {
+    let a = +parts[1], b = +parts[2], c = +parts[3];
+    if (String(parts[1]).length === 4) return buildIso(a, b, c); // YYYY.MM.DD
+    if (c < 100) c += c < 50 ? 2000 : 1900;                      // 2-digit year
+    // a=day, b=month unless that is impossible (a<=12 && b>12 => month-first)
+    if (a <= 12 && b > 12) return buildIso(c, a, b);
+    return buildIso(c, b, a);
+  }
+
+  // 24 Jan 2030 / 24-January-2030
+  const named = value.match(/^(\d{1,2})[.\-/\s]*([A-Za-z]{3,})[.\-/\s]*(\d{2,4})$/);
+  if (named) {
+    const month = MONTHS[named[2].slice(0, 3).toLowerCase()];
+    if (month) {
+      let year = +named[3];
+      if (year < 100) year += year < 50 ? 2000 : 1900;
+      return buildIso(year, month, +named[1]);
+    }
+  }
+
+  return "";
+}
+
+function buildIso(year, month, day) {
+  if (!year || !month || !day) return "";
+  if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * CNICs print sex as a single letter. Store the full word so the
+ * complete-profile Gender select matches it without the employee re-picking.
+ */
+function toFullGender(raw) {
+  const value = String(raw ?? "").trim().toUpperCase();
+  if (!value) return "";
+  if (value === "M" || value === "MALE") return "Male";
+  if (value === "F" || value === "FEMALE") return "Female";
+  if (value === "X" || value === "O" || value === "OTHER") return "Other";
+  return "";
+}
+
+/**
+ * Convert the raw model output into the shapes the database and the
+ * complete-profile form expect. Unparseable values become "" rather than
+ * garbage, so the employee is asked to fill them in instead of being shown
+ * something wrong.
+ */
+function normalizeCnicInfo(info = {}) {
+  return {
+    ...info,
+    gender: toFullGender(info.gender),
+    dateOfBirth: toIsoDate(info.dateOfBirth),
+    dateOfIssue: toIsoDate(info.dateOfIssue),
+    dateOfExpiry: toIsoDate(info.dateOfExpiry),
+  };
+}
+
 /**
  * Extracts CNIC info directly from image using OpenAI Vision.
  * @param {string|Buffer} fileData - Path to image or Buffer.
- * @returns {Promise<Object>} - Parsed CNIC info as JSON.
+ * @returns {Promise<Object>} - Parsed CNIC info as JSON (dates ISO-normalised).
  */
 async function extractCNICUsingOpenAI(fileData) {
   const imageBuffer = Buffer.isBuffer(fileData) ? fileData : fs.readFileSync(fileData);
@@ -100,7 +187,7 @@ If any field is missing or unclear, leave it as an empty string.
       throw new Error("OpenAI did not return JSON!");
     }
   }
-  return info;
+  return normalizeCnicInfo(info);
 }
 
 // Allowed intent labels — must match the response handlers in watcher.js.
@@ -149,4 +236,11 @@ Output only the label (e.g. "offer_acceptance").`;
   }
 }
 
-module.exports = { extractCNICUsingOpenAI, classifyEmailUsingOpenAI };
+module.exports = {
+  extractCNICUsingOpenAI,
+  classifyEmailUsingOpenAI,
+  // exported for reuse / tests
+  normalizeCnicInfo,
+  toIsoDate,
+  toFullGender,
+};
