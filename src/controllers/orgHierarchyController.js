@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const Hierarchy = require('../models/OrgHierarchy');
 const Employee = require('../models/Employees');
+const Department = require('../models/Departments');
 
 /**
  * Helper: look for any path from `seniorId` down to `juniorId`.
@@ -26,24 +27,65 @@ async function checkForCircularReference(ownerId, seniorId, juniorId) {
   return result.length > 0;
 }
 
+const NO_DEPARTMENT = '__none__';
+
+function normalizeDept(value) {
+  return String(value || '').trim();
+}
+
+function deptKey(value) {
+  const name = normalizeDept(value);
+  return name ? name.toLowerCase() : NO_DEPARTMENT;
+}
+
 /**
  * Sync admin access from the hierarchy.
- * The top senior(s) — i.e. the root manager(s) of each chain — get isAdmin=true.
- * Every other employee for this owner gets isAdmin=false, so the hierarchy fully
- * drives admin-dashboard access (manual grants on non-roots are intentionally
- * cleared). Called from rebuildHierarchy after roots are recomputed.
+ *
+ * A root used to mean "company admin", full stop. That was safe while the whole
+ * company was one tree with one root. Department-wise hierarchies deliberately
+ * produce MANY roots — one head per department — and granting every department
+ * head company-admin would be a serious privilege escalation.
+ *
+ * So a root only earns admin when it genuinely sits above the whole company:
+ *   • it is the only root, or
+ *   • its subtree spans more than one department (a real company-level person).
+ * A root whose subtree is a single department is just a department head.
+ *
+ * Department heads are also never DEMOTED here: we clear isAdmin for ordinary
+ * employees, but leave a head's flag exactly as an administrator set it.
+ *
+ * @param {string[]} rootIds        roots of the whole graph
+ * @param {Map<string,Set<string>>} deptSpanByRoot  root id -> departments in its subtree
  */
-async function syncTopSeniorAdmin(ownerId, rootIds) {
-  const rootObjectIds = rootIds.map((id) => new mongoose.Types.ObjectId(id));
+async function syncTopSeniorAdmin(ownerId, rootIds, deptSpanByRoot = new Map()) {
+  const onlyOneRoot = rootIds.length === 1;
+
+  const companyRootIds = rootIds.filter((id) => {
+    if (onlyOneRoot) return true;
+    const span = deptSpanByRoot.get(String(id));
+    return span ? span.size > 1 : false;
+  });
+
+  // Roots that head exactly one department — neither granted nor revoked.
+  const departmentHeadIds = rootIds.filter(
+    (id) => !companyRootIds.includes(id)
+  );
+
+  const protectedIds = [...companyRootIds, ...departmentHeadIds].map(
+    (id) => new mongoose.Types.ObjectId(id)
+  );
 
   await Employee.updateMany(
-    { owner: ownerId, _id: { $nin: rootObjectIds } },
+    { owner: ownerId, _id: { $nin: protectedIds } },
     { $set: { isAdmin: false } }
   );
 
-  if (rootObjectIds.length) {
+  if (companyRootIds.length) {
     await Employee.updateMany(
-      { owner: ownerId, _id: { $in: rootObjectIds } },
+      {
+        owner: ownerId,
+        _id: { $in: companyRootIds.map((id) => new mongoose.Types.ObjectId(id)) }
+      },
       { $set: { isAdmin: true } }
     );
   }
@@ -61,9 +103,29 @@ async function syncTopSeniorAdmin(ownerId, rootIds) {
  * rootManager: top-most manager id for that chain
  */
 async function rebuildHierarchy(ownerId) {
-  const links = await Hierarchy.find({ owner: ownerId })
+  let links = await Hierarchy.find({ owner: ownerId })
     .select('senior junior')
     .lean();
+
+  // Drop links whose senior or junior no longer exists. Deleting an employee
+  // leaves the link behind, and a dangling edge shows up as a phantom "unknown"
+  // row in the tree (and in anything derived from it, like onboarding tasks).
+  const referencedIds = [...new Set(links.flatMap(l => [String(l.senior), String(l.junior)]))];
+  const existing = referencedIds.length
+    ? await Employee.find({ _id: { $in: referencedIds } }).select('_id department').lean()
+    : [];
+  const existingIds = new Set(existing.map(e => String(e._id)));
+
+  const dangling = links.filter(
+    l => !existingIds.has(String(l.senior)) || !existingIds.has(String(l.junior))
+  );
+  if (dangling.length) {
+    await Hierarchy.deleteMany({ _id: { $in: dangling.map(l => l._id) } });
+    console.log(`🧹 Pruned ${dangling.length} hierarchy link(s) referencing deleted employees`);
+    links = links.filter(
+      l => existingIds.has(String(l.senior)) && existingIds.has(String(l.junior))
+    );
+  }
 
   // Build maps: senior -> [juniors], junior -> senior
   const childrenMap = new Map(); // key: seniorId, value: juniors[]
@@ -81,14 +143,41 @@ async function rebuildHierarchy(ownerId) {
     parentMap.set(j, s);
   }
 
+  // Department of every employee touched by the graph — needed to stamp each
+  // link with the team it belongs to and to tell a normal in-team report from a
+  // deliberate cross-department line.
+  const departmentOf = new Map(
+    existing.map(e => [String(e._id), normalizeDept(e.department)])
+  );
+
   // Roots = seniors that never appear as juniors
   const allSeniors = new Set(links.map(l => String(l.senior)));
   const allJuniors = new Set(links.map(l => String(l.junior)));
 
   const roots = [...allSeniors].filter(sid => !allJuniors.has(sid));
 
+  // Which departments live under each root? Drives the admin rule below: a root
+  // covering one department is a department head, not a company admin.
+  const deptSpanByRoot = new Map();
+  const spanSeen = new Set();
+
+  function collectSpan(nodeId, rootId) {
+    const guard = `${rootId}|${nodeId}`;
+    if (spanSeen.has(guard)) return;
+    spanSeen.add(guard);
+
+    const span = deptSpanByRoot.get(rootId) || new Set();
+    span.add(deptKey(departmentOf.get(nodeId)));
+    deptSpanByRoot.set(rootId, span);
+
+    for (const child of childrenMap.get(nodeId) || []) {
+      collectSpan(child, rootId);
+    }
+  }
+  for (const root of roots) collectSpan(root, root);
+
   // Top senior(s) become admins; everyone else loses admin access.
-  await syncTopSeniorAdmin(ownerId, roots);
+  await syncTopSeniorAdmin(ownerId, roots, deptSpanByRoot);
 
   // If there are no roots (shouldn't happen unless cycle or empty), stop
   if (!roots.length) return;
@@ -107,13 +196,23 @@ async function rebuildHierarchy(ownerId) {
       const nextLevel = level; // edge level represents distance from root senior to this edge's senior
       const edgePath = pathArr.join('.'); // path is the chain of seniors up to current senior
 
+      // The link belongs to the JUNIOR's department — it is that person's slot
+      // in their own team. When the senior sits elsewhere the line crosses
+      // departments, which is what joins two department trees together.
+      const juniorDept = departmentOf.get(juniorId) || '';
+      const seniorDept = departmentOf.get(seniorId) || '';
+      const scope =
+        deptKey(juniorDept) === deptKey(seniorDept) ? 'department' : 'company';
+
       await Hierarchy.updateOne(
         { owner: ownerId, senior: seniorId, junior: juniorId },
         {
           $set: {
             hierarchyLevel: nextLevel,
             path: edgePath,
-            rootManager: rootId
+            rootManager: rootId,
+            department: juniorDept,
+            scope
           }
         }
       );
@@ -241,7 +340,12 @@ exports.bulkCreate = async (req, res) => {
     }
 
     const invalid = [];
-    const toInsert = [];
+
+    // Cross-department lines are legitimate (a department head reporting to the
+    // CEO) but must be deliberate — dragging someone onto the wrong team by
+    // accident silently moves them out of their department's chain. The client
+    // sends allowCrossDepartment once the user has confirmed.
+    const allowCrossDepartment = req.body.allowCrossDepartment === true;
 
     // Validate + prepare docs (NO meta calc here; we rebuild after insert)
     let upsertCount = 0;
@@ -254,8 +358,8 @@ exports.bulkCreate = async (req, res) => {
 
       // employees exist?
       const [senior, junior] = await Promise.all([
-        Employee.findById(seniorId).select('_id status').lean(),
-        Employee.findById(juniorId).select('_id status').lean()
+        Employee.findById(seniorId).select('_id status name department').lean(),
+        Employee.findById(juniorId).select('_id status name department').lean()
       ]);
       if (!senior || !junior) {
         invalid.push({ seniorId, juniorId, reason: 'Employee not found' });
@@ -264,6 +368,22 @@ exports.bulkCreate = async (req, res) => {
 
       if (['offboarded', 'terminated'].includes(senior.status) || ['offboarded', 'terminated'].includes(junior.status)) {
         invalid.push({ seniorId, juniorId, reason: 'Employee is offboarded/terminated' });
+        continue;
+      }
+
+      const crossDepartment =
+        deptKey(senior.department) !== deptKey(junior.department);
+
+      if (crossDepartment && !allowCrossDepartment) {
+        invalid.push({
+          seniorId,
+          juniorId,
+          reason: 'CROSS_DEPARTMENT',
+          seniorName: senior.name,
+          juniorName: junior.name,
+          seniorDepartment: normalizeDept(senior.department) || 'Unassigned',
+          juniorDepartment: normalizeDept(junior.department) || 'Unassigned'
+        });
         continue;
       }
 
@@ -286,6 +406,22 @@ exports.bulkCreate = async (req, res) => {
         { upsert: true, new: true }
       );
       upsertCount++;
+    }
+
+    // Nothing applied and every rejection was a cross-department line — tell the
+    // client precisely that, so it can ask for confirmation instead of showing
+    // a generic failure.
+    if (
+      upsertCount === 0 &&
+      invalid.length > 0 &&
+      invalid.every((i) => i.reason === 'CROSS_DEPARTMENT')
+    ) {
+      return res.status(409).json({
+        status: 'error',
+        code: 'CROSS_DEPARTMENT',
+        message: 'This reporting line crosses departments',
+        invalid
+      });
     }
 
     if (upsertCount === 0 && invalid.length > 0) {
@@ -322,14 +458,16 @@ exports.bulkCreate = async (req, res) => {
  *
  * Your router should call THIS one (tree), since your UI expects nodes with children[].
  */
+const EMP_NODE_FIELDS = 'name status department subDepartment designation photographUrl employeeId';
+
 exports.getHierarchy = async function (req, res) {
   try {
     const ownerId = req.user._id;
 
     // Load all links with populated names and status
     const links = await Hierarchy.find({ owner: ownerId })
-      .populate('senior', 'name status')
-      .populate('junior', 'name status')
+      .populate('senior', EMP_NODE_FIELDS)
+      .populate('junior', EMP_NODE_FIELDS)
       .lean();
 
     // Filter out links where either senior or junior is offboarded or terminated
@@ -339,27 +477,189 @@ exports.getHierarchy = async function (req, res) {
       return seniorActive && juniorActive;
     });
 
+    const toNode = (emp) => ({
+      id: String(emp._id),
+      name: emp.name,
+      department: normalizeDept(emp.department),
+      subDepartment: emp.subDepartment || '',
+      designation: emp.designation || '',
+      photographUrl: emp.photographUrl || '',
+      employeeId: emp.employeeId || '',
+      // true when this person's own senior sits in another department
+      crossDepartment: false,
+      children: []
+    });
+
     // Build nodes map
     const map = {};
     filteredLinks.forEach(l => {
-      const sid = l.senior._id.toString();
-      const jid = l.junior._id.toString();
+      const sid = String(l.senior._id);
+      const jid = String(l.junior._id);
 
-      if (!map[sid]) {
-        map[sid] = { id: sid, name: l.senior.name, children: [] };
-      }
-      if (!map[jid]) {
-        map[jid] = { id: jid, name: l.junior.name, children: [] };
+      if (!map[sid]) map[sid] = toNode(l.senior);
+      if (!map[jid]) map[jid] = toNode(l.junior);
+
+      if (deptKey(map[sid].department) !== deptKey(map[jid].department)) {
+        map[jid].crossDepartment = true;
       }
 
       map[sid].children.push(map[jid]);
     });
 
     // Find roots (those never appearing as a junior in the filtered links)
-    const juniorIds = new Set(filteredLinks.map(l => l.junior._id.toString()));
+    const juniorIds = new Set(filteredLinks.map(l => String(l.junior._id)));
     const tree = Object.values(map).filter(node => !juniorIds.has(node.id));
 
-    res.json({ status: 'success', data: tree });
+    /* ── Department view ────────────────────────────────────────────────────
+     * The same people, regrouped so each department owns its own tree. A
+     * department's roots are its members whose senior is NOT in the department
+     * (or who have no senior at all) — i.e. the department heads. Everyone
+     * below them is reached through their existing children, minus anyone who
+     * belongs to a different department (those start their own tree there).
+     * ------------------------------------------------------------------- */
+    const allEmployees = await Employee.find({
+      owner: ownerId,
+      status: { $nin: ['offboarded', 'terminated'] }
+    })
+      .select(EMP_NODE_FIELDS)
+      .lean();
+
+    const seniorOf = new Map(
+      filteredLinks.map(l => [String(l.junior._id), String(l.senior._id)])
+    );
+    const placedIds = new Set([
+      ...filteredLinks.map(l => String(l.junior._id)),
+      ...filteredLinks.map(l => String(l.senior._id))
+    ]);
+
+    // Department records carry the tier: `order` is the department's rank in the
+    // org (0 = top tier). Seeded first so a department with no employees yet
+    // still appears and can be positioned.
+    const departmentDocs = await Department.find({ owner: ownerId })
+      .select('name order')
+      .sort({ order: 1 })
+      .lean();
+
+    const departmentMeta = new Map(
+      departmentDocs.map(d => [deptKey(d.name), { id: String(d._id), order: d.order ?? 0, name: d.name }])
+    );
+
+    const buckets = new Map(); // deptKey -> { department, members[], roots[], unplaced[] }
+    const bucketFor = (deptName) => {
+      const key = deptKey(deptName);
+      if (!buckets.has(key)) {
+        const meta = departmentMeta.get(key);
+        buckets.set(key, {
+          key,
+          departmentId: meta?.id || null,
+          department: meta?.name || normalizeDept(deptName) || 'Unassigned',
+          hasDepartment: !!normalizeDept(deptName),
+          tier: meta ? meta.order : Number.MAX_SAFE_INTEGER,
+          members: [],
+          unplaced: [],
+          rootIds: []
+        });
+      }
+      return buckets.get(key);
+    };
+
+    // Seed every configured department so empty ones are still orderable.
+    for (const doc of departmentDocs) bucketFor(doc.name);
+
+    for (const emp of allEmployees) {
+      const bucket = bucketFor(emp.department);
+      bucket.members.push(String(emp._id));
+      if (!placedIds.has(String(emp._id))) {
+        bucket.unplaced.push({
+          id: String(emp._id),
+          name: emp.name,
+          designation: emp.designation || '',
+          department: normalizeDept(emp.department),
+          photographUrl: emp.photographUrl || ''
+        });
+      }
+    }
+
+    // Department roots: placed members whose senior is outside the department.
+    for (const node of Object.values(map)) {
+      const seniorId = seniorOf.get(node.id);
+      const seniorNode = seniorId ? map[seniorId] : null;
+      const isDeptRoot =
+        !seniorNode || deptKey(seniorNode.department) !== deptKey(node.department);
+      if (isDeptRoot) bucketFor(node.department).rootIds.push(node.id);
+    }
+
+    // Clone a subtree, stopping wherever the chain leaves the department.
+    const subtreeForDepartment = (node, dKey, seen = new Set()) => {
+      if (seen.has(node.id)) return null;
+      seen.add(node.id);
+      return {
+        ...node,
+        children: node.children
+          .filter(child => deptKey(child.department) === dKey)
+          .map(child => subtreeForDepartment(child, dKey, seen))
+          .filter(Boolean)
+      };
+    };
+
+    const byDepartment = [...buckets.values()]
+      .map(bucket => {
+        const roots = bucket.rootIds
+          .map(id => subtreeForDepartment(map[id], bucket.key))
+          .filter(Boolean);
+
+        const head = roots.length
+          ? {
+              id: roots[0].id,
+              name: roots[0].name,
+              designation: roots[0].designation
+            }
+          : null;
+
+        const countNodes = (nodes) =>
+          nodes.reduce((sum, n) => sum + 1 + countNodes(n.children), 0);
+        const depthOf = (nodes) =>
+          nodes.reduce((max, n) => Math.max(max, 1 + depthOf(n.children)), 0);
+
+        return {
+          key: bucket.key,
+          departmentId: bucket.departmentId,
+          department: bucket.department,
+          hasDepartment: bucket.hasDepartment,
+          tier: bucket.tier,
+          head,
+          roots,
+          unplaced: bucket.unplaced,
+          totalMembers: bucket.members.length,
+          placedMembers: countNodes(roots),
+          unplacedMembers: bucket.unplaced.length,
+          depth: depthOf(roots),
+          // members of this department whose senior is in another department
+          crossDepartmentRoots: roots.filter(r => r.crossDepartment).length
+        };
+      })
+      .sort((a, b) => {
+        // Tier order first (that is the whole point of Department.order),
+        // "Unassigned" and unconfigured departments last, then by name.
+        if (a.hasDepartment !== b.hasDepartment) return a.hasDepartment ? -1 : 1;
+        if (a.tier !== b.tier) return a.tier - b.tier;
+        return a.department.localeCompare(b.department);
+      });
+
+    res.json({
+      status: 'success',
+      data: tree,
+      byDepartment,
+      stats: {
+        departments: byDepartment.filter(d => d.hasDepartment).length,
+        totalEmployees: allEmployees.length,
+        placed: placedIds.size,
+        unplaced: allEmployees.length - placedIds.size,
+        crossDepartmentLinks: filteredLinks.filter(
+          l => deptKey(l.senior.department) !== deptKey(l.junior.department)
+        ).length
+      }
+    });
   } catch (err) {
     console.error('Error fetching hierarchy tree:', err);
     res.status(500).json({ status: 'error', message: 'Failed to fetch hierarchy' });

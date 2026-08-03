@@ -845,28 +845,32 @@ exports.updateBug = async (req, res) => {
     }
 
     // Check permissions
-    const emp = await Employee.findById(employeeId).select("department role isAdmin");
+    const emp = await Employee.findById(employeeId).select(
+      "department role isAdmin owner",
+    );
     const isReporter = bug.reportedBy.toString() === employeeId.toString();
     const isRAndD =
-      emp.department === "Research and Development" ||
-      emp.department === "Research & Development" ||
-      emp.role === "admin";
+      emp?.department === "Research and Development" ||
+      emp?.department === "Research & Development" ||
+      emp?.role === "admin";
+    const { hasAccess: canManageAllFeedback } = await getFeedbackAccess(
+      emp || req.employee,
+    );
+    const reporter = await Employee.findById(bug.reportedBy).select("owner");
+    const isOwnerOfReporter =
+      reporter?.owner?.toString() === employeeId.toString();
 
-    if (!isReporter && !isRAndD) {
-      // Check if user is owner of reporter
-      const reporter = await Employee.findById(bug.reportedBy).select("owner");
-      if (!reporter || reporter.owner.toString() !== employeeId.toString()) {
-        // cleanup new uploads
-        if (req.files && req.files.length > 0) {
-          req.files.forEach((file) => {
-            if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
-          });
-        }
-        return res.status(403).json({
-          status: "error",
-          message: "Not authorized to update this bug",
+    if (!isReporter && !isRAndD && !isOwnerOfReporter && !canManageAllFeedback) {
+      // cleanup new uploads
+      if (req.files && req.files.length > 0) {
+        req.files.forEach((file) => {
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
         });
       }
+      return res.status(403).json({
+        status: "error",
+        message: "Not authorized to update this bug",
+      });
     }
 
     // Update fields if provided
@@ -880,6 +884,25 @@ exports.updateBug = async (req, res) => {
 
     if (priority && ["low", "medium", "high"].includes(priority)) {
       bug.priority = priority;
+    }
+
+    // Marked-up screenshots arrive as a new upload plus the id of the image
+    // they replace. Multer keeps bracketed field names literally, while some
+    // clients normalize them, so accept both forms.
+    const rawDeleteIds =
+      req.body.deleteImages ?? req.body["deleteImages[]"] ?? [];
+    const requestedDeleteIds = new Set(
+      (Array.isArray(rawDeleteIds) ? rawDeleteIds : [rawDeleteIds])
+        .filter(Boolean)
+        .map(String),
+    );
+    const removedImages = [];
+    if (requestedDeleteIds.size > 0) {
+      bug.images = bug.images.filter((image) => {
+        const shouldRemove = requestedDeleteIds.has(image._id.toString());
+        if (shouldRemove) removedImages.push(image.toObject?.() || image);
+        return !shouldRemove;
+      });
     }
 
     // Append new images (do not delete existing)
@@ -896,6 +919,25 @@ exports.updateBug = async (req, res) => {
     }
 
     await bug.save();
+
+    // Delete old files only after MongoDB accepted the replacement, so a
+    // failed save never destroys the user's original screenshot.
+    removedImages.forEach((image) => {
+      const storedName = path.basename(image.filename || image.path || "");
+      if (!storedName) return;
+      const candidates = new Set([
+        path.join(process.cwd(), "uploads", storedName),
+        path.join(__dirname, "../uploads", storedName),
+      ]);
+      candidates.forEach((imagePath) => {
+        try {
+          if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+        } catch (fileError) {
+          console.warn("Could not remove replaced feedback image:", fileError.message);
+        }
+      });
+    });
+
     await bug.populate({
       path: "reportedBy",
       select: "name companyEmail department balance photographUrl owner",
