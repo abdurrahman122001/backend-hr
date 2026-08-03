@@ -162,6 +162,10 @@ const EmployeeSchema = new Schema(
     ndaGenerated: { type: Boolean, default: false },
     ndaPath: { type: String },
     contractPath: { type: String },
+    // Onboarding policies: set when the HR policy was emailed to this employee
+    // (automatically on offer acceptance, or manually re-sent by HR). Also used
+    // to keep the automatic send idempotent.
+    hrPolicySentAt: { type: Date, default: null },
     // NOTE: trusted devices were moved to their own `TrustedDevice` collection
     // (models/TrustedDevice.js). Do not re-add them here.
     permissions: PermissionSchema,
@@ -171,10 +175,20 @@ const EmployeeSchema = new Schema(
     mentionsSeenAt: { type: Date, default: null },
     status: {
       type: String,
+      // Onboarding lifecycle, in order:
+      //   Offered              → offer letter sent (offerLetterController)
+      //   Onboarding           → candidate accepted (watcher: offer_acceptance)
+      //   Document Submitted   → CNIC/CV received (watcher: document path)
+      //   review               → password set after completing the profile
+      //   active               → approved by HR
+      // "Document Submitted" was written by the watcher via findOneAndUpdate,
+      // which skips validators, so it persisted while missing here — every
+      // later emp.save() on that document then failed validation.
       enum: [
         "active",
         "Offered",
         "Onboarding",
+        "Document Submitted",
         "review",
         "resigned",
         "offboarded",

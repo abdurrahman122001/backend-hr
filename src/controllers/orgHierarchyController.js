@@ -366,6 +366,138 @@ exports.getHierarchy = async function (req, res) {
   }
 };
 
+/**
+ * GET /org-hierarchy/seniors?department=<name>
+ *
+ * Returns the employees that are ALREADY seniors in the org hierarchy, i.e. the
+ * ones that have at least one junior under them. Used by the auto-onboarding
+ * (offer letter) form: after a department is picked we only offer the seniors of
+ * that department as the new hire's reporting manager.
+ *
+ * `department` is matched against Employee.department (a plain name string, that
+ * is how the offer-letter flow stores it), case-insensitively. Omit it to get
+ * every senior of the company.
+ */
+exports.getSeniors = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const department = (req.query.department || '').trim();
+
+    // Distinct senior ids + how many juniors each one has.
+    const grouped = await Hierarchy.aggregate([
+      { $match: { owner: new mongoose.Types.ObjectId(ownerId) } },
+      {
+        $group: {
+          _id: '$senior',
+          juniorCount: { $sum: 1 },
+          hierarchyLevel: { $min: '$hierarchyLevel' }
+        }
+      }
+    ]);
+
+    if (!grouped.length) {
+      return res.json({ status: 'success', data: [] });
+    }
+
+    const countById = new Map(
+      grouped.map((g) => [String(g._id), g])
+    );
+
+    const query = {
+      _id: { $in: grouped.map((g) => g._id) },
+      owner: ownerId,
+      status: { $nin: ['offboarded', 'terminated'] }
+    };
+
+    if (department) {
+      // Escape regex metacharacters — department names are free text.
+      const escaped = department.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.department = new RegExp(`^${escaped}$`, 'i');
+    }
+
+    const seniors = await Employee.find(query)
+      .select('name department subDepartment designation photographUrl status')
+      .lean();
+
+    const data = seniors
+      .map((e) => {
+        const meta = countById.get(String(e._id)) || {};
+        return {
+          _id: e._id,
+          name: e.name,
+          department: e.department,
+          subDepartment: e.subDepartment,
+          designation: e.designation,
+          photographUrl: e.photographUrl,
+          juniorCount: meta.juniorCount || 0,
+          hierarchyLevel: meta.hierarchyLevel || 1
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.hierarchyLevel - b.hierarchyLevel ||
+          String(a.name).localeCompare(String(b.name))
+      );
+
+    res.json({ status: 'success', data });
+  } catch (err) {
+    console.error('Fetch hierarchy seniors error:', err);
+    res.status(500).json({
+      status: 'error',
+      message: 'Failed to fetch seniors'
+    });
+  }
+};
+
+/**
+ * Programmatic helper (no req/res) so other flows — auto onboarding, in
+ * particular — can place a freshly created employee under a senior using the
+ * exact same validation + metadata rebuild as the hierarchy UI.
+ *
+ * Returns the created link, or throws with a readable message.
+ */
+exports.linkJuniorToSenior = async function linkJuniorToSenior(
+  ownerId,
+  seniorId,
+  juniorId,
+  relation = 'Manager'
+) {
+  if (!seniorId || !juniorId) throw new Error('seniorId and juniorId are required');
+  if (String(seniorId) === String(juniorId)) {
+    throw new Error('Self-referencing hierarchy is not allowed');
+  }
+
+  const senior = await Employee.findOne({ _id: seniorId, owner: ownerId })
+    .select('_id status')
+    .lean();
+
+  if (!senior) throw new Error('Senior not found for this company');
+  if (['offboarded', 'terminated'].includes(senior.status)) {
+    throw new Error('Cannot report to an offboarded or terminated employee');
+  }
+
+  if (await checkForCircularReference(ownerId, seniorId, juniorId)) {
+    throw new Error('Circular hierarchy detected');
+  }
+
+  // A junior can only have ONE senior — mirrors bulkCreate's upsert.
+  const link = await Hierarchy.findOneAndUpdate(
+    { owner: ownerId, junior: juniorId },
+    {
+      senior: seniorId,
+      relation: relation || 'Manager',
+      hierarchyLevel: 1,
+      path: String(seniorId),
+      rootManager: seniorId
+    },
+    { upsert: true, new: true }
+  );
+
+  await rebuildHierarchy(ownerId);
+
+  return link;
+};
+
 exports.getDirectReports = async (req, res) => {
   try {
     const { employeeId } = req.params;

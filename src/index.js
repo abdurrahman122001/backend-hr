@@ -326,6 +326,8 @@ app.use("/api/commission-requests", commissionRoutes);
 app.use("/api/unified-requests", unifiedRequestsRoutes);
 const openRequestsRoutes = require("./routes/openRequestsRoutes");
 app.use("/api/open-requests", openRequestsRoutes);
+const onboardingTaskRoutes = require("./routes/onboardingTasks");
+app.use("/api/onboarding-tasks", onboardingTaskRoutes);
 app.use("/api/tax-adjustment-requests", taxAdjustmentRequestRoutes);
 const bonusRoutes = require("./routes/bonusRoutes");
 app.use("/api/bonus-requests", bonusRoutes);
@@ -556,6 +558,8 @@ const io = new Server(primaryServer, {
 
 // ---------- Socket Events ----------
 app.set("io", io);
+// Also register it for background workers that have no `req` (IMAP watcher…)
+require("./socket/ioRegistry").setIo(io);
 
 const uniqueSocketOwnerIds = (values) =>
   [...new Set(values.filter(Boolean).map((value) => String(value)))];

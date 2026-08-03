@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const CompanyProfile = require("../models/CompanyProfile");
 const Salaries = require("../models/Salaries");
 const Employee = require("../models/Employees");
-const nodemailer = require("nodemailer");
+const { sendHrMail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
 const OfferEmailTemplate = require("../models/OfferEmailTemplate");
@@ -10,17 +10,17 @@ const probationPeriods = require("../models/ProbationPeriod");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
 const verifyEmail = require("../utils/verifyEmail");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
+const { linkJuniorToSenior } = require("./orgHierarchyController");
+const {
+  createOnboardingAssignmentTask,
+} = require("./onboardingTaskController");
 
 require("dotenv").config();
 
-/* ----------------------------- Mail Transport ----------------------------- */
-const transporter = nodemailer.createTransport({
-  host: process.env.MAIL_HOST,
-  port: Number(process.env.MAIL_PORT),
-  secure: Number(process.env.MAIL_PORT) === 465,
-  auth: { user: process.env.MAIL_USERNAME, pass: process.env.MAIL_PASSWORD },
-  tls: { rejectUnauthorized: false },
-});
+/* ----------------------------- Mail Transport -----------------------------
+ * Offer letters go out through the shared HR transport in mailService
+ * (sendHrMail) so they are sent from — and replied to at — the mailbox the HR
+ * watcher reads. */
 
 /* ----------------------------- Env Fallbacks ------------------------------ */
 const FALLBACKS = {
@@ -382,6 +382,8 @@ async function sendOfferLetter(req, res) {
       subDepartment,
       shift,
       probationDays,
+      seniorId,
+      seniorRelation,
       subject: subjectOverride,
       letter: letterOverride,
     } = req.body;
@@ -530,6 +532,41 @@ async function sendOfferLetter(req, res) {
     });
 
     /* ---------------------------------------------------------
+     * ➕ PLACE THE NEW HIRE UNDER THE SELECTED SENIOR
+     * The form only offers seniors that already have juniors in the org
+     * hierarchy, so this just adds the new employee as one more junior.
+     * A hierarchy failure must not lose the offer — surface it as a warning.
+     * --------------------------------------------------------- */
+    let hierarchyWarning = null;
+    if (seniorId) {
+      try {
+        await linkJuniorToSenior(
+          ownerId,
+          seniorId,
+          employee._id,
+          seniorRelation || "Manager"
+        );
+
+        // Notify the manager: raise a Things-to-do item on the senior's
+        // dashboard to add the new hire to their clients / projects.
+        try {
+          await createOnboardingAssignmentTask({
+            ownerId,
+            seniorId,
+            employee,
+            io: req.app.get("io"),
+          });
+        } catch (taskErr) {
+          // The hierarchy link is what matters; the reminder is best-effort.
+          console.error("Onboarding task creation failed:", taskErr.message);
+        }
+      } catch (linkErr) {
+        console.error("Offer letter hierarchy link error:", linkErr);
+        hierarchyWarning = linkErr.message || "Failed to add employee to hierarchy";
+      }
+    }
+
+    /* ---------------------------------------------------------
      * ⭐ FIX: Auto-generate month & year required in Salaries
      * --------------------------------------------------------- */
     const jsDate = new Date(startDate);
@@ -569,15 +606,17 @@ async function sendOfferLetter(req, res) {
      * --------------------------------------------------------- */
     const text = finalHtml.replace(/<[^>]+>/g, " ");
 
-    await transporter.sendMail({
-      from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
+    // Sent from the HR mailbox (HR_MAIL_*) — the candidate's "I accept the
+    // offer" reply has to land in the mailbox the HR watcher reads, otherwise
+    // the onboarding flow never advances.
+    await sendHrMail({
       to: candidateEmail,
       subject: finalSubject,
       text,
       html: finalHtml,
     });
 
-    return res.json({ success: true });
+    return res.json({ success: true, ...(hierarchyWarning ? { hierarchyWarning } : {}) });
   } catch (err) {
     console.error("Email send error:", err);
     return res.status(500).json({ error: "Failed to send offer letter." });
