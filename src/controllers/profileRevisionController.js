@@ -363,13 +363,9 @@ async function approveRevision(req, res) {
 async function rejectRevision(req, res) {
   try {
     const { revisionId } = req.params;
-    const { reason: rejectionReason } = req.body;
+    const rejectionReason = typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
     const adminId = req.user.employeeId || req.user._id;
     const ownerId = req.user.owner;
-
-    if (!rejectionReason || rejectionReason.trim().length === 0) {
-      return res.status(400).json({ error: 'Rejection reason is required' });
-    }
 
     const revision = await ProfileRevision.findOne({
       _id: revisionId,
@@ -385,7 +381,7 @@ async function rejectRevision(req, res) {
     revision.approvedBy = adminId;
     revision.reviewedBy = req.employee?._id || req.user?.employeeId || req.user?.employeeInfo?.employeeId || adminId;
     revision.approvalDate = new Date();
-    revision.adminResponse = rejectionReason.trim();
+    revision.adminResponse = rejectionReason || undefined;
     await revision.save();
 
     console.log(`❌ [PROFILE-REVISION] Rejected revision ${revisionId} by admin ${adminId}`);

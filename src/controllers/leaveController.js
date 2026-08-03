@@ -1544,13 +1544,8 @@ exports.approveLeave = async (req, res) => {
 exports.rejectLeave = async (req, res) => {
   try {
     const { reason, basedOnPolicy = false } = req.body;
+    const rejectionReason = typeof reason === "string" ? reason.trim() : "";
     const user = req.user;
-
-    if (!reason || reason.trim().length < 5) {
-      return res.status(400).json({
-        message: "Rejection reason is required (minimum 5 characters)",
-      });
-    }
 
     if (!req.user) {
       return res.status(401).json({
@@ -1603,10 +1598,10 @@ exports.rejectLeave = async (req, res) => {
     leave.status = "rejected";
     leave.rejectedBy = rejectorId;
     leave.rejectedDate = new Date();
-    leave.rejectionReason = reason;
+    leave.rejectionReason = rejectionReason || undefined;
 
     // Add policy-based rejection note if applicable
-    let rejectionNotes = `Rejected: ${reason}`;
+    let rejectionNotes = rejectionReason ? `Rejected: ${rejectionReason}` : "Rejected";
     if (basedOnPolicy && leave.policyAnalysis) {
       rejectionNotes += " (Based on HR policy violations)";
     }
@@ -1643,7 +1638,9 @@ exports.rejectLeave = async (req, res) => {
         io.to(`employee_${processedLeave.employee._id}`).emit("leave_changed", {
           action: "rejected",
           leave: processedLeave,
-          message: `Your leave request has been rejected: ${reason}`,
+          message: rejectionReason
+            ? `Your leave request has been rejected: ${rejectionReason}`
+            : "Your leave request has been rejected",
         });
 
         // Notify previous approvers in the chain so they can see the final status
