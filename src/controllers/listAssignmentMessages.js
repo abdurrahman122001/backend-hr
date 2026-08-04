@@ -271,6 +271,7 @@ async function applyVisibility(q, req, filterParam) {
 
   const currentUserRole = normalizeRole(req.employee?.role || "");
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
+  const isCrmUser = await hasCrmAccess(req.employee);
 
   // 🛡️ CORE PRIVACY RULE: Pending messages are ONLY visible to participants (Sender & Receiver)
   const isParticipant = {
@@ -306,9 +307,13 @@ async function applyVisibility(q, req, filterParam) {
   // the assigned employee hasn't responded to is invisible to their seniors.
   if (filterParam === "review") {
     const isOwner = currentUserRole === "owner";
+    const isCrmActivityScope =
+      String(req.query.scope || "") === "crm" && isCrmUser;
     const externalOnly = { client: { $exists: true, $ne: null } };
-    // Owners see everything in their org; everyone else is limited to their hierarchy juniors
-    if (isOwner) {
+    // CRM-scoped requests are organization-wide for CRM-access holders. The
+    // same employee remains hierarchy-limited in Employee Dashboard/Connect,
+    // where scope=crm is intentionally absent.
+    if (isOwner || isCrmActivityScope) {
       return { $and: [q, { owner: ownerId }, externalOnly] };
     }
     if (juniorIds.length === 0) return { _id: null };
@@ -335,7 +340,6 @@ async function applyVisibility(q, req, filterParam) {
   }
 
   // 🔑 ACCESS-BASED: CRM-access holders (and rootManager) get org-wide email view.
-  const isCrmUser = await hasCrmAccess(req.employee);
   const roleHierarchyFilters = [];
   if (isCrmUser || currentUserRole === "owner") {
     roleHierarchyFilters.push({ owner: ownerId });
@@ -909,9 +913,27 @@ exports.listMessages = async function listMessages(req, res) {
       let reviewJuniorIdStrings = [];
       if (filter === "review") {
         const ownerForJuniors = q.owner || req.employee?.owner;
-        reviewJuniorIdStrings = (
-          await getCachedJuniors(ownerForJuniors, me)
-        ).map(String);
+        const isCrmOrgActivity =
+          String(req.query.scope || "") === "crm" &&
+          (normalizeRole(req.employee?.role || "") === "owner" ||
+            (await hasCrmAccess(req.employee)));
+
+        if (isCrmOrgActivity) {
+          // CRM watches the whole organization, not only its own hierarchy
+          // subtree. Use every employee id when deciding whether a thread is
+          // still pending below, preserving the existing rule that unapproved
+          // work stays in For Approval instead of leaking into All Activity.
+          reviewJuniorIdStrings = (
+            await Employee.find({
+              owner: ownerForJuniors,
+              _id: { $ne: me },
+            }).distinct("_id")
+          ).map(String);
+        } else {
+          reviewJuniorIdStrings = (
+            await getCachedJuniors(ownerForJuniors, me)
+          ).map(String);
+        }
       }
 
       const pipeline = [

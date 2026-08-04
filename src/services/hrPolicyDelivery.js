@@ -250,7 +250,10 @@ async function sendHrPolicyToEmployee({ employee, ownerId, force = false }) {
       receiver: [emp._id],
       subject: `${title} – ${companyName}`,
       note: html,
-      approvalStatus: "approved",
+      // Internal mail is outside the client approval flow, so it stores null —
+      // the same as any employee-to-employee compose. "approved" would render a
+      // green "✓ Approved" badge for an approval that never happened.
+      approvalStatus: null,
       status: "sent",
       sentAt: new Date(),
       source: "system",
