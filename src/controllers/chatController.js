@@ -5493,14 +5493,40 @@ exports.updateMessage = async (req, res) => {
         rooms.push(`conversation_${convId}`);
       }
 
-      rooms.forEach(room => {
-        io.to(room).emit("message_updated", {
-          messageId: message._id.toString(),
-          message: message,
-          updatedBy: userId.toString(),
-          updatedAt: new Date(),
+      const payload = {
+        messageId: message._id.toString(),
+        message: message,
+        updatedBy: userId.toString(),
+        updatedAt: new Date(),
+      };
+
+      rooms.forEach((room) => io.to(room).emit("message_updated", payload));
+
+      // Chat-room delivery only reaches clients that joined that room — i.e.
+      // someone with the thread open. The conversation list has to show the
+      // edit too, so mirror the event into every participant's personal room,
+      // the same way new messages are delivered.
+      try {
+        let recipientIds = [];
+        if (message.space) {
+          const spaceId = message.space._id || message.space;
+          const spaceDoc = await Space.findById(spaceId).select("members").lean();
+          recipientIds = spaceDoc?.members || [];
+        } else if (message.conversation) {
+          const convId = message.conversation._id || message.conversation;
+          const convDoc = await Conversation.findById(convId)
+            .select("participants")
+            .lean();
+          recipientIds = convDoc?.participants || [];
+        }
+
+        new Set(recipientIds.map((id) => String(id))).forEach((rid) => {
+          io.to(`user_${rid}`).emit("message_updated", payload);
         });
-      });
+      } catch (fanoutError) {
+        // Never fail the edit because the extra fan-out could not resolve.
+        console.error("message_updated fan-out failed:", fanoutError);
+      }
     }
 
     res.status(200).json({

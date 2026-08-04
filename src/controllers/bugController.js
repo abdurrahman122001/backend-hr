@@ -8,6 +8,7 @@ const {
   hasFeedbackAccess,
   getFeedbackAccess,
 } = require("../utils/feedbackAccess");
+const { nextFeedbackTicketNumber } = require("../utils/feedbackTicketNumber");
 
 // ---------------------
 // CREATE BUG
@@ -75,6 +76,11 @@ exports.createBug = async (req, res) => {
         }))
       : [];
 
+    // Permanent, per-company serial. Reserved before the insert so the number
+    // is fixed at creation and never derived from list position.
+    const owner = emp.owner || null;
+    const ticketNumber = await nextFeedbackTicketNumber(owner);
+
     // Create bug
     const bug = await Bug.create({
       title: title.trim(),
@@ -84,7 +90,8 @@ exports.createBug = async (req, res) => {
       department: emp.department,
       images: images,
       rewardAdded: false, // Initially no reward added
-      // Note: Owner is not stored in Bug model, it's referenced through Employee
+      owner,
+      ticketNumber,
     });
 
     // Populate reporter info for response
