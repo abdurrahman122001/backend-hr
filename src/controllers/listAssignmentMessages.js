@@ -2315,7 +2315,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
 exports.getMessagesByThread = async function getMessagesByThread(req, res) {
   try {
     const { threadId } = req.params;
-    const { limit = 50, page = 1 } = req.query;
+    const { limit = 50, page = 1, clientId: requestedClientId } = req.query;
 
     if (!threadId) {
       return res.status(400).json({ error: "Thread ID is required" });
@@ -2323,6 +2323,13 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
 
     // Build base query
     const q = { threadId };
+
+    // A legacy thread id may have been reused across clients. When the email
+    // detail view supplies its client, preserve that boundary in the query so
+    // only that client and its company employees appear in the conversation.
+    if (requestedClientId && isObjId(requestedClientId)) {
+      q.client = requestedClientId;
+    }
 
     // Apply visibility rules
     const qFinal = await applyVisibility(q, req);
