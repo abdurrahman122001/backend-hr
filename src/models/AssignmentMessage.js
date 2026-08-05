@@ -129,6 +129,23 @@ const AssignmentMessageSchema = new Schema(
         },
       },
     ],
+    bcc: [
+      {
+        email: {
+          type: String,
+          trim: true,
+          lowercase: true,
+        },
+        name: {
+          type: String,
+          trim: true,
+        },
+        addedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
     labels: [
       {
         label: {

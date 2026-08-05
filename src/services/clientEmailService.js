@@ -141,9 +141,18 @@ async function sendApprovedReplyToClient(message) {
     ? baseSubject
     : `Re: ${baseSubject || "Your email"}`;
 
+  // Bcc recipients on the compose must actually receive the real outbound
+  // email (not just an in-app copy) — nodemailer strips the Bcc header for
+  // delivery the same way a real mail server does, so this stays blind to
+  // the "to" recipient without any extra work here.
+  const bccAddresses = (message.bcc || [])
+    .map((entry) => entry?.email)
+    .filter(Boolean);
+
   const mailOptions = {
     from: getFromAddress(),
     to,
+    ...(bccAddresses.length > 0 ? { bcc: bccAddresses } : {}),
     subject,
     html: message.note || "",
     text: stripHtml(message.note),

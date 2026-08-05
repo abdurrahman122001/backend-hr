@@ -3313,6 +3313,33 @@ exports.searchMessages = async function searchMessages(req, res) {
       qFinal.$and.push(condition);
     };
 
+    // A client's own address (as opposed to a "company employee" sub-contact,
+    // which IS stored per-message via clientEmployeeEmail) is never stored as
+    // text on the message — only as the `client` ObjectId reference. Every
+    // message in that client's thread carries it regardless of send
+    // direction, so resolving the term against ClientInfo and matching
+    // `client` is what actually finds a client's sent+received history;
+    // without this, from:/to:/participantEmail search for a client's email
+    // silently returns nothing.
+    const resolveClientIds = async (value) => {
+      const term = String(value || "").trim();
+      if (!term) return [];
+      const pattern = new RegExp(escapeSearchRegex(term), "i");
+      const clientQuery = {
+        $or: [
+          { clientEmail: pattern },
+          { "businesses.email": pattern },
+          { clientName: pattern },
+        ],
+      };
+      if (req.employee?.owner) clientQuery.owner = req.employee.owner;
+      const clients = await ClientInfo.find(clientQuery)
+        .select("_id")
+        .limit(50)
+        .lean();
+      return clients.map((c) => c._id);
+    };
+
     const resolveEmployeeClauses = async (values, direction) => {
       const clauses = [];
       const individualValues = values.flatMap((rawValue) =>
@@ -3330,11 +3357,13 @@ exports.searchMessages = async function searchMessages(req, res) {
           ],
         };
         if (qFinal.owner) employeeQuery.owner = qFinal.owner;
-        const employeeIds = await Employee.find(employeeQuery)
-          .select("_id")
-          .limit(50)
-          .lean();
+        const [employeeIds, clientIds] = await Promise.all([
+          Employee.find(employeeQuery).select("_id").limit(50).lean(),
+          resolveClientIds(value),
+        ]);
         const ids = employeeIds.map((employee) => employee._id);
+
+        if (clientIds.length) clauses.push({ client: { $in: clientIds } });
 
         if (direction === "from") {
           if (ids.length) clauses.push({ sender: { $in: ids } });
@@ -3424,6 +3453,7 @@ exports.searchMessages = async function searchMessages(req, res) {
         `^${escapeParticipantRegex(participantEmail.trim())}$`,
         "i",
       );
+      const participantClientIds = await resolveClientIds(participantEmail);
       qFinal.$and = qFinal.$and || [];
       qFinal.$and.push({
         $or: [
@@ -3433,6 +3463,9 @@ exports.searchMessages = async function searchMessages(req, res) {
           { "emailMetadata.cc": participantPattern },
           { "emailMetadata.bcc": participantPattern },
           { "cc.email": participantPattern },
+          ...(participantClientIds.length
+            ? [{ client: { $in: participantClientIds } }]
+            : []),
         ],
       });
     }
@@ -3466,6 +3499,15 @@ exports.searchMessages = async function searchMessages(req, res) {
       }
 
       if (searchFields.includes("all")) {
+        // A plain client's own address/name isn't stored as text on the
+        // message (only clientEmployeeEmail, for a company-employee
+        // sub-contact, is) — resolve it against ClientInfo so typing a
+        // client's email finds every message in that client's thread, sent
+        // and received, the same way from:/to: already does above.
+        const freeTextClientIds = await resolveClientIds(searchTerm);
+        if (freeTextClientIds.length) {
+          searchConditions.push({ client: { $in: freeTextClientIds } });
+        }
         [
           "clientName",
           "clientEmployeeName",

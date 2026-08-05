@@ -212,6 +212,11 @@ exports.getBugs = async (req, res) => {
       query.department = department;
     }
 
+    // "Only me" — feedbacks currently assigned to the logged-in employee.
+    if (req.query.assignedToMe === "true") {
+      query.assignedTo = employeeId;
+    }
+
     // Date range filter
     if (startDate || endDate) {
       query.createdAt = {};
@@ -379,6 +384,13 @@ exports.getBugsByOwner = async (req, res) => {
 
     if (req.query.employeeId && req.query.employeeId !== "all") {
       query.reportedBy = req.query.employeeId;
+    }
+
+    // "Only me" — feedbacks currently assigned to the logged-in admin/employee.
+    // req.user._id is the Employee id here (see comment above on ownerId), which
+    // is what `assignedTo` is populated with via /bugs/assignees.
+    if (req.query.assignedToMe === "true") {
+      query.assignedTo = req.user._id;
     }
 
     // Get total count for pagination

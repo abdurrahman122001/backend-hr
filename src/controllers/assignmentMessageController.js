@@ -1015,6 +1015,7 @@ exports.createMessage = async function createMessage(req, res) {
       clientEmployees: clientEmployeesBody,
       companyEmployees: companyEmployeesBody,
       cc: ccBody,
+      bcc: bccBody,
     } = req.body;
 
     let targetSupervisor = null; // 🔥 HIERARCHY-BASED: Capture for notification at the end
@@ -1619,9 +1620,15 @@ exports.createMessage = async function createMessage(req, res) {
     }
 
     let ccEmails = await parseCCEmailsForOwner(ccBody, owner);
+    let bccEmails = await parseCCEmailsForOwner(bccBody, owner);
 
     // 🔥 NEW: Check CC emails against employee database and add matching employees as receivers
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, approvalStatus);
+    // Same for BCC — a BCC'd employee must actually receive the message, not
+    // just have their address recorded, so they are merged into `receiver`
+    // exactly like a CC'd employee (this app does not currently redact `bcc`
+    // from other recipients' view of the message, same as `cc`).
+    receivers = await syncCCWithReceivers(receivers, bccEmails, owner, sender, approvalStatus);
 
     const msgData = {
       owner,
@@ -1653,6 +1660,10 @@ exports.createMessage = async function createMessage(req, res) {
 
     if (ccEmails.length > 0) {
       msgData.cc = ccEmails;
+    }
+
+    if (bccEmails.length > 0) {
+      msgData.bcc = bccEmails;
     }
 
     // Store the full ordered approval chain for display in Message Info
@@ -1699,6 +1710,7 @@ exports.createMessage = async function createMessage(req, res) {
             note: m.note || "",
             attachments: m.attachments || [],
             cc: m.cc || [],
+            bcc: m.bcc || [],
             status: "sent",
             approvalStatus: "approved",
             isForward: true,
@@ -3081,6 +3093,7 @@ exports.createDraft = async function createDraft(req, res) {
       subject,
       note,
       cc: ccBody,
+      bcc: bccBody,
       isFromClient,
       isFromCompanyEmployee,
       clientEmployeeName,
@@ -3109,7 +3122,9 @@ exports.createDraft = async function createDraft(req, res) {
     );
 
     let ccEmails = await parseCCEmailsForOwner(ccBody, owner);
+    let bccEmails = await parseCCEmailsForOwner(bccBody, owner);
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, null);
+    receivers = await syncCCWithReceivers(receivers, bccEmails, owner, sender, null);
 
     // Note: Drafts can be saved without receivers. 
     // The requirement for receivers should only be enforced when sending.
@@ -3147,6 +3162,7 @@ exports.createDraft = async function createDraft(req, res) {
       status: "draft",
       isScheduled: false,
       cc: ccEmails,
+      bcc: bccEmails,
       isFromClient: inheritedIsFromClient,
       isFromCompanyEmployee: inheritedIsFromCompanyEmployee,
       clientEmployeeName: inheritedClientEmployeeName,
@@ -3218,6 +3234,7 @@ exports.updateMessage = async function updateMessage(req, res) {
       receiver: receiverBody,
       receivers: receiversBody,
       cc: ccBody,
+      bcc: bccBody,
       client: clientBody,
       isFromClient,
       isFromCompanyEmployee,
@@ -3294,6 +3311,21 @@ exports.updateMessage = async function updateMessage(req, res) {
       msg.receiver = updatedReceivers;
     }
 
+    if (bccBody) {
+      const bccEmails = await parseCCEmailsForOwner(bccBody, msg.owner);
+      msg.bcc = bccEmails;
+
+      // Sync updated BCC with receivers, same as CC
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        bccEmails,
+        msg.owner,
+        msg.sender,
+        msg.approvalStatus
+      );
+      msg.receiver = updatedReceivers;
+    }
+
     await msg.save();
 
     const populated = await msg.populate([
@@ -3339,6 +3371,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       isScheduled: isScheduledBody,
       scheduledFor,
       cc: ccBody,
+      bcc: bccBody,
       client: clientBody,
       isFromClient,
       isFromCompanyEmployee,
@@ -3502,6 +3535,31 @@ exports.sendDraft = async function sendDraft(req, res) {
       const updatedReceivers = await syncCCWithReceivers(
         msg.receiver.map(String),
         msg.cc,
+        msg.owner,
+        msg.sender,
+        msg.approvalStatus
+      );
+      msg.receiver = updatedReceivers;
+    }
+
+    // Process BCC and sync with receivers if BCC is provided during send
+    if (bccBody) {
+      const bccEmails = await parseCCEmailsForOwner(bccBody, msg.owner);
+      msg.bcc = bccEmails;
+
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        bccEmails,
+        msg.owner,
+        msg.sender,
+        msg.approvalStatus
+      );
+      msg.receiver = updatedReceivers;
+    } else if (msg.bcc && msg.bcc.length > 0) {
+      // Even if no new BCC is provided, ensure existing BCC is synced with receivers
+      const updatedReceivers = await syncCCWithReceivers(
+        msg.receiver.map(String),
+        msg.bcc,
         msg.owner,
         msg.sender,
         msg.approvalStatus
