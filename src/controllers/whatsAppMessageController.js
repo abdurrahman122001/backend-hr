@@ -1883,11 +1883,27 @@ exports.approveMessage = async function approveMessage(req, res) {
     // sent/display time (and timeline position) reflects the latest approval —
     // lower senior approves → that time; upper senior approves → updated again.
     // createdAt is immutable via Mongoose timestamps, so use the raw driver.
+    //
+    // RIGHT HERE is the last moment the sender's real send time still exists:
+    // on the FIRST approval createdAt has not been rewritten yet, so it is that
+    // time. Capture it before destroying it, for any message that reached this
+    // point without originalSentAt — one created by a path that does not set it,
+    // or created before the field existed. On later approvals in the same chain
+    // originalSentAt is already set and must NOT be recaptured, or it would drift
+    // forward to each approval in turn.
+    const preserveOriginalSentAt = !msg.originalSentAt;
     try {
+      const timeFields = { createdAt: approvalTime };
+      if (preserveOriginalSentAt) {
+        timeFields.originalSentAt = msg.createdAt;
+      }
       await WhatsAppMessage.collection.updateOne(
         { _id: msg._id },
-        { $set: { createdAt: approvalTime } },
+        { $set: timeFields },
       );
+      if (preserveOriginalSentAt) {
+        msg.originalSentAt = msg.createdAt;
+      }
       msg.createdAt = approvalTime;
     } catch (e) {
       console.warn("Failed to set approval createdAt:", e?.message || e);
@@ -2800,6 +2816,9 @@ exports.editMessage = async function editMessage(req, res) {
                 isForwarded: true,
                 originalMessage: msg._id,
                 forwardedBy: req.employee._id,
+                // Carry the source message's send time across, or this copy
+                // would report the forward moment as the sender's send time.
+                originalSentAt: msg.originalSentAt || msg.createdAt || new Date(),
                 isScheduled: msg.isScheduled,
                 status: msg.status,
                 scheduledFor: msg.scheduledFor,
@@ -4550,6 +4569,9 @@ exports.createMessage = async function createMessage(req, res) {
       scheduledAt,
       scheduledBy,
       sentAt: !isScheduled ? new Date() : undefined,
+      // Survives the createdAt rewrite that approval performs, so the sender
+      // keeps seeing when THEY sent it. See the field's note on the model.
+      originalSentAt: new Date(),
       isReply: isReply || false,
       repliedTo: isReply ? repliedTo : null,
       replyContent: isReply ? replyContent : null,

@@ -12,6 +12,15 @@ async function loadAesKey() {
     throw new Error("No active key document with a valid `currentAesKey`");
   }
 
+  // Never cache an unusable key: it would turn one bad row into "every decrypt
+  // in this process fails until restart", which is what the AES-length spam was.
+  if (doc.currentAesKey.length !== 32) {
+    throw new Error(
+      `Active DecryptionKey ${doc._id} (owner ${doc.owner}) has a ` +
+        `${doc.currentAesKey.length}-char currentAesKey; aes-256-cbc needs 32.`
+    );
+  }
+
   _cachedAesKey = doc.currentAesKey;
   return _cachedAesKey;
 }

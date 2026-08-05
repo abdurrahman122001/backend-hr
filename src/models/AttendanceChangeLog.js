@@ -4,9 +4,11 @@ const { Schema, model } = require('mongoose');
 const AttendanceChangeLogSchema = new Schema({
   owner: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   
-  // Who made the change (Admin or Proxy Employee)
+  // Who made the change (Admin, Proxy Employee, or an automated rule)
   performedBy: { type: Schema.Types.ObjectId, refPath: 'performerType' },
-  performerType: { type: String, enum: ['User', 'Employee'], required: true },
+  // 'System' = written by a cron/rule (e.g. the late-deduction processor).
+  // performedBy then points at the affected Employee, so nothing populates it.
+  performerType: { type: String, enum: ['User', 'Employee', 'System'], required: true },
   performerName: { type: String },
 
   // Patient (Employee whose attendance was changed)

@@ -112,6 +112,19 @@ const WhatsAppMessageSchema = new Schema(
     originalMessage: { type: Schema.Types.ObjectId, ref: "WhatsAppMessage" },
     forwardedBy: { type: Schema.Types.ObjectId, ref: "Employee" },
 
+    // When the SENDER actually composed and sent this message.
+    //
+    // Approval rewrites `createdAt` to the approval time on purpose, so the
+    // message lands at the right place in everyone else's timeline and shows
+    // when it really went out to the client. That rewrite destroys the only
+    // record of when the sender hit send, which is the time the SENDER should
+    // keep seeing on their own message. This field is written once at creation
+    // and never touched again.
+    //
+    // Messages created before this field existed have no value; readers fall
+    // back to `createdAt`, which for an approved message is the approval time.
+    originalSentAt: { type: Date, default: null },
+
     approvedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
     approvedAt: { type: Date, default: null },
     disapprovedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },

@@ -14,7 +14,7 @@ const Attendance = require("./models/Attendance");
 const { backfillForDate } = require("./backfillAttendance");
 const PayrollPeriod = require("./models/PayrollPeriod");
 const empAuth = require("./middleware/empAuth");
-const puppeteer = require("puppeteer");
+const { closeBrowser } = require("./utils/browserPool");
 const ProbationPeriod = require("./models/ProbationPeriod");
 const EmployeeSession = require("./models/EmployeeSession");
 const { getLeaveYear } = require("./utils/leaveEntitlement");
@@ -3426,3 +3426,17 @@ cron.schedule(
 app.get("/", (_req, res) => {
   res.send("OK");
 });
+
+// ---------- Graceful shutdown ----------
+// The shared Chrome is a child process; without this a pm2 restart orphans it
+// and the leftovers pile up in RAM until the box OOMs.
+let shuttingDown = false;
+for (const signal of ["SIGTERM", "SIGINT"]) {
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${signal} received, closing browser…`);
+    await closeBrowser();
+    process.exit(0);
+  });
+}
