@@ -25,14 +25,34 @@ function buildPublicUrl(req, filename) {
   return `${base}/uploads/${filename}`;
 }
 
-function getInvalidLeaveDateTime(dates = []) {
+function getInvalidLeaveDateTime(dates = [], { isAbsenceJustification = false } = {}) {
   return dates.find(
     (day) =>
       ((day?.type === "late" || day?.type === "early_leave") &&
         !String(day?.time || "").trim()) ||
+      // A planned half day must say which half. An absence justification is
+      // explaining a half day that ALREADY happened, so the times come from the
+      // attendance record rather than the employee — don't demand them here.
       (day?.type === "half" &&
+        !isAbsenceJustification &&
         (!String(day?.checkInTime || "").trim() || !String(day?.checkOutTime || "").trim())),
   );
+}
+
+// `totalDays` is derived from `hours`, but leave consumption, balance reversal
+// and the attendance conversion all key off `dates[].type`. A caller that sends
+// only `hours: 4` used to store type "full" — the day was then valued at 0.5 in
+// one place and 1.0 in another, and an unpaid half day was converted into a
+// full paid "Leave". Derive the missing type so the two can never disagree.
+function normalizeLeaveDateTypes(dates = []) {
+  return dates.map((day) => {
+    if (day?.type) return day;
+    const hours = Number(day?.hours);
+    if (Number.isFinite(hours) && hours > 0 && hours < 8) {
+      return { ...day, type: "half", hours };
+    }
+    return { ...day, type: "full" };
+  });
 }
 
 // Helper function to process employee data and add full photo URLs
@@ -504,6 +524,46 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
 /**
  * Reverts the effects of an approved leave (balance, transactions, salary)
  */
+/**
+ * Undo the attendance rows an approved leave produced.
+ * - Rows the approval CREATED are removed (the day has no leave any more).
+ * - Rows it MODIFIED are restored to their recorded originalStatus.
+ * Balances/transactions are handled separately by revertLeaveEffects.
+ */
+async function revertLeaveAttendance(leave) {
+  try {
+    if (leave.status !== "approved" && leave.status !== "auto_approved") return true;
+
+    const employeeId = leave.employee._id || leave.employee;
+    for (const d of leave.dates || []) {
+      const dateStr = new Date(d.date).toISOString().split("T")[0];
+      const attendance = await Attendance.findOne({ employee: employeeId, date: dateStr });
+      if (!attendance) continue;
+
+      const wasAutoCreated = String(attendance.notes || "").includes(
+        "Auto-created from approved leave request",
+      );
+
+      if (wasAutoCreated) {
+        await Attendance.deleteOne({ _id: attendance._id });
+        continue;
+      }
+
+      if (attendance.originalStatus) {
+        attendance.status = attendance.originalStatus;
+        attendance.originalStatus = undefined;
+      }
+      attendance.leaveType = undefined;
+      attendance.markedByHR = false;
+      await attendance.save();
+    }
+    return true;
+  } catch (error) {
+    console.error("❌ [revertLeaveAttendance] Error:", error);
+    return false;
+  }
+}
+
 async function revertLeaveEffects(leave, performedBy) {
   try {
     if (leave.status !== "approved" && leave.status !== "auto_approved") return;
@@ -627,17 +687,19 @@ async function buildApprovalChain(employeeId, ownerId, supervisorId) {
 // @access  Private
 exports.applyLeave = async (req, res) => {
   try {
-    const { dates, leaveType, customLeaveType, reason, isAbsenceJustification = false } = req.body;
+    const { dates: rawDates, leaveType, customLeaveType, reason, isAbsenceJustification = false } = req.body;
     const employeeId = req.user.employeeId || req.user.id;
 
     // Validate dates
-    if (!dates || dates.length === 0) {
+    if (!rawDates || rawDates.length === 0) {
       return res
         .status(400)
         .json({ message: "Please select at least one date" });
     }
 
-    if (getInvalidLeaveDateTime(dates)) {
+    const dates = normalizeLeaveDateTypes(rawDates);
+
+    if (getInvalidLeaveDateTime(dates, { isAbsenceJustification })) {
       return res.status(400).json({
         message: "Please add the required time for the selected day type",
       });
@@ -981,10 +1043,13 @@ exports.approveLeave = async (req, res) => {
     let isSuperAdmin =
       user.isAdmin || userRole === "admin" || userRole === "hr";
     let isSupervisor = false;
+    // Declared out here because the 403 response below reads both of them.
+    let currentSupervisorId = null;
+    let employeeId = null;
 
     if (user.isEmployee) {
       // User is an employee (not admin/HR)
-      const employeeId = user.employeeId || user._id;
+      employeeId = user.employeeId || user._id;
       approver = await Employee.findById(employeeId);
       if (!approver) {
         return res.status(404).json({
@@ -993,7 +1058,7 @@ exports.approveLeave = async (req, res) => {
       }
 
       // Check if this employee is the supervisor for this leave
-      const currentSupervisorId = leave.supervisor?._id || leave.supervisor;
+      currentSupervisorId = leave.supervisor?._id || leave.supervisor;
       isSupervisor =
         currentSupervisorId &&
         currentSupervisorId.toString() === employeeId.toString();
@@ -1018,7 +1083,7 @@ exports.approveLeave = async (req, res) => {
           isSupervisor: isSupervisor,
           required: "Must be admin/HR or the assigned supervisor",
           currentSupervisorId: currentSupervisorId ? currentSupervisorId.toString() : null,
-          approverId: employeeId.toString()
+          approverId: employeeId ? employeeId.toString() : null
         },
       });
     }
@@ -1377,7 +1442,13 @@ exports.approveLeave = async (req, res) => {
         //   (no reversal, no re-save) so it isn't double-touched.
         const isExistingHalfDay = attendance && attendance.status === "Half Day";
         const isAlreadyPaidHalfDay = isExistingHalfDay && attendance.leaveType === "Paid";
-        const isUnpaidHalfDay = isExistingHalfDay && attendance.leaveType === "Unpaid";
+        // Anything that isn't explicitly "Paid" is an unpaid half day — unpaid
+        // is the default, and the login path can leave leaveType blank (the
+        // field defaults to null and the deduction guards can return before
+        // stamping it). Matching only === "Unpaid" made those blank records
+        // fall through the `continue` below, so approving the leave never
+        // upgraded them to Paid.
+        const isUnpaidHalfDay = isExistingHalfDay && attendance.leaveType !== "Paid";
 
         if (isAlreadyPaidHalfDay) {
           // Status stays the same — nothing to change for this date.
@@ -2456,6 +2527,14 @@ exports.deleteLeave = async (req, res) => {
     if (!leave) {
       return res.status(404).json({ message: "Leave request not found" });
     }
+
+    // Undo everything the approval did before trashing it. Without this the
+    // consumed balance stayed spent and the attendance rows the approval
+    // created were orphaned as "Leave (Paid)" / "Half Day (Paid)" with no
+    // leave behind them — which is what made deleted leaves keep showing as
+    // paid on the attendance screens.
+    await revertLeaveEffects(leave, employee._id);
+    await revertLeaveAttendance(leave);
 
     // Soft delete
     leave.isTrashed = true;

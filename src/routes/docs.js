@@ -1,6 +1,6 @@
 const express = require("express");
 const router = express.Router();
-const puppeteer = require("puppeteer");
+const { withPage } = require("../utils/browserPool");
 const { PDFDocument } = require("pdf-lib");
 const path = require("path");
 const fs = require("fs");
@@ -1255,15 +1255,10 @@ async function generateDocumentPDF(
   const pages = extractAllPages(tpl.canvas || {});
   if (pages.length === 0) throw new Error("No pages found in template");
 
-  const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
+  const mergedPdf = await PDFDocument.create();
 
-  try {
-    const mergedPdf = await PDFDocument.create();
-
-    for (const page of pages) {
-      const p = await browser.newPage();
+  for (const page of pages) {
+    const pdfBuffer = await withPage(async (p) => {
       await p.setViewport({ width: page.widthPx, height: page.heightPx });
 
       const html = generateSinglePageHTML(page, tokens, pages.length);
@@ -1273,7 +1268,7 @@ async function generateDocumentPDF(
       const headerMm = pxToMm(page.header);
       const footerMm = pxToMm(page.footer);
 
-      const pdfBuffer = await p.pdf({
+      return p.pdf({
         printBackground: true,
         preferCSSPageSize: true,
         width: `${pxToMm(page.widthPx)}mm`,
@@ -1285,18 +1280,15 @@ async function generateDocumentPDF(
           right: "0mm",
         },
       });
+    });
 
-      const tempPdf = await PDFDocument.load(pdfBuffer);
-      const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
-      mergedPdf.addPage(copiedPage);
-      await p.close();
-    }
-
-    const mergedPdfBytes = await mergedPdf.save();
-    return Buffer.from(mergedPdfBytes);
-  } finally {
-    await browser.close();
+    const tempPdf = await PDFDocument.load(pdfBuffer);
+    const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
+    mergedPdf.addPage(copiedPage);
   }
+
+  const mergedPdfBytes = await mergedPdf.save();
+  return Buffer.from(mergedPdfBytes);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────────
@@ -1585,12 +1577,7 @@ router.post("/bulk/:docType", async (req, res) => {
       );
     }
 
-    // Launch browser once for all employees
-    const browser = await puppeteer.launch({
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    });
-
-    try {
+    {
       const mergedPdf = await PDFDocument.create();
       const allReferenceNumbers = [];
       const signerContext = await resolveSignerContext(req.ownerId, req.user);
@@ -1624,33 +1611,33 @@ router.post("/bulk/:docType", async (req, res) => {
 
         // For each page in the template, generate for this employee
         for (const page of pages) {
-          const p = await browser.newPage();
-          await p.setViewport({ width: page.widthPx, height: page.heightPx });
+          const pdfBuffer = await withPage(async (p) => {
+            await p.setViewport({ width: page.widthPx, height: page.heightPx });
 
-          const html = generateSinglePageHTML(page, tokens, pages.length);
-          await p.setContent(html, { waitUntil: "networkidle0" });
-          await p.emulateMediaType("screen");
+            const html = generateSinglePageHTML(page, tokens, pages.length);
+            await p.setContent(html, { waitUntil: "networkidle0" });
+            await p.emulateMediaType("screen");
 
-          const headerMm = pxToMm(page.header);
-          const footerMm = pxToMm(page.footer);
+            const headerMm = pxToMm(page.header);
+            const footerMm = pxToMm(page.footer);
 
-          const pdfBuffer = await p.pdf({
-            printBackground: true,
-            preferCSSPageSize: true,
-            width: `${pxToMm(page.widthPx)}mm`,
-            height: `${pxToMm(page.heightPx)}mm`,
-            margin: {
-              top: `${headerMm}mm`,
-              bottom: `${footerMm}mm`,
-              left: "0mm",
-              right: "0mm",
-            },
+            return p.pdf({
+              printBackground: true,
+              preferCSSPageSize: true,
+              width: `${pxToMm(page.widthPx)}mm`,
+              height: `${pxToMm(page.heightPx)}mm`,
+              margin: {
+                top: `${headerMm}mm`,
+                bottom: `${footerMm}mm`,
+                left: "0mm",
+                right: "0mm",
+              },
+            });
           });
 
           const tempPdf = await PDFDocument.load(pdfBuffer);
           const [copiedPage] = await mergedPdf.copyPages(tempPdf, [0]);
           mergedPdf.addPage(copiedPage);
-          await p.close();
         }
 
         // Save individual document for each employee
@@ -1715,8 +1702,6 @@ router.post("/bulk/:docType", async (req, res) => {
         )}`
       );
       res.status(200).end(pdfBuffer);
-    } finally {
-      await browser.close();
     }
   } catch (err) {
     console.error(`Error in bulk ${req.params.docType} download:`, err);
@@ -2324,25 +2309,22 @@ module.exports.generateSalarySlipForEmployee = async (employeeId, ownerId, month
   console.log(`[generateSalarySlipForEmployee] Using company: ${companyName}`);
 
   // Generate PDFs for each slip
-  const browser = await puppeteer.launch({
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  });
-
-  try {
+  {
     const mergedPdf = await PDFDocument.create();
 
     for (const slip of slips) {
       const html = generateSalarySlipHTML(slip, emp, settings, companyName, companyAddress, companyLogo, salaryFields);
 
-      const page = await browser.newPage();
-      await page.setViewport({ width: 1200, height: 1600 });
-      await page.setContent(html, { waitUntil: "networkidle0" });
-      await page.emulateMediaType("print");
+      const pdfBuffer = await withPage(async (page) => {
+        await page.setViewport({ width: 1200, height: 1600 });
+        await page.setContent(html, { waitUntil: "networkidle0" });
+        await page.emulateMediaType("print");
 
-      const pdfBuffer = await page.pdf({
-        format: "A4",
-        printBackground: true,
-        margin: { top: "0.5cm", bottom: "0.5cm", left: "0.5cm", right: "0.5cm" }
+        return page.pdf({
+          format: "A4",
+          printBackground: true,
+          margin: { top: "0.5cm", bottom: "0.5cm", left: "0.5cm", right: "0.5cm" }
+        });
       });
 
       const tempPdf = await PDFDocument.load(pdfBuffer);
@@ -2352,8 +2334,6 @@ module.exports.generateSalarySlipForEmployee = async (employeeId, ownerId, month
         const [copiedPage] = await mergedPdf.copyPages(tempPdf, [i]);
         mergedPdf.addPage(copiedPage);
       }
-
-      await page.close();
     }
 
     const mergedPdfBytes = await mergedPdf.save();
@@ -2369,8 +2349,6 @@ module.exports.generateSalarySlipForEmployee = async (employeeId, ownerId, month
     );
 
     return { pdfBuffer, saveResult, referenceNumber };
-  } finally {
-    await browser.close();
   }
 };
 

@@ -50,11 +50,15 @@ async function findSupervisorsFromHierarchy(ownerId, employeeId) {
  * @returns {Promise<string[]>} - Array of all supervisor IDs in the chain
  */
 async function getManagementChainFromHierarchy(ownerId, employeeId) {
-  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+  // Callers sometimes pass a populated Employee doc rather than an id. A
+  // Mongoose document passes isValidObjectId() but String()s to its inspect
+  // dump, which then blows up the `junior` cast — so unwrap it first.
+  const startId = employeeId?._id ?? employeeId;
+  if (!isObjId(ownerId) || !isObjId(startId)) return [];
 
   try {
     const chain = [];
-    let currentEmployee = employeeId;
+    let currentEmployee = startId;
     const visited = new Set();
 
     // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops)
@@ -310,6 +314,34 @@ async function parseCCEmailsForOwner(ccBody, ownerId) {
   return ccEmails.filter(
     (cc) => !ownMailboxes.includes(cc.email) || employeeAddresses.has(cc.email)
   );
+}
+
+// BCC counterpart of syncCCWithReceivers. Blind recipients must still RECEIVE
+// the message, so their employee ids are resolved here — but they are returned
+// as a separate list rather than merged into `receiver`, because `receiver` is
+// what every UI renders as the visible recipient list.
+//
+// Addresses that match no employee are external; they stay in the stored `bcc`
+// array for the outbound envelope and simply resolve to nobody internally.
+async function resolveBccReceivers(bccEmails, ownerId, senderId, approvalStatus) {
+  if (!bccEmails || bccEmails.length === 0 || approvalStatus === "pending") {
+    return [];
+  }
+
+  const matchingEmployees = await findEmployeesByEmails(
+    ownerId,
+    bccEmails.map((b) => b.email)
+  );
+
+  const blindReceivers = [];
+  matchingEmployees.forEach((employee) => {
+    const employeeId = String(employee._id);
+    // Blind-copying yourself is a no-op; the sender already has it in Sent.
+    if (employeeId === String(senderId)) return;
+    if (!blindReceivers.includes(employeeId)) blindReceivers.push(employeeId);
+  });
+
+  return blindReceivers;
 }
 
 async function syncCCWithReceivers(receivers, ccEmails, ownerId, senderId, approvalStatus) {
@@ -1015,6 +1047,8 @@ exports.createMessage = async function createMessage(req, res) {
       clientEmployees: clientEmployeesBody,
       companyEmployees: companyEmployeesBody,
       cc: ccBody,
+      bcc: bccBody,
+      sentOnBehalfOfAdmin,
     } = req.body;
 
     let targetSupervisor = null; // 🔥 HIERARCHY-BASED: Capture for notification at the end
@@ -1623,6 +1657,15 @@ exports.createMessage = async function createMessage(req, res) {
     // 🔥 NEW: Check CC emails against employee database and add matching employees as receivers
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, approvalStatus);
 
+    // BCC resolves to its own recipient list — never merged into `receivers`.
+    const bccEmails = await parseCCEmailsForOwner(bccBody, owner);
+    const bccReceivers = await resolveBccReceivers(
+      bccEmails,
+      owner,
+      sender,
+      approvalStatus
+    );
+
     const msgData = {
       owner,
       sender,
@@ -1645,6 +1688,9 @@ exports.createMessage = async function createMessage(req, res) {
       clientEmployeeName: inheritedClientEmployeeName,
       clientEmployeeEmail: inheritedClientEmployeeEmail,
       clientName: inheritedClientName,
+      // Marks `sender` as an explicitly chosen internal identity, so the UI
+      // shows that person instead of substituting the client.
+      sentOnBehalfOfAdmin: !!sentOnBehalfOfAdmin,
     };
 
     if (client && isObjId(client)) {
@@ -1653,6 +1699,11 @@ exports.createMessage = async function createMessage(req, res) {
 
     if (ccEmails.length > 0) {
       msgData.cc = ccEmails;
+    }
+
+    if (bccEmails.length > 0) {
+      msgData.bcc = bccEmails;
+      msgData.bccReceiver = bccReceivers;
     }
 
     // Store the full ordered approval chain for display in Message Info
@@ -2183,11 +2234,12 @@ async function isUplineOfPendingApprover(msg, ownerId, currentUserId) {
 exports.approveMessage = async function approveMessage(req, res) {
   try {
     const { id } = req.params;
-    let msg = await AssignmentMessage.findById(id).populate([
-      { path: "sender", select: "_id name companyEmail role designation" },
-      { path: "receiver", select: "_id name companyEmail role designation" },
-      { path: "client", select: "_id clientName legalBusinessName dba" },
-    ]);
+    let msg = await AssignmentMessage.findById(id)
+      .populate([
+        { path: "sender", select: "_id name companyEmail role designation" },
+        { path: "receiver", select: "_id name companyEmail role designation" },
+        { path: "client", select: "_id clientName legalBusinessName dba" },
+      ]);
     if (!msg) return res.status(404).json({ error: "Message not found" });
 
     const userRole = normalizeRole(req.employee?.role || "");
@@ -2365,6 +2417,20 @@ exports.approveMessage = async function approveMessage(req, res) {
               }
             }
           });
+        }
+
+        // Same deferral as CC above: resolveBccReceivers() bails out while a
+        // message is pending, so for a supervised sender this is the only point
+        // where blind recipients get resolved. They go to bccReceiver, NOT into
+        // finalReceivers — putting them in the visible list would unblind them.
+        if (doc.bcc && doc.bcc.length > 0) {
+          const bccMatchingEmployees = await findEmployeesByEmails(
+            doc.owner,
+            doc.bcc.map((b) => b.email)
+          );
+          doc.bccReceiver = bccMatchingEmployees
+            .map((e) => String(e._id))
+            .filter((rid) => rid !== String(doc.sender?._id || doc.sender));
         }
 
         doc.approvalStatus = "approved";
@@ -3081,6 +3147,7 @@ exports.createDraft = async function createDraft(req, res) {
       subject,
       note,
       cc: ccBody,
+      bcc: bccBody,
       isFromClient,
       isFromCompanyEmployee,
       clientEmployeeName,
@@ -3111,7 +3178,11 @@ exports.createDraft = async function createDraft(req, res) {
     let ccEmails = await parseCCEmailsForOwner(ccBody, owner);
     receivers = await syncCCWithReceivers(receivers, ccEmails, owner, sender, null);
 
-    // Note: Drafts can be saved without receivers. 
+    // A draft is not delivered yet, so only the address list is kept here; the
+    // blind recipients are resolved when the draft is actually sent.
+    const bccEmails = await parseCCEmailsForOwner(bccBody, owner);
+
+    // Note: Drafts can be saved without receivers.
     // The requirement for receivers should only be enforced when sending.
 
     const senderDoc = await Employee.findById(sender).select("_id role").lean();
@@ -3147,6 +3218,7 @@ exports.createDraft = async function createDraft(req, res) {
       status: "draft",
       isScheduled: false,
       cc: ccEmails,
+      bcc: bccEmails,
       isFromClient: inheritedIsFromClient,
       isFromCompanyEmployee: inheritedIsFromCompanyEmployee,
       clientEmployeeName: inheritedClientEmployeeName,
@@ -3218,6 +3290,7 @@ exports.updateMessage = async function updateMessage(req, res) {
       receiver: receiverBody,
       receivers: receiversBody,
       cc: ccBody,
+      bcc: bccBody,
       client: clientBody,
       isFromClient,
       isFromCompanyEmployee,
@@ -3304,6 +3377,12 @@ exports.updateMessage = async function updateMessage(req, res) {
       msg.receiver = updatedReceivers;
     }
 
+    if (bccBody !== undefined) {
+      // Still a draft here, so only the address list is stored; blind
+      // recipients are resolved by sendDraft when it actually goes out.
+      msg.bcc = await parseCCEmailsForOwner(bccBody, msg.owner);
+    }
+
     await msg.save();
 
     const populated = await msg.populate([
@@ -3349,6 +3428,7 @@ exports.sendDraft = async function sendDraft(req, res) {
       isScheduled: isScheduledBody,
       scheduledFor,
       cc: ccBody,
+      bcc: bccBody,
       client: clientBody,
       isFromClient,
       isFromCompanyEmployee,
@@ -3594,6 +3674,20 @@ exports.sendDraft = async function sendDraft(req, res) {
       } else {
         msg.approvalStatus = null;
       }
+    }
+
+    // Resolve blind recipients last: approvalStatus is decided above, and a
+    // message still awaiting approval must not be delivered to anyone yet.
+    if (bccBody !== undefined) {
+      msg.bcc = await parseCCEmailsForOwner(bccBody, msg.owner);
+    }
+    if (msg.bcc && msg.bcc.length > 0) {
+      msg.bccReceiver = await resolveBccReceivers(
+        msg.bcc,
+        msg.owner,
+        msg.sender,
+        msg.approvalStatus
+      );
     }
 
     await msg.save();

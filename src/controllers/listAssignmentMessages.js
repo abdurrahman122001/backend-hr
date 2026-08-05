@@ -62,11 +62,14 @@ async function getAllJuniorsRecursively(ownerId, seniorId) {
 }
 
 async function getManagementChainFromHierarchy(ownerId, employeeId) {
-  if (!isObjId(ownerId) || !isObjId(employeeId)) return [];
+  // Same unwrap as assignmentMessageController: a populated Employee doc
+  // String()s to its inspect dump and breaks the `junior` cast.
+  const startId = employeeId?._id ?? employeeId;
+  if (!isObjId(ownerId) || !isObjId(startId)) return [];
 
   try {
     const chain = [];
-    let currentEmployee = employeeId;
+    let currentEmployee = startId;
     const visited = new Set();
 
     // Traverse up the hierarchy (limit to 10 levels to prevent infinite loops)
@@ -275,7 +278,13 @@ async function applyVisibility(q, req, filterParam) {
 
   // 🛡️ CORE PRIVACY RULE: Pending messages are ONLY visible to participants (Sender & Receiver)
   const isParticipant = {
-    $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
+    $or: [
+      { sender: me },
+      { receiver: me },
+      { receiver: { $in: [me] } },
+      // Blind recipients participate too — see receiverMe in the list query.
+      { bccReceiver: me },
+    ],
   };
 
   // Get clients I'm assigned to OR supervising for shared visibility
@@ -543,6 +552,13 @@ exports.getMessage = async function getMessage(req, res) {
         select: "_id name companyEmail email role designation",
         options: { allowNull: true },
       },
+      // BCC'd employees resolve to their real identity so the UI can show the
+      // company email rather than whatever address was typed.
+      {
+        path: "bccReceiver",
+        select: "_id name companyEmail email role designation",
+        options: { allowNull: true },
+      },
     ]);
 
     if (!msg) {
@@ -803,8 +819,15 @@ exports.listMessages = async function listMessages(req, res) {
         .lean();
       const myAssignedClientIds = myAssignedClients.map((c) => c._id);
 
+      // A blind recipient is a real recipient: bccReceiver has to be matched
+      // everywhere `receiver` is, or the message is delivered nowhere they can
+      // see it. It is only the DISCLOSURE of that list that is restricted.
       const receiverMe = {
-        $or: [{ receiver: me }, { receiver: { $in: [me] } }],
+        $or: [
+          { receiver: me },
+          { receiver: { $in: [me] } },
+          { bccReceiver: me },
+        ],
       };
       if (isCrmScope) {
         // CRM app: Primary shows everything addressed to me plus inbound
@@ -812,6 +835,7 @@ exports.listMessages = async function listMessages(req, res) {
         q.$or = [
           { receiver: me },
           { receiver: { $in: [me] } },
+          { bccReceiver: me },
           ...(myAssignedClientIds.length > 0
             ? [{ client: { $in: myAssignedClientIds }, isFromClient: true }]
             : []),
@@ -881,6 +905,7 @@ exports.listMessages = async function listMessages(req, res) {
         { isFromClient: true },
         { receiver: me },
         { receiver: { $in: [me] } },
+        { bccReceiver: me },
         { sender: me }
       ];
     }
@@ -1243,6 +1268,9 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl" },
           { path: "receiver", select: "_id name companyEmail email role designation" },
+          // BCC'd employees resolve to their real identity so the UI can show
+          // the company email rather than whatever address was typed.
+          { path: "bccReceiver", select: "_id name companyEmail email role designation" },
           // client photo + contacts travel with the thread list so detail
           // view avatars render instantly without extra requests; assignedTo
           // feeds the Unread/Unresponded badge (read-by-assignee check)
@@ -1286,6 +1314,9 @@ exports.listMessages = async function listMessages(req, res) {
             select: "_id name companyEmail role designation supervisionMode photographUrl imageUrl",
           }, // 🔥 ADDED supervisionMode
           { path: "receiver", select: "_id name companyEmail email role designation" },
+          // BCC'd employees resolve to their real identity so the UI can show
+          // the company email rather than whatever address was typed.
+          { path: "bccReceiver", select: "_id name companyEmail email role designation" },
           { path: "client", select: "_id clientName photographUrl companyEmployees" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
           { path: "scheduledBy", select: "_id name companyEmail" },
@@ -2308,6 +2339,9 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "owner", select: "_id name companyEmail" },
           { path: "sender", select: "_id name companyEmail role designation photographUrl imageUrl" },
           { path: "receiver", select: "_id name companyEmail email role designation photographUrl imageUrl" },
+          // BCC'd employees resolve to their real identity so the UI can show
+          // the company email rather than whatever address was typed.
+          { path: "bccReceiver", select: "_id name companyEmail email role designation photographUrl imageUrl" },
           // photographUrl + companyEmployees ride along so the client/contact
           // avatars render without a separate client-info request.
           // Signatures now live on the business (businesses[].emailSignature,
@@ -2353,6 +2387,7 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
       if (item.emailMetadata && item.emailMetadata.headers) {
         delete item.emailMetadata.headers;
       }
+      
       return {
         ...item,
         isDirectMessage: !item.client,

@@ -1727,7 +1727,25 @@ exports.markAttendance = async (req, res) => {
     }
 
     if (!beforeJoin && (status === "Half Day" || status === "Unpaid Half Day")) {
-      const isExplicitUnpaid = (status === "Unpaid Half Day" || leaveType === "Unpaid");
+      // A half day is PAID only when an approved paid leave actually covers the
+      // date — same rule the login path uses in applyRealTimeHalfDayDeduction.
+      // This block used to default to Paid whenever the caller didn't say
+      // "Unpaid", so challenge approval (updateChallengeStatus delegates here
+      // and never sets leaveType) silently turned an unpaid half day into a
+      // paid one and consumed 0.5 leave with no leave application behind it.
+      const isExplicitPaid = leaveType === "Paid";
+      let isExplicitUnpaid = (status === "Unpaid Half Day" || leaveType === "Unpaid");
+
+      if (!isExplicitUnpaid && !isExplicitPaid) {
+        const { hasApprovedLeaveForDate } = require("../utils/lateDeductions");
+        const approvedLeave = await hasApprovedLeaveForDate(employeeId, date);
+        if (!approvedLeave) {
+          console.log(
+            `[HALF-DAY] ${employeeId} on ${date}: no approved leave — marking UNPAID`,
+          );
+          isExplicitUnpaid = true;
+        }
+      }
 
       if (!isExplicitUnpaid) {
         // PAID case: deduct from balance (debt allowed as per current full-day leave logic)
@@ -1752,6 +1770,13 @@ exports.markAttendance = async (req, res) => {
           0.5,
           "absent",
           true // forceUnpaid = true forces addUnpaid = deductionCount in utils
+        );
+        // Stamp the record too, mirroring the paid branch — otherwise a record
+        // that was previously Paid keeps its stale leaveType after being
+        // resolved as unpaid.
+        await Attendance.updateOne(
+          { owner: ownerId, employee: employeeId, date },
+          { $set: { leaveType: "Unpaid", status: "Half Day" } }
         );
       }
       return res.json(rec);

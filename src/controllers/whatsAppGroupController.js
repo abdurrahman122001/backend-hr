@@ -522,6 +522,9 @@ exports.sendGroupMessage = async function (req, res) {
             }))
         : [],
       status: "sent",
+      // Survives the createdAt rewrite that approval performs, so the sender
+      // keeps seeing when THEY sent it. See the field's note on the model.
+      originalSentAt: new Date(),
       isGroupMessage: true,
       groupId: oid(groupId),
       chatType: "group",

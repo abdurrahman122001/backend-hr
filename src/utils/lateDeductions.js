@@ -663,6 +663,25 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
     const employee = await Employee.findById(employeeId).lean();
     if (!employee) return;
 
+    // A half day is UNPAID unless an approved paid leave covers the date.
+    // Stamp that on the attendance record FIRST: everything below can bail out
+    // for bookkeeping reasons (no payroll period, no leave-year balance, a
+    // duplicate deduction already recorded) and those bail-outs used to leave
+    // leaveType at its schema default of null — which the dashboards render as
+    // "Half Day (Paid)" even though no leave was ever applied for.
+    const approvedLeave = forceUnpaid
+      ? null
+      : await hasApprovedLeaveForDate(employeeId, attendanceDate);
+    const hasApprovedLeave = !!approvedLeave;
+
+    if (!hasApprovedLeave) {
+      await Attendance.updateOne(
+        { owner: ownerId, employee: employeeId, date: attendanceDate },
+        { $set: { leaveType: "Unpaid" } }
+      );
+      console.log(`[HALF-DAY] ${employee.name} on ${attendanceDate}: no approved leave → UNPAID`);
+    }
+
     // 1. Find payroll period (to get the right Salary Slip)
     const allPayrolls = await PayrollPeriod.find({ owner: ownerId }).lean();
     const shiftId = employee.shifts?.[0];
@@ -726,7 +745,24 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
       });
 
       if (!existingReversal) {
-        // Deduction exists and hasn't been reversed - skip creating new one
+        // Deduction exists and hasn't been reversed - skip creating new one.
+        // Still re-stamp the label: a re-login on the same day lands here, and
+        // the login path $unsets leaveType beforehand, so returning without
+        // stamping left the record blank (rendered "Paid").
+        // The approved leave is the authority, NOT the ledger — a stale
+        // PAID_LEAVE_USED (e.g. the leave was deleted after it was consumed)
+        // must not keep the day marked Paid.
+        await Attendance.updateOne(
+          { owner: ownerId, employee: employeeId, date: attendanceDate },
+          {
+            $set: {
+              leaveType:
+                hasApprovedLeave && existingDeduction.type === "PAID_LEAVE_USED"
+                  ? "Paid"
+                  : "Unpaid",
+            },
+          }
+        );
         console.log(`[HALF-DAY] Active deduction exists for ${employeeId} on ${attendanceDate}. Skipping duplicate.`);
         return;
       }
@@ -734,13 +770,12 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
       console.log(`[HALF-DAY] Previous deduction was reversed for ${employeeId} on ${attendanceDate}. Creating new deduction.`);
     }
 
-    // ✅ LOGIC: Default is UNPAID half day.
+    // ✅ LOGIC: Default is UNPAID half day (already stamped above).
     // Only mark PAID (deduct from leave balance) when the employee applied a
     // leave for this date AND it was approved by all seniors, AND they have
     // leave balance. An employee with ZERO leaves stays UNPAID even when the
     // leave was approved by all seniors.
-    const approvedLeave = await hasApprovedLeaveForDate(employeeId, attendanceDate);
-    const hasApprovedLeave = !!approvedLeave;
+    // `approvedLeave` / `hasApprovedLeave` are computed at the top of this fn.
 
     // If approveLeave already consumed the balance for this leave, the 0.5 is
     // reflected in usedPaid — so "has balance" means not in debt (>= 0);
@@ -1321,6 +1356,7 @@ module.exports = {
   getLeaveYear,
   applyRealTimeLateDeduction,
   applyRealTimeHalfDayDeduction,
+  hasApprovedLeaveForDate,
   reverseHalfDayDeduction,
   reverseLateDayDeduction,
   applyEarlyDepartureHoursDeduction,

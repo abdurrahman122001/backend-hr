@@ -80,6 +80,19 @@ const AssignmentMessageSchema = new Schema(
       type: Boolean,
       default: false,
     },
+    // Set when a CRM-access user picked a specific isAdmin colleague in the
+    // composer's "From" field, so `sender` is that colleague rather than the
+    // person typing.
+    //
+    // The UI otherwise assumes any CRM/manager message inside a client thread
+    // REPRESENTS the client, and swaps in the client's name and photo purely
+    // from the sender's role. That assumption is wrong here — an explicit
+    // internal identity was chosen — and `isFromClient: false` alone cannot
+    // distinguish this case from an ordinary message. Hence an explicit flag.
+    sentOnBehalfOfAdmin: {
+      type: Boolean,
+      default: false,
+    },
     clientEmployeeName: {
       type: String,
     },
@@ -129,6 +142,35 @@ const AssignmentMessageSchema = new Schema(
         },
       },
     ],
+    // Carbon copy, listed as its own field rather than folded into `cc`.
+    //
+    // NOTE: by product decision this is NOT blind — every viewer of the message
+    // sees the BCC list, the same way they see `cc`. Both fields are therefore
+    // normally selectable and are returned on every read path. If BCC ever has
+    // to become genuinely blind again, the change is to mark both `select:
+    // false` and disclose them only to the sender; delivery would be unaffected
+    // because that works off `bccReceiver` matching, not projection.
+    bcc: {
+      type: [
+        {
+          _id: false,
+          email: { type: String, trim: true, lowercase: true },
+          name: { type: String, trim: true },
+          addedAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+    },
+    // Internal employees resolved from `bcc`. Kept OUT of `receiver` so the To
+    // list stays exactly who the sender addressed directly; inbox and thread
+    // queries match on this field as well, which is how delivery reaches BCC'd
+    // employees. Populated on read so the UI can show their real identity
+    // (company email, name) instead of just the typed address.
+    bccReceiver: {
+      type: [{ type: Schema.Types.ObjectId, ref: "Employee" }],
+      default: [],
+      index: true,
+    },
     labels: [
       {
         label: {
