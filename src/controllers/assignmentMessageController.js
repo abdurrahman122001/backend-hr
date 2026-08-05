@@ -3257,9 +3257,19 @@ exports.updateMessage = async function updateMessage(req, res) {
     if (typeof subject === "string") msg.subject = subject;
     if (typeof note === "string") msg.note = note;
 
-    // Update client reference if provided
-    if (clientBody && isObjId(clientBody)) {
-      msg.client = clientBody;
+    // Keep draft client context in sync with the composer. An explicit null
+    // means the user switched to an internal-only message, so stale client
+    // context must be removed instead of surviving the autosave.
+    if (Object.prototype.hasOwnProperty.call(req.body, "client")) {
+      if (clientBody && isObjId(clientBody)) {
+        msg.client = clientBody;
+      } else if (
+        clientBody === null ||
+        clientBody === "" ||
+        clientBody === "none"
+      ) {
+        msg.client = undefined;
+      }
     }
 
     // Update client employee tracking fields for managers
@@ -3431,9 +3441,18 @@ exports.sendDraft = async function sendDraft(req, res) {
     if (subject !== undefined) msg.subject = subject;
     if (note !== undefined) msg.note = note;
 
-    // Update client reference if provided in the send payload
-    if (clientBody && isObjId(clientBody)) {
-      msg.client = clientBody;
+    // An explicit null clears client context left on an autosaved draft when
+    // the recipients were changed to colleagues before sending.
+    if (Object.prototype.hasOwnProperty.call(req.body, "client")) {
+      if (clientBody && isObjId(clientBody)) {
+        msg.client = clientBody;
+      } else if (
+        clientBody === null ||
+        clientBody === "" ||
+        clientBody === "none"
+      ) {
+        msg.client = undefined;
+      }
     }
 
     // Update client employee tracking fields for managers
@@ -3594,10 +3613,10 @@ exports.sendDraft = async function sendDraft(req, res) {
       // 🔥 HIERARCHY-BASED: Determine approval status and hierarchy routing
       targetSupervisor = null;
 
-      // 🔥 If the message is from a client or company employee, auto-approve immediately
-      // (no supervision/approval needed for external-originated messages)
+      // Client/company-originated mail is also outside the approval workflow,
+      // so use null just like createMessage does.
       if (msg.isFromClient || msg.isFromCompanyEmployee) {
-        msg.approvalStatus = "approved";
+        msg.approvalStatus = null;
       } else if (msg.client) {
         const clientDoc = await ClientInfo.findById(msg.client).lean();
         const senderId = String(msg.sender);
@@ -3631,7 +3650,7 @@ exports.sendDraft = async function sendDraft(req, res) {
           msg.approvalStatus = "approved";
         }
       } else {
-        msg.approvalStatus = "approved";
+        msg.approvalStatus = null;
       }
     }
 

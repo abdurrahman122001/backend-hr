@@ -264,13 +264,30 @@ module.exports = {
       html = enforceComicSans(html);
       html = enforceImgCss(html);
 
-      // Send email with explicit From header
-      await sendEmail({
-        from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
-        to: candidateEmail,
-        subject,
-        html,
-      });
+      // Send email with explicit From header.
+      // Tagged [CNIC-REQUEST] on purpose: mailService already logs every send,
+      // but those lines look identical for offer letters, policies, slips and
+      // everything else, so there is no way to confirm THIS mail in pm2 logs
+      // without a tag of its own.
+      console.log(
+        `[CNIC-REQUEST] sending to ${candidateEmail} (candidate: ${candidateName})`
+      );
+      try {
+        const info = await sendEmail({
+          from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
+          to: candidateEmail,
+          subject,
+          html,
+        });
+        console.log(
+          `[CNIC-REQUEST] SENT to ${candidateEmail} messageId=${info?.messageId || "n/a"}`
+        );
+      } catch (mailErr) {
+        console.error(
+          `[CNIC-REQUEST] FAILED to ${candidateEmail}: ${mailErr.message}`
+        );
+        throw mailErr; // keep the existing 500 response path
+      }
 
       return res.json({
         success: true,

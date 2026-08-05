@@ -32,6 +32,22 @@ const bugSchema = new mongoose.Schema(
       type: String,
       required: true,
     },
+    // Company this feedback belongs to. Denormalised from the reporter at
+    // create time so the ticket number can be sequenced per company without
+    // joining through Employee on every write.
+    owner: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    // Human-facing serial ("Feedback #11"). Allocated once from
+    // FeedbackCounter and never recomputed: resolving or deleting an item
+    // leaves a gap instead of renumbering everything after it, so a number in
+    // a chat, an audit log or a screenshot keeps pointing at the same item.
+    ticketNumber: {
+      type: Number,
+      default: null,
+    },
     // Who is meant to act on this feedback. Set after the fact from the
     // Feedbacks page by an admin / feedback-resolve grantee, not by the
     // reporter at submit time. null = unassigned.
@@ -122,6 +138,15 @@ bugSchema.index({ status: 1, createdAt: -1 });
 bugSchema.index({ createdAt: -1 });
 // "What is assigned to me / to this person" filtering on the Feedbacks page.
 bugSchema.index({ assignedTo: 1, createdAt: -1 });
+// One ticket number per company. Partial (rather than sparse) so the pre-
+// backfill documents that still hold the `null` default do not collide.
+bugSchema.index(
+  { owner: 1, ticketNumber: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { ticketNumber: { $type: "number" } },
+  }
+);
 
 // Assignee is wanted on every read path (employee list, org-wide list, detail,
 // owner dashboard), so populate it here rather than repeating it at each of the
