@@ -1641,6 +1641,10 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
               "lastWhatsAppMessage.senderId": msgObj.sender?._id || msgObj.sender,
               "lastWhatsAppMessage.hasAttachments": Array.isArray(msgObj.attachments) && msgObj.attachments.length > 0,
               "lastWhatsAppMessage.deleted": false,
+              "lastWhatsAppMessage.isReaction": false,
+              "lastWhatsAppMessage.reactionEmoji": null,
+              "lastWhatsAppMessage.reactorId": null,
+              "lastWhatsAppMessage.reactorName": null,
             }},
             { timestamps: false }
           ).catch(() => {});
@@ -2014,6 +2018,10 @@ exports.approveMessage = async function approveMessage(req, res) {
           "lastWhatsAppMessage.senderId": msg.sender?._id || msg.sender,
           "lastWhatsAppMessage.hasAttachments": Array.isArray(msg.attachments) && msg.attachments.length > 0,
           "lastWhatsAppMessage.deleted": false,
+          "lastWhatsAppMessage.isReaction": false,
+          "lastWhatsAppMessage.reactionEmoji": null,
+          "lastWhatsAppMessage.reactorId": null,
+          "lastWhatsAppMessage.reactorName": null,
         },
       }, { timestamps: false }).catch(() => {});
     }
@@ -2029,6 +2037,10 @@ exports.approveMessage = async function approveMessage(req, res) {
           lastMessageAt: msg.approvedAt || new Date(),
           lastMessageBy: msg.sender?._id || msg.sender,
           lastMessageDeleted: false,
+          lastMessageIsReaction: false,
+          lastMessageReactionEmoji: null,
+          lastMessageReactorId: null,
+          lastMessageReactorName: null,
         },
       }, { timestamps: false }).catch(() => {});
     }
@@ -4864,6 +4876,10 @@ exports.createMessage = async function createMessage(req, res) {
             "lastWhatsAppMessage.senderId": responseWithSupervision.sender?._id || responseWithSupervision.sender,
             "lastWhatsAppMessage.hasAttachments": Array.isArray(responseWithSupervision.attachments) && responseWithSupervision.attachments.length > 0,
             "lastWhatsAppMessage.deleted": false,
+            "lastWhatsAppMessage.isReaction": false,
+            "lastWhatsAppMessage.reactionEmoji": null,
+            "lastWhatsAppMessage.reactorId": null,
+            "lastWhatsAppMessage.reactorName": null,
           },
         }, { timestamps: false }).catch(() => {}); // fire-and-forget, non-blocking
       }
@@ -4937,6 +4953,12 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
   for (const row of latest) {
     const cached = byId.get(String(row._id));
     const cachedAt = cached?.lastWhatsAppMessage?.at ? new Date(cached.lastWhatsAppMessage.at).getTime() : 0;
+    // A "You reacted 👍 to: ..." preview is intentionally stamped with the
+    // reaction time, which is newer than the reacted-to message's own `at` —
+    // don't let this repair pass clobber it back to the plain message text.
+    if (cached?.lastWhatsAppMessage?.isReaction && cachedAt >= new Date(row.at).getTime()) {
+      continue;
+    }
     if (!cachedAt || cachedAt !== new Date(row.at).getTime()) {
       const text = row.deleted
         ? ""
@@ -4955,6 +4977,10 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
               "lastWhatsAppMessage.senderId": row.senderId,
               "lastWhatsAppMessage.hasAttachments": row.deleted ? false : row.hasAtt,
               "lastWhatsAppMessage.deleted": !!row.deleted,
+              "lastWhatsAppMessage.isReaction": false,
+              "lastWhatsAppMessage.reactionEmoji": null,
+              "lastWhatsAppMessage.reactorId": null,
+              "lastWhatsAppMessage.reactorName": null,
             },
           },
         },
@@ -4996,7 +5022,7 @@ exports.getChatList = async function getChatList(req, res) {
     // ── Kick off groups + unread queries immediately — they don't depend on
     // the client list, so they run in parallel with steps 1 and 2 below.
     const groupsPromise = WhatsAppGroup.find(groupQuery)
-      .select("_id name avatar lastMessage lastMessageAt lastMessageDeleted members")
+      .select("_id name avatar lastMessage lastMessageAt lastMessageDeleted members lastMessageIsReaction lastMessageReactionEmoji lastMessageReactorId lastMessageReactorName")
       .sort({ lastMessageAt: -1 })
       .limit(60)
       .lean();
@@ -5308,6 +5334,18 @@ exports.getChatList = async function getChatList(req, res) {
             ])
           : "📎 Attachment"; // denorm writers store the typed label in .text
 
+      // WhatsApp-style "You reacted 👍 to: \"...\"" preview — only applies
+      // when nothing newer (e.g. a pending message) has superseded it.
+      const isReactionPreview = !usePending && !lastDeleted && !!lastMsg?.isReaction;
+      let previewText = lastDeleted ? "" : (cleanText || attLabel);
+      if (isReactionPreview) {
+        const reactorLabel =
+          lastMsg.reactorId && String(lastMsg.reactorId) === String(meId)
+            ? "You"
+            : lastMsg.reactorName || "Someone";
+        previewText = `${reactorLabel} reacted ${lastMsg.reactionEmoji || ""} to: "${cleanText}"`;
+      }
+
       chats.push({
         chatId: cid,
         clientId: cid,
@@ -5315,11 +5353,12 @@ exports.getChatList = async function getChatList(req, res) {
         dba: c.dba,
         legalBusinessName: c.legalBusinessName || null,
         photographUrl: c.photographUrl || null,
-        lastMessage: lastDeleted ? "" : (cleanText || attLabel),
+        lastMessage: previewText,
+        lastMessageIsReaction: isReactionPreview,
         lastMessageDeleted: lastDeleted,
         lastMessageAt: usePending ? pendingLatest.at : lastMsg.at,
         senderId: (usePending ? pendingLatest.senderId : lastMsg.senderId) || null,
-        hasAttachments: hasAtt,
+        hasAttachments: isReactionPreview ? false : hasAtt,
         unreadCount: unreadMap.get(cid) || 0,
         hasUnreadMessages: !!(unreadMap.get(cid)),
         pendingApprovalCount: pendingMap.get(cid) || 0,
@@ -5424,22 +5463,34 @@ exports.getChatList = async function getChatList(req, res) {
       // A group whose only/latest message was deleted still belongs in the list
       // (it shows the tombstone placeholder), so keep it when the flag is set.
       if (!g.lastMessageAt && !g.lastMessage && !useGPending && !gDeleted) continue;
+
+      const gIsReactionPreview = !useGPending && !gDeleted && !!g.lastMessageIsReaction;
+      let gPreviewText = useGPending
+        ? (gPending.note || "").replace(/<[^>]*>/g, "").trim() ||
+          (gPending.hasAtt
+            ? attachmentPreviewLabel([
+                { mimetype: gPending.attType, filename: gPending.attName },
+              ])
+            : "")
+        : gDeleted
+          ? ""
+          : g.lastMessage || "";
+      if (gIsReactionPreview) {
+        const gReactorLabel =
+          g.lastMessageReactorId && String(g.lastMessageReactorId) === String(meId)
+            ? "You"
+            : g.lastMessageReactorName || "Someone";
+        gPreviewText = `${gReactorLabel} reacted ${g.lastMessageReactionEmoji || ""} to: "${g.lastMessage || ""}"`;
+      }
+
       chats.push({
         chatId: `group_${gid}`,
         groupId: gid,
         groupName: g.name,
         groupAvatar: g.avatar,
         groupMembers: g.members,
-        lastMessage: useGPending
-          ? (gPending.note || "").replace(/<[^>]*>/g, "").trim() ||
-            (gPending.hasAtt
-              ? attachmentPreviewLabel([
-                  { mimetype: gPending.attType, filename: gPending.attName },
-                ])
-              : "")
-          : gDeleted
-            ? ""
-            : g.lastMessage || "",
+        lastMessage: gPreviewText,
+        lastMessageIsReaction: gIsReactionPreview,
         lastMessageDeleted: gDeleted,
         lastMessageAt: useGPending ? gPending.at : g.lastMessageAt || null,
         unreadCount: unreadMap.get(gid) || 0,
@@ -5495,6 +5546,103 @@ exports.getChatList = async function getChatList(req, res) {
   }
 };
 
+// Keeps the denormalized sidebar preview (ClientInfo.lastWhatsAppMessage /
+// WhatsAppGroup.lastMessage) in sync with reaction toggles, WhatsApp-style:
+// adding a reaction bumps the chat to show "<reactor> reacted <emoji> to:
+// \"...\"" as the preview; removing the reaction that produced the cached
+// preview reverts it back to the real last message.
+async function syncReactionPreview({ message, wasAdded, emoji, employee, quotedText }) {
+  const ClientInfo = require("../models/ClientInfo");
+  const isClientChat =
+    message.client && !message.isGroupMessage && !message.isClientEmployeeMessage;
+
+  try {
+    if (wasAdded) {
+      if (isClientChat) {
+        await ClientInfo.findByIdAndUpdate(message.client, {
+          $set: {
+            "lastWhatsAppMessage.isReaction": true,
+            "lastWhatsAppMessage.reactionEmoji": emoji,
+            "lastWhatsAppMessage.reactorId": employee._id,
+            "lastWhatsAppMessage.reactorName": employee.name || "",
+            "lastWhatsAppMessage.text": quotedText,
+            "lastWhatsAppMessage.at": new Date(),
+            "lastWhatsAppMessage.senderId": employee._id,
+            "lastWhatsAppMessage.hasAttachments": false,
+            "lastWhatsAppMessage.deleted": false,
+          },
+        }, { timestamps: false });
+      } else if (message.isGroupMessage && message.groupId) {
+        await WhatsAppGroup.findByIdAndUpdate(message.groupId, {
+          $set: {
+            lastMessage: quotedText,
+            lastMessageAt: new Date(),
+            lastMessageBy: employee._id,
+            lastMessageDeleted: false,
+            lastMessageIsReaction: true,
+            lastMessageReactionEmoji: emoji,
+            lastMessageReactorId: employee._id,
+            lastMessageReactorName: employee.name || "",
+          },
+        }, { timestamps: false });
+      }
+      return;
+    }
+
+    // Reaction removed — only touch the cache if it was actually reflecting
+    // this reaction, then revert to the true last message.
+    if (isClientChat) {
+      const clientDoc = await ClientInfo.findById(message.client).select("lastWhatsAppMessage");
+      if (!clientDoc?.lastWhatsAppMessage?.isReaction) return;
+      const latest = await WhatsAppMessage.findOne({
+        client: message.client,
+        isGroupMessage: { $ne: true },
+        isClientEmployeeMessage: { $ne: true },
+        deletedForEveryone: { $ne: true },
+      }).sort({ createdAt: -1 }).select("note attachments sender createdAt approvedAt");
+      await ClientInfo.findByIdAndUpdate(message.client, {
+        $set: latest
+          ? {
+              "lastWhatsAppMessage.isReaction": false,
+              "lastWhatsAppMessage.reactionEmoji": null,
+              "lastWhatsAppMessage.reactorId": null,
+              "lastWhatsAppMessage.reactorName": null,
+              "lastWhatsAppMessage.text": ((latest.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(latest.attachments)).slice(0, 200),
+              "lastWhatsAppMessage.at": latest.approvedAt || latest.createdAt,
+              "lastWhatsAppMessage.senderId": latest.sender,
+              "lastWhatsAppMessage.hasAttachments": Array.isArray(latest.attachments) && latest.attachments.length > 0,
+              "lastWhatsAppMessage.deleted": false,
+            }
+          : { lastWhatsAppMessage: null },
+      }, { timestamps: false });
+    } else if (message.isGroupMessage && message.groupId) {
+      const groupDoc = await WhatsAppGroup.findById(message.groupId).select("lastMessageIsReaction");
+      if (!groupDoc?.lastMessageIsReaction) return;
+      const latest = await WhatsAppMessage.findOne({
+        groupId: message.groupId,
+        isGroupMessage: true,
+        deletedForEveryone: { $ne: true },
+      }).sort({ createdAt: -1 }).select("note attachments sender createdAt approvedAt");
+      await WhatsAppGroup.findByIdAndUpdate(message.groupId, {
+        $set: latest
+          ? {
+              lastMessage: (latest.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(latest.attachments),
+              lastMessageAt: latest.approvedAt || latest.createdAt,
+              lastMessageBy: latest.sender,
+              lastMessageDeleted: false,
+              lastMessageIsReaction: false,
+              lastMessageReactionEmoji: null,
+              lastMessageReactorId: null,
+              lastMessageReactorName: null,
+            }
+          : { lastMessage: null, lastMessageIsReaction: false },
+      }, { timestamps: false });
+    }
+  } catch (err) {
+    console.error("❌ syncReactionPreview error:", err);
+  }
+}
+
 // POST /:messageId/reactions  — toggle a reaction on a message
 exports.toggleMessageReaction = async (req, res) => {
   try {
@@ -5527,6 +5675,16 @@ exports.toggleMessageReaction = async (req, res) => {
       await employee.save();
     }
 
+    // WhatsApp-style "<reactor> reacted <emoji> to: \"...\"" sidebar preview.
+    // `text` is the quoted reacted-to message, truncated short like WhatsApp.
+    const quotedRaw =
+      (message.note || "").replace(/<[^>]*>/g, "").trim() ||
+      attachmentPreviewLabel(message.attachments);
+    const quotedText =
+      quotedRaw.length > 40 ? `${quotedRaw.slice(0, 40)}…` : quotedRaw;
+
+    await syncReactionPreview({ message, wasAdded, emoji, employee, quotedText });
+
     // Emit real-time update to all participants via socket.
     // ⚠️ Send plain strings, not Mongoose ObjectIds: socket.io serializes
     // ObjectIds (which wrap a Buffer) as binary, so the client receives a
@@ -5541,6 +5699,22 @@ exports.toggleMessageReaction = async (req, res) => {
       io.emit("message:reaction", {
         messageId: String(message._id),
         reactions: plainReactions,
+        action: wasAdded ? "added" : "removed",
+        emoji,
+        reactorId: String(employee._id),
+        reactorName: employee.name || "",
+        quotedText,
+        clientId: message.client ? String(message.client) : null,
+        groupId: message.groupId ? String(message.groupId) : null,
+        clientEmployeeId: message.isClientEmployeeMessage
+          ? String(
+              message.clientEmployeeId?.clientEmployeeId ||
+                message.clientEmployeeId ||
+                "",
+            )
+          : null,
+        isGroupMessage: !!message.isGroupMessage,
+        isClientEmployeeMessage: !!message.isClientEmployeeMessage,
       });
     }
 

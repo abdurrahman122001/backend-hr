@@ -63,6 +63,18 @@ const WhatsAppGroupSchema = new Schema(
       ref: "Employee",
       default: null,
     },
+    // WhatsApp-style "You reacted 👍 to: ..." sidebar preview. When true,
+    // `lastMessage` holds the quoted (reacted-to) text, not the reaction
+    // itself — the "<reactor> reacted <emoji> to:" prefix is rendered per
+    // viewer (getChatList knows whether the viewer is the reactor).
+    lastMessageIsReaction: { type: Boolean, default: false },
+    lastMessageReactionEmoji: { type: String, default: null },
+    lastMessageReactorId: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    lastMessageReactorName: { type: String, default: null },
   },
   { timestamps: true }
 );
