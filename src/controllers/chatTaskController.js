@@ -55,7 +55,7 @@ const postTaskThreadEntry = async (req, task, content) => {
     task?.sourceMessageId || task?.announcementMessageId;
   if (!parentMessageId) return;
   try {
-    const { Message } = require("../models/Chat");
+    const { Message, Conversation, Space } = require("../models/Chat");
     const ChatThread = require("../models/ChatThread");
     const parentMsg = await Message.findById(parentMessageId).select(
       "conversation space"
@@ -82,11 +82,30 @@ const postTaskThreadEntry = async (req, task, content) => {
       const spaceId = parentMsg.space ? String(parentMsg.space) : null;
       let target = io.to(`conversation_${conversationId}`);
       if (spaceId) target = target.to(`space_${spaceId}`);
-      target.emit("chat_thread_updated", {
+      const threadUpdate = {
         parentMessageId: String(parentMessageId),
         conversationId,
         spaceId,
         lastReply: populatedReply,
+      };
+      target.emit("chat_thread_updated", threadUpdate);
+
+      // The persistent application rail is only in each user's personal
+      // socket room. Mirror thread changes there so its aggregate Chat badge
+      // updates even when the full Google Chat page is not mounted.
+      const audience = spaceId
+        ? await Space.findById(spaceId).select("members").lean()
+        : await Conversation.findById(conversationId)
+            .select("participants")
+            .lean();
+      const memberIds = spaceId
+        ? audience?.members || []
+        : audience?.participants || [];
+      memberIds.forEach((memberId) => {
+        io.to(`user_${String(memberId)}`).emit(
+          "chat_thread_updated",
+          threadUpdate,
+        );
       });
     }
   } catch (e) {

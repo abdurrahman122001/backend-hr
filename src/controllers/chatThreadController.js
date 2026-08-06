@@ -12,6 +12,27 @@ function getIO(req) {
   return req.app.get("io");
 }
 
+// The main application rail keeps a small, long-lived socket in the personal
+// `user_<id>` room. Unlike the full Google Chat page, it does not join every
+// conversation/space room, so thread activity must also reach this room for
+// its unread badge to update immediately.
+async function emitThreadUpdateToMembers(io, parentMsg, payload) {
+  if (!io || !parentMsg) return;
+
+  const audience = parentMsg.space
+    ? await Space.findById(parentMsg.space).select("members").lean()
+    : await Conversation.findById(parentMsg.conversation)
+        .select("participants")
+        .lean();
+  const memberIds = parentMsg.space
+    ? audience?.members || []
+    : audience?.participants || [];
+
+  memberIds.forEach((memberId) => {
+    io.to(`user_${String(memberId)}`).emit("chat_thread_updated", payload);
+  });
+}
+
 /**
  * Utility to group flat reactions into the structure expected by the frontend
  */
@@ -155,12 +176,14 @@ exports.createThreadReply = async (req, res) => {
       if (spaceId) {
         threadUpdateTarget = threadUpdateTarget.to(`space_${spaceId}`);
       }
-      threadUpdateTarget.emit("chat_thread_updated", {
+      const threadUpdate = {
         parentMessageId,
         conversationId,
         spaceId,
         lastReply: populatedReply,
-      });
+      };
+      threadUpdateTarget.emit("chat_thread_updated", threadUpdate);
+      await emitThreadUpdateToMembers(io, parentMsg, threadUpdate);
 
       // Send mention notifications
       if (finalMentions.length > 0) {
@@ -512,6 +535,14 @@ exports.markThreadAsRead = async (req, res) => {
         },
       }
     );
+
+    // Update this employee's Chat rail immediately, including their other
+    // open tabs. The thread UI clears optimistically, but the rail has its own
+    // aggregate count and needs the server-confirmed refresh signal.
+    const io = getIO(req);
+    io?.to(`user_${String(employeeId)}`).emit("chat_thread_read", {
+      parentMessageId: String(parentMessageId),
+    });
 
     res.json({ success: true });
   } catch (error) {

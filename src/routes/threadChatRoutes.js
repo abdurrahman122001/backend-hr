@@ -23,6 +23,10 @@ router.get("/threads/:threadId/unread-count", empAuth, threadChatController.getU
 // Bulk unread counts for many threads (email list red-dot indicator)
 router.post("/threads/unread-counts", empAuth, threadChatController.getUnreadCountsBulk);
 
+// Global unread count across every thread — SendQuery rail badge. Counts
+// threads-with-unread, mirroring /chat/conversations/unread/count.
+router.get("/unread/count", empAuth, threadChatController.getAllThreadsUnreadCount);
+
 // Edit a message
 router.patch("/messages/:id/edit", empAuth, threadChatController.editMessage);
 
@@ -49,6 +53,10 @@ router.get("/threads/:threadId/participants", empAuth, threadChatController.getT
 
 // Mark thread as read
 router.post("/threads/:threadId/read", empAuth, threadChatController.markThreadAsRead);
+
+// Mark one message as read — ThreadSideChat calls this for messages read while
+// the panel is already open. Was missing, so those reads never persisted.
+router.post("/messages/:id/read", empAuth, threadChatController.markMessageAsRead);
 
 // Search in thread
 router.get("/threads/:threadId/search", empAuth, threadChatController.searchInThread);
