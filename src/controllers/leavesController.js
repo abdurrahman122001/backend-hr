@@ -6,12 +6,14 @@ const { eachDayOfInterval, format } = require('date-fns');
 
 exports.requestLeave = async (req, res) => {
   try {
-    const { employeeId, date, daysRequested, endDate } = req.body;
+    const { employeeId, date, daysRequested, endDate, reason, requestText } = req.body;
     const leave = await LeaveRequest.create({
       employee:     employeeId,
       date,
       daysRequested,
-      endDate
+      endDate,
+      requestText:  reason ?? requestText ?? "",
+      noticeDays:   0,
     });
     res.json(leave);
   } catch (err) {
@@ -137,6 +139,7 @@ exports.decideLeave = async (req, res) => {
             status:     'Absent',
             leaveType:  'Paid',
             markedByHR: true,
+            notes:      leave.requestText || null,
           },
           { upsert: true, new: true }
         );
