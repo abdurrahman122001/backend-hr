@@ -137,7 +137,7 @@ cron.schedule("45 23 * * *", async () => {
                             status: attendanceStatus,
                             leaveType: finalIsPaid ? "Paid" : "Unpaid",
                             markedByHR: true,
-                            notes: (leave.approvalNotes || "Auto-sync leave") + (dateEntry.type !== "full" ? ` (${dateEntry.type})` : ""),
+                            notes: leave.reason || null,
                             createdBy: leave.approvedBy || ownerId,
                         }
                     },

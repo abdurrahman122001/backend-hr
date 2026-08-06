@@ -121,6 +121,7 @@ const parseGmailStyleSearch = (rawQuery = "") => {
     from: [],
     to: [],
     subject: "",
+    filename: "",
     excluded: [],
     scope: "",
     hasAttachments: null,
@@ -148,6 +149,12 @@ const parseGmailStyleSearch = (rawQuery = "") => {
   parsed.from = takeOperators("from");
   parsed.to = takeOperators("to");
   parsed.subject = takeOperators("subject").join(" ").trim();
+  parsed.filename = [
+    ...takeOperators("filename"),
+    ...takeOperators("attachment"),
+  ]
+    .join(" ")
+    .trim();
   parsed.scope = (takeOperators("in").pop() || "").toLowerCase();
 
   const larger = takeOperators("larger").pop();
@@ -3359,31 +3366,6 @@ exports.searchMessages = async function searchMessages(req, res) {
       q.$or = [{ receiver: receiver }, { receiver: { $in: [receiver] } }];
     }
 
-    // 🛡️ SEARCH VISIBILITY — participant-only.
-    // A regular employee can only search emails they are a participant of
-    // (sender or receiver). This is enforced UNCONDITIONALLY — passing
-    // ?sender=/&receiver= no longer bypasses the scope, and neither the
-    // hierarchy-junior nor shared-client visibility widens search results.
-    // Only owners and CRM-access holders keep org-wide search.
-    const currentEmployeeId = req.employee?._id;
-    const currentUserRole = normalizeRole(req.employee?.role || "");
-    const isPrivilegedSearcher =
-      currentUserRole === "owner" || (await hasCrmAccess(req.employee));
-
-    if (currentEmployeeId && !isPrivilegedSearcher) {
-      const me = oid(String(currentEmployeeId));
-      const participantFilter = {
-        $or: [{ sender: me }, { receiver: me }, { receiver: { $in: [me] } }],
-      };
-      q.$and = q.$and || [];
-      // Preserve any $or already built (e.g. the receiver param filter).
-      if (q.$or) {
-        q.$and.push({ $or: q.$or });
-        delete q.$or;
-      }
-      q.$and.push(participantFilter);
-    }
-
     // ✅ Apply visibility rules
     const qFinal = await applyVisibility(q, req);
 
@@ -3409,6 +3391,10 @@ exports.searchMessages = async function searchMessages(req, res) {
           { clientEmail: pattern },
           { "businesses.email": pattern },
           { clientName: pattern },
+          { legalBusinessName: pattern },
+          { dba: pattern },
+          { "companyEmployees.email": pattern },
+          { "companyEmployees.name": pattern },
         ],
       };
       if (req.employee?.owner) clientQuery.owner = req.employee.owner;
@@ -3417,6 +3403,25 @@ exports.searchMessages = async function searchMessages(req, res) {
         .limit(50)
         .lean();
       return clients.map((c) => c._id);
+    };
+
+    const resolveEmployeeIds = async (value) => {
+      const term = String(value || "").trim();
+      if (!term) return [];
+      const pattern = new RegExp(escapeSearchRegex(term), "i");
+      const employeeQuery = {
+        $or: [
+          { companyEmail: pattern },
+          { email: pattern },
+          { name: pattern },
+        ],
+      };
+      if (qFinal.owner) employeeQuery.owner = qFinal.owner;
+      const employees = await Employee.find(employeeQuery)
+        .select("_id")
+        .limit(50)
+        .lean();
+      return employees.map((e) => e._id);
     };
 
     const resolveEmployeeClauses = async (values, direction) => {
@@ -3476,6 +3481,14 @@ exports.searchMessages = async function searchMessages(req, res) {
         })),
       });
     }
+    if (parsedSearch.filename) {
+      const filenameWords = parsedSearch.filename.split(/\s+/).filter(Boolean);
+      addAndCondition({
+        $and: filenameWords.map((word) => ({
+          "attachments.originalName": { $regex: escapeSearchRegex(word), $options: "i" },
+        })),
+      });
+    }
     if (parsedSearch.unread === true && currentEmployeeId) {
       addAndCondition({ "readBy.employee": { $ne: currentEmployeeId } });
     } else if (parsedSearch.unread === false && currentEmployeeId) {
@@ -3528,11 +3541,15 @@ exports.searchMessages = async function searchMessages(req, res) {
     if (participantEmail && participantEmail.trim()) {
       const escapeParticipantRegex = (s) =>
         s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const participantTerm = participantEmail.trim();
       const participantPattern = new RegExp(
-        `^${escapeParticipantRegex(participantEmail.trim())}$`,
+        escapeParticipantRegex(participantTerm),
         "i",
       );
-      const participantClientIds = await resolveClientIds(participantEmail);
+      const [participantClientIds, participantEmployeeIds] = await Promise.all([
+        resolveClientIds(participantTerm),
+        resolveEmployeeIds(participantTerm),
+      ]);
       qFinal.$and = qFinal.$and || [];
       qFinal.$and.push({
         $or: [
@@ -3545,6 +3562,12 @@ exports.searchMessages = async function searchMessages(req, res) {
           ...(participantClientIds.length
             ? [{ client: { $in: participantClientIds } }]
             : []),
+          ...(participantEmployeeIds.length
+            ? [
+                { sender: { $in: participantEmployeeIds } },
+                { receiver: { $in: participantEmployeeIds } },
+              ]
+            : []),
         ],
       });
     }
@@ -3554,12 +3577,8 @@ exports.searchMessages = async function searchMessages(req, res) {
       const searchTerm = effectiveSearchQuery;
       const searchConditions = [];
 
-      // Escape regex metacharacters — subjects like "Invoice (July)" or queries
-      // containing +?[] used to silently match nothing (or throw).
+      // Escape regex metacharacters
       const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      // Word-wise matching: every typed word must appear in the field, in any
-      // order and regardless of extra whitespace — a single whole-phrase regex
-      // missed exact subjects typed with different spacing/word order.
       const words = searchTerm.split(/\s+/).filter(Boolean).map(escapeRegex);
       const fieldMatchesAllWords = (field) => ({
         $and: words.map((w) => ({ [field]: { $regex: w, $options: "i" } })),
@@ -3578,14 +3597,16 @@ exports.searchMessages = async function searchMessages(req, res) {
       }
 
       if (searchFields.includes("all")) {
-        // A plain client's own address/name isn't stored as text on the
-        // message (only clientEmployeeEmail, for a company-employee
-        // sub-contact, is) — resolve it against ClientInfo so typing a
-        // client's email finds every message in that client's thread, sent
-        // and received, the same way from:/to: already does above.
-        const freeTextClientIds = await resolveClientIds(searchTerm);
+        const [freeTextClientIds, freeTextEmployeeIds] = await Promise.all([
+          resolveClientIds(searchTerm),
+          resolveEmployeeIds(searchTerm),
+        ]);
         if (freeTextClientIds.length) {
           searchConditions.push({ client: { $in: freeTextClientIds } });
+        }
+        if (freeTextEmployeeIds.length) {
+          searchConditions.push({ sender: { $in: freeTextEmployeeIds } });
+          searchConditions.push({ receiver: { $in: freeTextEmployeeIds } });
         }
         [
           "clientName",

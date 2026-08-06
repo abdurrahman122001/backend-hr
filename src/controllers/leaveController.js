@@ -540,9 +540,14 @@ async function revertLeaveAttendance(leave) {
       const attendance = await Attendance.findOne({ employee: employeeId, date: dateStr });
       if (!attendance) continue;
 
-      const wasAutoCreated = String(attendance.notes || "").includes(
-        "Auto-created from approved leave request",
-      );
+      // Leave attendance rows no longer carry a generated system note. A row
+      // without originalStatus was created by the leave approval itself;
+      // rows with originalStatus were existing attendance records that must be
+      // restored instead of deleted.
+      const wasAutoCreated =
+        !attendance.originalStatus &&
+        attendance.markedByHR === true &&
+        ["Paid", "Unpaid"].includes(attendance.leaveType);
 
       if (wasAutoCreated) {
         await Attendance.deleteOne({ _id: attendance._id });
@@ -1511,20 +1516,13 @@ exports.approveLeave = async (req, res) => {
           }
 
           // Special handling for absence justifications
-          const wasAbsent = attendance.status === "Absent";
-
           attendance.status = leaveStatus;
           attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
           attendance.markedByHR = true;
 
-          let updateNote = `Marked as ${leaveStatus} via approved leave request`;
-          if (leave.isAbsenceJustification && wasAbsent) {
-            updateNote = `Unexplained absence on ${dateStr} justified and converted to ${finalIsPaid ? "Paid" : "Unpaid"} ${leaveStatus}`;
-          }
-
-          attendance.notes = attendance.notes
-            ? `${attendance.notes}; ${updateNote}`
-            : updateNote;
+          // Keep only the employee's submitted reason on Attendance. Approval
+          // and policy details remain available in the leave workflow history.
+          attendance.notes = leave.reason || null;
 
           await attendance.save();
         } else {
@@ -1536,9 +1534,7 @@ exports.approveLeave = async (req, res) => {
             status: leaveStatus,
             leaveType: finalIsPaid ? "Paid" : "Unpaid",
             markedByHR: true,
-            notes: leave.isAbsenceJustification
-              ? `Auto-created from approved absence justification (${leaveStatus})`
-              : `Auto-created from approved leave request (${leaveStatus})`,
+            notes: leave.reason || null,
           });
           await attendance.save();
         }
