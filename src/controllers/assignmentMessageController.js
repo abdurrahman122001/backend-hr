@@ -542,9 +542,19 @@ async function applyVisibility(q, req) {
     ],
   };
 
-  // Handle specific scheduled fetch (e.g., from a scheduled list view)
+  // The Scheduled view is the author's own outbox: mail that has NOT been
+  // delivered yet, so only the person who scheduled it may see it. Falling back
+  // to `inboxVisibility` matched RECEIVERS and bypassed the sender-only rule
+  // declared in `scheduledVisibility` just above, exposing the subject, body and
+  // send time of mail that had not gone out. `scheduledBy` is included because
+  // a message can be scheduled on another employee's behalf.
+  //
+  // Kept identical to the copy in listAssignmentMessages.js — both files carry
+  // their own applyVisibility and this endpoint (/scheduled/all) uses this one.
   if (q.isScheduled === true && q.status === "scheduled") {
-    return { $and: [q, inboxVisibility] };
+    return {
+      $and: [q, { $or: [{ sender: me }, { scheduledBy: me }] }],
+    };
   }
 
   return { $and: [q, scheduledVisibility] };
@@ -1024,6 +1034,21 @@ const THREAD_ROUTING_FIELDS =
   "_id threadId sender receiver subject client role approvalStatus " +
   "isFromClient isFromCompanyEmployee clientEmployeeName clientEmployeeEmail clientName createdAt";
 
+// Is this employee part of the team that works this client? Assignment lives
+// per business (businesses[].assignedTo) and is mirrored onto the client-level
+// assignedTo; supervisedBy covers the seniors watching over it.
+async function isClientTeamMember(employeeId, clientId) {
+  if (!isObjId(employeeId) || !isObjId(clientId)) return false;
+  return !!(await ClientInfo.exists({
+    _id: clientId,
+    $or: [
+      { assignedTo: employeeId },
+      { supervisedBy: employeeId },
+      { "businesses.assignedTo": employeeId },
+    ],
+  }));
+}
+
 exports.createMessage = async function createMessage(req, res) {
   try {
     const {
@@ -1071,7 +1096,9 @@ exports.createMessage = async function createMessage(req, res) {
     // sender whose role is "Employee" had the context nulled and their reply
     // showed their own name instead of the company employee they addressed
     // it to. Gate on CRM access (or the legacy role) instead.
-    const senderCanActAsClient =
+    // CRM/manager authority applies to every client; the client's own team is
+    // added to it below, once the client this message belongs to is known.
+    const senderHasCrmAuthority =
       senderRole === "manager" || (await hasCrmAccess(req.employee));
 
     // Forwards must not inherit the original thread — keeping them private to
@@ -1168,6 +1195,22 @@ exports.createMessage = async function createMessage(req, res) {
         console.error("Error fetching thread messages:", err);
       }
     }
+
+    // Sending a client's mail out under the client's own identity (as the
+    // client, or as one of its contacts) is not a CRM-only power: the
+    // employees actually assigned to a client work its inbox and pick those
+    // same identities in the composer's "From". Scoped to the client this
+    // message belongs to — being on one client's team grants nothing on any
+    // other. The EmailDetail apps gate their "From" picker on the same rule,
+    // so an identity they offer is never silently dropped here.
+    const identityClientId =
+      (isObjId(client) && client) ||
+      originalMessage?.client ||
+      threadMessages.find((m) => m.client)?.client ||
+      null;
+    const senderCanActAsClient =
+      senderHasCrmAuthority ||
+      (await isClientTeamMember(sender, identityClientId));
 
     let inheritedIsFromClient = false;
     let inheritedIsFromCompanyEmployee = false;
@@ -1356,17 +1399,30 @@ exports.createMessage = async function createMessage(req, res) {
       }
 
       if (
-        inheritedIsFromClient ||
-        inheritedIsFromCompanyEmployee ||
-        ((isFromClient || isFromCompanyEmployee) &&
-          (senderRole === "manager" || senderHasCrmAccess))
+        (senderRole === "manager" || senderHasCrmAccess) &&
+        (inheritedIsFromClient ||
+          inheritedIsFromCompanyEmployee ||
+          isFromClient ||
+          isFromCompanyEmployee)
       ) {
         // Client-originated emails are outside the approval flow entirely —
         // store null (like inbound IMAP client emails), not "approved".
-        // The raw body flags only count for manager/CRM-access senders: the
-        // reply composer inherits isFromClient from the original message, so
-        // an ungated check let a junior's reply to a client-inbound email
-        // skip the needs_approval → pending supervision path below.
+        //
+        // The CRM/manager gate applies to the INHERITED flags too, not just the
+        // raw body ones. `inheritedIsFromClient` is set whenever
+        // `senderCanActAsClient` holds, and that is true for any client TEAM
+        // MEMBER (ClientInfo.assignedTo / supervisedBy / businesses.assignedTo)
+        // — i.e. the assigned employee. Composing to a client sends
+        // isFromClient/isFromCompanyEmployee, so the assigned employee's own
+        // mail landed here, got approvalStatus null, and skipped the
+        // needs_approval → pending path below AND the hierarchy routing (which
+        // only runs when approvalStatus === "pending"). It went straight out.
+        //
+        // Nothing real is lost by gating: inbound client mail never reaches
+        // createMessage — emailReceiverService/clientEmailService write those
+        // documents directly — so inside this controller these flags only ever
+        // mean "the composer is writing in the client's identity", which is a
+        // CRM/manager capability.
         approvalStatus = null;
       } else if (clientSupervisionMode === "needs_approval" &&
                  (isSenderAssigned || senderRole === "employee")) {
@@ -3187,10 +3243,13 @@ exports.createDraft = async function createDraft(req, res) {
 
     const senderDoc = await Employee.findById(sender).select("_id role").lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
-    // Same reasoning as the send path: a CRM-access sender must keep the
-    // company-employee context they explicitly chose, whatever their role.
+    // Same reasoning as the send path: a CRM-access sender — or the client's
+    // own assigned/supervising team — must keep the company-employee context
+    // they explicitly chose, whatever their role.
     const senderCanActAsClient =
-      senderRole === "manager" || (await hasCrmAccess(req.employee));
+      senderRole === "manager" ||
+      (await hasCrmAccess(req.employee)) ||
+      (await isClientTeamMember(sender, isObjId(client) ? client : null));
 
     // Resolve client employee tracking fields — only managers may set them
     let inheritedIsFromClient = false;
@@ -3636,8 +3695,21 @@ exports.sendDraft = async function sendDraft(req, res) {
       targetSupervisor = null;
 
       // Client/company-originated mail is also outside the approval workflow,
-      // so use null just like createMessage does.
-      if (msg.isFromClient || msg.isFromCompanyEmployee) {
+      // so use null just like createMessage does — including its CRM/manager
+      // gate. On a COMPOSED message these flags only mean "the author wrote in
+      // the client's identity", which is a CRM/manager capability; inbound
+      // client mail never passes through here. Ungated, an assigned employee
+      // could save a draft to their own client (or schedule one) and have it go
+      // straight out, skipping both the needs_approval → pending branch below
+      // and the hierarchy routing it gates.
+      const draftSenderDoc = await Employee.findById(msg.sender)
+        .select("_id role")
+        .lean();
+      const draftSenderIsCrm =
+        normalizeRole(draftSenderDoc?.role || "") === "manager" ||
+        (await hasCrmAccess(req.employee));
+
+      if (draftSenderIsCrm && (msg.isFromClient || msg.isFromCompanyEmployee)) {
         msg.approvalStatus = null;
       } else if (msg.client) {
         const clientDoc = await ClientInfo.findById(msg.client).lean();

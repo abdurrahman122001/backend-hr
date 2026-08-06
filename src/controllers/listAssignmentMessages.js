@@ -431,9 +431,21 @@ async function applyVisibility(q, req, filterParam) {
     ],
   };
 
-  // Handle specific scheduled fetch
+  // The Scheduled folder is the author's own outbox: mail that has NOT been
+  // delivered yet, so only the person who scheduled it may see it.
+  //
+  // This used to fall back to `inboxVisibility`, which matches RECEIVERS. That
+  // bypassed the sender-only rule declared in `scheduledVisibility` just above
+  // and handed every addressee — and, for CRM-access holders, the whole org —
+  // the subject, body and send time of mail that had not gone out yet.
+  //
+  // `scheduledBy` is included alongside `sender` because a message can be
+  // scheduled on someone else's behalf (rescheduleMessage sets scheduledBy to
+  // the acting employee while `sender` stays the original author).
   if (q.isScheduled === true && q.status === "scheduled") {
-    return { $and: [q, inboxVisibility] };
+    return {
+      $and: [q, { $or: [{ sender: me }, { scheduledBy: me }] }],
+    };
   }
 
   return { $and: [q, scheduledVisibility] };
@@ -591,6 +603,31 @@ exports.getMessage = async function getMessage(req, res) {
           ? msg.receiver
           : msg.receiver?._id?.toString(),
       ];
+    }
+
+    // 🕒 A scheduled message that has NOT gone out yet belongs to its author
+    // alone. This gate runs before every rule below because all of them would
+    // otherwise expose undelivered mail: recipients are already stored in
+    // `receiver[]` at schedule time (so the participant check right below
+    // passes), and the org-wide clause further down explicitly accepted
+    // status "scheduled". Mirrors the Scheduled-folder rule in applyVisibility.
+    //
+    // Once scheduledFor has passed the message is treated as delivered — the
+    // same boundary `scheduledVisibility` uses — so a lagging cron run never
+    // hides mail whose send time has already arrived.
+    if (
+      msg.status === "scheduled" &&
+      msg.scheduledFor &&
+      new Date(msg.scheduledFor) > new Date()
+    ) {
+      const scheduledById = String(
+        msg.scheduledBy?._id || msg.scheduledBy || ""
+      );
+      if (userId !== senderId && userId !== scheduledById) {
+        return res
+          .status(403)
+          .json({ error: "You don't have permission to view this message" });
+      }
     }
 
     // Check basic participant access
@@ -2322,7 +2359,7 @@ exports.getClientThreads = async function getClientThreads(req, res) {
 exports.getMessagesByThread = async function getMessagesByThread(req, res) {
   try {
     const { threadId } = req.params;
-    const { limit = 50, page = 1 } = req.query;
+    const { limit = 50, page = 1, clientId: requestedClientId } = req.query;
 
     if (!threadId) {
       return res.status(400).json({ error: "Thread ID is required" });
@@ -2330,6 +2367,13 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
 
     // Build base query
     const q = { threadId };
+
+    // A legacy thread id may have been reused across clients. When the email
+    // detail view supplies its client, preserve that boundary in the query so
+    // only that client and its company employees appear in the conversation.
+    if (requestedClientId && isObjId(requestedClientId)) {
+      q.client = requestedClientId;
+    }
 
     // Apply visibility rules
     const qFinal = await applyVisibility(q, req);

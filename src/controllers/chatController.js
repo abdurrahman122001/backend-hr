@@ -64,7 +64,7 @@ const sendMentionNotifications = async (
   }
 };
 
-const processMentions = async (content, senderId) => {
+const processMentions = async (content, senderId, allMemberIds = []) => {
   if (!content) return [];
 
   const mentions = [];
@@ -74,7 +74,7 @@ const processMentions = async (content, senderId) => {
   const addMention = async (userId, mentionText) => {
     if (
       !userId ||
-      userId === senderId.toString() ||
+      String(userId) === String(senderId) ||
       !mongoose.Types.ObjectId.isValid(userId) ||
       seen.has(String(userId))
     ) {
@@ -107,6 +107,19 @@ const processMentions = async (content, senderId) => {
     /data-mention-id=["']([^"']+)["'][^>]*?(?:data-mention-name=["']([^"']+)["'])?/g;
   while ((match = htmlRegex.exec(content)) !== null) {
     await addMention(match[1], match[2]);
+  }
+
+  // `@all` is represented by the picker as a normal mention chip with the
+  // reserved id __all__. Expand it only against this chat's members, so it can
+  // never notify employees outside the current space/group.
+  const hasAllMention =
+    /data-mention-id=["']__all__["']/i.test(content) ||
+    /@\[all\]\(__all__\)/i.test(content);
+  if (hasAllMention && Array.isArray(allMemberIds)) {
+    for (const member of allMemberIds) {
+      const memberId = member?._id || member;
+      await addMention(memberId, "@all");
+    }
   }
 
   return mentions;
@@ -1129,7 +1142,7 @@ exports.sendMessage = async (req, res) => {
         finalMessageType = "file";
       }
     }
-    const mentions = await processMentions(content, req.employee._id);
+    const mentions = await processMentions(content, req.employee._id, conversation.participants);
 
     // Prepare message data
     const messageData = {
@@ -1589,7 +1602,7 @@ exports.sendDirectMessage = async (req, res) => {
       (p) => p.toString() !== req.employee._id.toString()
     );
 
-    const mentions = await processMentions(content, req.employee._id);
+    const mentions = await processMentions(content, req.employee._id, conversation.participants);
 
     // Create message with mentions
     const message = new Message({
@@ -3108,7 +3121,7 @@ exports.sendSpaceMessage = async (req, res) => {
       .filter((member) => member._id.toString() !== req.employee._id.toString())
       .map((member) => member._id);
 
-    const mentions = await processMentions(content, req.employee._id);
+    const mentions = await processMentions(content, req.employee._id, space.members);
 
     // Create message with mentions
     const message = new Message({

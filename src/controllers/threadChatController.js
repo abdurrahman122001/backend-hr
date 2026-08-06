@@ -1,12 +1,79 @@
 const ThreadChatMessage = require("../models/ThreadChatMessage");
 const AssignmentMessage = require("../models/AssignmentMessage");
 const Employee = require("../models/Employees");
+const ClientInfo = require("../models/ClientInfo");
 const mongoose = require("mongoose");
 const path = require("path");
 
 // Utility functions
 const isObjId = (v) => mongoose.isValidObjectId(v);
 const oid = (v) => mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
+
+function buildIdVariants(value) {
+  const variants = [];
+  const seen = new Set();
+
+  const pushValue = (candidate) => {
+    if (candidate == null) return;
+    const str = String(candidate);
+    if (!seen.has(str)) {
+      seen.add(str);
+      variants.push(candidate);
+      variants.push(str);
+    }
+    if (isObjId(str)) {
+      const objectId = oid(str);
+      const objectIdStr = objectId ? String(objectId) : null;
+      if (objectIdStr && !seen.has(objectIdStr)) {
+        seen.add(objectIdStr);
+        variants.push(objectId);
+      }
+    }
+  };
+
+  if (Array.isArray(value)) {
+    value.forEach(pushValue);
+  } else {
+    pushValue(value);
+  }
+
+  return variants;
+}
+
+function buildRecipientMatch(userId) {
+  const variants = buildIdVariants(userId);
+  return {
+    $or: [
+      { receiver: { $in: variants } },
+    ],
+  };
+}
+
+function buildParticipantMatch(userId) {
+  const variants = buildIdVariants(userId);
+  return {
+    $or: [
+      { sender: { $in: variants } },
+      { receiver: { $in: variants } },
+    ],
+  };
+}
+
+function normalizeReceiverIds(receiver) {
+  if (!receiver) return [];
+  const values = Array.isArray(receiver) ? receiver : [receiver];
+
+  return values
+    .map((id) => {
+      if (!id) return null;
+      const idStr = String(id);
+      if (isObjId(id) || isObjId(idStr)) {
+        return oid(idStr);
+      }
+      return null;
+    })
+    .filter(Boolean);
+}
 
 function buildPublicUrl(req, filename) {
   const base = process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
@@ -32,13 +99,7 @@ async function applyVisibility(q, req) {
   const ownerId = req.employee?.owner ? oid(req.employee.owner) : null;
 
   // Base filter: user must be participant
-  const participantFilter = {
-    $or: [
-      { sender: me },
-      { receiver: me },
-      { receiver: { $in: [me] } }
-    ]
-  };
+  const participantFilter = buildParticipantMatch(me);
 
   const visibilityQuery = {
     $and: [participantFilter]
@@ -74,8 +135,8 @@ async function emitToThreadParticipants(io, message, eventName = "new_thread_cha
 
     if (!populatedMessage) return;
 
-    // Get all participants in this thread
-    const participants = await ThreadChatMessage.getThreadParticipants(populatedMessage.threadId);
+    // Get all participants in this thread, including assignment and client-based participants
+    const participants = await getImmediateThreadParticipants(populatedMessage.threadId);
 
     // Also add current message participants
     const currentParticipants = new Set();
@@ -123,7 +184,7 @@ async function emitToThreadParticipants(io, message, eventName = "new_thread_cha
 }
 
 // NEW: Get immediate thread participants with assignment message context
-async function getImmediateThreadParticipants(threadId, req) {
+async function getImmediateThreadParticipants(threadId) {
   try {
     // First, get the main assignment message to get initial participants
     const assignmentMessage = await AssignmentMessage.findOne({ threadId })
@@ -194,6 +255,39 @@ async function getImmediateThreadParticipants(threadId, req) {
       });
     }
 
+    // Include assigned and supervised employees from the client, if available.
+    if (assignmentMessage.client) {
+      const client = await ClientInfo.findById(assignmentMessage.client)
+        .select("assignedTo supervisedBy")
+        .populate([
+          { path: "assignedTo", select: "_id name companyEmail role photographUrl" },
+          { path: "supervisedBy", select: "_id name companyEmail role photographUrl" },
+        ]);
+
+      if (client) {
+        const addEmployee = (emp) => {
+          if (emp && emp._id && !participants.has(emp._id.toString())) {
+            participants.set(emp._id.toString(), {
+              _id: emp._id,
+              name: emp.name,
+              companyEmail: emp.companyEmail,
+              role: emp.role,
+              photographUrl: emp.photographUrl,
+              isFromClientAssignment: true
+            });
+          }
+        };
+
+        if (Array.isArray(client.assignedTo)) {
+          client.assignedTo.forEach(addEmployee);
+        }
+
+        if (Array.isArray(client.supervisedBy)) {
+          client.supervisedBy.forEach(addEmployee);
+        }
+      }
+    }
+
     return Array.from(participants.values());
 
   } catch (error) {
@@ -232,37 +326,16 @@ exports.createThreadChatMessage = async function (req, res) {
     // Process receivers
     let receivers = [];
     if (receiver) {
-      if (Array.isArray(receiver)) {
-        receivers = receiver.filter(id => isObjId(id)).map(String);
-      } else if (isObjId(receiver)) {
-        receivers = [String(receiver)];
-      }
+      const rawReceivers = Array.isArray(receiver) ? receiver : [receiver];
+      receivers = normalizeReceiverIds(rawReceivers);
     }
 
-    // If no receivers specified, get from thread
+    // If no receivers specified, use the thread's immediate participants.
     if (receivers.length === 0) {
-      // Get participants from thread
-      const threadMessages = await AssignmentMessage.find({ threadId })
-        .select('sender receiver')
-        .limit(10);
-
-      const threadParticipants = new Set();
-
-      threadMessages.forEach(msg => {
-        if (msg.sender && String(msg.sender) !== String(sender)) {
-          threadParticipants.add(String(msg.sender));
-        }
-
-        if (msg.receiver && Array.isArray(msg.receiver)) {
-          msg.receiver.forEach(rec => {
-            if (String(rec) !== String(sender)) {
-              threadParticipants.add(String(rec));
-            }
-          });
-        }
-      });
-
-      receivers = Array.from(threadParticipants);
+      const participants = await getImmediateThreadParticipants(threadId);
+      receivers = participants
+        .map((participant) => String(participant._id))
+        .filter((participantId) => participantId && participantId !== String(sender));
     }
 
     // Remove sender from receivers
@@ -351,7 +424,7 @@ exports.getThreadMessages = async function (req, res) {
     }
 
     // Get immediate participants first
-    const participants = await getImmediateThreadParticipants(threadId, req);
+    const participants = await getImmediateThreadParticipants(threadId);
 
     // Build query
     const q = {
@@ -396,6 +469,7 @@ exports.getThreadMessages = async function (req, res) {
           { path: "replyTo", select: "_id content sender createdAt" },
           { path: "replyTo.sender", select: "_id name companyEmail" },
           { path: "attachments.uploadedBy", select: "_id name companyEmail" },
+          { path: "reactions.employee", select: "_id name companyEmail" },
         ])
         .lean(),
       ThreadChatMessage.countDocuments(qFinal)
@@ -412,16 +486,41 @@ exports.getThreadMessages = async function (req, res) {
         { _id: { $in: unreadMessages.map(msg => msg._id) } },
         { $push: { readBy: { employee: currentUser, readAt: new Date() } } }
       );
+
+      // Opening a thread is a read — drop this user's rail badge right away
+      // instead of waiting for the next poll.
+      const io = getIO(req);
+      if (io) {
+        io.to(`employee_${currentUser}`).emit("thread_chat_read", {
+          threadId,
+          userId: String(currentUser),
+          timestamp: new Date()
+        });
+      }
     }
 
+    // `messages` is a .lean() snapshot taken BEFORE the updateMany above, so
+    // the rows we just marked read still look unread in it. Report them as read
+    // — otherwise the panel loads showing an unread count for messages the
+    // server already considers read, and only self-corrects by firing one
+    // mark-read request per message.
+    const justMarkedRead = new Set(unreadMessages.map(msg => String(msg._id)));
+
     // Format response
-    const formattedMessages = messages.map(msg => ({
-      ...msg,
-      isMe: msg.sender._id.toString() === currentUser.toString(),
-      isRead: msg.readBy.some(read => read.employee.toString() === currentUser.toString()),
-      readCount: msg.readBy.length,
-      reactionCount: msg.reactions.length
-    })).reverse(); // Reverse to show oldest first for display
+    const formattedMessages = messages.map(msg => {
+      const readNow = justMarkedRead.has(String(msg._id));
+      return {
+        ...msg,
+        // sender populates to null if that employee was deleted — reading
+        // ._id off it blew up the whole thread load with a 500.
+        isMe: String(msg.sender?._id || msg.sender || "") === String(currentUser),
+        isRead:
+          readNow ||
+          msg.readBy.some(read => read.employee.toString() === currentUser.toString()),
+        readCount: msg.readBy.length + (readNow ? 1 : 0),
+        reactionCount: msg.reactions.length
+      };
+    }).reverse(); // Reverse to show oldest first for display
 
     res.json({
       success: true,
@@ -470,45 +569,7 @@ exports.getThreadInfo = async function (req, res) {
       return res.status(404).json({ error: "Thread not found" });
     }
 
-    // Get immediate participants (fast version)
-    const participants = [];
-
-    // Add sender
-    if (thread.sender) {
-      participants.push({
-        _id: thread.sender._id,
-        name: thread.sender.name,
-        companyEmail: thread.sender.companyEmail,
-        role: thread.sender.role,
-        photographUrl: thread.sender.photographUrl,
-        isFromAssignment: true
-      });
-    }
-
-    // Add receivers
-    if (Array.isArray(thread.receiver)) {
-      thread.receiver.forEach(receiver => {
-        if (receiver && receiver._id) {
-          participants.push({
-            _id: receiver._id,
-            name: receiver.name,
-            companyEmail: receiver.companyEmail,
-            role: receiver.role,
-            photographUrl: receiver.photographUrl,
-            isFromAssignment: true
-          });
-        }
-      });
-    }
-
-    // Remove duplicates
-    const uniqueParticipants = participants.reduce((acc, current) => {
-      const existing = acc.find(item => item._id.toString() === current._id.toString());
-      if (!existing) {
-        acc.push(current);
-      }
-      return acc;
-    }, []);
+    const uniqueParticipants = await getImmediateThreadParticipants(threadId);
 
     // Get latest message if exists
     let latestMessage = null;
@@ -592,7 +653,7 @@ exports.getThreadParticipantsImmediate = async function (req, res) {
       return res.status(400).json({ error: "Thread ID is required" });
     }
 
-    const participants = await getImmediateThreadParticipants(threadId, req);
+    const participants = await getImmediateThreadParticipants(threadId);
 
     res.json({
       success: true,
@@ -615,18 +676,12 @@ exports.getThreadParticipants = async function (req, res) {
       return res.status(400).json({ error: "Thread ID is required" });
     }
 
-    const participants = await ThreadChatMessage.getThreadParticipants(threadId);
-
-    // Get employee details
-    const employeeDetails = await Employee.find(
-      { _id: { $in: participants } },
-      "_id name companyEmail role photographUrl"
-    );
+    const participants = await getImmediateThreadParticipants(threadId);
 
     res.json({
       success: true,
-      data: employeeDetails,
-      count: employeeDetails.length
+      data: participants,
+      count: participants.length
     });
 
   } catch (e) {
@@ -933,12 +988,8 @@ exports.markThreadAsRead = async function (req, res) {
     const result = await ThreadChatMessage.updateMany(
       {
         threadId,
-        'readBy.employee': { $ne: currentUser },
-        $or: [
-          { sender: currentUser },
-          { receiver: currentUser },
-          { receiver: { $in: [currentUser] } }
-        ],
+        'readBy.employee': { $nin: buildIdVariants(currentUser) },
+        ...buildParticipantMatch(currentUser),
         isDeleted: false
       },
       {
@@ -956,7 +1007,14 @@ exports.markThreadAsRead = async function (req, res) {
     if (io) {
       io.to(`thread_${threadId}`).emit("thread_marked_as_read", {
         threadId,
-        userId: currentUser,
+        userId: String(currentUser),
+        timestamp: new Date()
+      });
+      // Also tell this user's other tabs/rails: they aren't necessarily joined
+      // to the thread room, but their unread badge still has to drop.
+      io.to(`employee_${currentUser}`).emit("thread_chat_read", {
+        threadId,
+        userId: String(currentUser),
         timestamp: new Date()
       });
     }
@@ -969,6 +1027,78 @@ exports.markThreadAsRead = async function (req, res) {
   } catch (e) {
     console.error("❌ Error in markThreadAsRead:", e);
     res.status(500).json({ error: "Failed to mark thread as read" });
+  }
+};
+
+// Mark a SINGLE message as read.
+//
+// ThreadSideChat has always called this (POST /messages/:id/read) whenever a
+// message is read while the panel is already open — a reply arriving while you
+// sit in the thread, or the open-panel sweep over unseen messages. The route
+// never existed, so every one of those calls 404'd. Worse, the rejection
+// happened *before* the optimistic `isRead: true` local update, so the read
+// registered nowhere at all and the badge only ever cleared by re-opening the
+// thread (which goes through markThreadAsRead instead).
+exports.markMessageAsRead = async function (req, res) {
+  try {
+    const { id } = req.params;
+    const currentUser = req.employee._id;
+
+    if (!isObjId(id)) {
+      return res.status(400).json({ error: "Invalid message ID" });
+    }
+
+    const message = await ThreadChatMessage.findById(id);
+    if (!message) {
+      return res.status(404).json({ error: "Message not found" });
+    }
+
+    // Only a participant of the message may mark it read.
+    const isParticipant =
+      String(message.sender) === String(currentUser) ||
+      (message.receiver || []).some((r) => String(r) === String(currentUser));
+    if (!isParticipant) {
+      return res
+        .status(403)
+        .json({ error: "You are not a participant of this message" });
+    }
+
+    // No-op when already read, so repeat calls can't duplicate readBy entries.
+    await message.markAsRead(currentUser);
+
+    // Plain strings, NOT raw ObjectIds: socket.io serializes an ObjectId as a
+    // binary blob, and the client compares `r.employee === currentUserId`. Emit
+    // the Mongoose subdocs as-is and the receiver's own read stops matching, so
+    // the message pops back to unread.
+    const readBy = (message.readBy || []).map((r) => ({
+      employee: String(r.employee),
+      readAt: r.readAt,
+    }));
+
+    const io = getIO(req);
+    if (io) {
+      // Shape matches ThreadSideChat's handleMessageReadEvent.
+      io.to(`thread_${message.threadId}`).emit("message_read", {
+        threadId: message.threadId,
+        messageId: String(message._id),
+        readBy,
+      });
+      // And drop this user's rail badge on their other tabs.
+      io.to(`employee_${currentUser}`).emit("thread_chat_read", {
+        threadId: message.threadId,
+        userId: String(currentUser),
+        timestamp: new Date(),
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Message marked as read",
+      data: { messageId: String(message._id), readBy },
+    });
+  } catch (e) {
+    console.error("❌ Error in markMessageAsRead:", e);
+    res.status(500).json({ error: "Failed to mark message as read" });
   }
 };
 
@@ -1130,12 +1260,8 @@ exports.getUnreadCount = async function (req, res) {
     const unreadCount = await ThreadChatMessage.countDocuments({
       threadId,
       isDeleted: false,
-      'readBy.employee': { $ne: currentUser },
-      $or: [
-        { sender: currentUser },
-        { receiver: currentUser },
-        { receiver: { $in: [currentUser] } }
-      ]
+      'readBy.employee': { $nin: buildIdVariants(currentUser) },
+      ...buildParticipantMatch(currentUser)
     });
 
     res.json({
@@ -1160,6 +1286,7 @@ exports.getUnreadCountsBulk = async function (req, res) {
       return res.json({ success: true, counts: {} });
     }
 
+    const variants = buildIdVariants(currentUser);
     const rows = await ThreadChatMessage.aggregate([
       {
         $match: {
@@ -1168,12 +1295,9 @@ exports.getUnreadCountsBulk = async function (req, res) {
           // Only messages from someone else, that the current user hasn't read,
           // and that were actually addressed TO this user — otherwise a comment
           // between two other people on a thread would wrongly badge everyone.
-          sender: { $ne: currentUser },
-          "readBy.employee": { $ne: currentUser },
-          $or: [
-            { receiver: currentUser },
-            { receiver: { $in: [currentUser] } },
-          ],
+          sender: { $nin: variants },
+          "readBy.employee": { $nin: variants },
+          receiver: { $in: variants },
         },
       },
       { $group: { _id: "$threadId", count: { $sum: 1 } } },
@@ -1188,5 +1312,49 @@ exports.getUnreadCountsBulk = async function (req, res) {
   } catch (e) {
     console.error("❌ Error in getUnreadCountsBulk:", e);
     res.status(500).json({ error: "Failed to fetch unread counts" });
+  }
+};
+
+// Global thread-chat unread count for the SendQuery rail badge.
+//
+// Deliberately mirrors normal chat's /chat/conversations/unread/count: the
+// number is THREADS that have at least one unread message, not the raw message
+// total — 20 unread messages in one thread contribute 1, exactly like a chat
+// conversation with 20 unread messages does.
+exports.getAllThreadsUnreadCount = async function (req, res) {
+  try {
+    const currentUser = oid(String(req.employee._id));
+    if (!currentUser) {
+      return res.json({ success: true, data: { unreadCount: 0 } });
+    }
+
+    // Same three rules as getUnreadCountsBulk: the message is from someone
+    // else, this user hasn't read it, and it was actually addressed to them —
+    // otherwise a comment between two other people would badge everyone.
+    const variants = buildIdVariants(currentUser);
+    const match = {
+      isDeleted: false,
+      sender: { $nin: variants },
+      "readBy.employee": { $nin: variants },
+      receiver: { $in: variants },
+    };
+
+    // Org scope, so the badge can never leak across owners.
+    const ownerId = req.employee?.owner ? oid(String(req.employee.owner)) : null;
+    if (ownerId) match.owner = ownerId;
+
+    const rows = await ThreadChatMessage.aggregate([
+      { $match: match },
+      { $group: { _id: "$threadId" } },
+      { $count: "unreadThreads" },
+    ]);
+
+    res.json({
+      success: true,
+      data: { unreadCount: rows[0]?.unreadThreads || 0 },
+    });
+  } catch (e) {
+    console.error("❌ Error in getAllThreadsUnreadCount:", e);
+    res.status(500).json({ error: "Failed to fetch thread chat unread count" });
   }
 };
