@@ -248,6 +248,14 @@ const ClientInfoSchema = new Schema(
       // true when the latest message was "deleted for everyone" — the sidebar
       // shows the "This message was deleted" placeholder, like WhatsApp.
       deleted:   { type: Boolean, default: false },
+      // WhatsApp-style "You reacted 👍 to: ..." sidebar preview. When true,
+      // `text` holds the quoted (reacted-to) message text, not the reaction
+      // itself — the "<reactor> reacted <emoji> to:" prefix is rendered per
+      // viewer (getChatList knows whether the viewer is the reactor).
+      isReaction: { type: Boolean, default: false },
+      reactionEmoji: { type: String, default: null },
+      reactorId: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+      reactorName: { type: String, default: null },
     },
 
     // Client photo

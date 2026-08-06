@@ -555,6 +555,10 @@ exports.sendGroupMessage = async function (req, res) {
       lastMessageAt: new Date(),
       lastMessageBy: senderId,
       lastMessageDeleted: false,
+      lastMessageIsReaction: false,
+      lastMessageReactionEmoji: null,
+      lastMessageReactorId: null,
+      lastMessageReactorName: null,
     });
 
     const populated = await WhatsAppMessage.findById(message._id)
