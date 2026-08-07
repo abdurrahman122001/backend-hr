@@ -3061,14 +3061,17 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
-    // Approved messages cannot be deleted by anyone
-    if (msg.approvalStatus === "approved") {
-      return res.status(403).json({ error: "Approved messages cannot be deleted" });
-    }
-
-    // Only the sender can delete their own message
-    if (String(msg.sender) !== currentUserId) {
-      return res.status(403).json({ error: "Only the sender can delete this message" });
+    // Deleting only applies while a message is still in play. Once the approval
+    // chain has finished with it — approved by all seniors, or disapproved by
+    // any one of them — the outcome is part of the record and neither delete
+    // type applies any more, not even for the sender.
+    if (
+      msg.approvalStatus === "approved" ||
+      msg.approvalStatus === "disapproved"
+    ) {
+      return res.status(403).json({
+        error: "Approved or disapproved messages cannot be deleted",
+      });
     }
 
     const io = req.app.get("io");
@@ -3227,7 +3230,28 @@ exports.deleteMessage = async function deleteMessage(req, res) {
 
       return res.json({ ok: true, deletedForEveryone: true, message: populated });
     } else {
-      // Delete for me only — add currentUser to deletedForUsers array
+      // Delete for me only — a personal hide, so it is open to any viewer of the
+      // message (sender, past approvers, CRM); it never changes what other
+      // participants see. The one exception is the senior the message is
+      // currently waiting on: hiding it would strand the approval chain with no
+      // one able to approve or disapprove. Mirrors `canApprove` in ChatMessage.
+      if (msg.approvalStatus === "pending" && String(msg.sender) !== currentUserId) {
+        const receivers = Array.isArray(msg.receiver) ? msg.receiver : [msg.receiver];
+        const isCurrentApprover = receivers.some(
+          (r) => r && String(r._id || r) === currentUserId
+        );
+        const alreadyActed = (msg.approvalChain || []).some((step) => {
+          const approverId = step && (step.approver?._id || step.approver);
+          return approverId && String(approverId) === currentUserId;
+        });
+        if (isCurrentApprover && !alreadyActed) {
+          return res.status(403).json({
+            error: "Approve or disapprove this message before hiding it",
+          });
+        }
+      }
+
+      if (!Array.isArray(msg.deletedForUsers)) msg.deletedForUsers = [];
       const alreadyDeleted = msg.deletedForUsers.some(
         (uid) => String(uid) === currentUserId
       );
@@ -3970,6 +3994,9 @@ exports.searchMessages = async function searchMessages(req, res) {
         console.warn("Visibility filter skipped:", visibilityError.message);
         // Use base query if visibility fails
       }
+      // Messages this user hid via "delete for me" must stay hidden here too —
+      // otherwise search hands back a message the chat no longer shows.
+      qFinal.deletedForUsers = { $nin: [oid(String(req.employee._id))] };
     }
 
     const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 20);
