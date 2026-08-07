@@ -31,7 +31,7 @@
  */
 require("dotenv").config();
 const mongoose = require("mongoose");
-const { Message, Conversation, Space } = require("./models/Chat");
+const { Message, Conversation, Space } = require("./src/models/Chat");
 
 const uri = process.env.MONGODB_URI || process.env.MONGO_URI;
 const BATCH_SIZE = 500;
