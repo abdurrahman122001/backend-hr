@@ -445,8 +445,12 @@ exports.deleteTask = async (req, res) => {
     const task = await ChatTask.findByIdAndDelete(taskId);
     if (!task) return res.status(404).json({ error: "Task not found" });
     emit(req, "chat_task_deleted", task.chatId, { taskId });
-    // Deleting a parent removes its subtasks too (one level deep)
-    const subtasks = await ChatTask.find({ parentTaskId: taskId }).select("_id");
+    // Deleting a parent removes its subtasks too (one level deep).
+    // Their thread parent + title are selected because each one is announced
+    // below, exactly like the parent.
+    const subtasks = await ChatTask.find({ parentTaskId: taskId }).select(
+      "_id title sourceMessageId announcementMessageId"
+    );
     if (subtasks.length) {
       await ChatTask.deleteMany({ parentTaskId: taskId });
       subtasks.forEach((s) =>
@@ -457,6 +461,71 @@ exports.deleteTask = async (req, res) => {
     await ChatTaskComment.deleteMany({
       taskId: { $in: [taskId, ...subtasks.map((s) => s._id)] },
     });
+
+    // The "N tasks created" badge under a source message is derived from the
+    // ChatTask rows (see the taskStats aggregation in chatController), and
+    // creation announces itself with `message_task_created`. Deletion emitted
+    // nothing, so the badge kept its old count until the next refetch. Send the
+    // recomputed count rather than a decrement, so the badge can never drift out
+    // of step with the panel; 0 hides it entirely on the client.
+    const sourceMessageIds = [
+      ...new Set(
+        [task, ...subtasks]
+          .map((t) => t.sourceMessageId && String(t.sourceMessageId))
+          .filter(Boolean)
+      ),
+    ];
+    if (sourceMessageIds.length) {
+      const remaining = await ChatTask.aggregate([
+        {
+          $match: {
+            sourceMessageId: {
+              $in: sourceMessageIds.map((id) => new mongoose.Types.ObjectId(id)),
+            },
+          },
+        },
+        {
+          $group: {
+            _id: "$sourceMessageId",
+            taskCount: { $sum: 1 },
+            lastTaskCreatedAt: { $max: "$createdAt" },
+          },
+        },
+      ]);
+      const statsById = new Map(remaining.map((r) => [String(r._id), r]));
+      sourceMessageIds.forEach((messageId) => {
+        const stat = statsById.get(messageId);
+        emit(req, "message_task_deleted", task.chatId, {
+          messageId,
+          taskCount: stat?.taskCount || 0,
+          lastTaskCreatedAt: stat?.lastTaskCreatedAt || null,
+        });
+      });
+    }
+
+    // Every other lifecycle event — created, assigned, submitted for review,
+    // completed, reopened, returned — posts itself into the source message's
+    // thread, and the entry's `sender` is what shows WHO did it. Deletion was
+    // the one mutation that announced nothing, so a task simply vanished from
+    // the panel with no record of who removed it. Posted after the delete
+    // succeeds (never announce a deletion that failed); the doc returned by
+    // findByIdAndDelete still carries the thread parent and title.
+    await postTaskThreadEntry(
+      req,
+      task,
+      `Deleted a task (via Chat)\n${task.title}`
+    );
+    // A subtask removed along with its parent disappears from its OWN thread
+    // just as silently, so announce those too — postTaskThreadEntry is a no-op
+    // for any task that has no thread parent.
+    for (const s of subtasks) {
+      await postTaskThreadEntry(
+        req,
+        s,
+        `Deleted a task (via Chat)\n${s.title}`
+      );
+    }
+
     return res.json({ success: true });
   } catch (e) {
     console.error("deleteTask error:", e);

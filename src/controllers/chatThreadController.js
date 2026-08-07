@@ -213,9 +213,33 @@ exports.createThreadReply = async (req, res) => {
 exports.getThreadReplies = async (req, res) => {
   try {
     const { parentMessageId } = req.params;
+    const employeeId = req.employee?._id;
 
     if (!isObjId(parentMessageId)) {
       return res.status(400).json({ error: "Invalid parent message ID" });
+    }
+
+    // Opening a thread IS the read. This is the one call every entry point goes
+    // through — the conversation's "N replies" summary, the Home thread inbox,
+    // and the task dialog — so persisting it here is what makes the unread
+    // badge actually clear. Previously only the Home inbox sent an explicit
+    // PUT /read, and opening a thread from inside a conversation just wrote a
+    // localStorage timestamp: the reply stayed unread in the database forever,
+    // so the rail count never dropped and other devices still saw it as unread.
+    if (employeeId) {
+      await ChatThread.updateMany(
+        {
+          parentMessageId: new mongoose.Types.ObjectId(parentMessageId),
+          isDeleted: false,
+          "readBy.employee": { $ne: employeeId },
+        },
+        { $push: { readBy: { employee: employeeId, readAt: new Date() } } }
+      );
+
+      const io = getIO(req);
+      io?.to(`user_${String(employeeId)}`).emit("chat_thread_read", {
+        parentMessageId: String(parentMessageId),
+      });
     }
 
     const replies = await ChatThread.find({ parentMessageId, isDeleted: false })
@@ -275,13 +299,22 @@ exports.getRecentActiveThreads = async (req, res) => {
           latestReplyId: { $first: "$_id" },
           participantIds: { $addToSet: "$sender" },
           replyMentionIds: { $push: "$mentions.employee" },
+          // Must match the per-message threadUnreadCount the conversation
+          // view shows, including the "not my own reply" rule — otherwise the
+          // rail claims a thread is unread while the conversation shows
+          // nothing new in it, and the badge can never be cleared by reading.
           unreadCount: {
             $sum: {
               $cond: [
                 {
-                  $in: [
-                    employeeObjectId,
-                    { $ifNull: ["$readBy.employee", []] },
+                  $or: [
+                    { $eq: ["$sender", employeeObjectId] },
+                    {
+                      $in: [
+                        employeeObjectId,
+                        { $ifNull: ["$readBy.employee", []] },
+                      ],
+                    },
                   ],
                 },
                 0,

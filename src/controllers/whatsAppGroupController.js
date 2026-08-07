@@ -198,6 +198,9 @@ exports.getGroupMessages = async function (req, res) {
         { approvalStatus: "pending", "approvalChain.approver": me },
         { approvalStatus: "disapproved", sender: me },
       ],
+      // Messages this user hid via "delete for me" stay hidden on every refetch
+      // (mirrors listMessages for 1:1 chats).
+      deletedForUsers: { $nin: [me] },
     };
 
     if (cursor && isObjId(cursor)) {

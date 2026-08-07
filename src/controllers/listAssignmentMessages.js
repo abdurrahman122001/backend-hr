@@ -273,6 +273,23 @@ function slimListMessage(m) {
   return m;
 }
 
+// Employees whose mail inside a CLIENT thread the thread view renders as the
+// client itself — getSmartDisplayName in EmailDetail hands the client's name
+// and avatar to any CRM or manager sender there, whatever the message flags
+// say. Both the Activity visibility rule and the Unread/Unresponded anchor
+// below have to use this same set, or the list contradicts the thread on
+// screen. Resolved from the sender's own record on purpose: `role` is not
+// denormalised onto messages (every document stores null), so this is the same
+// place the UI reads it from.
+async function getClientVoiceSenderIds(ownerId) {
+  if (!ownerId) return [];
+  const ids = await Employee.find({
+    owner: ownerId,
+    $or: [{ role: /^\s*manager\s*$/i }, { role: /crm/i }],
+  }).distinct("_id");
+  return ids.map(String);
+}
+
 async function applyVisibility(q, req, filterParam) {
   if (!req.employee?._id) return { _id: null };
 
@@ -333,6 +350,9 @@ async function applyVisibility(q, req, filterParam) {
       return { $and: [q, { owner: ownerId }, externalOnly] };
     }
     if (juniorIds.length === 0) return { _id: null };
+    const clientVoiceIds = (await getClientVoiceSenderIds(ownerId))
+      .filter(isObjId)
+      .map((id) => oid(id));
     return {
       $and: [
         q,
@@ -347,7 +367,17 @@ async function applyVisibility(q, req, filterParam) {
             // employee receiving it is my junior, so I must see it).
             {
               receiver: { $in: juniorIds },
-              $or: [{ senderType: "client" }, { isFromClient: true }],
+              $or: [
+                { senderType: "client" },
+                { isFromClient: true },
+                // A CRM/manager writing in a client thread is shown AS the
+                // client, so it reaches me for exactly the reason above —
+                // and without it the thread's Unread/Unresponded state is
+                // decided from a thread this query pretended ended earlier.
+                ...(clientVoiceIds.length
+                  ? [{ sender: { $in: clientVoiceIds } }]
+                  : []),
+              ],
             },
           ],
         },
@@ -1005,6 +1035,41 @@ exports.listMessages = async function listMessages(req, res) {
         }
       }
 
+      // The thread view speaks for the client in three cases, and this anchor
+      // has to agree with it or the badge contradicts what is on screen: real
+      // inbound mail (senderType "client"), a message composed in the client's
+      // identity (isFromClient), and any message a CRM/manager sends inside a
+      // client thread — see getClientVoiceSenderIds.
+      const clientVoiceSenderIds = await getClientVoiceSenderIds(
+        q.owner || req.employee?.owner,
+      );
+
+      const IS_FROM_CLIENT = {
+        $or: [
+          { $eq: ["$senderType", "client"] },
+          { $eq: ["$isFromClient", true] },
+          {
+            // Only inside a client thread — the same `!isDirectMessage` guard
+            // the display rule uses. A manager's internal mail stays theirs.
+            $and: [
+              { $ne: [{ $ifNull: ["$client", null] }, null] },
+              { $in: [{ $toString: "$sender" }, clientVoiceSenderIds] },
+            ],
+          },
+        ],
+      };
+      // A reply the client can actually have received. Mail still waiting on an
+      // approver — or rejected by one — never left the building, so it must not
+      // count as an answer. (Drafts are already excluded by the base query;
+      // `scheduled` hasn't gone out yet either.)
+      const IS_DELIVERED_REPLY = {
+        $and: [
+          { $not: IS_FROM_CLIENT },
+          { $eq: ["$status", "sent"] },
+          { $not: { $in: ["$approvalStatus", ["pending", "disapproved"]] } },
+        ],
+      };
+
       const pipeline = [
         { $match: qFinal },
         // Perf: keep only the scalar fields the $group below reads, so the
@@ -1020,6 +1085,7 @@ exports.listMessages = async function listMessages(req, res) {
             sender: 1,
             receiver: 1,
             approvalStatus: 1,
+            status: 1,
             "readBy.employee": 1,
           },
         },
@@ -1031,19 +1097,37 @@ exports.listMessages = async function listMessages(req, res) {
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
             // Docs are sorted newest-first, so $first = the thread's latest message.
-            // "From client" = real inbound mail (senderType "client") OR a
-            // manually composed client message (isFromClient flag with an
-            // employee sender) — both count for Unread/Unresponded.
-            latestFromClient: {
-              $first: {
-                $or: [
-                  { $eq: ["$senderType", "client"] },
-                  { $eq: ["$isFromClient", true] },
+            latestClient: { $first: "$client" },
+            // Unread/Unresponded is anchored on the LAST MAIL THE CLIENT SENT,
+            // not on the thread's last message. A client who writes again into
+            // a thread that was answered before is waiting again from that
+            // moment on, and the earlier reply says nothing about the new mail
+            // — anchoring on the thread's last message dropped exactly those
+            // threads out of both views. Pairing it with the last DELIVERED
+            // reply also keeps a thread listed while its answer is still stuck
+            // in approval, which the client cannot see.
+            lastClientAt: { $max: { $cond: [IS_FROM_CLIENT, "$createdAt", null] } },
+            lastReplyAt: {
+              $max: { $cond: [IS_DELIVERED_REPLY, "$createdAt", null] },
+            },
+            // [sortKey, …payload]: $max compares arrays element by element, so
+            // the winner is the newest client message and it carries its own
+            // id and readers out with it. Cheaper than a second lookup, and
+            // the readers must come from THAT message — the read state of a
+            // later internal note says nothing about the client's mail.
+            lastClientMeta: {
+              $max: {
+                $cond: [
+                  IS_FROM_CLIENT,
+                  [
+                    "$createdAt",
+                    { $ifNull: ["$readBy.employee", []] },
+                    "$_id",
+                  ],
+                  null,
                 ],
               },
             },
-            latestClient: { $first: "$client" },
-            latestReadByIds: { $first: { $ifNull: ["$readBy.employee", []] } },
             receivedSomething: {
               $max: {
                 $cond: [
@@ -1151,6 +1235,28 @@ exports.listMessages = async function listMessages(req, res) {
         }
       ];
 
+      // Unpack the client anchor: is the client still waiting, who read the
+      // mail they are waiting on, and which message it is.
+      pipeline.push({
+        $addFields: {
+          awaitingClientReply: {
+            $and: [
+              { $ne: ["$lastClientAt", null] },
+              {
+                $or: [
+                  { $eq: ["$lastReplyAt", null] },
+                  { $lt: ["$lastReplyAt", "$lastClientAt"] },
+                ],
+              },
+            ],
+          },
+          lastClientReadByIds: {
+            $ifNull: [{ $arrayElemAt: ["$lastClientMeta", 1] }, []],
+          },
+          lastClientId: { $arrayElemAt: ["$lastClientMeta", 2] },
+        },
+      });
+
       // Only restrict to received threads if we are strictly filtering for incoming-only inboxes.
       // 'all'/'allMail' show every thread (including ones I started); 'inbox'
       // is incoming-only, so it DOES require the thread to have received something.
@@ -1232,7 +1338,7 @@ exports.listMessages = async function listMessages(req, res) {
 
       if (reviewStateVal) {
         pipeline.push(
-          { $match: { latestFromClient: true } },
+          { $match: { awaitingClientReply: true } },
           // "Read" must mean read by one of the client's ASSIGNED employees.
           // Inbound mail is also delivered to team leads / CC'd employees, and
           // they (or a senior receiver) opening it must NOT move the thread
@@ -1252,7 +1358,7 @@ exports.listMessages = async function listMessages(req, res) {
                   {
                     $size: {
                       $setIntersection: [
-                        { $ifNull: ["$latestReadByIds", []] },
+                        { $ifNull: ["$lastClientReadByIds", []] },
                         {
                           $ifNull: [
                             { $arrayElemAt: ["$clientDoc.assignedTo", 0] },
@@ -1270,6 +1376,18 @@ exports.listMessages = async function listMessages(req, res) {
           {
             $match: {
               latestReadByAssignee: reviewStateVal === "unresponded",
+            },
+          },
+          // These two views are ABOUT the unanswered client mail, so each row
+          // is that mail — not whatever internal message happens to sit on top
+          // of the thread. A no-op for threads the client's mail already ends;
+          // it only re-points the ones this fix newly surfaces.
+          {
+            $addFields: {
+              latestId: { $ifNull: ["$lastClientId", "$latestId"] },
+              latestMessageAt: {
+                $ifNull: ["$lastClientAt", "$latestMessageAt"],
+              },
             },
           },
           { $project: { clientDoc: 0 } }
@@ -1329,7 +1447,13 @@ exports.listMessages = async function listMessages(req, res) {
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
-          threadUnreadCount: stats ? stats.threadUnreadCount : 0
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0,
+          // Thread-level Unread/Unresponded state. In All activity the row is
+          // whatever message came last, which is not necessarily the client's,
+          // so the badge cannot be derived from this message alone — these two
+          // carry the state of the client mail actually being waited on.
+          awaitingClientReply: !!stats?.awaitingClientReply,
+          clientMailReadBy: (stats?.lastClientReadByIds || []).map(String),
         };
       }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 

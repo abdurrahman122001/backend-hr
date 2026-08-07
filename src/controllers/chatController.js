@@ -754,13 +754,35 @@ exports.getMessages = async (req, res) => {
 
     // Aggregate thread reply counts for these messages
     const messageIds = messagesRaw.map(m => m._id);
+    const threadViewerId = new mongoose.Types.ObjectId(req.employee._id);
     const threadStats = await ChatThread.aggregate([
       { $match: { parentMessageId: { $in: messageIds }, isDeleted: false } },
       {
         $group: {
           _id: "$parentMessageId",
           threadReplyCount: { $sum: 1 },
-          lastThreadReplyAt: { $max: "$createdAt" }
+          lastThreadReplyAt: { $max: "$createdAt" },
+          // Unread replies for THIS viewer, so the conversation can surface
+          // which threads still need reading instead of relying on a
+          // per-browser localStorage timestamp that never leaves the device.
+          threadUnreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$sender", threadViewerId] },
+                    {
+                      $not: [
+                        { $in: [threadViewerId, { $ifNull: ["$readBy.employee", []] }] }
+                      ]
+                    }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
         }
       }
     ]);
@@ -775,6 +797,7 @@ exports.getMessages = async (req, res) => {
     const messages = messagesRaw.map(m => ({
       ...m,
       threadReplyCount: statsMap[m._id.toString()]?.threadReplyCount || 0,
+      threadUnreadCount: statsMap[m._id.toString()]?.threadUnreadCount || 0,
       lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null
     }));
 
@@ -4098,13 +4121,34 @@ exports.getSpaceMessages = async (req, res) => {
 
     // Aggregate thread reply counts for these messages
     const messageIds = messagesRaw.map(m => m._id);
+    const threadViewerId = new mongoose.Types.ObjectId(req.employee._id);
     const threadStats = await ChatThread.aggregate([
       { $match: { parentMessageId: { $in: messageIds }, isDeleted: false } },
       {
         $group: {
           _id: "$parentMessageId",
           threadReplyCount: { $sum: 1 },
-          lastThreadReplyAt: { $max: "$createdAt" }
+          lastThreadReplyAt: { $max: "$createdAt" },
+          // Unread replies for THIS viewer — see the matching comment in the
+          // conversation message list above.
+          threadUnreadCount: {
+            $sum: {
+              $cond: [
+                {
+                  $and: [
+                    { $ne: ["$sender", threadViewerId] },
+                    {
+                      $not: [
+                        { $in: [threadViewerId, { $ifNull: ["$readBy.employee", []] }] }
+                      ]
+                    }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          }
         }
       }
     ]);
@@ -4135,6 +4179,7 @@ exports.getSpaceMessages = async (req, res) => {
     const messages = messagesRaw.map(m => ({
       ...m,
       threadReplyCount: statsMap[m._id.toString()]?.threadReplyCount || 0,
+      threadUnreadCount: statsMap[m._id.toString()]?.threadUnreadCount || 0,
       lastThreadReplyAt: statsMap[m._id.toString()]?.lastThreadReplyAt || null,
       taskCount: taskStatsMap[m._id.toString()]?.taskCount || 0,
       lastTaskCreatedAt: taskStatsMap[m._id.toString()]?.lastTaskCreatedAt || null

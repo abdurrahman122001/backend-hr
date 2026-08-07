@@ -849,6 +849,49 @@ exports.applyLeave = async (req, res) => {
 
     await leave.save();
 
+    // An isAdmin employee's request is final the moment it is created — it never
+    // passes through approveLeave, so every post-approval effect that lives
+    // there has to be applied here too or it simply never runs: no balance
+    // consumption, no salary deduction, and no attendance sync — which is why an
+    // already-deducted UNPAID half day was never upgraded to PAID for them.
+    if (isEmployeeAdmin) {
+      // approveLeave defaults a final approval to PAID regardless of what the
+      // policy analysis suggested, then lets the zero-balance rule veto it.
+      let finalIsPaid = true;
+      let paymentNotes = "";
+      ({ finalIsPaid, paymentNotes } = await applyZeroBalanceRule(
+        leave,
+        finalIsPaid,
+        paymentNotes,
+      ));
+
+      if (leave.isPaid !== finalIsPaid) {
+        leave.isPaid = finalIsPaid;
+        leave.workflowHistory.push({
+          action: "approved",
+          performedBy: employeeId,
+          performedByName: employee.name || "Admin",
+          notes: paymentNotes || (finalIsPaid ? "Approved as paid" : "Approved as unpaid"),
+          timestamp: new Date(),
+        });
+        await leave.save();
+      }
+
+      try {
+        await applyLeaveApprovalEffects(leave, {
+          approverId: employeeId,
+          finalIsPaid,
+          actualApprovedDays: leave.totalDays,
+          partialApproval: null,
+          ownerId: employee.owner,
+        });
+      } catch (effectsErr) {
+        // Match approveLeave: the approval itself must not fail because a
+        // downstream balance/attendance write did.
+        console.error("⚠️ Error applying auto-approval effects:", effectsErr);
+      }
+    }
+
     // 🔥 NEW: Real-time notification for all seniors in the hierarchy
     if (!isEmployeeAdmin && req.app.get("io") && approvalChain && approvalChain.length > 0) {
       const io = req.app.get("io");
@@ -1005,6 +1048,319 @@ exports.updateLeave = async (req, res) => {
 
 // @route   PUT /api/leaves/:id/approve
 // @access  Private (Supervisors/Admins)
+/**
+ * Zero-balance rule: an employee with no (or insufficient) leave balance stays
+ * UNPAID even when the leave is fully approved — full-day and half-day alike.
+ * The approval still goes through; only the payment status flips, so the day is
+ * settled by salary deduction instead of by consuming balance.
+ */
+async function applyZeroBalanceRule(leave, finalIsPaid, paymentNotes = "") {
+  // Zero-balance rule: an employee with no (or insufficient) leave balance
+  // stays UNPAID even when the leave was approved by all seniors — full-day
+  // and half-day alike. The approval itself still goes through; only the
+  // payment status is forced to unpaid (salary deduction instead of balance).
+  if (finalIsPaid) {
+    try {
+      const balanceYear = getLeaveYear(leave.startDate);
+      const bal = await LeaveYearBalance.findOne({
+        employee: leave.employee._id || leave.employee,
+        year: balanceYear,
+      }).lean();
+      const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
+      const availableBalance = totalEntitled - Number(bal?.usedPaid || 0);
+      const willConsume = (leave.dates || []).reduce((sum, d) => {
+        if (d.type === "early_leave" || d.type === "late") return sum;
+        return sum + (d.type === "half" ? 0.5 : 1);
+      }, 0);
+
+      if (willConsume > 0 && availableBalance < willConsume) {
+        finalIsPaid = false;
+        paymentNotes = `Auto-converted to UNPAID: insufficient leave balance (available ${availableBalance}, needed ${willConsume})`;
+        console.log(`[LEAVE-APPROVE] ${leave.employee?.name || leave.employee}: ${paymentNotes}`);
+      }
+    } catch (balErr) {
+      console.error("⚠️ Error checking leave balance for zero-balance rule:", balErr);
+    }
+  }
+
+  return { finalIsPaid, paymentNotes };
+}
+
+/**
+ * Everything that must happen once a leave becomes FINALLY approved: salary
+ * deduction when unpaid, leave-balance consumption plus its LeaveTransaction,
+ * and the attendance sync for dates that have already occurred — which is where
+ * an existing UNPAID half day gets its deduction reversed and is upgraded to
+ * PAID.
+ *
+ * Shared deliberately. approveLeave is not the only way a leave reaches its
+ * final state: an isAdmin employee's request is created already approved by
+ * applyLeave and never passes through approveLeave at all, so without this
+ * helper none of the above ran for them — their half day stayed unpaid forever.
+ */
+async function applyLeaveApprovalEffects(
+  leave,
+  { approverId, finalIsPaid, actualApprovedDays, partialApproval = null, ownerId } = {}
+) {
+  const employeeId = leave.employee?._id || leave.employee;
+  ownerId = ownerId || leave.employee?.owner;
+
+  // Handle salary deduction reversal for absence justifications
+  // If this was an absence justification and is now approved as paid, revert the deduction
+  if (leave.isAbsenceJustification && finalIsPaid) {
+    await revertLeaveSalaryDeduction(employeeId, actualApprovedDays, leave.startDate);
+  }
+
+  // Days that actually consume leave balance / salary, decided per-date by the
+  // date's OWN type (NOT the leave-level leaveType): full = 1, half = 0.5, and
+  // early_leave / late = 0 (the employee was physically present, so nothing is
+  // consumed). This keeps "Early Leave" / "Late Arrival" days from ever being
+  // charged as leave, even on a request whose leaveType is annual/personal/etc.
+  const isPresentDay = (t) => t === "early_leave" || t === "late";
+  const consumingDays = (leave.dates || []).reduce((sum, d) => {
+    if (isPresentDay(d.type)) return sum;
+    return sum + (d.type === "half" ? 0.5 : 1);
+  }, 0);
+  // Respect partial approval — never consume more than what was approved.
+  const daysToDeduct = partialApproval && partialApproval.approvedDays > 0
+    ? Math.min(actualApprovedDays, consumingDays)
+    : consumingDays;
+
+  // APPLY SALARY DEDUCTION IF UNPAID (present-only days like early_leave/late deduct nothing)
+  if (!finalIsPaid && daysToDeduct > 0) {
+    await deductLeaveFromSalary(employeeId, daysToDeduct, leave.startDate);
+  }
+
+  // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
+  if (daysToDeduct > 0) try {
+    const leaveYear = getLeaveYear(leave.startDate);
+    // employeeId / ownerId come from the function header — they must NOT be
+    // redeclared here: `leave.employee` is a bare ObjectId when applyLeave
+    // calls this, so `leave.employee.owner` would be undefined.
+
+    if (finalIsPaid) {
+      // Increment usedPaid in Employee model
+      await Employee.findByIdAndUpdate(employeeId, {
+        $inc: { "leaveEntitlement.usedPaid": daysToDeduct },
+      });
+
+      // Update LeaveYearBalance
+      const balance = await LeaveYearBalance.findOneAndUpdate(
+        { employee: employeeId, year: leaveYear },
+        {
+          $inc: { usedPaid: daysToDeduct },
+          $set: { owner: ownerId }
+        },
+        { upsert: true, new: true }
+      );
+
+      // Create Transaction
+      await LeaveTransaction.create({
+        owner: ownerId,
+        employee: employeeId,
+        leaveYearBalance: balance._id,
+        year: leaveYear,
+        date: leave.startDate,
+        type: "PAID_LEAVE_USED",
+        value: daysToDeduct,
+        sourceModel: "ApplyLeave",
+        sourceId: leave._id,
+        createdBy: approverId,
+        notes: leave.isAbsenceJustification ? "Absence justification approved as paid leave" : "Leave approved"
+      });
+
+    } else {
+      // Increment usedUnpaid in Employee model
+      await Employee.findByIdAndUpdate(employeeId, {
+        $inc: { "leaveEntitlement.usedUnpaid": daysToDeduct },
+      });
+
+      // Update LeaveYearBalance
+      const balance = await LeaveYearBalance.findOneAndUpdate(
+        { employee: employeeId, year: leaveYear },
+        {
+          $inc: { usedUnpaid: daysToDeduct },
+          $set: { owner: ownerId }
+        },
+        { upsert: true, new: true }
+      );
+
+      // Create Transaction
+      await LeaveTransaction.create({
+        owner: ownerId,
+        employee: employeeId,
+        leaveYearBalance: balance._id,
+        year: leaveYear,
+        date: leave.startDate,
+        type: "UNPAID_LEAVE_USED",
+        value: daysToDeduct,
+        sourceModel: "ApplyLeave",
+        sourceId: leave._id,
+        createdBy: approverId,
+        notes: leave.isAbsenceJustification ? "Absence justification approved as unpaid leave" : "Leave approved as unpaid"
+      });
+    }
+  } catch (balanceError) {
+    console.error("⚠️ Error updating leave balance:", balanceError);
+    // Don't fail the approval if balance update fails
+  }
+
+  // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
+  try {
+    const Attendance = require("../models/Attendance");
+
+    // Only mark attendance for dates that have already occurred (today or
+    // earlier). Future leave dates are intentionally NOT pre-marked here —
+    // leaveSyncCron creates each day's record when that day actually arrives.
+    const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
+
+    for (const dateObj of leave.dates) {
+      // early_leave / late dates = employee was physically present; leave it as
+      // whatever attendance already exists (do NOT overwrite it with "Leave").
+      if (isPresentDay(dateObj.type)) continue;
+
+      // Convert date to YYYY-MM-DD format consistently
+      let dateStr;
+      if (typeof dateObj.date === 'string') {
+        // If already a string, check if it needs parsing
+        if (dateObj.date.includes('T')) {
+          dateStr = dateObj.date.split('T')[0];
+        } else {
+          dateStr = dateObj.date;
+        }
+      } else if (dateObj.date instanceof Date) {
+        // If it's a Date object, convert to YYYY-MM-DD
+        dateStr = dateObj.date.toISOString().split('T')[0];
+      } else {
+        // Fallback
+        dateStr = new Date(dateObj.date).toISOString().split('T')[0];
+      }
+
+      // Skip future dates — attendance for them is created on the actual day
+      // by leaveSyncCron, not pre-marked at approval time.
+      if (dateStr > todayStr) continue;
+
+      const leaveDate = new Date(dateStr);
+
+      // Check if attendance record exists for this date
+      let attendance = await Attendance.findOne({
+        employee: employeeId,
+        date: dateStr,
+        owner: ownerId,
+      });
+
+      // A half-day leave date must stay a half day — it should be valued at
+      // 0.5, not promoted to a full "Leave"/paid day.
+      const isHalfDay = dateObj.type === "half";
+      const leaveStatus = isHalfDay ? "Half Day" : "Leave";
+
+      // Existing half-day attendance handling:
+      // - UNPAID half day (auto default from late login / early logout):
+      //   reverse the prior salary deduction and upgrade to PAID below —
+      //   the approval flow already applied its own paid consumption.
+      // - Already PAID half day: leave the attendance record exactly as-is
+      //   (no reversal, no re-save) so it isn't double-touched.
+      const isExistingHalfDay = attendance && attendance.status === "Half Day";
+      const isAlreadyPaidHalfDay = isExistingHalfDay && attendance.leaveType === "Paid";
+      // Anything that isn't explicitly "Paid" is an unpaid half day — unpaid
+      // is the default, and the login path can leave leaveType blank (the
+      // field defaults to null and the deduction guards can return before
+      // stamping it). Matching only === "Unpaid" made those blank records
+      // fall through the `continue` below, so approving the leave never
+      // upgraded them to Paid.
+      const isUnpaidHalfDay = isExistingHalfDay && attendance.leaveType !== "Paid";
+
+      if (isAlreadyPaidHalfDay) {
+        // Status stays the same — nothing to change for this date.
+        continue;
+      }
+
+      // Half-day leave dates are NOT pre-marked at approval time. The paid
+      // half day is stamped when the actual trigger happens — login after
+      // 6 PM or logout before 9 PM — by applyRealTimeHalfDayDeduction, which
+      // sees the approved leave and marks it Paid. If the employee never
+      // triggers a half day, leaveSyncCron settles the day at 23:45.
+      // The only exception is an existing UNPAID half day (deduction already
+      // applied before approval) — that one is reversed and upgraded below.
+      if (isHalfDay && !isUnpaidHalfDay) {
+        continue;
+      }
+
+      if (isUnpaidHalfDay) {
+        // Zero-leave employees stay UNPAID even when all seniors approved:
+        // only upgrade to Paid when the leave is paid AND the balance isn't
+        // exhausted (approval consumption above already counted in usedPaid,
+        // so "has balance" = not in debt).
+        let hasBalanceForUpgrade = false;
+        if (finalIsPaid) {
+          try {
+            const upgradeYear = getLeaveYear(dateStr);
+            const bal = await LeaveYearBalance.findOne({
+              employee: employeeId,
+              year: upgradeYear,
+            }).lean();
+            const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
+            hasBalanceForUpgrade = totalEntitled - Number(bal?.usedPaid || 0) >= 0;
+          } catch (balErr) {
+            console.error("⚠️ Error checking balance for half-day upgrade:", balErr);
+          }
+        }
+
+        if (!finalIsPaid || !hasBalanceForUpgrade) {
+          console.log(`[LEAVE-APPROVE] Half day on ${dateStr} stays UNPAID (${!finalIsPaid ? "leave is unpaid" : "zero leave balance"})`);
+          continue;
+        }
+
+        try {
+          const { reverseHalfDayDeduction } = require("../utils/lateDeductions");
+          await reverseHalfDayDeduction(
+            employeeId,
+            ownerId,
+            approverId,
+            dateStr
+          );
+        } catch (revErr) {
+          console.error("⚠️ Error reversing prior half-day deduction:", revErr);
+        }
+      }
+
+      if (attendance) {
+        // Update existing attendance - preserve original status if needed
+        if (!attendance.originalStatus) {
+          attendance.originalStatus = attendance.status;
+        }
+
+        // Special handling for absence justifications
+        attendance.status = leaveStatus;
+        attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
+        attendance.markedByHR = true;
+
+        // Keep only the employee's submitted reason on Attendance. Approval
+        // and policy details remain available in the leave workflow history.
+        attendance.notes = leave.reason || null;
+
+        await attendance.save();
+      } else {
+        // Create new attendance record as Leave / Half Day
+        attendance = new Attendance({
+          owner: ownerId,
+          employee: employeeId,
+          date: dateStr,
+          status: leaveStatus,
+          leaveType: finalIsPaid ? "Paid" : "Unpaid",
+          markedByHR: true,
+          notes: leave.reason || null,
+        });
+        await attendance.save();
+      }
+    }
+  } catch (attendanceError) {
+    console.error("⚠️ Error updating attendance for leave:", attendanceError);
+    // Don't fail the approval if attendance update fails
+  }
+
+}
+
 exports.approveLeave = async (req, res) => {
   try {
     // Check if user exists
@@ -1231,33 +1587,12 @@ exports.approveLeave = async (req, res) => {
 
     // FINAL APPROVAL LOGIC
 
-    // Zero-balance rule: an employee with no (or insufficient) leave balance
-    // stays UNPAID even when the leave was approved by all seniors — full-day
-    // and half-day alike. The approval itself still goes through; only the
-    // payment status is forced to unpaid (salary deduction instead of balance).
-    if (finalIsPaid) {
-      try {
-        const balanceYear = getLeaveYear(leave.startDate);
-        const bal = await LeaveYearBalance.findOne({
-          employee: leave.employee._id || leave.employee,
-          year: balanceYear,
-        }).lean();
-        const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
-        const availableBalance = totalEntitled - Number(bal?.usedPaid || 0);
-        const willConsume = (leave.dates || []).reduce((sum, d) => {
-          if (d.type === "early_leave" || d.type === "late") return sum;
-          return sum + (d.type === "half" ? 0.5 : 1);
-        }, 0);
-
-        if (willConsume > 0 && availableBalance < willConsume) {
-          finalIsPaid = false;
-          paymentNotes = `Auto-converted to UNPAID: insufficient leave balance (available ${availableBalance}, needed ${willConsume})`;
-          console.log(`[LEAVE-APPROVE] ${leave.employee?.name || leave.employee}: ${paymentNotes}`);
-        }
-      } catch (balErr) {
-        console.error("⚠️ Error checking leave balance for zero-balance rule:", balErr);
-      }
-    }
+    // Zero-balance rule — shared with the auto-approved (isAdmin) path.
+    ({ finalIsPaid, paymentNotes } = await applyZeroBalanceRule(
+      leave,
+      finalIsPaid,
+      paymentNotes,
+    ));
 
     leave.status = "approved";
     leave.approvedBy = approverId;
@@ -1291,258 +1626,13 @@ exports.approveLeave = async (req, res) => {
 
     await leave.save();
 
-    // Handle salary deduction reversal for absence justifications
-    // If this was an absence justification and is now approved as paid, revert the deduction
-    if (leave.isAbsenceJustification && finalIsPaid) {
-      await revertLeaveSalaryDeduction(leave.employee._id, actualApprovedDays, leave.startDate);
-    }
-
-    // Days that actually consume leave balance / salary, decided per-date by the
-    // date's OWN type (NOT the leave-level leaveType): full = 1, half = 0.5, and
-    // early_leave / late = 0 (the employee was physically present, so nothing is
-    // consumed). This keeps "Early Leave" / "Late Arrival" days from ever being
-    // charged as leave, even on a request whose leaveType is annual/personal/etc.
-    const isPresentDay = (t) => t === "early_leave" || t === "late";
-    const consumingDays = (leave.dates || []).reduce((sum, d) => {
-      if (isPresentDay(d.type)) return sum;
-      return sum + (d.type === "half" ? 0.5 : 1);
-    }, 0);
-    // Respect partial approval — never consume more than what was approved.
-    const daysToDeduct = partialApproval && partialApproval.approvedDays > 0
-      ? Math.min(actualApprovedDays, consumingDays)
-      : consumingDays;
-
-    // APPLY SALARY DEDUCTION IF UNPAID (present-only days like early_leave/late deduct nothing)
-    if (!finalIsPaid && daysToDeduct > 0) {
-      await deductLeaveFromSalary(leave.employee._id, daysToDeduct, leave.startDate);
-    }
-
-    // UPDATE LEAVE BALANCE AND CREATE TRANSACTION FOR FINAL APPROVAL
-    if (daysToDeduct > 0) try {
-      const leaveYear = getLeaveYear(leave.startDate);
-      const employeeId = leave.employee._id;
-      const ownerId = leave.employee.owner;
-
-      if (finalIsPaid) {
-        // Increment usedPaid in Employee model
-        await Employee.findByIdAndUpdate(employeeId, {
-          $inc: { "leaveEntitlement.usedPaid": daysToDeduct },
-        });
-
-        // Update LeaveYearBalance
-        const balance = await LeaveYearBalance.findOneAndUpdate(
-          { employee: employeeId, year: leaveYear },
-          {
-            $inc: { usedPaid: daysToDeduct },
-            $set: { owner: ownerId }
-          },
-          { upsert: true, new: true }
-        );
-
-        // Create Transaction
-        await LeaveTransaction.create({
-          owner: ownerId,
-          employee: employeeId,
-          leaveYearBalance: balance._id,
-          year: leaveYear,
-          date: leave.startDate,
-          type: "PAID_LEAVE_USED",
-          value: daysToDeduct,
-          sourceModel: "ApplyLeave",
-          sourceId: leave._id,
-          createdBy: approverId,
-          notes: leave.isAbsenceJustification ? "Absence justification approved as paid leave" : "Leave approved"
-        });
-
-      } else {
-        // Increment usedUnpaid in Employee model
-        await Employee.findByIdAndUpdate(employeeId, {
-          $inc: { "leaveEntitlement.usedUnpaid": daysToDeduct },
-        });
-
-        // Update LeaveYearBalance
-        const balance = await LeaveYearBalance.findOneAndUpdate(
-          { employee: employeeId, year: leaveYear },
-          {
-            $inc: { usedUnpaid: daysToDeduct },
-            $set: { owner: ownerId }
-          },
-          { upsert: true, new: true }
-        );
-
-        // Create Transaction
-        await LeaveTransaction.create({
-          owner: ownerId,
-          employee: employeeId,
-          leaveYearBalance: balance._id,
-          year: leaveYear,
-          date: leave.startDate,
-          type: "UNPAID_LEAVE_USED",
-          value: daysToDeduct,
-          sourceModel: "ApplyLeave",
-          sourceId: leave._id,
-          createdBy: approverId,
-          notes: leave.isAbsenceJustification ? "Absence justification approved as unpaid leave" : "Leave approved as unpaid"
-        });
-      }
-    } catch (balanceError) {
-      console.error("⚠️ Error updating leave balance:", balanceError);
-      // Don't fail the approval if balance update fails
-    }
-
-    // UPDATE ATTENDANCE RECORDS FOR PAST/PRESENT DATES
-    try {
-      const Attendance = require("../models/Attendance");
-
-      // Only mark attendance for dates that have already occurred (today or
-      // earlier). Future leave dates are intentionally NOT pre-marked here —
-      // leaveSyncCron creates each day's record when that day actually arrives.
-      const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
-
-      for (const dateObj of leave.dates) {
-        // early_leave / late dates = employee was physically present; leave it as
-        // whatever attendance already exists (do NOT overwrite it with "Leave").
-        if (isPresentDay(dateObj.type)) continue;
-
-        // Convert date to YYYY-MM-DD format consistently
-        let dateStr;
-        if (typeof dateObj.date === 'string') {
-          // If already a string, check if it needs parsing
-          if (dateObj.date.includes('T')) {
-            dateStr = dateObj.date.split('T')[0];
-          } else {
-            dateStr = dateObj.date;
-          }
-        } else if (dateObj.date instanceof Date) {
-          // If it's a Date object, convert to YYYY-MM-DD
-          dateStr = dateObj.date.toISOString().split('T')[0];
-        } else {
-          // Fallback
-          dateStr = new Date(dateObj.date).toISOString().split('T')[0];
-        }
-
-        // Skip future dates — attendance for them is created on the actual day
-        // by leaveSyncCron, not pre-marked at approval time.
-        if (dateStr > todayStr) continue;
-
-        const leaveDate = new Date(dateStr);
-
-        // Check if attendance record exists for this date
-        let attendance = await Attendance.findOne({
-          employee: leave.employee._id || leave.employee,
-          date: dateStr,
-          owner: leave.employee.owner || ownerId,
-        });
-
-        // A half-day leave date must stay a half day — it should be valued at
-        // 0.5, not promoted to a full "Leave"/paid day.
-        const isHalfDay = dateObj.type === "half";
-        const leaveStatus = isHalfDay ? "Half Day" : "Leave";
-
-        // Existing half-day attendance handling:
-        // - UNPAID half day (auto default from late login / early logout):
-        //   reverse the prior salary deduction and upgrade to PAID below —
-        //   the approval flow already applied its own paid consumption.
-        // - Already PAID half day: leave the attendance record exactly as-is
-        //   (no reversal, no re-save) so it isn't double-touched.
-        const isExistingHalfDay = attendance && attendance.status === "Half Day";
-        const isAlreadyPaidHalfDay = isExistingHalfDay && attendance.leaveType === "Paid";
-        // Anything that isn't explicitly "Paid" is an unpaid half day — unpaid
-        // is the default, and the login path can leave leaveType blank (the
-        // field defaults to null and the deduction guards can return before
-        // stamping it). Matching only === "Unpaid" made those blank records
-        // fall through the `continue` below, so approving the leave never
-        // upgraded them to Paid.
-        const isUnpaidHalfDay = isExistingHalfDay && attendance.leaveType !== "Paid";
-
-        if (isAlreadyPaidHalfDay) {
-          // Status stays the same — nothing to change for this date.
-          continue;
-        }
-
-        // Half-day leave dates are NOT pre-marked at approval time. The paid
-        // half day is stamped when the actual trigger happens — login after
-        // 6 PM or logout before 9 PM — by applyRealTimeHalfDayDeduction, which
-        // sees the approved leave and marks it Paid. If the employee never
-        // triggers a half day, leaveSyncCron settles the day at 23:45.
-        // The only exception is an existing UNPAID half day (deduction already
-        // applied before approval) — that one is reversed and upgraded below.
-        if (isHalfDay && !isUnpaidHalfDay) {
-          continue;
-        }
-
-        if (isUnpaidHalfDay) {
-          // Zero-leave employees stay UNPAID even when all seniors approved:
-          // only upgrade to Paid when the leave is paid AND the balance isn't
-          // exhausted (approval consumption above already counted in usedPaid,
-          // so "has balance" = not in debt).
-          let hasBalanceForUpgrade = false;
-          if (finalIsPaid) {
-            try {
-              const upgradeYear = getLeaveYear(dateStr);
-              const bal = await LeaveYearBalance.findOne({
-                employee: leave.employee._id || leave.employee,
-                year: upgradeYear,
-              }).lean();
-              const totalEntitled = Number(bal?.total || 0) + Number(bal?.bonus || 0);
-              hasBalanceForUpgrade = totalEntitled - Number(bal?.usedPaid || 0) >= 0;
-            } catch (balErr) {
-              console.error("⚠️ Error checking balance for half-day upgrade:", balErr);
-            }
-          }
-
-          if (!finalIsPaid || !hasBalanceForUpgrade) {
-            console.log(`[LEAVE-APPROVE] Half day on ${dateStr} stays UNPAID (${!finalIsPaid ? "leave is unpaid" : "zero leave balance"})`);
-            continue;
-          }
-
-          try {
-            const { reverseHalfDayDeduction } = require("../utils/lateDeductions");
-            await reverseHalfDayDeduction(
-              leave.employee._id || leave.employee,
-              leave.employee.owner || ownerId,
-              approverId,
-              dateStr
-            );
-          } catch (revErr) {
-            console.error("⚠️ Error reversing prior half-day deduction:", revErr);
-          }
-        }
-
-        if (attendance) {
-          // Update existing attendance - preserve original status if needed
-          if (!attendance.originalStatus) {
-            attendance.originalStatus = attendance.status;
-          }
-
-          // Special handling for absence justifications
-          attendance.status = leaveStatus;
-          attendance.leaveType = finalIsPaid ? "Paid" : "Unpaid";
-          attendance.markedByHR = true;
-
-          // Keep only the employee's submitted reason on Attendance. Approval
-          // and policy details remain available in the leave workflow history.
-          attendance.notes = leave.reason || null;
-
-          await attendance.save();
-        } else {
-          // Create new attendance record as Leave / Half Day
-          attendance = new Attendance({
-            owner: leave.employee.owner || ownerId,
-            employee: leave.employee._id || leave.employee,
-            date: dateStr,
-            status: leaveStatus,
-            leaveType: finalIsPaid ? "Paid" : "Unpaid",
-            markedByHR: true,
-            notes: leave.reason || null,
-          });
-          await attendance.save();
-        }
-      }
-    } catch (attendanceError) {
-      console.error("⚠️ Error updating attendance for leave:", attendanceError);
-      // Don't fail the approval if attendance update fails
-    }
+    await applyLeaveApprovalEffects(leave, {
+      approverId,
+      finalIsPaid,
+      actualApprovedDays,
+      partialApproval,
+      ownerId: leave.employee.owner,
+    });
 
     // Get updated leave with populated fields
     const updatedLeave = await Leave.findById(leave._id)

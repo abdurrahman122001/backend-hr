@@ -1091,6 +1091,15 @@ exports.createMessage = async function createMessage(req, res) {
       .select("_id role supervisor supervisionMode owner isAdmin")
       .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
+    // An isAdmin employee is top authority: nobody outranks them, so their mail
+    // never enters the approval workflow. That is stored as approvalStatus null
+    // — the same "outside the workflow" marker manager/CRM sends and inbound
+    // client mail use — NOT "approved", which asserts that a supervisor
+    // reviewed and cleared the message. Applies to both ways such a message is
+    // written: the admin sending it themselves, and a CRM-access user sending
+    // under that admin's identity from the composer's "From" picker (which
+    // makes `sender` the admin, so this covers it without a separate flag).
+    const senderIsAdmin = senderDoc?.isAdmin === true;
     // The client/company-employee context below used to be preserved only for
     // role === "manager". CRM powers are access-based now, so a CRM-access
     // sender whose role is "Employee" had the context nulled and their reply
@@ -1226,7 +1235,17 @@ exports.createMessage = async function createMessage(req, res) {
         inheritedClientEmployeeEmail = clientEmployeeEmail || null;
         inheritedClientName = clientName || null;
       }
-      else if (threadMessages.length > 0) {
+      // INHERITING the thread's client identity is a CRM/manager-only
+      // continuation of the client's voice. `senderCanActAsClient` above also
+      // covers the client's own assigned team, and for them this branch was
+      // catastrophic: an assigned employee hitting Reply/Reply-all on the
+      // client's message sends no identity flags, fell in here, and had their
+      // OWN reply stored as isFromClient/isFromCompanyEmployee. It then
+      // rendered with the client's avatar and, to every other recipient, under
+      // the client's name — as if the client had written it. A reply TO the
+      // client is not a message written AS the client. Explicitly chosen
+      // identities (the branch above) are unaffected.
+      else if (senderHasCrmAuthority && threadMessages.length > 0) {
         // Prefer inheriting from a company-employee message so the employee's
         // name is preserved. Only fall back to a plain client message if the
         // thread has no company-employee message. (Previously this grabbed the
@@ -1398,7 +1417,13 @@ exports.createMessage = async function createMessage(req, res) {
         }
       }
 
-      if (
+      if (senderIsAdmin) {
+        // Top authority — see `senderIsAdmin` above. Checked FIRST so it also
+        // wins over the needs_approval branch below: routing an admin's mail to
+        // a supervisor for approval would invert the hierarchy, and marking it
+        // "approved" would claim an approval that never happened.
+        approvalStatus = null;
+      } else if (
         (senderRole === "manager" || senderHasCrmAccess) &&
         (inheritedIsFromClient ||
           inheritedIsFromCompanyEmployee ||
@@ -1481,12 +1506,25 @@ exports.createMessage = async function createMessage(req, res) {
           targetSupervisor = hierarchyResult.targetSupervisor;
         }
 
-        // Update thread history
+        // Update thread history: the supervisor this message just escalated to
+        // gets added to the thread's EARLIER messages so they can read the
+        // conversation they are being asked to approve.
+        //
+        // Strictly the already-decided ones. A message still sitting at
+        // "pending" is not history — it is another approver's queue item, and
+        // "My approval" matches on `receiver` (pending + receiver = me + I have
+        // not approved it), so adding this supervisor to it put SOMEONE ELSE'S
+        // pending approval in their tab. Every senior in a thread ended up
+        // seeing every other senior's outstanding approvals.
         if (targetSupervisor && threadMessages.length > 0 && !threadHasTeamLead) {
           try {
             const threadMessageIds = threadMessages.map(msg => msg._id);
             await AssignmentMessage.updateMany(
-              { _id: { $in: threadMessageIds }, receiver: { $ne: targetSupervisor } },
+              {
+                _id: { $in: threadMessageIds },
+                receiver: { $ne: targetSupervisor },
+                approvalStatus: { $ne: "pending" },
+              },
               { $addToSet: { receiver: targetSupervisor } }
             );
           } catch (e) {
@@ -1628,7 +1666,13 @@ exports.createMessage = async function createMessage(req, res) {
           if (
             client &&
             isObjId(client) &&
-            clientSupervisionMode === "needs_approval"
+            clientSupervisionMode === "needs_approval" &&
+            // An isAdmin sender is never routed for approval, even on a
+            // supervised client — without this they would fall into the
+            // supervisor-routing branch below and this recipient fallback
+            // would put the status back to "pending"/"approved" after the
+            // approval decision above deliberately set null.
+            !senderIsAdmin
           ) {
             // 🔥 HIERARCHY-BASED
             const supervisorsToNotify = hasHierarchy ? hierarchySupervisors : tls;
@@ -1645,11 +1689,13 @@ exports.createMessage = async function createMessage(req, res) {
           } else if (
             client &&
             isObjId(client) &&
-            clientSupervisionMode === "direct"
+            (clientSupervisionMode === "direct" || senderIsAdmin)
           ) {
             if (managers.length > 0) {
               receivers = [...managers];
-              approvalStatus = "approved";
+              // Keep an admin's message outside the workflow (null); everyone
+              // else on a direct client sends as "approved" as before.
+              if (!senderIsAdmin) approvalStatus = "approved";
             } else {
               return res.status(400).json({
                 error:
@@ -1851,11 +1897,23 @@ exports.createMessage = async function createMessage(req, res) {
       { path: "scheduledBy", select: "_id name companyEmail" },
     ]);
 
-    // A reply that is already fully approved at creation (top-of-hierarchy sender,
+    // A reply that is already cleared at creation (top-of-hierarchy sender,
     // direct supervision, manager/team-lead) never passes through approveMessage,
     // so it must reach the client's real mailbox from here. The service is a no-op
     // for threads that did not originate from an inbound client email.
-    if (!isScheduled && approvalStatus === "approved" && msgData.client) {
+    //
+    // "Cleared" is the ABSENCE of a block, not the literal "approved": null means
+    // the message was never subject to approval at all (isAdmin/manager/CRM
+    // senders), and those must go out too — gating on "approved" alone left an
+    // admin's mail sitting in the app and never delivered. Only pending (not yet
+    // cleared) and disapproved (refused) are withheld. Mail written in the
+    // client's own identity is skipped inside the service itself.
+    if (
+      !isScheduled &&
+      msgData.client &&
+      approvalStatus !== "pending" &&
+      approvalStatus !== "disapproved"
+    ) {
       sendApprovedReplyToClient(msg)
         .then((result) => {
           if (result?.sent) {
@@ -2186,9 +2244,19 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
 
         // 🔥 HIERARCHY-BASED: Determine approval status and hierarchy routing
         let targetSupervisor = null;
-        if (message.client) {
+        const scheduledSenderId = String(message.sender?._id || message.sender);
+        // Same rule as createMessage/sendDraft: an isAdmin sender is top
+        // authority, so a scheduled message of theirs fires outside the
+        // approval workflow (null) instead of being stamped "approved" here.
+        const scheduledSenderIsAdmin = await Employee.exists({
+          _id: scheduledSenderId,
+          isAdmin: true,
+        });
+        if (scheduledSenderIsAdmin) {
+          message.approvalStatus = null;
+        } else if (message.client) {
           const clientDoc = await ClientInfo.findById(message.client._id || message.client).lean();
-          const senderId = String(message.sender?._id || message.sender);
+          const senderId = scheduledSenderId;
           const assignedToIds = (clientDoc?.assignedTo || []).map((id) => String(id));
           const isSenderAssigned = assignedToIds.includes(senderId);
           const clientSupervisionMode = clientDoc?.supervision || "direct";
@@ -3703,13 +3771,19 @@ exports.sendDraft = async function sendDraft(req, res) {
       // straight out, skipping both the needs_approval → pending branch below
       // and the hierarchy routing it gates.
       const draftSenderDoc = await Employee.findById(msg.sender)
-        .select("_id role")
+        .select("_id role isAdmin")
         .lean();
       const draftSenderIsCrm =
         normalizeRole(draftSenderDoc?.role || "") === "manager" ||
         (await hasCrmAccess(req.employee));
 
-      if (draftSenderIsCrm && (msg.isFromClient || msg.isFromCompanyEmployee)) {
+      if (draftSenderDoc?.isAdmin === true) {
+        // Mirror of createMessage: an isAdmin sender is top authority, so the
+        // draft goes out outside the approval workflow (null), never
+        // "approved". `msg.sender` is already the chosen admin here — the
+        // send-as override above runs before this block.
+        msg.approvalStatus = null;
+      } else if (draftSenderIsCrm && (msg.isFromClient || msg.isFromCompanyEmployee)) {
         msg.approvalStatus = null;
       } else if (msg.client) {
         const clientDoc = await ClientInfo.findById(msg.client).lean();

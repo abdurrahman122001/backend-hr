@@ -1895,6 +1895,7 @@ exports.approveMessage = async function approveMessage(req, res) {
     // or created before the field existed. On later approvals in the same chain
     // originalSentAt is already set and must NOT be recaptured, or it would drift
     // forward to each approval in turn.
+    const originalSentAtForDisplay = msg.originalSentAt || msg.createdAt;
     const preserveOriginalSentAt = !msg.originalSentAt;
     try {
       const timeFields = { createdAt: approvalTime };
@@ -1933,6 +1934,10 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     const updatedMessage = {
       ...populatedMsg.toObject(),
+      // Always include the pre-approval send time in realtime approval events.
+      // Legacy messages may not have a persisted originalSentAt field; the
+      // captured value above is still the sender's true original timestamp.
+      originalSentAt: originalSentAtForDisplay,
       clientSupervision: clientSupervision,
       requiresApproval: clientSupervision === "needs_approval",
       approvalFinalized,
@@ -2014,7 +2019,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       ClientInfo.findByIdAndUpdate(msg.client, {
         $set: {
           "lastWhatsAppMessage.text": ((msg.note || "").replace(/<[^>]*>/g, "").trim() || attachmentPreviewLabel(msg.attachments)).slice(0, 200),
-          "lastWhatsAppMessage.at": msg.approvedAt || new Date(),
+          "lastWhatsAppMessage.at": msg.originalSentAt || msg.createdAt || new Date(),
           "lastWhatsAppMessage.senderId": msg.sender?._id || msg.sender,
           "lastWhatsAppMessage.hasAttachments": Array.isArray(msg.attachments) && msg.attachments.length > 0,
           "lastWhatsAppMessage.deleted": false,
@@ -2034,7 +2039,7 @@ exports.approveMessage = async function approveMessage(req, res) {
       WhatsAppGroup.findByIdAndUpdate(groupIdVal, {
         $set: {
           lastMessage: groupText,
-          lastMessageAt: msg.approvedAt || new Date(),
+          lastMessageAt: msg.originalSentAt || msg.createdAt || new Date(),
           lastMessageBy: msg.sender?._id || msg.sender,
           lastMessageDeleted: false,
           lastMessageIsReaction: false,
@@ -3056,14 +3061,17 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     const msg = await WhatsAppMessage.findById(id);
     if (!msg) return res.status(404).json({ error: "Not found" });
 
-    // Approved messages cannot be deleted by anyone
-    if (msg.approvalStatus === "approved") {
-      return res.status(403).json({ error: "Approved messages cannot be deleted" });
-    }
-
-    // Only the sender can delete their own message
-    if (String(msg.sender) !== currentUserId) {
-      return res.status(403).json({ error: "Only the sender can delete this message" });
+    // Deleting only applies while a message is still in play. Once the approval
+    // chain has finished with it — approved by all seniors, or disapproved by
+    // any one of them — the outcome is part of the record and neither delete
+    // type applies any more, not even for the sender.
+    if (
+      msg.approvalStatus === "approved" ||
+      msg.approvalStatus === "disapproved"
+    ) {
+      return res.status(403).json({
+        error: "Approved or disapproved messages cannot be deleted",
+      });
     }
 
     const io = req.app.get("io");
@@ -3222,7 +3230,28 @@ exports.deleteMessage = async function deleteMessage(req, res) {
 
       return res.json({ ok: true, deletedForEveryone: true, message: populated });
     } else {
-      // Delete for me only — add currentUser to deletedForUsers array
+      // Delete for me only — a personal hide, so it is open to any viewer of the
+      // message (sender, past approvers, CRM); it never changes what other
+      // participants see. The one exception is the senior the message is
+      // currently waiting on: hiding it would strand the approval chain with no
+      // one able to approve or disapprove. Mirrors `canApprove` in ChatMessage.
+      if (msg.approvalStatus === "pending" && String(msg.sender) !== currentUserId) {
+        const receivers = Array.isArray(msg.receiver) ? msg.receiver : [msg.receiver];
+        const isCurrentApprover = receivers.some(
+          (r) => r && String(r._id || r) === currentUserId
+        );
+        const alreadyActed = (msg.approvalChain || []).some((step) => {
+          const approverId = step && (step.approver?._id || step.approver);
+          return approverId && String(approverId) === currentUserId;
+        });
+        if (isCurrentApprover && !alreadyActed) {
+          return res.status(403).json({
+            error: "Approve or disapprove this message before hiding it",
+          });
+        }
+      }
+
+      if (!Array.isArray(msg.deletedForUsers)) msg.deletedForUsers = [];
       const alreadyDeleted = msg.deletedForUsers.some(
         (uid) => String(uid) === currentUserId
       );
@@ -3354,7 +3383,7 @@ exports.uploadAttachments = async function uploadAttachments(req, res) {
     // Pending messages are skipped: their preview must stay hidden from
     // employees outside the approval flow.
     if (msg.approvalStatus !== "pending") {
-      const effAt = msg.approvedAt || msg.createdAt;
+      const effAt = msg.originalSentAt || msg.createdAt;
       const noteText = (msg.note || "").replace(/<[^>]*>/g, "").trim();
       const label = (noteText || attachmentPreviewLabel(msg.attachments)).slice(0, 200);
       if (msg.isGroupMessage && msg.groupId) {
@@ -3965,6 +3994,9 @@ exports.searchMessages = async function searchMessages(req, res) {
         console.warn("Visibility filter skipped:", visibilityError.message);
         // Use base query if visibility fails
       }
+      // Messages this user hid via "delete for me" must stay hidden here too —
+      // otherwise search hands back a message the chat no longer shows.
+      qFinal.deletedForUsers = { $nin: [oid(String(req.employee._id))] };
     }
 
     const lim = Math.min(Math.max(parseInt(limit, 10) || 10, 1), 20);
@@ -4872,7 +4904,7 @@ exports.createMessage = async function createMessage(req, res) {
         ClientInfo.findByIdAndUpdate(clientId, {
           $set: {
             "lastWhatsAppMessage.text": (responseWithSupervision.note || "").replace(/<[^>]*>/g, "").slice(0, 200),
-            "lastWhatsAppMessage.at": responseWithSupervision.createdAt || new Date(),
+            "lastWhatsAppMessage.at": responseWithSupervision.originalSentAt || responseWithSupervision.createdAt || new Date(),
             "lastWhatsAppMessage.senderId": responseWithSupervision.sender?._id || responseWithSupervision.sender,
             "lastWhatsAppMessage.hasAttachments": Array.isArray(responseWithSupervision.attachments) && responseWithSupervision.attachments.length > 0,
             "lastWhatsAppMessage.deleted": false,
@@ -4921,10 +4953,10 @@ async function repairLastWhatsAppMessages(ownerObjId, clients) {
     {
       $project: {
         client: 1,
-        // Rank approved messages by approval time (matches the approveMessage
-        // denorm bump) so this repair never reverts a just-approved message
-        // back to its older composed-at position.
-        at: { $ifNull: ["$approvedAt", "$createdAt"] },
+        // Use the original send time so approval never changes the message
+        // timestamp shown in the WhatsApp sidebar.
+
+        at: { $ifNull: ["$originalSentAt", "$createdAt"] },
         sender: 1,
         note: { $substrCP: [{ $ifNull: ["$note", ""] }, 0, 300] },
         hasAtt: { $gt: [{ $size: { $ifNull: ["$attachments", []] } }, 0] },
@@ -5242,10 +5274,10 @@ exports.getChatList = async function getChatList(req, res) {
       {
         $project: {
           client: 1,
-          // Approved messages rank by WHEN they were approved (i.e. actually
-          // sent to the client), not when they were composed, so finalizing an
-          // approval bumps the conversation to the top of the sidebar.
-          at: { $ifNull: ["$approvedAt", "$createdAt"] },
+          // Approved messages retain their original send time, so approval does
+          // not make an older conversation appear newly sent.
+
+          at: { $ifNull: ["$originalSentAt", "$createdAt"] },
           sender: 1,
           clientEmployeeId: 1,
           clientEmployeeData: 1,
