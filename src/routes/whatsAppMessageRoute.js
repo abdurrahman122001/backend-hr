@@ -76,6 +76,7 @@ router.patch("/:id/seen", ctrl.markAsSeen);
 router.get("/:id/seen-by", ctrl.getSeenBy);
 
 router.post("/:messageId/reactions", ctrl.toggleMessageReaction);
+router.post("/:messageId/pin", ctrl.togglePinMessage);
 
 router.get(
   "/:messageId/mentionable",

@@ -5725,6 +5725,47 @@ exports.toggleMessageReaction = async (req, res) => {
   }
 };
 
+// POST /:messageId/pin  — pin/unpin a message (surfaced from the PDF preview's
+// Pin button). Body may optionally force a state via { isPinned }; omitted, it
+// toggles the current value.
+exports.togglePinMessage = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    if (!mongoose.isValidObjectId(messageId))
+      return res.status(400).json({ error: "Invalid message id" });
+
+    const message = await WhatsAppMessage.findById(messageId);
+    if (!message) return res.status(404).json({ error: "Message not found" });
+
+    const nextPinned =
+      typeof req.body?.isPinned === "boolean" ? req.body.isPinned : !message.isPinned;
+
+    message.isPinned = nextPinned;
+    message.pinnedBy = nextPinned ? req.employee._id : null;
+    message.pinnedAt = nextPinned ? new Date() : null;
+    await message.save();
+
+    const io = req.app.get("io");
+    if (io) {
+      io.emit("message:pin", {
+        messageId: String(message._id),
+        isPinned: nextPinned,
+        pinnedBy: nextPinned ? String(req.employee._id) : null,
+        pinnedByName: nextPinned ? req.employee.name || "" : "",
+        clientId: message.client ? String(message.client) : null,
+        groupId: message.groupId ? String(message.groupId) : null,
+        isGroupMessage: !!message.isGroupMessage,
+        isClientEmployeeMessage: !!message.isClientEmployeeMessage,
+      });
+    }
+
+    res.json({ isPinned: nextPinned, pinnedBy: message.pinnedBy, pinnedAt: message.pinnedAt });
+  } catch (err) {
+    console.error("❌ togglePinMessage error:", err);
+    res.status(500).json({ error: "Failed to toggle pin" });
+  }
+};
+
 // GET /frequent-emojis  — return current employee's top 6 most-used emojis
 exports.getFrequentEmojis = async (req, res) => {
   try {

@@ -259,6 +259,11 @@ const WhatsAppMessageSchema = new Schema(
       default: [],
     },
 
+    // Pinned attachment/message (surfaced from the PDF preview's Pin button)
+    isPinned: { type: Boolean, default: false },
+    pinnedBy: { type: Schema.Types.ObjectId, ref: "Employee", default: null },
+    pinnedAt: { type: Date, default: null },
+
     // NEW: Comments system
     comments: [CommentSchema],
     commentCount: {
