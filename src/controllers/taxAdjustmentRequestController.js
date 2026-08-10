@@ -1,5 +1,6 @@
 const TaxAdjustmentRequest = require("../models/TaxAdjustmentRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 exports.submitTaxAdjustmentRequest = async (req, res) => {
   try {
@@ -21,6 +22,7 @@ exports.submitTaxAdjustmentRequest = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "tax-adjustment", requestModel: "TaxAdjustmentRequest", actor: employeeId });
 
     res.status(201).json({
       success: true,
@@ -86,6 +88,11 @@ exports.updateTaxAdjustmentStatus = async (req, res) => {
     if (!request) {
       return res.status(404).json({ message: "Tax adjustment request not found" });
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "tax-adjustment", requestModel: "TaxAdjustmentRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({
       message: `Tax adjustment request ${status}`,

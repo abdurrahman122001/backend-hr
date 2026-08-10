@@ -5,6 +5,9 @@ const UnifiedAuth = require("../middleware/unifiedAuth");
 const ApplyLeave = require("../models/ApplyLeave");
 const LeaveMessage = require("../models/LeaveMessage");
 const Employee = require("../models/Employees");
+const {
+  createManyRequestNotifications,
+} = require("../services/requestNotificationService");
 
 const requireAuth = require("../middleware/auth"); // Make sure this is correct
 
@@ -169,6 +172,27 @@ router.post("/:id/messages", UnifiedAuth, async (req, res) => {
         });
       }
     }
+
+    const participantIds = [leave.employee];
+    if (Array.isArray(leave.approvalChain)) {
+      participantIds.push(...leave.approvalChain);
+    }
+    if (leave.supervisor) participantIds.push(leave.supervisor);
+
+    await createManyRequestNotifications({
+      req,
+      recipients: participantIds,
+      exclude: senderId,
+      actor: isEmployee ? req.user.employeeId : undefined,
+      requestId: leave._id,
+      requestType: "leave",
+      requestModel: "ApplyLeave",
+      action: "message",
+      title: "New message on leave request",
+      message: `${senderName}: ${message.trim()}`,
+      forApproval: (recipientId) => String(recipientId) !== String(leave.employee),
+      metadata: { messageId: populatedMsg._id },
+    });
 
     return res.status(201).json({ message: populatedMsg });
   } catch (err) {

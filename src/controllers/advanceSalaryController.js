@@ -1,6 +1,7 @@
 const AdvanceSalaryRequest = require("../models/AdvanceSalaryRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 exports.applyAdvanceSalary = async (req, res) => {
   try {
@@ -22,6 +23,7 @@ exports.applyAdvanceSalary = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "advance-salary", requestModel: "AdvanceSalaryRequest", actor: employeeId });
     res.status(201).json({
       message: newRequest.status === "approved" ? "Advance salary request approved successfully" : "Advance salary request submitted successfully",
       data: newRequest,
@@ -77,6 +79,11 @@ exports.updateStatus = async (req, res) => {
     if (!request) {
       return res.status(404).json({ message: "Request not found" });
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "advance-salary", requestModel: "AdvanceSalaryRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({
       message: `Advance salary request ${status}`,

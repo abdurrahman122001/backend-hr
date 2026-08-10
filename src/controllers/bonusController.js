@@ -1,6 +1,7 @@
 const BonusRequest = require("../models/BonusRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -23,6 +24,7 @@ exports.applyBonus = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "bonus", requestModel: "BonusRequest", actor: employeeId });
     if (newRequest.status === "approved") {
       await Employee.findByIdAndUpdate(employeeId, { $inc: { bonusCash: Number(amount) || 0 } });
     }
@@ -94,6 +96,11 @@ exports.updateStatus = async (req, res) => {
         console.error("Failed to apply bonus to employee:", err);
       }
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "bonus", requestModel: "BonusRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({ message: `Bonus request ${status}`, data: request });
   } catch (error) {

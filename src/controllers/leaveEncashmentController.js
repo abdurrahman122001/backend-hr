@@ -1,6 +1,7 @@
 const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -25,6 +26,7 @@ exports.applyLeaveEncashment = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "leave-encashment", requestModel: "LeaveEncashmentRequest", actor: employeeId });
     res.status(201).json({
       message: newRequest.status === "approved" ? "Leave encashment request approved successfully" : "Leave encashment request submitted successfully",
       data: newRequest,
@@ -96,6 +98,11 @@ exports.updateStatus = async (req, res) => {
         console.error("Failed to apply leave encashment to employee:", err);
       }
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "leave-encashment", requestModel: "LeaveEncashmentRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({ message: `Leave encashment request ${status}`, data: request });
   } catch (error) {

@@ -17,6 +17,9 @@ const salaryController = require("./employeeSalaryController");
 const Attendance = require("../models/Attendance");
 const EmployeeSession = require("../models/EmployeeSession");
 const moment = require("moment-timezone");
+const {
+  createRequestNotification,
+} = require("../services/requestNotificationService");
 
 /** ---------- utils ---------- **/
 function buildPublicUrl(req, filename) {
@@ -931,6 +934,21 @@ exports.applyLeave = async (req, res) => {
       });
     }
 
+    if (!isEmployeeAdmin && supervisor) {
+      await createRequestNotification({
+        req,
+        recipient: supervisor,
+        actor: employeeId,
+        requestId: leave._id,
+        requestType: "leave",
+        requestModel: "ApplyLeave",
+        action: "approval_required",
+        title: "Leave approval required",
+        message: `${employee.name} submitted a leave request for your approval.`,
+        forApproval: true,
+      });
+    }
+
     // Prepare response message based on analysis
     let message = isEmployeeAdmin
       ? "Leave request approved"
@@ -1577,6 +1595,34 @@ exports.approveLeave = async (req, res) => {
         }
       }
 
+      await Promise.all([
+        nextSupervisorId
+          ? createRequestNotification({
+              req,
+              recipient: nextSupervisorId,
+              actor: user.isEmployee ? approverId : undefined,
+              requestId: leave._id,
+              requestType: "leave",
+              requestModel: "ApplyLeave",
+              action: "approval_required",
+              title: "Leave approval required",
+              message: `${updatedLeave.employee?.name || "An employee"}'s leave request is waiting for your approval.`,
+              forApproval: true,
+            })
+          : Promise.resolve(null),
+        createRequestNotification({
+          req,
+          recipient: updatedLeave.employee?._id,
+          actor: user.isEmployee ? approverId : undefined,
+          requestId: leave._id,
+          requestType: "leave",
+          requestModel: "ApplyLeave",
+          action: "approval_progress",
+          title: "Leave request updated",
+          message: `Your leave request was approved by ${approver.name || user.name || "your reviewer"} and moved to the next reviewer.`,
+        }),
+      ]);
+
       return res.json({
         success: true,
         data: updatedLeave,
@@ -1686,6 +1732,18 @@ exports.approveLeave = async (req, res) => {
         console.error("Error emitting leave_changed (approved):", emitErr);
       }
     }
+
+    await createRequestNotification({
+      req,
+      recipient: processedLeave.employee?._id,
+      actor: user.isEmployee ? approverId : undefined,
+      requestId: leave._id,
+      requestType: "leave",
+      requestModel: "ApplyLeave",
+      action: "approved",
+      title: "Leave request approved",
+      message: `Your leave request was approved by ${approver.name || user.name || "your reviewer"}.`,
+    });
   } catch (error) {
     console.error("❌ [approveLeave] Error:", error);
     res.status(500).json({
@@ -1825,6 +1883,20 @@ exports.rejectLeave = async (req, res) => {
       ...leave.toObject(),
       employee: processEmployeeWithPhoto(leave.employee, req),
     };
+
+    await createRequestNotification({
+      req,
+      recipient: leave.employee?._id || leave.employee,
+      actor: user.isEmployee ? rejectorId : undefined,
+      requestId: leave._id,
+      requestType: "leave",
+      requestModel: "ApplyLeave",
+      action: "rejected",
+      title: "Leave request rejected",
+      message: rejectionReason
+        ? `Your leave request was rejected${user.name ? ` by ${user.name}` : ""}: ${rejectionReason}`
+        : `Your leave request was rejected${user.name ? ` by ${user.name}` : ""}.`,
+    });
 
     res.json({
       success: true,

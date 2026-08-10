@@ -1,6 +1,7 @@
 const SalaryChangeRequest = require("../models/SalaryChangeRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 const applySalaryChangeToEmployee = (employeeId, proposedSalary) =>
   Employee.findByIdAndUpdate(employeeId, {
@@ -71,6 +72,7 @@ exports.submitSalaryChangeRequest = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "salary-change", requestModel: "SalaryChangeRequest", actor: employeeId });
     if (newRequest.status === "approved") {
       await applySalaryChangeToEmployee(employeeId, proposedSalary);
     }
@@ -144,6 +146,11 @@ exports.updateSalaryChangeStatus = async (req, res) => {
     if (status === "approved" && request.employee) {
       await applySalaryChangeToEmployee(request.employee._id, request.proposedSalary);
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "salary-change", requestModel: "SalaryChangeRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({
       message: `Salary change request ${status}`,

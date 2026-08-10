@@ -1,6 +1,7 @@
 const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision } = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -95,6 +96,11 @@ exports.updateStatus = async (req, res) => {
         console.error("Failed to apply leave carry forward to employee:", err);
       }
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "leave-carry-forward", requestModel: "LeaveCarryForwardRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({ message: `Leave carry forward request ${status}`, data: request });
   } catch (error) {

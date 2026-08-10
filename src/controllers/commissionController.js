@@ -1,5 +1,6 @@
 const CommissionRequest = require("../models/CommissionRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 exports.applyCommission = async (req, res) => {
   try {
@@ -21,6 +22,7 @@ exports.applyCommission = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "commission", requestModel: "CommissionRequest", actor: employeeId });
     res.status(201).json({
       message: newRequest.status === "approved" ? "Commission request approved successfully" : "Commission request submitted successfully",
       data: newRequest,
@@ -86,6 +88,11 @@ exports.updateStatus = async (req, res) => {
     if (!request) {
       return res.status(404).json({ message: "Request not found" });
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "commission", requestModel: "CommissionRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({
       message: `Commission request ${status}`,

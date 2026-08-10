@@ -3,6 +3,7 @@ const Employee = require("../models/Employees");
 const Settings = require("../models/Settings");
 const { generateSalaryCertificateForEmployee } = require("../routes/docs");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -43,6 +44,7 @@ exports.applyDocumentRequest = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "document", requestModel: "DocumentRequest", actor: employeeId });
 
     // Auto-generate the certificate PDF for approved soft-copy requests if setting is enabled
     if (autoGenerate && newRequest.status === "approved") {
@@ -166,6 +168,11 @@ exports.updateStatus = async (req, res) => {
           : `Your salary certificate request was rejected. ${adminReason || ""}`.trim(),
       });
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "document", requestModel: "DocumentRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({ message: `Document request ${status}`, data: request });
   } catch (error) {

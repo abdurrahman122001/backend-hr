@@ -225,7 +225,9 @@ exports.getUpcomingAnniversaries = async (req, res) => {
       }
 
       // ------------------------------------------------------
-      // 🏆 Work Anniversary
+      // 🏆 Work Anniversary (only once at least 1 full year of
+      // service has been completed — the day someone JOINS is
+      // not their 1st anniversary)
       // ------------------------------------------------------
       if (emp.joiningDate) {
         const joining = dayjs(emp.joiningDate);
@@ -236,13 +238,20 @@ exports.getUpcomingAnniversaries = async (req, res) => {
         }
 
         const upcoming = normalizeToCurrentYear(emp.joiningDate);
+        const anniversaryNumber = upcoming ? upcoming.year() - joining.year() : 0;
 
-        if (upcoming && upcoming.isAfter(today) && upcoming.isBefore(next30)) {
+        if (
+          upcoming &&
+          anniversaryNumber >= 1 &&
+          upcoming.isAfter(today) &&
+          upcoming.isBefore(next30)
+        ) {
           result.push({
             type: "work_anniversary",
             ...emp.toObject(),
             upcomingDate: upcoming.format("YYYY-MM-DD"),
             daysLeft: upcoming.diff(today, "day"),
+            anniversaryNumber,
           });
         }
       }

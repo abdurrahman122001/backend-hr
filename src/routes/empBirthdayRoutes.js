@@ -98,6 +98,9 @@ router.get("/anniversaries", requireAuth, async (req, res) => {
         };
       })
       .filter(Boolean)
+      // ❌ yearsOfService < 1 means "nextAnniversary" is actually just the
+      // joining day itself (same-year join, no rollover yet) — not a real anniversary
+      .filter((e) => e.yearsOfService >= 1)
       .filter((e) => {
         const days = e.nextAnniversary.diff(now, "day");
         return days >= 0 && days <= 7;

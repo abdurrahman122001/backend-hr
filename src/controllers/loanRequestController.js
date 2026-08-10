@@ -1,5 +1,6 @@
 const LoanRequest = require("../models/LoanRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 exports.applyLoan = async (req, res) => {
   try {
@@ -24,6 +25,7 @@ exports.applyLoan = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "loan", requestModel: "LoanRequest", actor: employeeId });
 
     res.status(201).json({
       success: true,
@@ -104,6 +106,11 @@ exports.updateLoanRequestStatus = async (req, res) => {
     }
 
     await request.save();
+
+    await notifyRequestDecision({
+      req, request, requestType: "loan", requestModel: "LoanRequest",
+      status, actor: reviewerId, reason: rejectionReason,
+    });
 
     res.json({
       success: true,

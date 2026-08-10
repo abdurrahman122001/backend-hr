@@ -1,6 +1,7 @@
 const ReimbursementRequest = require("../models/ReimbursementRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 exports.applyReimbursement = async (req, res) => {
   try {
@@ -23,6 +24,7 @@ exports.applyReimbursement = async (req, res) => {
     });
 
     await newRequest.save();
+    await notifyRequestSubmitted({ req, request: newRequest, requestType: "reimbursement", requestModel: "ReimbursementRequest", actor: employeeId });
     res.status(201).json({
       message: newRequest.status === "approved" ? "Reimbursement request approved successfully" : "Reimbursement request submitted successfully",
       data: newRequest,
@@ -78,6 +80,11 @@ exports.updateStatus = async (req, res) => {
     if (!request) {
       return res.status(404).json({ message: "Request not found" });
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "reimbursement", requestModel: "ReimbursementRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({
       message: `Reimbursement request ${status}`,

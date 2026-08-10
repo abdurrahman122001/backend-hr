@@ -4,6 +4,7 @@ const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employees");
 const Shift = require("../models/Shift");
 const { approvedFields } = require("../utils/requestAutoApproval");
+const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
 
 const getEmployeeId = (req) => req.employee?._id;
 const getOwnerId = (req) => req.employee?.owner || req.user?.owner || req.user?._id;
@@ -72,6 +73,14 @@ exports.applyOvertimeRequest = async (req, res) => {
     if (newRequest.status === "approved") {
       await creditOvertimeBonusHours(newRequest, ownerId);
     }
+
+    await notifyRequestSubmitted({
+      req,
+      request: newRequest,
+      requestType: "overtime",
+      requestModel: "OvertimeRequest",
+      actor: employeeId,
+    });
 
     res.status(201).json({
       message: newRequest.status === "approved" ? "Overtime request approved successfully" : "Overtime request submitted successfully",
@@ -284,6 +293,11 @@ exports.updateStatus = async (req, res) => {
         `Accumulated: ${balance.bonusHoursAccumulated}h, Bonus days: ${balance.bonus}`
       );
     }
+
+    await notifyRequestDecision({
+      req, request, requestType: "overtime", requestModel: "OvertimeRequest",
+      status, actor: reviewerId, reason: adminReason,
+    });
 
     res.status(200).json({ message: `Overtime request ${status}`, data: request });
   } catch (error) {

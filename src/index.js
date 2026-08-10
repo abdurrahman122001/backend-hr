@@ -106,6 +106,7 @@ const employeeWorkSpaceManagementRoute = require("./routes/employeeTaskRoutes");
 const penaltyRoutes = require("./routes/penaltyRoutes");
 const warningRoutes = require("./routes/warningRoutes");
 const applyLeaveRoutes = require("./routes/applyLeaveRoutes");
+const requestNotificationRoutes = require("./routes/requestNotificationRoutes");
 const promotionRoutes = require("./routes/promotion");
 const salaryStructureRoutes = require("./routes/salaryStructure");
 const probationLeaveApprovalsRouter = require("./routes/probationLeaveApprovals");
@@ -365,6 +366,7 @@ app.use("/api/employee/task", employeeWorkSpaceManagementRoute);
 app.use("/api/penalties", penaltyRoutes);
 app.use("/api/warnings", warningRoutes);
 app.use("/api/apply-leave", applyLeaveRoutes);
+app.use("/api/request-notifications", requestNotificationRoutes);
 app.use("/api/promotion", anyPayrollAuth, promotionRoutes);
 app.use("/api/salary-structure", salaryStructureRoutes);
 app.use(
