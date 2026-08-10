@@ -5,12 +5,20 @@ const mongoose = require("mongoose");
 
 const chatTaskSchema = new mongoose.Schema(
   {
-    // The space / conversation this task lives in.
+    // The space / conversation this task lives in. Absent for personal tasks,
+    // which deliberately belong to no conversation at all.
     chatId: {
       type: mongoose.Schema.Types.ObjectId,
-      required: true,
+      required: function () {
+        return !this.isPersonal;
+      },
       index: true,
     },
+    // A private to-do, created from an email with no client space to file it
+    // under. It has no chatId, so every space/DM listing (which queries BY
+    // chatId) skips it automatically — it surfaces only in the task app's Home,
+    // which fetches these separately. Never shown to anyone but its owner.
+    isPersonal: { type: Boolean, default: false, index: true },
     // Org owner, for tenant scoping.
     owner: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     title: { type: String, required: true, trim: true },
@@ -42,6 +50,18 @@ const chatTaskSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // Same idea for the OTHER kind of message — an email turned into a task
+    // from the mail view's message menu. Kept separate from sourceMessageId
+    // because that one refs a chat Message and is what the chat badge keys on.
+    sourceEmailId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "AssignmentMessage",
+      default: null,
+      index: true,
+    },
+    // Carried alongside so the task can link back to the whole conversation,
+    // not just the one message.
+    sourceEmailThreadId: { type: String, default: "" },
     // Conversation message generated when the task is created directly from
     // the Tasks panel. Assignment activity is threaded under this message.
     announcementMessageId: {

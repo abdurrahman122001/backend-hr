@@ -5,6 +5,11 @@ const { Types } = require("mongoose");
 
 const Employee = require("../models/Employees");
 const LoanDetail = require("../models/LoanDetail");
+const {
+  BONUS_LOAN_TYPE,
+  LONG_TERM_LOAN_TYPE,
+} = require("../models/LoanDetail");
+const requireAdmin = require("../middleware/requireAdmin");
 const SalarySlip = require("../models/SalarySlip");
 const { encrypt, decrypt } = require("../utils/encryption");
 
@@ -104,6 +109,119 @@ async function computeLoanMonthlyContribution(loan, month, yNum) {
 }
 
 /**
+ * What a Long Term Loan still owes: everything payable minus every deduction
+ * an admin has actually approved so far. This is the number a short month
+ * carries forward — approving less than the installment leaves the difference
+ * here, so it simply comes due again later instead of being written off.
+ */
+async function longTermOutstanding(loan, key) {
+  const owedEnc = loan.totalToBePaid || loan.loanAmount;
+  const owed = owedEnc ? Number(await decrypt(owedEnc, key)) || 0 : 0;
+  let taken = 0;
+  for (const a of loan.deductionApprovals || []) {
+    taken += Number(await decrypt(a.amount, key)) || 0;
+  }
+  return Math.max(0, owed - taken);
+}
+
+/**
+ * The deduction for one month of a Long Term Loan: exactly what was approved
+ * for that month, and nothing at all when it has not been approved. The
+ * schedule is only ever a PROPOSAL for the admin — it never deducts by itself.
+ */
+async function computeLongTermContribution(loan, month, yNum) {
+  const approval = (loan.deductionApprovals || []).find(
+    (a) => normMonth(a.month) === month && Number(a.year) === yNum,
+  );
+  if (!approval) return 0;
+  const v = Number(await decrypt(approval.amount)) || 0;
+  return Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * A Bonus Loan is never taken out of salary — it is recovered from the BONUS on
+ * the slip, and only from that. So the deduction for a month is
+ *     min(this month's bonus, what is still outstanding)
+ * which is what makes a bonus smaller than the loan simply pay off part of it
+ * and carry the rest, and a bigger bonus clear it and leave the remainder with
+ * the employee.
+ *
+ * Repeatable by construction: the month being recomputed is removed from the
+ * running total before its own share is worked out, so re-running it — or
+ * editing the bonus and recomputing — replaces that month's figure instead of
+ * stacking another one on top. Returns the amount to deduct this month, and
+ * records it on the loan.
+ */
+async function computeBonusLoanRecovery(loanId, month, yNum, slip) {
+  const loan = await LoanDetail.findById(loanId);
+  if (!loan) return 0;
+
+  // Only bonuses from the month the loan was taken onwards. Recompute walks
+  // EVERY existing slip of the employee, so without this a new loan would reach
+  // back into bonuses already paid out months ago and retro-add a deduction to
+  // payslips that have long since been issued.
+  const takenAt = loan.createdAt ? new Date(loan.createdAt) : null;
+  if (takenAt) {
+    const slipRank = yNum * 12 + monthsList.indexOf(month);
+    const takenRank = takenAt.getFullYear() * 12 + takenAt.getMonth();
+    if (slipRank < takenRank) {
+      const stale = (loan.bonusRecoveries || []).findIndex(
+        (r) => normMonth(r.month) === month && Number(r.year) === yNum,
+      );
+      if (stale >= 0) {
+        loan.bonusRecoveries.splice(stale, 1);
+        loan.markModified("bonusRecoveries");
+        await loan.save();
+      }
+      return 0;
+    }
+  }
+
+  const owedEnc = loan.totalToBePaid || loan.loanAmount;
+  const owed = Number(await decrypt(owedEnc));
+  if (!Number.isFinite(owed) || owed <= 0) return 0;
+
+  const recoveries = Array.isArray(loan.bonusRecoveries)
+    ? loan.bonusRecoveries
+    : [];
+  let recoveredElsewhere = 0;
+  for (const r of recoveries) {
+    if (normMonth(r.month) === month && Number(r.year) === yNum) continue;
+    const v = Number(await decrypt(r.amount));
+    if (Number.isFinite(v)) recoveredElsewhere += v;
+  }
+
+  const outstanding = Math.max(0, owed - recoveredElsewhere);
+  const bonusThisMonth = slip?.bonus ? Number(await decrypt(slip.bonus)) : 0;
+  const recovery = Math.min(
+    Number.isFinite(bonusThisMonth) && bonusThisMonth > 0 ? bonusThisMonth : 0,
+    outstanding,
+  );
+
+  const idx = recoveries.findIndex(
+    (r) => normMonth(r.month) === month && Number(r.year) === yNum,
+  );
+  if (recovery > 0) {
+    const entry = {
+      month,
+      year: yNum,
+      amount: await encrypt(String(recovery)),
+      at: new Date(),
+    };
+    if (idx >= 0) loan.bonusRecoveries[idx] = entry;
+    else loan.bonusRecoveries.push(entry);
+  } else if (idx >= 0) {
+    // The bonus was removed or the loan is already settled — drop the row so it
+    // stops counting against the outstanding balance.
+    loan.bonusRecoveries.splice(idx, 1);
+  }
+  loan.markModified("bonusRecoveries");
+  await loan.save();
+
+  return recovery;
+}
+
+/**
  * Update a single salary slip for given (employee, month, year).
  * This is the MAIN function that updates salary slips when loans change.
  */
@@ -142,6 +260,31 @@ async function recomputeSingleMonthOtherLoans(
     // Calculate total loan deduction for this month
     for (const loan of loans) {
       try {
+        // Recovered from this month's bonus instead of from salary. Handled
+        // before the schedule lookup because a Bonus Loan has no schedule at
+        // all — there is nothing for computeLoanMonthlyContribution to find.
+        if (loan.type === BONUS_LOAN_TYPE) {
+          totalOtherLoans += await computeBonusLoanRecovery(
+            loan._id,
+            month,
+            yNum,
+            slip,
+          );
+          continue;
+        }
+
+        // Deducts only what an admin signed off for THIS month. Also handled
+        // before the schedule lookup: the schedule exists, but it proposes
+        // rather than decides, so reading it here would deduct unapproved.
+        if (loan.type === LONG_TERM_LOAN_TYPE) {
+          totalOtherLoans += await computeLongTermContribution(
+            loan,
+            month,
+            yNum,
+          );
+          continue;
+        }
+
         let contribution = await computeLoanMonthlyContribution(
           loan,
           month,
@@ -802,12 +945,26 @@ router.post("/loan/:employeeId", async (req, res) => {
       loanAllowanceField,
     } = req.body;
 
+    // A Bonus Loan carries an amount and nothing else: no term, no markup, no
+    // schedule. Those fields are optional on the model for this type, so they
+    // are left unset rather than filled with zeroes that would read as a real
+    // (and due) installment plan.
+    const isBonusLoan = type === BONUS_LOAN_TYPE;
+
     // Encrypt sensitive data
     const encryptedData = {
       loanAmount: await encrypt(loanAmount.toString()),
-      monthlyInstallment: await encrypt(monthlyInstallment.toString()),
-      totalMarkup: await encrypt(totalMarkup.toString()),
-      totalToBePaid: await encrypt(totalToBePaid.toString()),
+      monthlyInstallment: isBonusLoan
+        ? undefined
+        : await encrypt(monthlyInstallment.toString()),
+      totalMarkup: isBonusLoan
+        ? undefined
+        : await encrypt(totalMarkup.toString()),
+      // What has to come back out of future bonuses. With no markup on a bonus
+      // loan that is simply the amount lent.
+      totalToBePaid: isBonusLoan
+        ? await encrypt(loanAmount.toString())
+        : await encrypt(totalToBePaid.toString()),
     };
 
     // Encrypt payment schedule
@@ -831,15 +988,15 @@ router.post("/loan/:employeeId", async (req, res) => {
       type,
       loanAllowanceField: type === "Loan Allowance" ? (loanAllowanceField || null) : null,
       loanAmount: encryptedData.loanAmount,
-      loanTerm,
-      markupType,
-      markupValue,
-      scheduleStartMonth,
-      scheduleStartYear,
+      loanTerm: isBonusLoan ? undefined : loanTerm,
+      markupType: isBonusLoan ? undefined : markupType,
+      markupValue: isBonusLoan ? undefined : markupValue,
+      scheduleStartMonth: isBonusLoan ? undefined : scheduleStartMonth,
+      scheduleStartYear: isBonusLoan ? undefined : scheduleStartYear,
       monthlyInstallment: encryptedData.monthlyInstallment,
       totalMarkup: encryptedData.totalMarkup,
       totalToBePaid: encryptedData.totalToBePaid,
-      paymentSchedule: encryptedPaymentSchedule,
+      paymentSchedule: isBonusLoan ? [] : encryptedPaymentSchedule,
     });
 
     // Recompute salary slips for this employee
@@ -926,12 +1083,175 @@ router.get("/loan-detail/:loanId", decryptWithKey, async (req, res) => {
       );
     }
 
+    // Which months an admin has already signed off, so the Loan Calculator can
+    // show each scheduled row as approved or still pending. Amounts are read
+    // back with the same key the rest of this response uses.
+    if (loan.type === LONG_TERM_LOAN_TYPE) {
+      out.deductionApprovals = await Promise.all(
+        (loan.deductionApprovals || []).map(async (a) => ({
+          month: a.month,
+          year: a.year,
+          amount: Number(await decrypt(a.amount, req.decryptionKey)) || 0,
+          approvedByName: a.approvedByName || "",
+          approvedAt: a.approvedAt,
+        })),
+      );
+      out.outstanding = Math.round(
+        await longTermOutstanding(loan, req.decryptionKey),
+      );
+    }
+
     res.json(out);
   } catch (err) {
     console.error("Error fetching loan:", err);
     res
       .status(500)
       .json({ error: "Failed to fetch loan", details: err.message });
+  }
+});
+
+/**
+ * Approve ONE month's deduction on a Long Term Loan.
+ * requireAdmin = company admin / super-admin, or any employee with isAdmin.
+ * Nothing is deducted from a month until this has been called for it.
+ */
+router.post("/loan/:loanId/approve-deduction", requireAdmin, async (req, res) => {
+  try {
+    const { loanId } = req.params;
+    const { month: monthRaw, year: yearRaw, amount } = req.body || {};
+    if (!Types.ObjectId.isValid(loanId)) {
+      return res.status(400).json({ error: "Invalid loan ID" });
+    }
+
+    const loan = await LoanDetail.findById(loanId);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+    if (loan.type !== LONG_TERM_LOAN_TYPE) {
+      return res
+        .status(400)
+        .json({ error: "Only Long Term Loans need deduction approval" });
+    }
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) return res.status(403).json({ error: "Access denied" });
+
+    const month = normMonth(monthRaw);
+    const yNum = Number(yearRaw);
+    if (!monthsList.includes(month) || !Number.isFinite(yNum)) {
+      return res.status(400).json({ error: "Invalid month or year" });
+    }
+
+    const requested = Number(amount);
+    if (!Number.isFinite(requested) || requested <= 0) {
+      return res.status(400).json({ error: "Amount must be greater than zero" });
+    }
+
+    // Approving more than is left would over-collect the loan; the caller's
+    // figure is also already capped by net salary on the payroll screen, and
+    // whatever is not taken this month simply stays outstanding for a later one.
+    const outstanding = await longTermOutstanding(loan);
+    if (outstanding <= 0) {
+      return res.status(400).json({ error: "This loan is already fully paid" });
+    }
+
+    // Never take more than the employee is actually being paid. Enforced HERE
+    // rather than only on the payroll screen so the guarantee holds wherever
+    // the approval came from — the Loan Calculator has no idea what this
+    // month's net is. Whatever does not fit stays outstanding and comes due
+    // again next month.
+    let netCap = Infinity;
+    try {
+      const slip = await SalarySlip.findOne({
+        employee: loan.employee,
+        month,
+        year: String(yNum),
+        ...(ownerId ? { owner: ownerId } : {}),
+      }).lean();
+      if (slip?.netPayable) {
+        const net = Number(await decrypt(slip.netPayable));
+        // The loan's own deduction is already inside netPayable once a previous
+        // approval for this month was applied, so add back what this month has
+        // already taken for THIS loan before capping.
+        const already = await computeLongTermContribution(loan, month, yNum);
+        if (Number.isFinite(net)) netCap = Math.max(0, net + already);
+      }
+    } catch (e) {
+      console.error("net salary lookup failed, approving uncapped:", e.message);
+    }
+
+    const finalAmount = Math.min(requested, outstanding, netCap);
+    if (finalAmount <= 0) {
+      return res.status(400).json({
+        error:
+          "Net salary for this month leaves nothing to deduct — the balance carries to next month.",
+      });
+    }
+
+    const entry = {
+      month,
+      year: yNum,
+      amount: await encrypt(String(finalAmount)),
+      approvedBy: req.user?.employeeId || null,
+      approvedByName: req.user?.name || "",
+      approvedAt: new Date(),
+    };
+    const idx = (loan.deductionApprovals || []).findIndex(
+      (a) => normMonth(a.month) === month && Number(a.year) === yNum,
+    );
+    if (idx >= 0) loan.deductionApprovals[idx] = entry;
+    else loan.deductionApprovals.push(entry);
+    loan.markModified("deductionApprovals");
+    await loan.save();
+
+    // Push it straight onto that month's slip so the payroll figures move now.
+    await recomputeSingleMonthOtherLoans(loan.employee, month, yNum, ownerId);
+
+    res.json({
+      message: "Deduction approved",
+      month,
+      year: yNum,
+      amount: finalAmount,
+      outstandingAfter: Math.max(0, outstanding - finalAmount),
+    });
+  } catch (err) {
+    console.error("Error approving deduction:", err);
+    res
+      .status(500)
+      .json({ error: "Failed to approve deduction", details: err.message });
+  }
+});
+
+/** Withdraw a month's approval — the deduction comes straight back off. */
+router.delete("/loan/:loanId/approve-deduction", requireAdmin, async (req, res) => {
+  try {
+    const { loanId } = req.params;
+    const month = normMonth(req.query.month);
+    const yNum = Number(req.query.year);
+    if (!Types.ObjectId.isValid(loanId)) {
+      return res.status(400).json({ error: "Invalid loan ID" });
+    }
+
+    const loan = await LoanDetail.findById(loanId);
+    if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+    const ownerId = req.user?.owner || req.user?._id;
+    const emp = await Employee.findOne({ _id: loan.employee, owner: ownerId });
+    if (!emp) return res.status(403).json({ error: "Access denied" });
+
+    const idx = (loan.deductionApprovals || []).findIndex(
+      (a) => normMonth(a.month) === month && Number(a.year) === yNum,
+    );
+    if (idx >= 0) {
+      loan.deductionApprovals.splice(idx, 1);
+      loan.markModified("deductionApprovals");
+      await loan.save();
+      await recomputeSingleMonthOtherLoans(loan.employee, month, yNum, ownerId);
+    }
+
+    res.json({ message: "Approval withdrawn", month, year: yNum });
+  } catch (err) {
+    console.error("Error withdrawing approval:", err);
+    res.status(500).json({ error: "Failed to withdraw approval" });
   }
 });
 
@@ -1130,12 +1450,93 @@ router.get("/loan-benefits/:employeeId", decryptWithKey, async (req, res) => {
       }
     }
 
+    /* ---------------- LONG TERM LOANS ----------------
+     * Nothing here deducts on its own. Each entry tells the payroll screen what
+     * this month WOULD take (the scheduled installment, never more than the
+     * balance still owed) and whether an admin has actually approved it yet.
+     */
+    const longTermLoans = [];
+    for (const loan of loans) {
+      if (loan.type !== LONG_TERM_LOAN_TYPE) continue;
+      try {
+        const outstanding = await longTermOutstanding(loan, req.decryptionKey);
+        if (outstanding <= 0) continue;
+
+        const sched = (loan.paymentSchedule || []).find(
+          (ps) => normMonth(ps.month) === month && Number(ps.year) === year,
+        );
+        const scheduled = sched?.totalPayment
+          ? Number(await decrypt(sched.totalPayment, req.decryptionKey)) || 0
+          : loan.monthlyInstallment
+            ? Number(await decrypt(loan.monthlyInstallment, req.decryptionKey)) ||
+              0
+            : 0;
+
+        const approval = (loan.deductionApprovals || []).find(
+          (a) => normMonth(a.month) === month && Number(a.year) === year,
+        );
+        const approvedAmount = approval
+          ? Number(await decrypt(approval.amount, req.decryptionKey)) || 0
+          : 0;
+
+        longTermLoans.push({
+          loanId: loan._id.toString(),
+          // Never propose more than is left to pay.
+          proposed: Math.round(Math.min(scheduled || outstanding, outstanding)),
+          outstanding: Math.round(outstanding),
+          approved: !!approval,
+          approvedAmount: Math.round(approvedAmount),
+          approvedByName: approval?.approvedByName || "",
+        });
+      } catch (e) {
+        console.error(`Long term loan ${loan._id} read failed:`, e);
+      }
+    }
+
+    /* ---------------- BONUS LOANS ----------------
+     * They have no payment schedule, so the loop above skips them entirely.
+     * What a payroll estimate needs from them is not an installment but the
+     * balance still owed — the estimate then takes min(bonus, outstanding),
+     * the same figure the saved slip computes server-side.
+     */
+    let bonusLoanOutstanding = 0;
+    const bonusLoans = [];
+    for (const loan of loans) {
+      if (loan.type !== BONUS_LOAN_TYPE) continue;
+      try {
+        const owedEnc = loan.totalToBePaid || loan.loanAmount;
+        const owed = owedEnc
+          ? Number(await decrypt(owedEnc, req.decryptionKey)) || 0
+          : 0;
+        let recovered = 0;
+        for (const r of loan.bonusRecoveries || []) {
+          // The month being estimated is excluded: its own recovery is exactly
+          // what the estimate is about to work out from the bonus on screen.
+          if (normMonth(r.month) === month && Number(r.year) === year) continue;
+          recovered += Number(await decrypt(r.amount, req.decryptionKey)) || 0;
+        }
+        const outstanding = Math.max(0, owed - recovered);
+        if (outstanding > 0) {
+          bonusLoans.push({
+            loanId: loan._id.toString(),
+            outstanding: Math.round(outstanding),
+          });
+          bonusLoanOutstanding += outstanding;
+        }
+      } catch (e) {
+        console.error(`Bonus loan ${loan._id} decrypt failed:`, e);
+      }
+    }
+
     /* ---------------- RESPONSE ---------------- */
     res.json({
       loanDetails,
       totalLoanBenefits: Math.round(totalLoanBenefits),
       totalLoanInstallments: Math.round(totalLoanInstallments),
       regularInstallments: Math.round(regularInstallments),
+      bonusLoans,
+      bonusLoanOutstanding: Math.round(bonusLoanOutstanding),
+      longTermLoans,
       allowanceLoans,
       summary: {
         totalAmountPaidCurrentMonth: Math.round(totalLoanInstallments),

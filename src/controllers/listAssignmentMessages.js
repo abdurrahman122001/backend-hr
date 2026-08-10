@@ -1490,6 +1490,10 @@ exports.listMessages = async function listMessages(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "trashedBy", select: "_id name companyEmail" },
           { path: "spamReportedBy", select: "_id name companyEmail" },
+          // Same reason as the thread endpoint: EmailDetail falls back to this
+          // list when the thread call comes back empty, and it names the senior
+          // who edited a message.
+          { path: "lastEditedBy", select: "_id name companyEmail role designation" },
         ])
         .lean(),
       AssignmentMessage.countDocuments(qFinal),
@@ -2533,6 +2537,11 @@ exports.getMessagesByThread = async function getMessagesByThread(req, res) {
           { path: "scheduledBy", select: "_id name companyEmail" },
           { path: "approvedBy", select: "_id name companyEmail role designation" },
           { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+          // A senior may rewrite a junior's pending mail. The thread has to say
+          // WHO, by name, to everyone reading it — without this the id arrives
+          // unpopulated and the "Last edited by …" line silently disappears on
+          // the next reload, leaving edited text with no author.
+          { path: "lastEditedBy", select: "_id name companyEmail role designation" },
           { path: "plannedApprovalChain", select: "_id name role designation" },
           {
             path: "approvalChain",

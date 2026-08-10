@@ -1107,8 +1107,14 @@ exports.createMessage = async function createMessage(req, res) {
     // it to. Gate on CRM access (or the legacy role) instead.
     // CRM/manager authority applies to every client; the client's own team is
     // added to it below, once the client this message belongs to is known.
+    // isAdmin counts too: that employee is the company's top authority — their
+    // mail already bypasses the approval chain entirely (approvalStatus null),
+    // so refusing them the client's own identity was inconsistent, and it left
+    // them able to START a client thread but not to answer in it.
     const senderHasCrmAuthority =
-      senderRole === "manager" || (await hasCrmAccess(req.employee));
+      senderRole === "manager" ||
+      senderDoc?.isAdmin === true ||
+      (await hasCrmAccess(req.employee));
 
     // Forwards must not inherit the original thread — keeping them private to
     // their selected recipients means starting their own thread, even if the
@@ -3309,13 +3315,16 @@ exports.createDraft = async function createDraft(req, res) {
     // Note: Drafts can be saved without receivers.
     // The requirement for receivers should only be enforced when sending.
 
-    const senderDoc = await Employee.findById(sender).select("_id role").lean();
+    const senderDoc = await Employee.findById(sender)
+      .select("_id role isAdmin")
+      .lean();
     const senderRole = normalizeRole(senderDoc?.role || "");
-    // Same reasoning as the send path: a CRM-access sender — or the client's
-    // own assigned/supervising team — must keep the company-employee context
-    // they explicitly chose, whatever their role.
+    // Same reasoning as the send path: an isAdmin or CRM-access sender — or the
+    // client's own assigned/supervising team — must keep the company-employee
+    // context they explicitly chose, whatever their role.
     const senderCanActAsClient =
       senderRole === "manager" ||
+      senderDoc?.isAdmin === true ||
       (await hasCrmAccess(req.employee)) ||
       (await isClientTeamMember(sender, isObjId(client) ? client : null));
 
@@ -4879,14 +4888,15 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
     // chain, so every senior can edit their junior's pending messages.
     const isSender = String(msg.sender) === currentUserId;
 
-    let isSeniorOfSender = false;
-    if (!isSender) {
-      const seniorChain = await getManagementChainFromHierarchy(
-        msg.owner,
-        msg.sender
-      );
-      isSeniorOfSender = seniorChain.some((id) => String(id) === currentUserId);
-    }
+    // Resolved even when the author is the one editing: the chain is also the
+    // audience for the edit event below, and every senior above the author is
+    // entitled to see that this message changed under them.
+    const seniorChain = await getManagementChainFromHierarchy(
+      msg.owner,
+      msg.sender
+    );
+    const isSeniorOfSender =
+      !isSender && seniorChain.some((id) => String(id) === currentUserId);
 
     if (!isSender && !isSeniorOfSender) {
       return res.status(403).json({
@@ -5002,6 +5012,13 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         }
 
         authorizedParticipants.add(String(currentUser._id));
+
+        // Every senior above the author, not only the approver currently
+        // holding the message. An edit changes what the whole chain is about
+        // to approve, so it has to reach all of them live — otherwise a senior
+        // who is not this message's receiver keeps reading the pre-edit text
+        // until they happen to reload.
+        seniorChain.forEach((id) => authorizedParticipants.add(String(id)));
 
         const notificationData = {
           message: populated,

@@ -14,6 +14,10 @@ const { linkJuniorToSenior } = require("./orgHierarchyController");
 const {
   createOnboardingAssignmentTask,
 } = require("./onboardingTaskController");
+const {
+  recordOnboardingEvent,
+  resolveActor,
+} = require("../services/onboardingLog");
 
 require("dotenv").config();
 
@@ -609,12 +613,42 @@ async function sendOfferLetter(req, res) {
     // Sent from the HR mailbox (HR_MAIL_*) — the candidate's "I accept the
     // offer" reply has to land in the mailbox the HR watcher reads, otherwise
     // the onboarding flow never advances.
-    await sendHrMail({
-      to: candidateEmail,
-      subject: finalSubject,
-      text,
-      html: finalHtml,
-    });
+    //
+    // The Employee row above is already written by this point, so a throw here
+    // used to leave a candidate parked at "Offered" with nothing ever sent and
+    // no trace of why. Both outcomes are now logged against that employee and
+    // read back by the Log dialog on the Employees screen.
+    const sender = await resolveActor(req.user);
+    try {
+      const info = await sendHrMail({
+        to: candidateEmail,
+        subject: finalSubject,
+        text,
+        html: finalHtml,
+      });
+      await recordOnboardingEvent({
+        owner: ownerId,
+        employee: employee._id,
+        type: "offer_letter",
+        status: "success",
+        title: "Offer letter sent",
+        detail: info?.messageId ? `Message ID ${info.messageId}` : "",
+        recipient: candidateEmail,
+        ...sender,
+      });
+    } catch (mailErr) {
+      await recordOnboardingEvent({
+        owner: ownerId,
+        employee: employee._id,
+        type: "offer_letter",
+        status: "failed",
+        title: "Offer letter failed to send",
+        detail: mailErr?.message || "Unknown mail error",
+        recipient: candidateEmail,
+        ...sender,
+      });
+      throw mailErr;
+    }
 
     return res.json({ success: true, ...(hierarchyWarning ? { hierarchyWarning } : {}) });
   } catch (err) {

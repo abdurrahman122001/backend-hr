@@ -13,6 +13,7 @@ const {
   generateEmployeeIdForCompany,
   ensureCompanyOwnerIndex,
 } = require("../utils/companyEmployeeId");
+const { recordOnboardingEvent } = require("../services/onboardingLog");
 
 // --- Company Info ---
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -266,11 +267,36 @@ router.put(
         html = enforceComicSans(html);
         html = enforceImgCss(html);
 
-        await sendEmail({
-          to: emp.email,
-          subject: "Set Your Password – Mavens Advisors HR Portal",
-          html,
-        });
+        // Last automated mail of the onboarding chain. Logged like the rest so
+        // "candidate finished their profile but never got the password link"
+        // is answerable from the Employees screen instead of the pm2 output.
+        try {
+          const info = await sendEmail({
+            to: emp.email,
+            subject: "Set Your Password – Mavens Advisors HR Portal",
+            html,
+          });
+          await recordOnboardingEvent({
+            owner: emp.owner,
+            employee: emp._id,
+            type: "set_password_invite",
+            status: "success",
+            title: "Set-password link sent",
+            detail: info?.messageId ? `Message ID ${info.messageId}` : "",
+            recipient: emp.email,
+          });
+        } catch (mailErr) {
+          await recordOnboardingEvent({
+            owner: emp.owner,
+            employee: emp._id,
+            type: "set_password_invite",
+            status: "failed",
+            title: "Set-password link failed to send",
+            detail: mailErr?.message || "Unknown mail error",
+            recipient: emp.email,
+          });
+          throw mailErr;
+        }
       }
 
       return res.json({ success: true, data: { _id: emp._id.toString() } });

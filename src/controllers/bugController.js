@@ -1398,24 +1398,33 @@ exports.approveBug = async (req, res) => {
   }
 };
 
-// Reopen a resolved (or pending-approval) feedback item. Any employee who can
-// access the organisation-wide feedback queue may do this; the same helper
-// also grants owners and isAdmin employees implicitly.
+// Reopen a resolved (or pending-approval) feedback item.
+//
+// The reporter may always reopen their OWN feedback: they are the one who can
+// tell that the fix did not hold, and requiring organisation-wide feedback
+// access for that meant an employee whose feedback was signed off wrongly had
+// to go and find someone with the CRM-side right to undo it. Anyone else still
+// needs that access (the helper also grants owners and isAdmin employees).
 exports.reopenBug = async (req, res) => {
   try {
     const { id } = req.params;
-    const access = await getFeedbackAccess(req.employee);
-
-    if (!access.hasAccess) {
-      return res.status(403).json({
-        status: "error",
-        message: "Feedback access is required to reopen feedback",
-      });
-    }
 
     const bug = await Bug.findById(id);
     if (!bug) {
       return res.status(404).json({ status: "error", message: "Bug not found" });
+    }
+
+    const isReporter =
+      String(bug.reportedBy) === String(req.employee._id);
+
+    if (!isReporter) {
+      const access = await getFeedbackAccess(req.employee);
+      if (!access.hasAccess) {
+        return res.status(403).json({
+          status: "error",
+          message: "Feedback access is required to reopen someone else's feedback",
+        });
+      }
     }
 
     if (bug.status === "open") {

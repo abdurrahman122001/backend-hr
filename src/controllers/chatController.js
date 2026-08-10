@@ -3,6 +3,9 @@ const { Conversation, Message, Space } = require("../models/Chat");
 const ChatThread = require("../models/ChatThread");
 const ChatTask = require("../models/ChatTask");
 const Employee = require("../models/Employees");
+const {
+  assignSpaceMembersToClient,
+} = require("../services/clientSpaceService");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const path = require("path");
@@ -33,12 +36,21 @@ const sendMentionNotifications = async (
   mentions,
   message,
   conversation,
-  req
+  req,
+  // Who is actually in this chat. Mentioning someone who is not in the space or
+  // group is allowed (the composer offers them, and the sender is asked whether
+  // to add them), but until they are added they cannot open the message — so
+  // notifying them would only produce a ping that leads nowhere.
+  audienceIds = null
 ) => {
   try {
     const io = req.app.get("io");
+    const audience = Array.isArray(audienceIds)
+      ? new Set(audienceIds.map((id) => String(id?._id || id)))
+      : null;
 
     for (const mention of mentions) {
+      if (audience && !audience.has(String(mention.employee))) continue;
       // Send socket notification to mentioned user
       io.to(`user_${mention.employee}`).emit("user_mentioned", {
         messageId: message._id,
@@ -1219,7 +1231,13 @@ exports.sendMessage = async (req, res) => {
     conversation.lastMessage = message._id;
     conversation.updatedAt = new Date();
     if (mentions.length > 0) {
-      await sendMentionNotifications(mentions, message, conversation, req);
+      await sendMentionNotifications(
+        mentions,
+        message,
+        conversation,
+        req,
+        conversation.participants
+      );
     }
     // Update unread counts
     if (!isGroup) {
@@ -1652,7 +1670,13 @@ exports.sendDirectMessage = async (req, res) => {
 
     await conversation.save();
     if (mentions.length > 0) {
-      await sendMentionNotifications(mentions, message, conversation, req);
+      await sendMentionNotifications(
+        mentions,
+        message,
+        conversation,
+        req,
+        conversation.participants
+      );
     }
     // Populate message
     const populatedMessage = await Message.findById(message._id)
@@ -2620,6 +2644,16 @@ exports.addSpaceMembers = async (req, res) => {
       });
     }
 
+    // If this space stands for a CRM client, being invited to it is also an
+    // assignment to that client — the mirror image of the client → space member
+    // sync the CRM already does. Never throws: an invite must not fail because
+    // the client record could not be updated.
+    const assignedClient = await assignSpaceMembersToClient({
+      spaceId: space._id,
+      employeeIds: newMembers,
+      io,
+    });
+
     res.json({
       success: true,
       space: populatedSpace,
@@ -2627,6 +2661,10 @@ exports.addSpaceMembers = async (req, res) => {
       // callers keep working.
       addedMembers: newMembers.length,
       invitedMembers: newMembers.length,
+      // Lets the UI say "…and assigned to <client>" instead of guessing.
+      assignedClient: assignedClient
+        ? { _id: String(assignedClient._id), clientName: assignedClient.clientName }
+        : null,
     });
   } catch (error) {
     console.error("Add space members error:", error);
@@ -3180,7 +3218,13 @@ exports.sendSpaceMessage = async (req, res) => {
       conversation.unreadCount = new Map();
     }
     if (mentions.length > 0) {
-      await sendMentionNotifications(mentions, message, conversation, req);
+      await sendMentionNotifications(
+        mentions,
+        message,
+        conversation,
+        req,
+        space.members
+      );
     }
     // Increment unread count for all receivers
     receivers.forEach((receiverId) => {

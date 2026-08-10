@@ -74,8 +74,9 @@ router.put("/resolve/:id", requireEmployeeAuth, bugController.resolveBug);
 router.patch("/:id/approve", requireEmployeeAuth, bugController.approveBug);
 
 // @route   PATCH /api/bugs/:id/reopen
-// @desc    Reopen feedback (requires organisation-wide feedback access)
-// @access  Private (Feedback access / Admin / Owner)
+// @desc    Reopen feedback — the reporter may reopen their own; reopening
+//          anyone else's requires organisation-wide feedback access
+// @access  Private (Reporter / Feedback access / Admin / Owner)
 router.patch("/:id/reopen", requireEmployeeAuth, bugController.reopenBug);
 
 // @route   PATCH /api/bugs/:id/assign

@@ -532,3 +532,199 @@ exports.deleteTask = async (req, res) => {
     return res.status(500).json({ error: "Failed to delete task" });
   }
 };
+
+/**
+ * POST /chat/tasks/from-email
+ * Turn an email into a task, from the mail view's message menu.
+ *
+ * mode "space"    → files it on the CLIENT'S space, resolved automatically from
+ *                   the email (ClientInfo.chatSpace). Shared with that space
+ *                   like any other space task.
+ * mode "personal" → a private to-do with no space at all. It shows up only in
+ *                   the task app's Home; nothing else lists it.
+ */
+exports.createTaskFromEmail = async (req, res) => {
+  try {
+    const { messageId, mode, title, details, dueAt, assignees } = req.body || {};
+    if (!mongoose.isValidObjectId(messageId))
+      return res.status(400).json({ error: "Invalid email id" });
+    if (!["space", "personal"].includes(String(mode)))
+      return res.status(400).json({ error: "mode must be space or personal" });
+
+    const AssignmentMessage = require("../models/AssignmentMessage");
+    const ClientInfo = require("../models/ClientInfo");
+
+    const owner = req.employee.owner;
+    // Owner-scoped on purpose: an email id from another company must not be
+    // readable through this endpoint, let alone turned into one of its tasks.
+    const email = await AssignmentMessage.findOne({ _id: messageId, owner })
+      .select("_id subject note client threadId")
+      .lean();
+    if (!email) return res.status(404).json({ error: "Email not found" });
+
+    // The subject is the obvious title; an untitled mail still needs one.
+    const resolvedTitle =
+      (title && String(title).trim()) ||
+      (email.subject && String(email.subject).trim()) ||
+      "Task from email";
+
+    const base = {
+      owner,
+      title: resolvedTitle.slice(0, 300),
+      details: String(details || "").trim(),
+      dueAt: dueAt ? new Date(dueAt) : null,
+      createdBy: req.employee._id,
+      sourceEmailId: email._id,
+      sourceEmailThreadId: email.threadId || "",
+    };
+
+    if (mode === "personal") {
+      // Assigned to its creator: Home lists "my work", and a personal task that
+      // is nobody's work would never appear there.
+      let task = await ChatTask.create({
+        ...base,
+        isPersonal: true,
+        assignees: [req.employee._id],
+      });
+      task = await task.populate(POPULATE);
+      return res.json({ task, mode: "personal" });
+    }
+
+    // --- space mode ---
+    const clientId =
+      email.client && typeof email.client === "object"
+        ? email.client._id
+        : email.client;
+    if (!clientId) {
+      return res.status(400).json({
+        error:
+          "This email is internal — it has no client, so there is no space to file the task in.",
+      });
+    }
+
+    const client = await ClientInfo.findOne({ _id: clientId, owner })
+      .select("_id clientName chatSpace")
+      .lean();
+    if (!client?.chatSpace) {
+      return res.status(400).json({
+        error:
+          "This client has no space yet, so the task has nowhere to go. Create the client's space first.",
+      });
+    }
+
+    // Whoever the dialog picked; falling back to the creator so a task is
+    // never left belonging to nobody (Home lists "my work" by assignee).
+    const chosen = (Array.isArray(assignees) ? assignees : [])
+      .filter((a) => mongoose.isValidObjectId(a))
+      .map(String);
+
+    let task = await ChatTask.create({
+      ...base,
+      chatId: client.chatSpace,
+      assignees: chosen.length ? chosen : [req.employee._id],
+    });
+    task = await task.populate(POPULATE);
+    notifyAssignees(req, task, task.assignees, req.employee._id);
+
+    // Same room the Tasks side-panel listens on, so it appears without a reload.
+    emit(req, "chat_task_created", client.chatSpace, { task });
+
+    return res.json({ task, mode: "space", spaceId: String(client.chatSpace) });
+  } catch (e) {
+    console.error("createTaskFromEmail error:", e);
+    return res.status(500).json({ error: "Failed to create task" });
+  }
+};
+
+/**
+ * GET /chat/tasks/personal
+ * The caller's own personal tasks. Home is the only screen that calls this —
+ * space listings query by chatId and therefore never see these.
+ */
+exports.getPersonalTasks = async (req, res) => {
+  try {
+    const tasks = await ChatTask.find({
+      owner: req.employee.owner,
+      isPersonal: true,
+      createdBy: req.employee._id,
+    })
+      .sort({ done: 1, createdAt: -1 })
+      .populate(POPULATE)
+      .lean();
+    return res.json({ tasks });
+  } catch (e) {
+    console.error("getPersonalTasks error:", e);
+    return res.status(500).json({ error: "Failed to load personal tasks" });
+  }
+};
+
+/**
+ * GET /chat/tasks/from-email/:messageId/options
+ * What the "Create task" dialog needs before it can offer anything: the
+ * default title, whether this email has a client space to file a task in, and
+ * who can be assigned there.
+ */
+exports.getEmailTaskOptions = async (req, res) => {
+  try {
+    const { messageId } = req.params;
+    if (!mongoose.isValidObjectId(messageId))
+      return res.status(400).json({ error: "Invalid email id" });
+
+    const AssignmentMessage = require("../models/AssignmentMessage");
+    const ClientInfo = require("../models/ClientInfo");
+    const { Space } = require("../models/Chat");
+
+    const owner = req.employee.owner;
+    const email = await AssignmentMessage.findOne({ _id: messageId, owner })
+      .select("_id subject client")
+      .lean();
+    if (!email) return res.status(404).json({ error: "Email not found" });
+
+    const clientId =
+      email.client && typeof email.client === "object"
+        ? email.client._id
+        : email.client;
+
+    const result = {
+      defaultTitle: (email.subject || "").trim() || "Task from email",
+      hasClient: !!clientId,
+      clientName: "",
+      spaceId: null,
+      spaceName: "",
+      // Assignable people = the client space's own members. Empty for personal
+      // tasks, which are always the creator's own.
+      members: [],
+    };
+
+    if (clientId) {
+      const client = await ClientInfo.findOne({ _id: clientId, owner })
+        .select("_id clientName chatSpace")
+        .lean();
+      result.clientName = client?.clientName || "";
+      if (client?.chatSpace) {
+        const space = await Space.findById(client.chatSpace)
+          .select("_id name members")
+          .populate({
+            path: "members",
+            select: "_id name companyEmail photographUrl",
+          })
+          .lean();
+        if (space) {
+          result.spaceId = String(space._id);
+          result.spaceName = space.name || "";
+          result.members = (space.members || []).filter(Boolean).map((m) => ({
+            _id: String(m._id),
+            name: m.name || "",
+            companyEmail: m.companyEmail || "",
+            photographUrl: m.photographUrl || "",
+          }));
+        }
+      }
+    }
+
+    return res.json(result);
+  } catch (e) {
+    console.error("getEmailTaskOptions error:", e);
+    return res.status(500).json({ error: "Failed to load task options" });
+  }
+};

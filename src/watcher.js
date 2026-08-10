@@ -21,6 +21,7 @@ const {
   notifySeniorOfOnboarding,
 } = require("./controllers/onboardingTaskController");
 const { getIo } = require("./socket/ioRegistry");
+const { recordOnboardingEvent } = require("./services/onboardingLog");
 const Signature = require("./models/Signature");
 const User = require("./models/Users");
 const CompanyProfile = require("./models/CompanyProfile");
@@ -570,6 +571,16 @@ async function processMessage(stream, uid) {
 
         emp = updatedEmp;
 
+        await recordOnboardingEvent({
+          owner: ownerId,
+          employee: emp._id,
+          type: "documents_received",
+          status: "success",
+          title: "CNIC & CV received",
+          detail: "Candidate replied with their documents",
+          recipient: fromAddr,
+        });
+
         // Send profile link
         const sendResult = await sendCompleteProfileLink(
           emp._id,
@@ -584,6 +595,20 @@ async function processMessage(stream, uid) {
         } else {
           console.warn(`⚠️ Could not send profile link: ${sendResult.reason}`);
         }
+        // Both outcomes are recorded: a silently unsent profile link is the
+        // step most likely to strand a candidate — they are waiting for a mail
+        // that never arrived, and the status alone cannot show it.
+        await recordOnboardingEvent({
+          owner: ownerId,
+          employee: emp._id,
+          type: "complete_profile_link",
+          status: sendResult.success ? "success" : "failed",
+          title: sendResult.success
+            ? "Complete-profile link sent"
+            : "Complete-profile link failed to send",
+          detail: sendResult.success ? "" : sendResult.reason || "Unknown error",
+          recipient: fromAddr,
+        });
 
         return;
       }
@@ -644,6 +669,19 @@ async function processMessage(stream, uid) {
         }
 
         const bestName = emp?.name || "Candidate";
+
+        // The one step nobody triggers from the app — it arrives by email, so
+        // without this line the log would jump from "offer sent" straight to
+        // the document request with no sign of when the candidate said yes.
+        await recordOnboardingEvent({
+          owner: ownerId,
+          employee: emp._id,
+          type: "offer_accepted",
+          status: "success",
+          title: "Offer accepted by candidate",
+          detail: "Moved to Onboarding",
+          recipient: fromAddr,
+        });
 
         // Onboarding policies: drop the HR policy (inline + PDF) into the new
         // hire's in-app mailbox with their employee id as receiver. Not sent
@@ -722,6 +760,19 @@ async function processMessage(stream, uid) {
       },
 
       offer_rejection: async () => {
+        // Logged when we know who it was — an unrecognised address has no
+        // employee row to hang it off, and inventing one for a rejection would
+        // put a phantom candidate in the Employees list.
+        if (emp?._id) {
+          await recordOnboardingEvent({
+            owner: ownerId,
+            employee: emp._id,
+            type: "offer_rejected",
+            status: "success",
+            title: "Offer declined by candidate",
+            recipient: fromAddr,
+          });
+        }
         await sendSafeEmail({
           to: fromAddr,
           subject: "Thank You for Your Response",

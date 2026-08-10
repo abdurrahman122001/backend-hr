@@ -1,5 +1,6 @@
 // controllers/onboardingController.js
 require("dotenv").config();
+const mongoose = require("mongoose");
 const Employee = require("../models/Employees");
 const Salaries = require("../models/Salaries");
 const CompanyProfile = require("../models/CompanyProfile"); // <-- fetch company name from here
@@ -7,6 +8,11 @@ const { sendEmail } = require("../services/mailService");
 const { encrypt } = require("../utils/encryption");
 const Signature = require("../models/Signature");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
+const {
+  recordOnboardingEvent,
+  resolveActor,
+} = require("../services/onboardingLog");
+const OnboardingEvent = require("../models/OnboardingEvent");
 
 // ENV fallbacks (used only if CompanyProfile has no name)
 const COMPANY_NAME_FALLBACK = process.env.COMPANY_NAME || "Mavens Advisors";
@@ -272,6 +278,20 @@ module.exports = {
       console.log(
         `[CNIC-REQUEST] sending to ${candidateEmail} (candidate: ${candidateName})`
       );
+      // The candidate already exists as an Employee (created when the offer
+      // went out), so the log line can hang off that row. Looked up rather
+      // than required in the body: this endpoint is called with the offer
+      // form's fields, not with an employee id.
+      const candidate = await Employee.findOne({
+        email: candidateEmail,
+        owner: ownerId,
+      })
+        .select("_id")
+        .lean();
+      // anyPayrollAuth reports the company owner as `_id`, so the acting
+      // person (an isAdmin employee, say) only shows up via employeeId.
+      const sender = await resolveActor(req.user);
+
       try {
         const info = await sendEmail({
           from: `"${process.env.MAIL_FROM_NAME}" <${process.env.MAIL_FROM_ADDRESS}>`,
@@ -282,10 +302,30 @@ module.exports = {
         console.log(
           `[CNIC-REQUEST] SENT to ${candidateEmail} messageId=${info?.messageId || "n/a"}`
         );
+        await recordOnboardingEvent({
+          owner: ownerId,
+          employee: candidate?._id,
+          type: "cnic_cv_request",
+          status: "success",
+          title: "CNIC & CV request sent",
+          detail: info?.messageId ? `Message ID ${info.messageId}` : "",
+          recipient: candidateEmail,
+          ...sender,
+        });
       } catch (mailErr) {
         console.error(
           `[CNIC-REQUEST] FAILED to ${candidateEmail}: ${mailErr.message}`
         );
+        await recordOnboardingEvent({
+          owner: ownerId,
+          employee: candidate?._id,
+          type: "cnic_cv_request",
+          status: "failed",
+          title: "CNIC & CV request failed to send",
+          detail: mailErr?.message || "Unknown mail error",
+          recipient: candidateEmail,
+          ...sender,
+        });
         throw mailErr; // keep the existing 500 response path
       }
 
@@ -296,6 +336,64 @@ module.exports = {
     } catch (err) {
       console.error("Error requesting CNIC & CV:", err);
       return res.status(500).json({ error: "Failed to send CNIC/CV request." });
+    }
+  },
+
+  /**
+   * GET /api/onboarding/:employeeId/log
+   * Every onboarding step recorded for one candidate, newest first, so the
+   * Employees screen can answer "did the offer letter actually go out?".
+   */
+  async getOnboardingLog(req, res) {
+    try {
+      const { employeeId } = req.params;
+      if (!mongoose.isValidObjectId(employeeId)) {
+        return res.status(400).json({ error: "Invalid employee id." });
+      }
+      if (!req.user?._id) {
+        return res.status(401).json({ error: "Unauthorized." });
+      }
+
+      // anyPayrollAuth lets ANY employee through on a GET, and a candidate's
+      // hiring correspondence is not theirs to read. HR users and isAdmin
+      // employees both arrive here with isAdmin true; a delegated payroll /
+      // attendance grant counts as well, since those are the people who run
+      // onboarding day to day.
+      if (!req.user.isAdmin && !req.user.isDelegated) {
+        return res
+          .status(403)
+          .json({ error: "Not allowed to view onboarding logs." });
+      }
+
+      // Scoped to the caller's company, exactly like every other read here —
+      // an employee id from another owner must not return that owner's log.
+      // Under anyPayrollAuth both of these are already the company owner, so
+      // an isAdmin employee reads their company's log, not their own id's.
+      const ownerId = req.user.owner || req.user._id;
+
+      const events = await OnboardingEvent.find({
+        owner: ownerId,
+        employee: employeeId,
+      })
+        .sort({ at: -1 })
+        .limit(200)
+        .lean();
+
+      return res.json({
+        items: events.map((e) => ({
+          _id: e._id,
+          type: e.type,
+          status: e.status,
+          title: e.title,
+          detail: e.detail || "",
+          recipient: e.recipient || "",
+          actorName: e.actorName || "",
+          at: e.at,
+        })),
+      });
+    } catch (err) {
+      console.error("Error loading onboarding log:", err);
+      return res.status(500).json({ error: "Failed to load onboarding log." });
     }
   },
 };

@@ -17,6 +17,7 @@ const { Conversation, Space } = require("../models/Chat");
 const ClientInfo = require("../models/ClientInfo");
 require("../models/Employees");
 const EmployeeHierarchy = require("../models/EmployeeHierarchy");
+const { syncClientAssignees } = require("../utils/clientAssignees");
 
 const isObjId = (v) => mongoose.Types.ObjectId.isValid(String(v || ""));
 
@@ -221,9 +222,83 @@ async function syncClientSpaceMembers({ clientId, actorId, io }) {
   }
 }
 
+/**
+ * The reverse of syncClientSpaceMembers: someone invited into a CLIENT's space
+ * is thereby working on that client, so mirror the invite into the client's
+ * assignment. Used by the @-mention "Add member & send" flow — inviting a
+ * non-member of a client space would otherwise leave them able to read the
+ * client's chat while invisible to every other client-keyed surface (WhatsApp
+ * lists, email routing, visibility queries).
+ *
+ * Returns the client whose assignment changed, or null when the space is an
+ * ordinary space/group — most are. Fire-and-safe like the rest of this file:
+ * a failure here must never fail the invite that triggered it.
+ */
+async function assignSpaceMembersToClient({ spaceId, employeeIds, io }) {
+  try {
+    const ids = (employeeIds || []).map(String).filter(isObjId);
+    if (!isObjId(spaceId) || ids.length === 0) return null;
+
+    const client = await ClientInfo.findOne({ chatSpace: spaceId });
+    if (!client) return null;
+
+    // ClientInfo.assignedTo is DERIVED from businesses[].assignedTo, so the
+    // assignment has to be written there. A space belongs to the CLIENT, not to
+    // one of its businesses, so being in it means working on all of them.
+    let changed = false;
+    for (const business of client.businesses || []) {
+      const existing = new Set(
+        (business.assignedTo || []).map((e) => String(e?._id || e))
+      );
+      const missing = ids.filter((id) => !existing.has(id));
+      if (missing.length === 0) continue;
+      business.assignedTo = [...(business.assignedTo || []), ...missing];
+      changed = true;
+    }
+
+    if ((client.businesses || []).length > 0) {
+      syncClientAssignees(client);
+    } else {
+      // No businesses to derive the union from. syncClientAssignees leaves an
+      // empty union alone rather than clearing assignedTo, so writing the
+      // client level directly is safe for these (legacy) records.
+      const existing = new Set(
+        (client.assignedTo || []).map((e) => String(e?._id || e))
+      );
+      const missing = ids.filter((id) => !existing.has(id));
+      if (missing.length > 0) {
+        client.assignedTo = [...(client.assignedTo || []), ...missing];
+        changed = true;
+      }
+    }
+
+    if (!changed) return client;
+    await client.save();
+
+    if (io) {
+      // Same event the CRM assignment panels already listen for, so any open
+      // client screen picks the new assignee up without a reload.
+      io.to(`owner_${client.owner}`).emit("client_business_assigned", {
+        clientId: String(client._id),
+        businessId: null,
+        businesses: client.businesses,
+      });
+    }
+
+    return client;
+  } catch (error) {
+    console.error(
+      "assignSpaceMembersToClient error (invite unaffected):",
+      error
+    );
+    return null;
+  }
+}
+
 module.exports = {
   createClientSpace,
   syncClientSpaceMembers,
+  assignSpaceMembersToClient,
   resolveClientSpaceMembers,
   getSupervisionChain,
 };

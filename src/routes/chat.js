@@ -339,6 +339,15 @@ router.get(
 const chatTaskController = require("../controllers/chatTaskController");
 router.get("/spaces/:chatId/tasks", empAuth, chatTaskController.getTasks);
 router.post("/spaces/:chatId/tasks", empAuth, chatTaskController.createTask);
+// Turn an email into a task (mail view message menu) + the caller's personal
+// tasks. Registered before "/tasks/:taskId" so neither is read as a task id.
+router.post("/tasks/from-email", empAuth, chatTaskController.createTaskFromEmail);
+router.get(
+  "/tasks/from-email/:messageId/options",
+  empAuth,
+  chatTaskController.getEmailTaskOptions
+);
+router.get("/tasks/personal", empAuth, chatTaskController.getPersonalTasks);
 router.patch("/tasks/:taskId", empAuth, chatTaskController.updateTask);
 router.delete("/tasks/:taskId", empAuth, chatTaskController.deleteTask);
 router.get("/tasks/:taskId/comments", empAuth, chatTaskController.getTaskComments);

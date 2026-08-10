@@ -277,6 +277,9 @@ ClientInfoSchema.index({ assignedTo: 1 });
 ClientInfoSchema.index({ owner: 1, assignedTo: 1 });
 // Supports the $or supervisedBy branch in getChatList (was a collection scan)
 ClientInfoSchema.index({ owner: 1, supervisedBy: 1 });
+// "which client does this chat space belong to" — asked on every space invite
+// so the invitee can be assigned to the client (assignSpaceMembersToClient)
+ClientInfoSchema.index({ chatSpace: 1 });
 ClientInfoSchema.index({ owner: 1, "lastWhatsAppMessage.at": -1 });
 // Per-business assignment lookups ("which businesses am I assigned to")
 ClientInfoSchema.index({ owner: 1, "businesses.assignedTo": 1 });
