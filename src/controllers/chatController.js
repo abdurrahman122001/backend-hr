@@ -6392,6 +6392,11 @@ exports.getConversationMembersSimple = async (req, res) => {
       success: true,
       members: members,
       total: members.length,
+      // The Space behind this group (a group is a Space of kind "group" plus a
+      // linked conversation). The chat list hands the UI a CONVERSATION id for
+      // groups, so anything that has to reach the space endpoints — adding
+      // members from an @-mention, for one — cannot resolve it on its own.
+      space: conversation.space ? String(conversation.space) : null,
     });
   } catch (error) {
     console.error("Get simple conversation members error:", error);
