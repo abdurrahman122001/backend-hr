@@ -3738,6 +3738,59 @@ exports.getSeenBy = async function getSeenBy(req, res) {
   }
 };
 
+/**
+ * GET /whatsApp-messages/:id/reactors
+ *
+ * The employees behind a message's reactions, with their photos, for the
+ * Reactions dialog. The reaction subdocument only stores `userId` + `userName`,
+ * and `userId` cannot be populated in place — the client compares it to the
+ * current employee id as a string all over the chat, so turning it into an
+ * object would break "is this my reaction". Hence a separate lookup, lazily
+ * fetched when the dialog opens, exactly like /seen-by above.
+ */
+exports.getReactors = async function getReactors(req, res) {
+  try {
+    const { id } = req.params;
+    if (!isObjId(id)) return res.status(400).json({ error: "Invalid message id" });
+
+    const ownerId = req.employee?.owner;
+    const msg = await WhatsAppMessage.findOne({ _id: id, owner: ownerId })
+      .select("reactions")
+      .lean();
+
+    if (!msg) return res.status(404).json({ error: "Message not found" });
+
+    const ids = Array.from(
+      new Set(
+        (msg.reactions || [])
+          .map((r) => r?.userId)
+          .filter(Boolean)
+          .map(String)
+          .filter(isObjId),
+      ),
+    );
+    if (ids.length === 0) return res.json({ reactors: [] });
+
+    const employees = await Employee.find({ _id: { $in: ids } })
+      .select("_id name companyEmail role designation photographUrl")
+      .lean();
+
+    return res.json({
+      reactors: employees.map((e) => ({
+        _id: e._id,
+        name: e.name,
+        companyEmail: e.companyEmail,
+        role: e.role,
+        designation: e.designation,
+        photographUrl: e.photographUrl || null,
+      })),
+    });
+  } catch (e) {
+    console.error("Error fetching reactors:", e);
+    return res.status(500).json({ error: "Failed to fetch reactors" });
+  }
+};
+
 exports.getUnreadCounts = async function getUnreadCounts(req, res) {
   try {
     const currentUserId = req.employee._id;

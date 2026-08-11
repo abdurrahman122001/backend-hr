@@ -290,6 +290,45 @@ async function getClientVoiceSenderIds(ownerId) {
   return ids.map(String);
 }
 
+/**
+ * "<clientId>|<employeeId>" for every client-voice sender who is ALSO on that
+ * client's own team (assignedTo or supervisedBy).
+ *
+ * Those people are answering the client, never speaking for them, so the
+ * client-voice rule below must skip them for that client — see IS_FROM_CLIENT.
+ *
+ * A flat pair list rather than a per-client map, so the aggregation can test it
+ * with a plain `$in` on a concatenated key instead of `$getField` (which would
+ * impose a MongoDB 5.0 floor). It stays small: only client-voice senders are
+ * ever in it.
+ */
+async function getClientTeamPairs(ownerId, clientVoiceSenderIds) {
+  if (!ownerId || !clientVoiceSenderIds?.length) return [];
+
+  const voiceSet = new Set(clientVoiceSenderIds.map(String));
+  const voiceObjIds = clientVoiceSenderIds.filter(isObjId).map((id) => oid(id));
+  if (!voiceObjIds.length) return [];
+
+  const clients = await ClientInfo.find({
+    owner: ownerId,
+    $or: [
+      { assignedTo: { $in: voiceObjIds } },
+      { supervisedBy: { $in: voiceObjIds } },
+    ],
+  })
+    .select("_id assignedTo supervisedBy")
+    .lean();
+
+  const pairs = new Set();
+  for (const c of clients) {
+    for (const id of [...(c.assignedTo || []), ...(c.supervisedBy || [])]) {
+      const s = String(id);
+      if (voiceSet.has(s)) pairs.add(`${c._id}|${s}`);
+    }
+  }
+  return Array.from(pairs);
+}
+
 async function applyVisibility(q, req, filterParam) {
   if (!req.employee?._id) return { _id: null };
 
@@ -951,6 +990,10 @@ exports.listMessages = async function listMessages(req, res) {
       // message's receiver is its current APPROVER, and it must only show in
       // the For-approval filter until it's approved and actually delivered.
       q.approvalStatus = { $ne: "pending" };
+      // System announcements have their own tab. Leaving them here as well
+      // would bury real mail under machine-written notices — the inbox tabs
+      // partition mail, they don't duplicate it.
+      q.isSystemAnnouncement = { $ne: true };
       // Emails I only touched as an APPROVER (in the approval chain) belong
       // to the For-approval history, not my inbox — unless I was an intended
       // recipient of the message myself.
@@ -1043,6 +1086,12 @@ exports.listMessages = async function listMessages(req, res) {
       const clientVoiceSenderIds = await getClientVoiceSenderIds(
         q.owner || req.employee?.owner,
       );
+      // …except when that CRM/manager is on the client's OWN team. Then they
+      // are answering the client, not relaying them.
+      const clientTeamPairs = await getClientTeamPairs(
+        q.owner || req.employee?.owner,
+        clientVoiceSenderIds,
+      );
 
       const IS_FROM_CLIENT = {
         $or: [
@@ -1054,6 +1103,30 @@ exports.listMessages = async function listMessages(req, res) {
             $and: [
               { $ne: [{ $ifNull: ["$client", null] }, null] },
               { $in: [{ $toString: "$sender" }, clientVoiceSenderIds] },
+              // An assigned or supervising employee's mail is their REPLY, even
+              // when their role is manager/CRM. Without this their answer was
+              // read as fresh client mail, which both denied it the role of
+              // "the reply" AND re-armed the anchor — so the thread could never
+              // leave Unresponded however many times they answered. Supervisors
+              // sit on essentially every client's supervisedBy list, so this hit
+              // nearly every supervised thread.
+              // Note this narrows ONLY the role-derived clause: someone who
+              // deliberately composes AS the client still sets isFromClient
+              // above and is still counted as the client.
+              {
+                $not: {
+                  $in: [
+                    {
+                      $concat: [
+                        { $toString: "$client" },
+                        "|",
+                        { $toString: "$sender" },
+                      ],
+                    },
+                    clientTeamPairs,
+                  ],
+                },
+              },
             ],
           },
         ],
@@ -1079,6 +1152,8 @@ exports.listMessages = async function listMessages(req, res) {
             threadId: 1,
             owner: 1,
             createdAt: 1,
+            // Feeds `rootSubject` below — the thread's own name.
+            subject: 1,
             senderType: 1,
             isFromClient: 1,
             client: 1,
@@ -1096,6 +1171,14 @@ exports.listMessages = async function listMessages(req, res) {
             threadOwner: { $first: "$owner" },
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
+            // Docs arrive newest-first, so $last is the mail that STARTED the
+            // thread. A conversation is named after that mail — not after
+            // whatever landed on top of it. Anyone editing one reply's subject
+            // (the pending-message editor allows exactly that) would otherwise
+            // silently rename the whole conversation in the list, while the
+            // side chat — which reads the thread's first message — kept the
+            // original name. That disagreement is what users see as a glitch.
+            rootSubject: { $last: "$subject" },
             // Docs are sorted newest-first, so $first = the thread's latest message.
             latestClient: { $first: "$client" },
             // Unread/Unresponded is anchored on the LAST MAIL THE CLIENT SENT,
@@ -1454,6 +1537,9 @@ exports.listMessages = async function listMessages(req, res) {
           // carry the state of the client mail actually being waited on.
           awaitingClientReply: !!stats?.awaitingClientReply,
           clientMailReadBy: (stats?.lastClientReadByIds || []).map(String),
+          // The row is the thread's LATEST message, so its own subject is not
+          // the conversation's name. Falls back to it for a one-message thread.
+          threadSubject: stats?.rootSubject || m.subject,
         };
       }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
@@ -1784,6 +1870,8 @@ exports.getExternalCommunications = async function getExternalCommunications(
             threadId: 1,
             owner: 1,
             createdAt: 1,
+            // Feeds `rootSubject` below — the thread's own name.
+            subject: 1,
             senderType: 1,
             isFromClient: 1,
             client: 1,
@@ -1799,6 +1887,14 @@ exports.getExternalCommunications = async function getExternalCommunications(
             _id: "$threadId",
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
+            // Docs arrive newest-first, so $last is the mail that STARTED the
+            // thread. A conversation is named after that mail — not after
+            // whatever landed on top of it. Anyone editing one reply's subject
+            // (the pending-message editor allows exactly that) would otherwise
+            // silently rename the whole conversation in the list, while the
+            // side chat — which reads the thread's first message — kept the
+            // original name. That disagreement is what users see as a glitch.
+            rootSubject: { $last: "$subject" },
             // CRM (manager) and all users: External Inbox strictly shows threads with CLIENT replies.
             // Solitary sent messages remain in "Sent".
             hasClientInteraction: {
@@ -1875,7 +1971,10 @@ exports.getExternalCommunications = async function getExternalCommunications(
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
-          threadUnreadCount: stats ? stats.threadUnreadCount : 0
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0,
+          // The row is the thread's LATEST message, so its own subject is not
+          // the conversation's name. Falls back to it for a one-message thread.
+          threadSubject: stats?.rootSubject || m.subject
         };
       }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
@@ -1974,6 +2073,10 @@ exports.getInternalCommunications = async function getInternalCommunications(
     // getMessagesByThread deliberately does NOT apply this — that is where they
     // are meant to be read.
       isForwardedCopy: { $ne: true },
+
+      // Team Box is people talking to people. Announcements are non-client
+      // mail too, so without this they would swamp it; they have their own tab.
+      isSystemAnnouncement: { $ne: true },
     };
 
     /* -------------------------------------------------- */
@@ -2058,6 +2161,8 @@ exports.getInternalCommunications = async function getInternalCommunications(
             threadId: 1,
             owner: 1,
             createdAt: 1,
+            // Feeds `rootSubject` below — the thread's own name.
+            subject: 1,
             senderType: 1,
             isFromClient: 1,
             client: 1,
@@ -2073,6 +2178,14 @@ exports.getInternalCommunications = async function getInternalCommunications(
             _id: "$threadId",
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
+            // Docs arrive newest-first, so $last is the mail that STARTED the
+            // thread. A conversation is named after that mail — not after
+            // whatever landed on top of it. Anyone editing one reply's subject
+            // (the pending-message editor allows exactly that) would otherwise
+            // silently rename the whole conversation in the list, while the
+            // side chat — which reads the thread's first message — kept the
+            // original name. That disagreement is what users see as a glitch.
+            rootSubject: { $last: "$subject" },
             // Internal Inbox logic: show if received from someone else
             receivedFromOthers: {
               $max: {
@@ -2143,7 +2256,10 @@ exports.getInternalCommunications = async function getInternalCommunications(
           receiver: Array.isArray(m.receiver) ? m.receiver : [m.receiver].filter(Boolean),
           isDirectMessage: !m.client,
           threadMessageCount: stats ? stats.threadMessageCount : 1,
-          threadUnreadCount: stats ? stats.threadUnreadCount : 0
+          threadUnreadCount: stats ? stats.threadUnreadCount : 0,
+          // The row is the thread's LATEST message, so its own subject is not
+          // the conversation's name. Falls back to it for a one-message thread.
+          threadSubject: stats?.rootSubject || m.subject
         };
       }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
@@ -2183,6 +2299,80 @@ exports.getInternalCommunications = async function getInternalCommunications(
   } catch (e) {
     console.error("❌ Error in getInternalCommunications:", e);
     res.status(500).json({ error: "Failed to fetch internal communications" });
+  }
+};
+
+// GET /api/assignment-messages/system-announcements
+//
+// The inbox's "System Announcements" tab: mail the APP wrote to me rather than
+// a colleague — every Request Center event (submitted / approved / rejected)
+// plus the other system deliveries such as the HR policy.
+//
+// Deliberately flat, not threaded: each announcement is its own record of one
+// event, and grouping them by threadId would collapse a run of decisions into
+// a single row.
+exports.getSystemAnnouncements = async function getSystemAnnouncements(
+  req,
+  res
+) {
+  try {
+    const currentUser = req.employee?._id;
+    const owner = req.employee?.owner;
+    if (!isObjId(currentUser)) {
+      return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const { page = 1, limit = 50, isTrashed, isSpam } = req.query;
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
+    const me = oid(String(currentUser));
+
+    const q = {
+      ...(isObjId(owner) ? { owner } : {}),
+      status: "sent",
+      // Both flavours of system mail belong here: the Request Center
+      // announcements and the older system deliveries (HR policy).
+      $or: [{ isSystemAnnouncement: true }, { isSystemMessage: true }],
+      // Blind recipients are real recipients everywhere else, so match both.
+      $and: [{ $or: [{ receiver: me }, { bccReceiver: me }] }],
+      // Trash and spam are PER USER, like every other mail view.
+      ...(isTrashed === "true"
+        ? { trashedBy: me }
+        : { trashedBy: { $ne: me } }),
+      ...(isSpam === "true"
+        ? { spamReporters: me }
+        : { spamReporters: { $ne: me } }),
+    };
+
+    const [items, total] = await Promise.all([
+      AssignmentMessage.find(q)
+        .sort({ createdAt: -1 })
+        .skip((pageNum - 1) * lim)
+        .limit(lim)
+        .select("-emailMetadata.headers")
+        .populate([
+          { path: "sender", select: "_id name companyEmail role designation" },
+          {
+            path: "receiver",
+            select: "_id name companyEmail email role designation",
+          },
+        ])
+        .lean(),
+      AssignmentMessage.countDocuments(q),
+    ]);
+
+    res.set("Cache-Control", "no-store");
+    res.json({
+      communicationType: "system-announcements",
+      items,
+      total,
+      page: pageNum,
+      pages: Math.max(1, Math.ceil(total / lim)),
+      limit: lim,
+    });
+  } catch (e) {
+    console.error("❌ Error in getSystemAnnouncements:", e);
+    res.status(500).json({ error: "Failed to fetch system announcements" });
   }
 };
 
@@ -2761,6 +2951,8 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
             owner: oid(String(owner)),
             status: "sent",
             approvalStatus: { $ne: "pending" },
+            // Their own tab, their own badge — see systemAnnouncements below.
+            isSystemAnnouncement: { $ne: true },
           },
         },
         { $sort: { createdAt: -1 } },
@@ -2849,6 +3041,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       internalUnread,
       reviewUnread,
       supervisionPending,
+      systemAnnouncementsUnread,
     ] = await Promise.all([
       // Inbox: messages where user is receiver, not in THEIR bin/spam, status sent.
       // Pending items are supervision work (receiver = current approver) and
@@ -2875,6 +3068,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         spamReporters: { $ne: currentUser },
         // Not in the list (see the list queries), so not in the count either.
         isForwardedCopy: { $ne: true },
+        isSystemAnnouncement: { $ne: true },
       }),
 
       // Unread: Primary-inbox threads whose LATEST message is unread & addressed
@@ -2927,12 +3121,14 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         ...baseUnread,
       }),
 
-      // TeamBox (internal) unread: non-client threads where I'm a receiver, unread
+      // TeamBox (internal) unread: non-client threads where I'm a receiver,
+      // unread. Announcements are non-client mail but live in their own tab.
       countUnreadThreads({
         $and: [
           { $or: receiverOr },
           { $or: [{ client: { $exists: false } }, { client: null }] },
         ],
+        isSystemAnnouncement: { $ne: true },
         ...baseUnread,
       }),
 
@@ -2966,6 +3162,18 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       // badge. It was removed: it is not an approval queue — there is nothing
       // the viewer can do about those messages, and the number never cleared
       // from their own badge. The only approval count is `supervision` above.
+
+      // System Announcements: unread notices addressed to me. Counted per
+      // MESSAGE, not per thread — each one records a separate event.
+      AssignmentMessage.countDocuments({
+        owner,
+        status: "sent",
+        $or: [{ isSystemAnnouncement: true }, { isSystemMessage: true }],
+        $and: [{ $or: [{ receiver: currentUser }, { bccReceiver: currentUser }] }],
+        "readBy.employee": { $ne: currentUser },
+        trashedBy: { $ne: currentUser },
+        spamReporters: { $ne: currentUser },
+      }),
     ]);
 
     const payload = {
@@ -2982,6 +3190,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
       internal: internalUnread,
       review: reviewUnread,
       supervision: supervisionPending,
+      systemAnnouncements: systemAnnouncementsUnread,
     };
     res.set("Cache-Control", "no-store");
     res.json(payload);
@@ -3991,7 +4200,7 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
     // or collapses them into fewer than 50 rows.
     const matching = await AssignmentMessage.find(query)
       .sort({ createdAt: -1 })
-      .select("_id threadId createdAt approvalStatus")
+      .select("_id threadId createdAt approvalStatus subject")
       .lean();
 
     const threadGroups = [];
@@ -4013,6 +4222,9 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
 
       const group = threadMap.get(threadId);
       group.totalMessages += 1;
+      // Newest-first, so the last write wins = the mail that started the
+      // thread. That is the conversation's name (see rootSubject above).
+      group.rootSubject = message.subject;
       if ((message.approvalStatus || "pending") === "pending") {
         group.pendingMessages += 1;
       }
@@ -4037,6 +4249,7 @@ exports.getSupervisionMessages = async function getSupervisionMessages(req, res)
           ...item,
           threadMessageCount: group.totalMessages,
           threadPendingCount: group.pendingMessages,
+          threadSubject: group.rootSubject || item.subject,
         };
       })
       .filter(Boolean);

@@ -1,5 +1,9 @@
 const WhistleblowingReport = require("../models/WhistleblowingReport");
 const { resolvedFields } = require("../utils/requestAutoApproval");
+const {
+  notifyRequestSubmitted,
+  notifyRequestDecision,
+} = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -39,6 +43,25 @@ exports.applyReport = async (req, res) => {
     });
 
     await newReport.save();
+
+    // Reaches the reviewers' notifications + System Announcements tab. The
+    // report's own anonymity is unaffected: the announcement says a report
+    // needs review, and the reviewers can already see the report itself.
+    if (newReport.status !== "resolved") {
+      await notifyRequestSubmitted({
+        req,
+        request: {
+          _id: newReport._id,
+          status: "pending",
+          employee: employeeId,
+          owner: ownerId,
+        },
+        requestType: "whistleblowing",
+        requestModel: "WhistleblowingReport",
+        actor: employeeId,
+      });
+    }
+
     res.status(201).json({
       message: newReport.status === "resolved" ? "Whistleblowing report resolved successfully" : "Whistleblowing report submitted successfully",
       data: newReport,
@@ -98,6 +121,20 @@ exports.updateStatus = async (req, res) => {
 
     const report = await WhistleblowingReport.findByIdAndUpdate(id, updateData, { new: true });
     if (!report) return res.status(404).json({ message: "Report not found" });
+
+    // Only the closing outcomes are a decision worth announcing back — a report
+    // moving to "under-review" is not resolved either way yet.
+    if (["resolved", "dismissed"].includes(status)) {
+      await notifyRequestDecision({
+        req,
+        request: { _id: report._id, employee: report.employee },
+        requestType: "whistleblowing",
+        requestModel: "WhistleblowingReport",
+        status: status === "resolved" ? "approved" : "rejected",
+        actor: report.reviewedBy,
+        reason: adminNote,
+      });
+    }
 
     res.status(200).json({ message: `Whistleblowing report marked as ${status}`, data: report });
   } catch (error) {

@@ -17,6 +17,10 @@ const LeaveYearBalance = require("../models/LeaveYearBalance");
 const LeaveTransaction = require("../models/LeaveTransaction");
 const AttendanceChangeLog = require("../models/AttendanceChangeLog");
 const SalarySlip = require("../models/SalarySlip");
+const {
+  notifyRequestSubmitted,
+  notifyRequestDecision,
+} = require("../services/requestNotificationService");
 const { logAttendanceChange } = require("../utils/attendanceLogger");
 const SpecificNonWorkingDay = require("../models/SpecificNonWorkingDay");
 
@@ -2161,6 +2165,23 @@ exports.updateChallengeStatus = async (req, res) => {
       challenge.challengeAt = new Date();
       await challenge.save();
 
+      // Tell the employee their challenge was decided — the notification bell
+      // AND their System Announcements inbox tab. Placed here so it covers the
+      // approved branch (which hands off to markAttendance) and the
+      // rejected/withdrawn branch alike. Withdrawal is the employee's own
+      // doing, so it isn't announced back to them.
+      if (["Approved", "Rejected"].includes(challengeStatus)) {
+        await notifyRequestDecision({
+          req,
+          request: { _id: challenge._id, employee: attendance.employee },
+          requestType: "attendance",
+          requestModel: "AttendanceChallenge",
+          status: challengeStatus === "Approved" ? "approved" : "rejected",
+          actor: challenge.reviewedBy,
+          reason: challengeAdminNotes,
+        });
+      }
+
       if (challengeStatus === "Approved") {
         const resolvedCheckIn = overrideCheckIn || challenge.requestedCheckIn || attendance.checkIn;
         const resolvedCheckOut = overrideCheckOut || challenge.requestedCheckOut || attendance.checkOut;
@@ -2296,6 +2317,23 @@ exports.updateChallengeStatus = async (req, res) => {
 
     const ownerId = attendance.owner;
     const oldStatus = attendance.status;
+
+    // Same announcement as the challenge-document path above — a challenge
+    // raised before AttendanceChallenge existed still gets its decision told.
+    if (["Approved", "Rejected"].includes(challengeStatus)) {
+      await notifyRequestDecision({
+        req,
+        request: { _id: attendance._id, employee: attendance.employee },
+        requestType: "attendance",
+        requestModel: "Attendance",
+        status: challengeStatus === "Approved" ? "approved" : "rejected",
+        actor:
+          (await resolveReviewerEmployeeId(req)) ||
+          req.employee?._id ||
+          req.user?.employeeId,
+        reason: challengeAdminNotes,
+      });
+    }
 
     if (challengeStatus === "Approved") {
       // Admin override takes priority; fall back to what the employee requested, then to the existing check-in/out times

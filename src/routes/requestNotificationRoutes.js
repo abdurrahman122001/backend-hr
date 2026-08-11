@@ -5,5 +5,6 @@ const requestNotificationController = require("../controllers/requestNotificatio
 
 router.get("/", UnifiedAuth, requestNotificationController.listNotifications);
 router.patch("/read", UnifiedAuth, requestNotificationController.markNotificationsRead);
+router.delete("/", UnifiedAuth, requestNotificationController.clearNotifications);
 
 module.exports = router;

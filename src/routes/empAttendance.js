@@ -4,6 +4,9 @@ const mongoose = require('mongoose');
 const Attendance = require('../models/Attendance');
 const AttendanceChallenge = require('../models/AttendanceChallenge');
 const { upload } = require('../utils/multer');
+const {
+  notifyRequestSubmitted,
+} = require('../services/requestNotificationService');
 
 // GET /api/emp-attendance/me
 router.get('/me', async (req, res) => {
@@ -357,6 +360,21 @@ router.post('/challenge', upload.single('attachment'), async (req, res) => {
         "Auto-approved by request center"
       );
     }
+
+    // Put it in front of the approvers the same way every other request type
+    // does — notification bell plus their System Announcements inbox tab.
+    await notifyRequestSubmitted({
+      req,
+      request: {
+        _id: challenge._id,
+        status: "pending",
+        employee: employeeId,
+        owner: ownerId,
+      },
+      requestType: "attendance",
+      requestModel: "AttendanceChallenge",
+      actor: employeeId,
+    });
 
     // 5. Notify owner and supervisor via socket (merge fields for frontend compatibility)
     if (req.app.get("io")) {

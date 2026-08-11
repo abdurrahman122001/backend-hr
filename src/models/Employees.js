@@ -267,6 +267,13 @@ EmployeeSchema.pre("save", function (next) {
     this.isModified("status") &&
     String(this.status || "").toLowerCase() !== "active";
 
+  // The mirror image: finishing onboarding (or moving department) puts them in
+  // the company + department groups. Hooked on the model rather than in a
+  // controller because HR approval reaches "active" through several paths.
+  this.$locals.syncSystemGroups =
+    (this.isModified("status") || this.isModified("department")) &&
+    String(this.status || "").toLowerCase() === "active";
+
   if (this.experiences && this.isModified("experiences")) {
     this.experiences.forEach((exp) => {
       exp.updatedAt = new Date();
@@ -321,7 +328,52 @@ const removeCapturedEmployeesFromChat = async function () {
   await removeEmployeesFromChatMemberships(employeeIds);
 };
 
+// The joining side of the same story. An update that could not have changed
+// either field is left alone, so ordinary employee edits cost nothing.
+const captureEmployeesJoiningSystemGroups = async function (next) {
+  try {
+    const update = this.getUpdate() || {};
+    const touches = (field) =>
+      update[field] !== undefined ||
+      update.$set?.[field] !== undefined ||
+      update.$setOnInsert?.[field] !== undefined;
+
+    if (!touches("status") && !touches("department")) {
+      this._syncSystemGroupIds = [];
+      return next();
+    }
+
+    this._syncSystemGroupIds = await this.model
+      .find(this.getQuery())
+      .distinct("_id");
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
+const syncCapturedEmployeesIntoSystemGroups = async function () {
+  const employeeIds = this._syncSystemGroupIds || [];
+  if (employeeIds.length === 0) return;
+
+  const {
+    syncSystemGroupsForEmployee,
+  } = require("../services/systemGroupService");
+  // Sequential on purpose: several employees changing at once would otherwise
+  // race to create the same group.
+  for (const employeeId of employeeIds) {
+    await syncSystemGroupsForEmployee({ employeeId });
+  }
+};
+
 EmployeeSchema.post("save", async function () {
+  if (this.$locals.syncSystemGroups) {
+    const {
+      syncSystemGroupsForEmployee,
+    } = require("../services/systemGroupService");
+    await syncSystemGroupsForEmployee({ employeeId: this._id });
+  }
+
   if (!this.$locals.removeFromChatMemberships) return;
 
   const {
@@ -332,7 +384,9 @@ EmployeeSchema.post("save", async function () {
 
 ["findOneAndUpdate", "updateOne", "updateMany"].forEach((operation) => {
   EmployeeSchema.pre(operation, captureEmployeesLeavingActiveStatus);
+  EmployeeSchema.pre(operation, captureEmployeesJoiningSystemGroups);
   EmployeeSchema.post(operation, removeCapturedEmployeesFromChat);
+  EmployeeSchema.post(operation, syncCapturedEmployeesIntoSystemGroups);
 });
 
 module.exports = model("Employee", EmployeeSchema);

@@ -265,6 +265,21 @@ const AssignmentMessageSchema = new Schema(
     },
     isHrPolicy: { type: Boolean, default: false },
     isSystemMessage: { type: Boolean, default: false },
+    // Written by the system to record something that happened elsewhere in the
+    // app — every Request Center event, including approvals and rejections.
+    // These live in the inbox's "System Announcements" tab and are kept OUT of
+    // Primary / Team Box, the same way Gmail's category tabs partition mail.
+    isSystemAnnouncement: { type: Boolean, default: false, index: true },
+    systemAnnouncement: {
+      // What produced it — "request" today, room for more later.
+      category: { type: String },
+      // The Request Center item this reports on, so the announcement can link
+      // back to it (same target shape RequestNotification uses).
+      requestType: { type: String },
+      requestId: { type: Schema.Types.ObjectId },
+      action: { type: String },
+      target: { type: Schema.Types.Mixed },
+    },
   },
   { timestamps: true }
 );
@@ -294,6 +309,13 @@ AssignmentMessageSchema.index({ owner: 1, isTrashed: 1, isSpam: 1, createdAt: -1
 AssignmentMessageSchema.index({ receiver: 1, isTrashed: 1, isSpam: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ owner: 1, approvalStatus: 1, createdAt: -1 });
 AssignmentMessageSchema.index({ sender: 1, isTrashed: 1, isSpam: 1, createdAt: -1 });
+// The System Announcements tab: my announcements, newest first.
+AssignmentMessageSchema.index({
+  owner: 1,
+  isSystemAnnouncement: 1,
+  receiver: 1,
+  createdAt: -1,
+});
 
 AssignmentMessageSchema.pre("save", function (next) {
   if (!this.threadId) {

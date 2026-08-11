@@ -1,7 +1,10 @@
 const LeaveCarryForwardRequest = require("../models/LeaveCarryForwardRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
-const { notifyRequestDecision } = require("../services/requestNotificationService");
+const {
+  notifyRequestSubmitted,
+  notifyRequestDecision,
+} = require("../services/requestNotificationService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -31,6 +34,17 @@ exports.applyLeaveCarryForward = async (req, res) => {
     });
 
     await newRequest.save();
+
+    // This was the one request type that announced its DECISION but never its
+    // submission, so approvers were told nothing until someone else acted.
+    await notifyRequestSubmitted({
+      req,
+      request: newRequest,
+      requestType: "leave-carry-forward",
+      requestModel: "LeaveCarryForwardRequest",
+      actor: employeeId,
+    });
+
     res.status(201).json({
       message: newRequest.status === "approved" ? "Leave carry forward request approved successfully" : "Leave carry forward request submitted successfully",
       data: newRequest,

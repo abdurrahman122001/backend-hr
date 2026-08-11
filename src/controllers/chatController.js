@@ -6,6 +6,7 @@ const Employee = require("../models/Employees");
 const {
   assignSpaceMembersToClient,
 } = require("../services/clientSpaceService");
+const { isAutoMember } = require("../services/systemGroupService");
 const mongoose = require("mongoose");
 const multer = require("multer");
 const path = require("path");
@@ -3344,6 +3345,18 @@ exports.removeSpaceMember = async (req, res) => {
       });
     }
 
+    // Belonging to the company / your own department is not optional, so the
+    // system's own members stay put. Guests an admin added can be removed.
+    if (isAutoMember(space, memberId)) {
+      return res.status(400).json({
+        success: false,
+        error:
+          space.systemGroup?.role === "company"
+            ? "Everyone in the company belongs to this group and cannot be removed from it"
+            : "This person is in this group because of their department, so they cannot be removed from it",
+      });
+    }
+
     // Remove member from space
     space.members = space.members.filter(
       (member) => member._id.toString() !== memberId
@@ -3843,6 +3856,19 @@ exports.leaveSpace = async (req, res) => {
         success: false,
         error:
           "Space owner cannot leave the space. Please transfer ownership first or delete the space.",
+      });
+    }
+
+    // The company group holds everyone and a department group holds its
+    // department — neither is something you opt out of. Guests an admin invited
+    // are free to leave.
+    if (isAutoMember(space, req.employee._id)) {
+      return res.status(400).json({
+        success: false,
+        error:
+          space.systemGroup?.role === "company"
+            ? "Everyone in the company is in this group, so you cannot leave it"
+            : "You are in this group because of your department, so you cannot leave it",
       });
     }
 

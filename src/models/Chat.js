@@ -445,6 +445,26 @@ const spaceSchema = new mongoose.Schema(
       default: "space",
       index: true,
     },
+    // Groups the SYSTEM owns rather than a person: one per department and one
+    // for the whole company, created as people are onboarded (see
+    // services/systemGroupService.js). Absent on every hand-made space/group.
+    systemGroup: {
+      role: { type: String, enum: ["company", "department"] },
+      // Tenant, since Space itself has no owner field.
+      owner: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      // Lower-cased department name; "__company__" for the company group.
+      key: { type: String, trim: true },
+      // Members the system put here because they belong to this department /
+      // company. Anyone an admin adds by hand is deliberately NOT listed, which
+      // is what keeps a department move from evicting invited guests — and what
+      // decides who may leave (see leaveSpace / removeSpaceMember).
+      autoMembers: [
+        {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "Employee",
+        },
+      ],
+    },
     description: {
       type: String,
       trim: true,
@@ -758,6 +778,13 @@ spaceSchema.index({ createdBy: 1 });
 spaceSchema.index({ "pinnedBy.employee": 1 });
 spaceSchema.index({ hiddenBy: 1 });
 spaceSchema.index({ "notificationSettings.employee": 1, "notificationSettings.level": 1 });
+// "which group is this org's department / company group" — asked on every
+// onboarding and every department change (systemGroupService).
+spaceSchema.index({
+  "systemGroup.owner": 1,
+  "systemGroup.role": 1,
+  "systemGroup.key": 1,
+});
 
 const Message = mongoose.model("Message", messageSchema);
 const Conversation = mongoose.model("Conversation", conversationSchema);

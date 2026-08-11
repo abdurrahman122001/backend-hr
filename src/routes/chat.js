@@ -348,7 +348,15 @@ router.get(
   chatTaskController.getEmailTaskOptions
 );
 router.get("/tasks/personal", empAuth, chatTaskController.getPersonalTasks);
+// Who the caller reports to — assigning one of them sends a task request.
+router.get("/tasks/seniors", empAuth, chatTaskController.getMySeniors);
 router.patch("/tasks/:taskId", empAuth, chatTaskController.updateTask);
+// A senior accepting / declining / closing a request sent up to them.
+router.patch(
+  "/tasks/:taskId/request",
+  empAuth,
+  chatTaskController.respondToTaskRequest
+);
 router.delete("/tasks/:taskId", empAuth, chatTaskController.deleteTask);
 router.get("/tasks/:taskId/comments", empAuth, chatTaskController.getTaskComments);
 router.post("/tasks/:taskId/comments", empAuth, chatTaskController.addTaskComment);

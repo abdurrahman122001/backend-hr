@@ -75,6 +75,9 @@ router.patch("/:id/seen", ctrl.markAsSeen);
 // Read receipts — which employees have read this message (for the info dialog)
 router.get("/:id/seen-by", ctrl.getSeenBy);
 
+// Who reacted, with photos — for the Reactions dialog's avatars
+router.get("/:id/reactors", ctrl.getReactors);
+
 router.post("/:messageId/reactions", ctrl.toggleMessageReaction);
 router.post("/:messageId/pin", ctrl.togglePinMessage);
 

@@ -27,6 +27,10 @@ const removeEmployeesFromChatMemberships = async (employeeIds) => {
         $pull: {
           members: { $in: ids },
           admins: { $in: ids },
+          // System groups track who they placed themselves; leaving the company
+          // means leaving that list too, or a re-hire would look like an
+          // admin-invited guest (see systemGroupService).
+          "systemGroup.autoMembers": { $in: ids },
           notificationSettings: { employee: { $in: ids } },
           pinnedBy: { employee: { $in: ids } },
         },

@@ -178,10 +178,23 @@ const ClientInfoSchema = new Schema(
     state: { type: String },
     ein: { type: String },
 
+    // ⚠️ LEGACY — these four were ONE shared value per client, so pinning or
+    // archiving a chat did it for every employee who could see that client.
+    // They are no longer read or written; `employeeFlags` below replaced them.
+    // Kept only so existing documents stay valid (there is no record of WHO
+    // set them, so they cannot be migrated to the per-employee map).
     whatsappPinned: { type: Boolean, default: false },
     whatsappFavourite: { type: Boolean, default: false },
     whatsappMuted: { type: Boolean, default: false },
     whatsappArchived: { type: Boolean, default: false },
+
+    /**
+     * Per-employee WhatsApp sidebar flags (whatsappPinned / whatsappFavourite /
+     * whatsappMuted / whatsappArchived), keyed by the viewer's employee id — so
+     * pinning a client chat only affects the person who pinned it.
+     * Mirrors WhatsAppGroup.memberFlags, which already worked this way.
+     */
+    employeeFlags: { type: Map, of: Schema.Types.Mixed, default: {} },
 
     supervision: {
       type: String,

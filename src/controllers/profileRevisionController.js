@@ -3,6 +3,10 @@ const Employee = require('../models/Employees');
 const User = require('../models/Users');
 const mongoose = require('mongoose');
 const { autoApprovalNote, getRequestUserId, hasRequestAutoApproval } = require('../utils/requestAutoApproval');
+const {
+  notifyRequestSubmitted,
+  notifyRequestDecision,
+} = require('../services/requestNotificationService');
 
 // List of editable fields (all non-salary fields from EmployeeEdit)
 const EDITABLE_FIELDS = [
@@ -182,6 +186,24 @@ async function createRevision(req, res) {
       await applyRevisionChanges(revision);
     }
 
+    // Into the approvers' notification bell and their System Announcements
+    // inbox tab, like every other request type. An auto-approved revision needs
+    // nobody's approval, so it announces nothing.
+    if (!shouldAutoApprove) {
+      await notifyRequestSubmitted({
+        req,
+        request: {
+          _id: revision._id,
+          status: 'pending',
+          employee: employeeId,
+          owner: ownerId,
+        },
+        requestType: 'profile',
+        requestModel: 'ProfileRevision',
+        actor: employeeId,
+      });
+    }
+
     console.log(`[PROFILE-REVISION] ${shouldAutoApprove ? "Auto-approved" : "Created"} revision by ${employeeId}: ${revision._id}`);
 
     return res.status(201).json({
@@ -342,6 +364,16 @@ async function approveRevision(req, res) {
 
     console.log(`✅ [PROFILE-REVISION] Approved revision ${revisionId} by admin ${adminId}`);
 
+    await notifyRequestDecision({
+      req,
+      request: { _id: revision._id, employee: revision.employee },
+      requestType: 'profile',
+      requestModel: 'ProfileRevision',
+      status: 'approved',
+      actor: revision.reviewedBy,
+      reason: adminNotes,
+    });
+
     return res.json({
       message: 'Profile revision approved and applied',
       revision: {
@@ -385,6 +417,16 @@ async function rejectRevision(req, res) {
     await revision.save();
 
     console.log(`❌ [PROFILE-REVISION] Rejected revision ${revisionId} by admin ${adminId}`);
+
+    await notifyRequestDecision({
+      req,
+      request: { _id: revision._id, employee: revision.employee },
+      requestType: 'profile',
+      requestModel: 'ProfileRevision',
+      status: 'rejected',
+      actor: revision.reviewedBy,
+      reason: rejectionReason,
+    });
 
     return res.json({
       message: 'Profile revision rejected',

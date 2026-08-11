@@ -43,3 +43,16 @@ exports.markNotificationsRead = async (req, res) => {
     res.status(500).json({ message: "Failed to mark notifications as read" });
   }
 };
+
+exports.clearNotifications = async (req, res) => {
+  try {
+    const recipient = getRecipientId(req);
+    if (!recipient) return res.status(401).json({ message: "Unauthorized" });
+
+    const result = await RequestNotification.deleteMany({ recipient });
+    res.json({ deletedCount: result.deletedCount || 0, unreadCount: 0 });
+  } catch (error) {
+    console.error("[RequestNotification] clear error:", error);
+    res.status(500).json({ message: "Failed to clear notifications" });
+  }
+};

@@ -913,6 +913,46 @@ exports.deleteClientInfo = async (req, res) => {
   }
 };
 
+/** ObjectId | ObjectId[] | null → array of id strings. */
+function idList(value) {
+  if (!value) return [];
+  return (Array.isArray(value) ? value : [value]).filter(Boolean).map(String);
+}
+
+/**
+ * May this employee see — and therefore set their OWN sidebar flags on — this
+ * client's chat?
+ *
+ * Deliberately the same bar as getWhatsAppFlagsBulk's client query, which is
+ * what actually fills the sidebar. The old check compared
+ * `String(client.assignedTo)` — an ARRAY — against a single id, so it happened
+ * to hold for clients with exactly one assignee and 403'd every client with
+ * two or more, even though the bulk endpoint had already shown that chat. It
+ * also predated access-based CRM and ignored supervisedBy.
+ */
+async function canManageClientChatFlags(emp, client, reqEmployee) {
+  const role = String(emp.role || "").trim().toLowerCase();
+  if (role === "owner") return true;
+  if (["manager", "team lead", "team_lead", "teamlead"].includes(role)) return true;
+
+  const me = String(emp._id);
+  if (idList(client.assignedTo).includes(me)) return true;
+  if (idList(client.supervisedBy).includes(me)) return true;
+
+  return await hasCrmAccess(reqEmployee);
+}
+
+/**
+ * This employee's own flags for a client chat. Handles both a hydrated Map and
+ * the plain object a .lean() query returns.
+ */
+function employeeFlagsFor(client, empId) {
+  const ef = client?.employeeFlags;
+  if (!ef) return {};
+  const key = String(empId);
+  return (ef instanceof Map ? ef.get(key) : ef[key]) || {};
+}
+
 // Keep your existing toggleWhatsAppFlag and getWhatsAppFlags functions
 exports.toggleWhatsAppFlag = async (req, res) => {
   try {
@@ -967,29 +1007,31 @@ exports.toggleWhatsAppFlag = async (req, res) => {
       });
     }
 
-    const client = await ClientInfo.findById(id);
+    const client = await ClientInfo.findById(id).select(
+      "_id assignedTo supervisedBy employeeFlags"
+    );
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    // Authorization: same rules as view/update
-    const role = String(emp.role || "").trim().toLowerCase();
-    const authorized =
-      role === "owner" ||
-      ["manager", "team lead", "team_lead", "teamlead"].includes(role) ||
-      String(client.assignedTo) === String(emp._id);
-
-    if (!authorized) {
+    if (!(await canManageClientChatFlags(emp, client, req.employee))) {
       return res.status(403).json({ error: "Not authorized to toggle this flag" });
     }
 
-    // Toggle logic
-    client[flag] = !client[flag];
-    await client.save();
+    // Per-employee, exactly like WhatsAppGroup.memberFlags. This is a personal
+    // sidebar preference, so the old `client[flag] = !client[flag]` pinned /
+    // muted / archived the chat for EVERY employee who could see that client.
+    const key = String(emp._id);
+    const current = employeeFlagsFor(client, key);
+    const newValue = !current[flag];
+    await ClientInfo.updateOne(
+      { _id: client._id },
+      { $set: { [`employeeFlags.${key}`]: { ...current, [flag]: newValue } } }
+    );
 
     res.json({
       success: true,
       message: `${flag} toggled successfully`,
       flag,
-      newValue: client[flag],
+      newValue,
     });
   } catch (err) {
     console.error("toggleWhatsAppFlag error:", err);
@@ -1075,24 +1117,19 @@ exports.getWhatsAppFlags = async (req, res) => {
     const client = await ClientInfo.findById(id);
     if (!client) return res.status(404).json({ error: "Client not found" });
 
-    // Authorization: same rules as view/update
-    const role = String(emp.role || "").trim().toLowerCase();
-    const authorized =
-      role === "owner" ||
-      ["manager", "team lead", "team_lead", "teamlead"].includes(role) ||
-      String(client.assignedTo) === String(emp._id);
-
-    if (!authorized) {
+    if (!(await canManageClientChatFlags(emp, client, req.employee))) {
       return res.status(403).json({ error: "Not authorized to view this client" });
     }
 
-    // Return all WhatsApp flags
+    // Read THIS employee's own map. The legacy shared booleans are deliberately
+    // not consulted, so a pin someone else set can never surface here.
+    const myFlags = employeeFlagsFor(client, emp._id);
     res.json({
-      isPinned: client.whatsappPinned || false,
+      isPinned: !!myFlags.whatsappPinned,
       isRead: client.whatsappRead || false,
-      isFavourite: client.whatsappFavourite || false,
-      isMuted: client.whatsappMuted || false,
-      isArchived: client.whatsappArchived || false,
+      isFavourite: !!myFlags.whatsappFavourite,
+      isMuted: !!myFlags.whatsappMuted,
+      isArchived: !!myFlags.whatsappArchived,
       photographUrl: client.photographUrl || null,
     });
   } catch (err) {
@@ -1121,7 +1158,7 @@ exports.getWhatsAppFlagsBulk = async (req, res) => {
     const WhatsAppGroup = require("../models/WhatsAppGroup");
     const [clients, groups] = await Promise.all([
       ClientInfo.find(clientQuery)
-        .select("_id whatsappPinned whatsappRead whatsappFavourite whatsappMuted whatsappArchived photographUrl")
+        .select("_id whatsappRead employeeFlags photographUrl")
         .lean(),
       WhatsAppGroup.find({
         owner: emp.owner,
@@ -1134,12 +1171,15 @@ exports.getWhatsAppFlagsBulk = async (req, res) => {
 
     const flags = {};
     for (const c of clients) {
+      // Same per-employee read as the single-chat endpoint — this is the query
+      // that fills the sidebar, so it is where a colleague's pin used to leak.
+      const f = employeeFlagsFor(c, emp._id);
       flags[String(c._id)] = {
-        isPinned: !!c.whatsappPinned,
+        isPinned: !!f.whatsappPinned,
         isRead: !!c.whatsappRead,
-        isFavourite: !!c.whatsappFavourite,
-        isMuted: !!c.whatsappMuted,
-        isArchived: !!c.whatsappArchived,
+        isFavourite: !!f.whatsappFavourite,
+        isMuted: !!f.whatsappMuted,
+        isArchived: !!f.whatsappArchived,
         photographUrl: c.photographUrl || null,
       };
     }

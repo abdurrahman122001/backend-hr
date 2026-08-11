@@ -556,8 +556,14 @@ exports.getThreadInfo = async function (req, res) {
       return res.status(400).json({ error: "Thread ID is required" });
     }
 
-    // Get thread from AssignmentMessage
+    // A thread is named after the mail that STARTED it, so this must be the
+    // oldest message — never "whichever one the query plan hands back first".
+    // Unsorted, this rode on the `threadId_1` index happening to return
+    // insertion order; the moment the planner picked `threadId_1_createdAt_-1`
+    // instead it would have flipped to the newest message and silently
+    // re-titled every thread in this panel.
     const thread = await AssignmentMessage.findOne({ threadId })
+      .sort({ createdAt: 1 })
       .populate([
         { path: "owner", select: "_id name companyEmail" },
         { path: "sender", select: "_id name companyEmail role photographUrl" },

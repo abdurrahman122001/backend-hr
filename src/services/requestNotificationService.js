@@ -83,6 +83,27 @@ async function createRequestNotification({
       socket.to(`employee_${recipientId}`).emit("request_notification", payload);
     }
 
+    // Every Request Center event is also written into the recipient's inbox,
+    // under System Announcements. Hooked here rather than in the notify*
+    // helpers below because this is the one function EVERY request event goes
+    // through — submissions, approvals, rejections and the leave-specific
+    // events that call it directly.
+    const {
+      announceRequestEvent,
+    } = require("./systemAnnouncementService");
+    await announceRequestEvent({
+      recipientId,
+      actorId: normalizeId(actor),
+      title,
+      message,
+      requestId,
+      requestType,
+      requestLabel: requestTypeLabels[requestType] || "Request",
+      action,
+      target: notification.target,
+      io: socket,
+    });
+
     return payload;
   } catch (error) {
     console.error("[RequestNotification] create error:", error);

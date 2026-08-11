@@ -69,6 +69,35 @@ const chatTaskSchema = new mongoose.Schema(
       ref: "Message",
       default: null,
     },
+    // ── Assignment request ────────────────────────────────────────────────
+    // A junior cannot simply hand work to someone ABOVE them in the employee
+    // hierarchy: assigning upward arrives as a REQUEST the senior accepts,
+    // declines, or closes outright. "none" covers every ordinary assignment
+    // (downward or sideways), which is still just an assignment.
+    requestStatus: {
+      type: String,
+      enum: ["none", "pending", "accepted", "declined", "closed"],
+      default: "none",
+      index: true,
+    },
+    // The junior who raised the request.
+    requestedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    // The senior(s) being asked — always a subset of `assignees`, and emptied
+    // as each one answers.
+    requestedTo: [{ type: mongoose.Schema.Types.ObjectId, ref: "Employee" }],
+    requestedAt: { type: Date, default: null },
+    // Who answered last, when, and anything they said while declining.
+    respondedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Employee",
+      default: null,
+    },
+    respondedAt: { type: Date, default: null },
+    responseNote: { type: String, trim: true, default: "" },
     // ClickUp-style subtasks: set to the parent task's id (one level deep).
     parentTaskId: {
       type: mongoose.Schema.Types.ObjectId,

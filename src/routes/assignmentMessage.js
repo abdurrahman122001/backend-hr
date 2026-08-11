@@ -11,6 +11,8 @@ router.get("/count", filterCtrl.getMessageCounts);
 router.get("/external", filterCtrl.getExternalCommunications);
 router.get("/pending-approval", filterCtrl.getTeamLeadPendingApprovals);
 router.get("/internal", filterCtrl.getInternalCommunications);
+// Inbox tab for mail the app wrote: Request Center events, HR policy, etc.
+router.get("/system-announcements", filterCtrl.getSystemAnnouncements);
 // =============================
 // ✅ SPECIFIC ROUTES FIRST (without parameters)
 // =============================

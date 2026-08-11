@@ -3,12 +3,63 @@
 const mongoose = require("mongoose");
 const ChatTask = require("../models/ChatTask");
 const ChatTaskComment = require("../models/ChatTaskComment");
+const { getSupervisionChain } = require("../services/clientSpaceService");
 
+const PERSON = "_id name companyEmail photographUrl avatar";
 const POPULATE = [
-  { path: "assignees", select: "_id name companyEmail photographUrl avatar" },
-  { path: "createdBy", select: "_id name companyEmail photographUrl avatar" },
-  { path: "reviewRequestedBy", select: "_id name companyEmail photographUrl avatar" },
+  { path: "assignees", select: PERSON },
+  { path: "createdBy", select: PERSON },
+  { path: "reviewRequestedBy", select: PERSON },
+  { path: "requestedBy", select: PERSON },
+  { path: "requestedTo", select: PERSON },
+  { path: "respondedBy", select: PERSON },
 ];
+
+// Which of `assigneeIds` sit ABOVE the actor in the employee hierarchy — the
+// same hierarchy Google Chat spaces are built from. Those assignments become
+// requests the senior answers rather than orders they receive (ChatTask
+// .requestStatus). A hierarchy lookup that fails must never block the
+// assignment: it simply behaves as it did before requests existed.
+const findSeniorsAmong = async (actor, assigneeIds) => {
+  const ids = [...new Set((assigneeIds || []).map(String))].filter((id) =>
+    mongoose.isValidObjectId(id)
+  );
+  if (ids.length === 0) return [];
+  try {
+    const chain = new Set(await getSupervisionChain(actor.owner, actor._id));
+    return ids.filter((id) => chain.has(id));
+  } catch (e) {
+    console.error("findSeniorsAmong error (assignment unaffected):", e.message);
+    return [];
+  }
+};
+
+// The fields that put a task into "waiting on a senior" state, or clear it.
+const pendingRequestFields = (actorId, requestedTo) => ({
+  requestStatus: "pending",
+  requestedBy: actorId,
+  requestedTo,
+  requestedAt: new Date(),
+  respondedBy: null,
+  respondedAt: null,
+  responseNote: "",
+});
+
+const clearedRequestFields = () => ({
+  requestStatus: "none",
+  requestedBy: null,
+  requestedTo: [],
+  requestedAt: null,
+  respondedBy: null,
+  respondedAt: null,
+  responseNote: "",
+});
+
+// Thread wording: asking someone senior reads as a request, not an assignment.
+const assignActivity = (names, isRequest) =>
+  isRequest
+    ? `Requested ${names} to take on a task (via Chat)`
+    : `Assigned a task to ${names} (via Chat)`;
 
 const emit = (req, event, chatId, payload) => {
   try {
@@ -27,12 +78,13 @@ const emit = (req, event, chatId, payload) => {
 
 // Browser-notify each freshly-assigned employee (skipping the actor) on their
 // personal `user_<id>` room — the same room mentions/messages use.
-const notifyAssignees = (req, task, assigneeList, actorId) => {
+const notifyAssignees = (req, task, assigneeList, actorId, requestedIds = []) => {
   try {
     const io = req.app.get("io");
     if (!io) return;
     const actor = String(actorId);
     const by = req.employee?.name || "Someone";
+    const requested = new Set((requestedIds || []).map(String));
     (assigneeList || []).forEach((a) => {
       const id = String(a?._id || a);
       if (!id || id === actor) return;
@@ -41,6 +93,9 @@ const notifyAssignees = (req, task, assigneeList, actorId) => {
         taskId: String(task._id),
         title: task.title,
         assignedByName: by,
+        // Assigned UP the hierarchy: the senior is being asked, not told, so
+        // the notification has to read that way too.
+        isRequest: requested.has(id),
       });
     });
   } catch (e) {
@@ -138,15 +193,22 @@ exports.createTask = async (req, res) => {
     if (!title || !title.trim())
       return res.status(400).json({ error: "Title is required" });
 
+    const assigneeIds = Array.isArray(assignees)
+      ? assignees.filter((a) => mongoose.isValidObjectId(a))
+      : [];
+    // Assigning someone senior raises a request instead of handing them work.
+    const requestedTo = await findSeniorsAmong(req.employee, assigneeIds);
+
     let task = await ChatTask.create({
       chatId,
       owner: req.employee.owner,
       title: title.trim(),
       details: (details || "").trim(),
       dueAt: dueAt ? new Date(dueAt) : null,
-      assignees: Array.isArray(assignees)
-        ? assignees.filter((a) => mongoose.isValidObjectId(a))
-        : [],
+      assignees: assigneeIds,
+      ...(requestedTo.length
+        ? pendingRequestFields(req.employee._id, requestedTo)
+        : {}),
       createdBy: req.employee._id,
       sourceMessageId: mongoose.isValidObjectId(sourceMessageId)
         ? sourceMessageId
@@ -178,7 +240,7 @@ exports.createTask = async (req, res) => {
         await postTaskThreadEntry(
           req,
           task,
-          `Assigned a task to ${names} (via Chat)`
+          assignActivity(names, requestedTo.length > 0)
         );
       }
     } else {
@@ -245,7 +307,7 @@ exports.createTask = async (req, res) => {
             await postTaskThreadEntry(
               req,
               task,
-              `Assigned a task to ${names} (via Chat)`
+              assignActivity(names, requestedTo.length > 0)
             );
           }
         }
@@ -256,7 +318,7 @@ exports.createTask = async (req, res) => {
     // Emit after a direct-panel task has been linked to its announcement so
     // every Tasks panel receives the complete task document.
     emit(req, "chat_task_created", chatId, { task });
-    notifyAssignees(req, task, task.assignees, req.employee._id);
+    notifyAssignees(req, task, task.assignees, req.employee._id, requestedTo);
     return res.status(201).json({ task });
   } catch (e) {
     console.error("createTask error:", e);
@@ -286,11 +348,54 @@ exports.updateTask = async (req, res) => {
     if (typeof title === "string" && title.trim()) task.title = title.trim();
     if (typeof details === "string") task.details = details.trim();
     if (dueAt !== undefined) task.dueAt = dueAt ? new Date(dueAt) : null;
-    if (Array.isArray(assignees))
-      task.assignees = assignees.filter((a) => mongoose.isValidObjectId(a));
+    // Tracked so the request state below can be recomputed from the NEW list.
+    let requestedNow = [];
+    if (Array.isArray(assignees)) {
+      const nextIds = assignees
+        .filter((a) => mongoose.isValidObjectId(a))
+        .map(String);
+      task.assignees = nextIds;
+
+      // Only a NEWLY added senior raises a request. Re-saving a task whose
+      // request was already answered (the panel always sends `assignees`) must
+      // not drag it back to pending.
+      const addedIds = nextIds.filter((id) => !prevAssignees.includes(id));
+      requestedNow = await findSeniorsAmong(req.employee, addedIds);
+      // Anyone dropped from the assignees is no longer being asked either.
+      const stillRequested = (task.requestedTo || [])
+        .map(String)
+        .filter((id) => nextIds.includes(id));
+
+      if (requestedNow.length > 0) {
+        Object.assign(
+          task,
+          pendingRequestFields(req.employee._id, [
+            ...new Set([...stillRequested, ...requestedNow]),
+          ])
+        );
+      } else if (["declined", "closed"].includes(task.requestStatus)) {
+        // A settled answer stays on the task as its record — merely opening and
+        // re-saving the task must not erase it. Handing the work to somebody
+        // new is what supersedes it.
+        if (addedIds.length > 0) Object.assign(task, clearedRequestFields());
+      } else if (task.requestStatus !== "none" && stillRequested.length === 0) {
+        // The request's seniors are all off the task — nothing left to answer.
+        Object.assign(task, clearedRequestFields());
+      } else {
+        task.requestedTo = stillRequested;
+      }
+    }
     if (typeof done === "boolean") {
       const isCreator = String(task.createdBy) === String(req.employee._id);
-      if (done && !isCreator) {
+      // A senior who ACCEPTED a request sits above the junior who asked, so
+      // their completion is final. Sending it back down for that junior's
+      // review would invert the hierarchy the request exists to respect.
+      const acceptedRequest =
+        task.requestStatus === "accepted" &&
+        (task.requestedTo || []).some(
+          (id) => String(id?._id || id) === String(req.employee._id)
+        );
+      if (done && !isCreator && !acceptedRequest) {
         // An assignee (or any non-creator) completing the task sends it to
         // REVIEW — only the creator's completion actually closes it.
         task.inReview = true;
@@ -325,7 +430,7 @@ exports.updateTask = async (req, res) => {
       );
 
       // Notify only the newly added assignees.
-      notifyAssignees(req, populated, added, req.employee._id);
+      notifyAssignees(req, populated, added, req.employee._id, requestedNow);
 
       // Announce the assignee change in the source message's thread, Google-Chat
       // style: assign / reassign / unassign.
@@ -333,9 +438,11 @@ exports.updateTask = async (req, res) => {
         list.map((a) => `@${a.name || "member"}`).join(", ");
       let activity = null;
       if (added.length > 0 && removed.length > 0) {
-        activity = `Changed task assignee from ${fmt(removed)} to ${fmt(added)} (via Chat)`;
+        activity = requestedNow.length > 0
+          ? `Took a task from ${fmt(removed)} and requested ${fmt(added)} (via Chat)`
+          : `Changed task assignee from ${fmt(removed)} to ${fmt(added)} (via Chat)`;
       } else if (added.length > 0) {
-        activity = `Assigned a task to ${fmt(added)} (via Chat)`;
+        activity = assignActivity(fmt(added), requestedNow.length > 0);
       } else if (removed.length > 0) {
         activity = `Unassigned a task from ${fmt(removed)} (via Chat)`;
       }
@@ -386,6 +493,130 @@ exports.updateTask = async (req, res) => {
   } catch (e) {
     console.error("updateTask error:", e);
     return res.status(500).json({ error: "Failed to update task" });
+  }
+};
+
+/**
+ * PATCH /chat/tasks/:taskId/request   { action: "accept" | "decline" | "close", note }
+ *
+ * The senior's answer to work a junior sent up the hierarchy. Only somebody the
+ * request was actually addressed to may answer it — the requester cannot accept
+ * on their behalf, which is the whole point of a request.
+ */
+exports.respondToTaskRequest = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const { action, note } = req.body || {};
+    if (!mongoose.isValidObjectId(taskId))
+      return res.status(400).json({ error: "Invalid task id" });
+    if (!["accept", "decline", "close"].includes(String(action)))
+      return res
+        .status(400)
+        .json({ error: "action must be accept, decline or close" });
+
+    const task = await ChatTask.findById(taskId);
+    if (!task) return res.status(404).json({ error: "Task not found" });
+    if (task.requestStatus !== "pending")
+      return res.status(400).json({ error: "This task has no pending request" });
+
+    const me = String(req.employee._id);
+    if (!(task.requestedTo || []).some((id) => String(id) === me))
+      return res
+        .status(403)
+        .json({ error: "Only the person asked can answer this request" });
+
+    task.respondedBy = req.employee._id;
+    task.respondedAt = new Date();
+    task.responseNote = String(note || "").trim();
+
+    if (action === "accept") {
+      task.requestStatus = "accepted";
+    } else if (action === "close") {
+      // Closing settles the request AND the task: the senior decided the work
+      // isn't needed, so it lands in the same place as a completed task rather
+      // than sitting in the requester's list forever.
+      task.requestStatus = "closed";
+      task.done = true;
+      task.completedAt = new Date();
+      task.inReview = false;
+      task.reviewRequestedBy = null;
+      task.reviewRequestedAt = null;
+    } else {
+      // Declining hands the work back: the decliner comes off the assignees so
+      // the requester can take it themselves or ask someone else. Any other
+      // senior asked at the same time still has it pending.
+      task.assignees = (task.assignees || []).filter(
+        (a) => String(a?._id || a) !== me
+      );
+      task.requestedTo = (task.requestedTo || []).filter(
+        (id) => String(id) !== me
+      );
+      task.requestStatus = task.requestedTo.length > 0 ? "pending" : "declined";
+    }
+
+    await task.save();
+    const populated = await task.populate(POPULATE);
+
+    emit(req, "chat_task_updated", task.chatId, { task: populated });
+
+    const verb =
+      action === "accept"
+        ? "Accepted"
+        : action === "close"
+        ? "Closed"
+        : "Declined";
+    await postTaskThreadEntry(
+      req,
+      populated,
+      `${verb} a task request (via Chat)\n${populated.title}${
+        task.responseNote ? `\n${task.responseNote}` : ""
+      }`
+    );
+
+    // The requester is the one waiting on this answer, and they are rarely
+    // looking at the Tasks panel when it arrives.
+    try {
+      const io = req.app.get("io");
+      const requesterId = String(
+        populated.requestedBy?._id || populated.requestedBy || ""
+      );
+      if (io && requesterId && requesterId !== me) {
+        io.to(`user_${requesterId}`).emit("chat_task_request_responded", {
+          chatId: String(populated.chatId),
+          taskId: String(populated._id),
+          title: populated.title,
+          action,
+          note: task.responseNote,
+          byName: req.employee?.name || "Someone",
+        });
+      }
+    } catch (e) {
+      /* non-fatal */
+    }
+
+    return res.json({ task: populated });
+  } catch (e) {
+    console.error("respondToTaskRequest error:", e);
+    return res.status(500).json({ error: "Failed to answer the task request" });
+  }
+};
+
+/**
+ * GET /chat/tasks/seniors
+ * The caller's seniors, so the assign picker can say up front that picking one
+ * of them sends a request instead of an assignment.
+ */
+exports.getMySeniors = async (req, res) => {
+  try {
+    const seniors = await getSupervisionChain(
+      req.employee.owner,
+      req.employee._id
+    );
+    return res.json({ seniors });
+  } catch (e) {
+    // Only a UI hint depends on this — an empty list just hides the hint.
+    console.error("getMySeniors error:", e);
+    return res.json({ seniors: [] });
   }
 };
 
@@ -618,13 +849,20 @@ exports.createTaskFromEmail = async (req, res) => {
       .filter((a) => mongoose.isValidObjectId(a))
       .map(String);
 
+    const emailAssignees = chosen.length ? chosen : [String(req.employee._id)];
+    // Same rule as the Tasks panel: work sent up the hierarchy is a request.
+    const requestedTo = await findSeniorsAmong(req.employee, emailAssignees);
+
     let task = await ChatTask.create({
       ...base,
       chatId: client.chatSpace,
-      assignees: chosen.length ? chosen : [req.employee._id],
+      assignees: emailAssignees,
+      ...(requestedTo.length
+        ? pendingRequestFields(req.employee._id, requestedTo)
+        : {}),
     });
     task = await task.populate(POPULATE);
-    notifyAssignees(req, task, task.assignees, req.employee._id);
+    notifyAssignees(req, task, task.assignees, req.employee._id, requestedTo);
 
     // Same room the Tasks side-panel listens on, so it appears without a reload.
     emit(req, "chat_task_created", client.chatSpace, { task });
