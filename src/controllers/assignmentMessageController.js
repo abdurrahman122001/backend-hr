@@ -3927,6 +3927,32 @@ exports.sendDraft = async function sendDraft(req, res) {
     res.status(500).json({ error: "Failed to send draft" });
   }
 };
+/**
+ * A thread is named by its FIRST message, and on a client thread that same
+ * subject becomes the outbound mail's "Re: …" line (see clientEmailService's
+ * sendApprovedReplyToClient). Renaming a reply is therefore invisible inside
+ * the app while changing the subject the client actually receives, so only the
+ * thread's root message may be renamed.
+ *
+ * Returns an error string when the requested subject change must be refused,
+ * or null when there is nothing to refuse (no change, or this IS the root).
+ */
+async function subjectChangeRejection(msg, subject) {
+  if (subject === undefined || subject === null) return null;
+
+  const next = String(subject).trim();
+  if (!next || next === String(msg.subject || "").trim()) return null;
+  if (!msg.threadId) return null;
+
+  const root = await AssignmentMessage.findOne({ threadId: msg.threadId })
+    .sort({ createdAt: 1 })
+    .select("_id")
+    .lean();
+  if (!root || String(root._id) === String(msg._id)) return null;
+
+  return "The subject belongs to the thread and can only be changed on its first message.";
+}
+
 exports.editDisapprovedMessage = async function editDisapprovedMessage(
   req,
   res
@@ -4070,6 +4096,11 @@ exports.editDisapprovedMessage = async function editDisapprovedMessage(
         currentUser: currentUserId,
         allowedRoles: ["sender", "senior_in_hierarchy", "previous_approver"],
       });
+    }
+
+    const subjectRejection = await subjectChangeRejection(msg, subject);
+    if (subjectRejection) {
+      return res.status(400).json({ error: subjectRejection });
     }
 
     // Check if any changes are provided
@@ -4905,6 +4936,11 @@ exports.editPendingMessage = async function editPendingMessage(req, res) {
         messageOwner: msg.sender,
         currentUser: currentUserId,
       });
+    }
+
+    const subjectRejection = await subjectChangeRejection(msg, subject);
+    if (subjectRejection) {
+      return res.status(400).json({ error: subjectRejection });
     }
 
     // Update message fields

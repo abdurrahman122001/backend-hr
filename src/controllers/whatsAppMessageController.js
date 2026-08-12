@@ -31,6 +31,21 @@ const isObjId = (v) => mongoose.isValidObjectId(v);
 const oid = (v) =>
   mongoose.isValidObjectId(v) ? new mongoose.Types.ObjectId(v) : null;
 
+/**
+ * `replyContent` arrives straight from the client. Replying to a message with no
+ * Employee sender — an inbound WhatsApp message from a real client — sends
+ * `originalSender: ""`, which Mongoose rejects as an ObjectId cast failure and
+ * turns into a 500 on an otherwise valid reply. Drop the field when it isn't a
+ * real id; the quoted preview text carries the context either way.
+ */
+function sanitizeReplyContent(replyContent) {
+  if (!replyContent || typeof replyContent !== "object") return null;
+  const { originalSender, ...rest } = replyContent;
+  return isObjId(originalSender)
+    ? { ...rest, originalSender }
+    : { ...rest, originalSender: null };
+}
+
 function normalizeIds(val) {
   if (!val) return [];
   if (Array.isArray(val)) return val.filter(isObjId).map(String);
@@ -1628,6 +1643,12 @@ exports.sendScheduledMessages = async function sendScheduledMessages(
         ]);
         if (!populated) { results.failed++; continue; }
 
+        // A scheduled message fires past its approval step, so this is its
+        // send-out moment too — pending ones stay in the app until approved.
+        if (populated.approvalStatus !== "pending" && populated.approvalStatus !== "disapproved") {
+          require("../services/whatsappClientService").sendApprovedReplySafely(populated);
+        }
+
         const msgObj = populated.toObject();
 
         // Update lastWhatsAppMessage cache on ClientInfo (parent client chats only)
@@ -2014,6 +2035,14 @@ exports.approveMessage = async function approveMessage(req, res) {
 
     // Denormalize onto ClientInfo when approval is finalized so the sidebar refreshes
     // (parent client chats only — CE sub-chats are separate conversations).
+    // 📤 Final approval reached the top of the hierarchy — this is the moment the
+    // reply is allowed to leave the building. Mirrors clientEmailService on the
+    // email side; it self-skips unless the client actually messaged our real
+    // WhatsApp number, so internal client chats never go out.
+    if (approvalFinalized) {
+      require("../services/whatsappClientService").sendApprovedReplySafely(msg);
+    }
+
     if (approvalFinalized && msg.client && !msg.isGroupMessage && !msg.isClientEmployeeMessage) {
       const ClientInfo = require("../models/ClientInfo");
       ClientInfo.findByIdAndUpdate(msg.client, {
@@ -4671,7 +4700,7 @@ exports.createMessage = async function createMessage(req, res) {
       originalSentAt: new Date(),
       isReply: isReply || false,
       repliedTo: isReply ? repliedTo : null,
-      replyContent: isReply ? replyContent : null,
+      replyContent: isReply ? sanitizeReplyContent(replyContent) : null,
       // 🔥 NEW: Store client employee metadata if applicable
       clientEmployeeData: isClientEmployeeChat ? clientEmployeeData : null,
       isClientEmployeeMessage: isClientEmployeeChat,
@@ -4731,6 +4760,14 @@ exports.createMessage = async function createMessage(req, res) {
       // immediately list every senior the message will route through.
       { path: "plannedApprovalChain", select: "_id name role designation" },
     ]);
+
+    // 📤 Messages that need no further approval are final at creation — a direct
+    // (unsupervised) client, or a sender already at the top of the hierarchy who
+    // has no senior to approve them. approveMessage never runs for these, so
+    // this is their only chance to reach the client's real WhatsApp.
+    if (!isScheduled && (approvalStatus === "approved" || approvalStatus === null)) {
+      require("../services/whatsappClientService").sendApprovedReplySafely(populated);
+    }
 
     // 🔔 Notify @mentioned employees in real time (client-employee mentions
     // have no app account to notify).

@@ -90,10 +90,54 @@ const WhatsAppMessageSchema = new Schema(
   {
     owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
     client: { type: Schema.Types.ObjectId, ref: "ClientInfo", default: null },
-    sender: { type: Schema.Types.ObjectId, ref: "Employee", required: true },
+    // Null ONLY for messages the client sent us from their own WhatsApp — there
+    // is no Employee behind those. Every internally composed message still
+    // requires a sender, which is what the validator below enforces.
+    sender: {
+      type: Schema.Types.ObjectId,
+      ref: "Employee",
+      required: function () {
+        return this.senderType !== "client";
+      },
+      default: null,
+    },
     receiver: [
       { type: Schema.Types.ObjectId, ref: "Employee", required: true },
     ], // Array of receivers
+
+    // ---- Inbound from the real WhatsApp number (Cloud API) ----
+    // Mirrors AssignmentMessage's senderType/isFromClient/source, which the
+    // email side has carried since the client mailbox went live.
+    senderType: {
+      type: String,
+      enum: ["employee", "client"],
+      default: "employee",
+    },
+    isFromClient: { type: Boolean, default: false },
+    source: {
+      type: String,
+      enum: ["app", "whatsapp"],
+      default: "app",
+    },
+    // The client's own WhatsApp number and profile name, kept on the message so
+    // the chat still shows who wrote it even if the ClientInfo record is later
+    // edited or the contact is removed.
+    clientSenderName: { type: String, default: null },
+    clientSenderPhone: { type: String, default: null },
+    waMetadata: {
+      // Meta's message id ("wamid.…"). Unique per message — used to drop the
+      // duplicate deliveries Meta sends when it retries a webhook.
+      waMessageId: { type: String, default: null },
+      from: { type: String, default: null },
+      profileName: { type: String, default: null },
+      phoneNumberId: { type: String, default: null },
+      type: { type: String, default: null },
+      timestamp: { type: Date, default: null },
+      // Set on our OUTBOUND sends so delivery statuses can be matched back.
+      outboundWaMessageId: { type: String, default: null },
+      deliveryStatus: { type: String, default: null },
+      failureReason: { type: String, default: null },
+    },
 
     subject: { type: String },
     note: { type: String },
@@ -314,6 +358,22 @@ WhatsAppMessageSchema.index({ "comments.sender": 1 });
 WhatsAppMessageSchema.index({ "comments.createdAt": -1 });
 WhatsAppMessageSchema.index({ commentCount: -1 });
 WhatsAppMessageSchema.index({ lastCommentAt: -1 });
+
+// Meta redelivers a webhook until it gets a 200, and a slow first attempt means
+// the same wamid can arrive twice.
+//
+// PARTIAL, not sparse: `waMessageId` has `default: null`, so Mongoose writes the
+// key on every message, including internally composed ones. Sparse only skips
+// documents where the key is ABSENT, so all those nulls collided with each other
+// and the second in-app message ever sent failed with E11000. Restricting the
+// index to string values indexes only genuine inbound WhatsApp messages.
+WhatsAppMessageSchema.index(
+  { "waMetadata.waMessageId": 1 },
+  {
+    unique: true,
+    partialFilterExpression: { "waMetadata.waMessageId": { $type: "string" } },
+  },
+);
 
 // NEW: Virtual for comment replies (nested structure)
 CommentSchema.virtual("replies", {
