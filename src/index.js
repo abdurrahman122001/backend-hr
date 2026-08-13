@@ -225,6 +225,11 @@ app.use(
   ),
 );
 
+// ---------- WhatsApp Cloud API webhook ----------
+// Mounted BEFORE the JSON parser on purpose: Meta signs the raw request bytes,
+// and the router applies its own express.raw so the signature can be checked.
+app.use("/api/whatsapp", require("./routes/whatsappWebhookRoute"));
+
 // ---------- Body parsers ----------
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
