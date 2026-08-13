@@ -2529,6 +2529,12 @@ exports.getUnreadCount = async function getUnreadCount(req, res) {
           owner: oid(String(owner)),
           status: "sent",
           approvalStatus: { $ne: "pending" },
+          // Keep this endpoint aligned with the Primary Inbox list. These
+          // records live outside that list and otherwise leave a Mail-rail
+          // badge that the user has no visible thread available to clear.
+          isForwardedCopy: { $ne: true },
+          isSystemAnnouncement: { $ne: true },
+          isSystemMessage: { $ne: true },
         },
       },
       { $sort: { createdAt: -1 } },
