@@ -524,6 +524,10 @@ async function deductLeaveFromSalary(employeeId, totalDays, startDate) {
   }
 }
 
+// Exported for leaveSyncCron: settlement of an unpaid leave day moved from
+// approval time to the day itself, so the cron now applies this deduction.
+exports.deductLeaveFromSalary = deductLeaveFromSalary;
+
 /**
  * Reverts the effects of an approved leave (balance, transactions, salary)
  */
@@ -1135,14 +1139,50 @@ async function applyLeaveApprovalEffects(
   // consumed). This keeps "Early Leave" / "Late Arrival" days from ever being
   // charged as leave, even on a request whose leaveType is annual/personal/etc.
   const isPresentDay = (t) => t === "early_leave" || t === "late";
-  const consumingDays = (leave.dates || []).reduce((sum, d) => {
-    if (isPresentDay(d.type)) return sum;
-    return sum + (d.type === "half" ? 0.5 : 1);
-  }, 0);
+
+  // A leave day is SETTLED — balance consumed, salary deducted — on the day
+  // itself, never at approval time. Approving a future leave must not touch the
+  // balance: an employee with approved leave who turns up and marks attendance
+  // anyway owes nothing, and that can only be known once the day has arrived.
+  // leaveSyncCron settles each day at 23:45 after checking whether the employee
+  // actually showed up. Approval therefore only settles dates that had ALREADY
+  // passed when it ran — a retroactive approval or an absence justification,
+  // which the cron will never revisit because it only ever looks at today.
+  const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
+  // Day extraction matches the attendance loop below and hasApprovedLeaveForDate
+  // in utils/lateDeductions.js — a leave date's calendar day is read in UTC
+  // everywhere. Introducing a second convention here would move which day a
+  // date belongs to, which is not what this change is about.
+  const toDateStr = (value) => {
+    if (typeof value === "string") {
+      return value.includes("T") ? value.split("T")[0] : value;
+    }
+    return new Date(value).toISOString().split("T")[0];
+  };
+
+  const settleableDates = (leave.dates || []).filter(
+    (d) => !isPresentDay(d.type) && toDateStr(d.date) <= todayStr,
+  );
+
   // Respect partial approval — never consume more than what was approved.
-  const daysToDeduct = partialApproval && partialApproval.approvedDays > 0
-    ? Math.min(actualApprovedDays, consumingDays)
-    : consumingDays;
+  let remainingAllowance = partialApproval && partialApproval.approvedDays > 0
+    ? Math.min(
+        actualApprovedDays,
+        settleableDates.reduce((s, d) => s + (d.type === "half" ? 0.5 : 1), 0),
+      )
+    : Number.POSITIVE_INFINITY;
+
+  // One entry per date. leaveSyncCron checks for a transaction on THIS DAY
+  // before settling it, so a single request-level transaction would make it
+  // skip every other day of a multi-day leave.
+  const settledDates = [];
+  for (const dateObj of settleableDates) {
+    if (remainingAllowance <= 0) break;
+    const value = Math.min(dateObj.type === "half" ? 0.5 : 1, remainingAllowance);
+    settledDates.push({ date: dateObj.date, value });
+    remainingAllowance -= value;
+  }
+  const daysToDeduct = settledDates.reduce((sum, d) => sum + d.value, 0);
 
   // APPLY SALARY DEDUCTION IF UNPAID (present-only days like early_leave/late deduct nothing)
   if (!finalIsPaid && daysToDeduct > 0) {
@@ -1172,20 +1212,22 @@ async function applyLeaveApprovalEffects(
         { upsert: true, new: true }
       );
 
-      // Create Transaction
-      await LeaveTransaction.create({
-        owner: ownerId,
-        employee: employeeId,
-        leaveYearBalance: balance._id,
-        year: leaveYear,
-        date: leave.startDate,
-        type: "PAID_LEAVE_USED",
-        value: daysToDeduct,
-        sourceModel: "ApplyLeave",
-        sourceId: leave._id,
-        createdBy: approverId,
-        notes: leave.isAbsenceJustification ? "Absence justification approved as paid leave" : "Leave approved"
-      });
+      // Create one Transaction per settled date
+      for (const settled of settledDates) {
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: settled.date,
+          type: "PAID_LEAVE_USED",
+          value: settled.value,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId,
+          notes: leave.isAbsenceJustification ? "Absence justification approved as paid leave" : "Leave approved"
+        });
+      }
 
     } else {
       // Increment usedUnpaid in Employee model
@@ -1203,20 +1245,22 @@ async function applyLeaveApprovalEffects(
         { upsert: true, new: true }
       );
 
-      // Create Transaction
-      await LeaveTransaction.create({
-        owner: ownerId,
-        employee: employeeId,
-        leaveYearBalance: balance._id,
-        year: leaveYear,
-        date: leave.startDate,
-        type: "UNPAID_LEAVE_USED",
-        value: daysToDeduct,
-        sourceModel: "ApplyLeave",
-        sourceId: leave._id,
-        createdBy: approverId,
-        notes: leave.isAbsenceJustification ? "Absence justification approved as unpaid leave" : "Leave approved as unpaid"
-      });
+      // Create one Transaction per settled date
+      for (const settled of settledDates) {
+        await LeaveTransaction.create({
+          owner: ownerId,
+          employee: employeeId,
+          leaveYearBalance: balance._id,
+          year: leaveYear,
+          date: settled.date,
+          type: "UNPAID_LEAVE_USED",
+          value: settled.value,
+          sourceModel: "ApplyLeave",
+          sourceId: leave._id,
+          createdBy: approverId,
+          notes: leave.isAbsenceJustification ? "Absence justification approved as unpaid leave" : "Leave approved as unpaid"
+        });
+      }
     }
   } catch (balanceError) {
     console.error("⚠️ Error updating leave balance:", balanceError);
@@ -1228,9 +1272,9 @@ async function applyLeaveApprovalEffects(
     const Attendance = require("../models/Attendance");
 
     // Only mark attendance for dates that have already occurred (today or
-    // earlier). Future leave dates are intentionally NOT pre-marked here —
-    // leaveSyncCron creates each day's record when that day actually arrives.
-    const todayStr = moment().tz("Asia/Karachi").format("YYYY-MM-DD");
+    // earlier) — `todayStr` is computed once at the top of this function.
+    // Future leave dates are intentionally NOT pre-marked here: leaveSyncCron
+    // creates each day's record when that day actually arrives.
 
     for (const dateObj of leave.dates) {
       // early_leave / late dates = employee was physically present; leave it as

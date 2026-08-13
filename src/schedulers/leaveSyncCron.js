@@ -69,15 +69,23 @@ cron.schedule("45 23 * * *", async () => {
                     continue;
                 }
 
-                // If approveLeave already deducted balance & salary for this leave
-                // at approval time, do NOT deduct again here — only mark the day's
-                // attendance/session below. approveLeave records a LeaveTransaction
-                // for the leave (and intentionally does not pre-create future-dated
-                // attendance), so the transaction's presence means the balance was
-                // already consumed and this run should only materialise the record.
-                const alreadyDeductedAtApproval = await LeaveTransaction.exists({
+                // Balance is settled per DAY, not per request. approveLeave only
+                // settles dates that had already passed when it ran (a retroactive
+                // approval or an absence justification) and writes one transaction
+                // per settled date — so this run must ask whether TODAY specifically
+                // was already settled, not whether the request has any transaction.
+                // A request-level check would settle only the first day of a
+                // multi-day leave and silently skip every day after it.
+                // UTC day bounds: this cron stores `date: todayStr`, which Mongoose
+                // casts to UTC midnight, and approveLeave stores the leave date as
+                // submitted. Both land inside this window.
+                const dayStart = new Date(`${todayStr}T00:00:00.000Z`);
+                const dayEnd = new Date(`${todayStr}T23:59:59.999Z`);
+                const alreadySettledToday = await LeaveTransaction.exists({
                     sourceModel: "ApplyLeave",
                     sourceId: leave._id,
+                    type: { $in: ["PAID_LEAVE_USED", "UNPAID_LEAVE_USED"] },
+                    date: { $gte: dayStart, $lte: dayEnd },
                 });
 
                 // Logic for deduction and marking
@@ -95,9 +103,9 @@ cron.schedule("45 23 * * *", async () => {
                     sessionStatus = "late";
                 }
 
-                // Check balance if leave is supposed to be paid (skip when the
-                // balance was already deducted at approval — trust that decision).
-                if (finalIsPaid && !alreadyDeductedAtApproval) {
+                // Check balance if leave is supposed to be paid (skip when this
+                // day was already settled at approval — trust that decision).
+                if (finalIsPaid && !alreadySettledToday) {
                     const leaveYear = getLeaveYear(todayStr);
                     const balance = await LeaveYearBalance.findOne({
                         owner: ownerId,
@@ -165,11 +173,11 @@ cron.schedule("45 23 * * *", async () => {
                 );
 
                 // 3. Update Leave Balances and Transactions
-                // Skip entirely when approveLeave already deducted at approval time —
+                // Skip entirely when this day was already settled at approval time —
                 // the attendance/session above is all this run needs to do.
                 const leaveYearForDeduction = getLeaveYear(todayStr);
-                if (alreadyDeductedAtApproval) {
-                    console.log(`[LeaveSync] Marked attendance for ${employeeId} on ${todayStr} (balance already deducted at approval).`);
+                if (alreadySettledToday) {
+                    console.log(`[LeaveSync] Marked attendance for ${employeeId} on ${todayStr} (balance already settled at approval).`);
                 } else if (finalIsPaid) {
                     // Increment usedPaid in Employee model
                     await Employee.findByIdAndUpdate(employeeId, {
@@ -200,6 +208,19 @@ cron.schedule("45 23 * * *", async () => {
                         createdBy: leave.approvedBy || ownerId
                     });
                 } else {
+                    // Salary deduction for the unpaid day. approveLeave used to do
+                    // this at approval time; now that settlement waits for the day
+                    // to arrive, it belongs here — otherwise an unpaid leave day
+                    // would consume balance but never reach the salary slip.
+                    // Required lazily: this scheduler is loaded from index.js before
+                    // the controllers, so a top-level require would resolve early.
+                    try {
+                        const { deductLeaveFromSalary } = require("../controllers/leaveController");
+                        await deductLeaveFromSalary(employeeId, daysToDeduct, todayStr);
+                    } catch (salaryErr) {
+                        console.error(`[LeaveSync] Salary deduction failed for ${employeeId} on ${todayStr}:`, salaryErr);
+                    }
+
                     // Increment usedUnpaid in Employee model
                     await Employee.findByIdAndUpdate(employeeId, {
                         $inc: { "leaveEntitlement.usedUnpaid": daysToDeduct },

@@ -2422,25 +2422,19 @@ exports.approveMessage = async function approveMessage(req, res) {
     // caused mid-level seniors (e.g. Ali) to be skipped when only the top
     // manager was in supervisedBy. The full chain must approve explicitly.
 
-    // Fetch the approver's own hierarchy link to record the level
-    const approverLink = await EmployeeHierarchy.findOne({
-      owner: ownerId,
-      junior: currentUserId,
-    })
-      .select("senior hierarchyLevel")
-      .lean();
+    // The approver's own hierarchy link (to record the level) and their
+    // immediate seniors (1 level up) are independent lookups, so run them
+    // together instead of paying two sequential round-trips.
+    const [approverLink, immediateSeniors] = await Promise.all([
+      EmployeeHierarchy.findOne({
+        owner: ownerId,
+        junior: currentUserId,
+      })
+        .select("senior hierarchyLevel")
+        .lean(),
+      findSupervisorsFromHierarchy(ownerId, currentUserId),
+    ]);
     const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
-
-    const allLinksAsJunior = await EmployeeHierarchy.find({
-      owner: ownerId,
-      junior: currentUserId,
-    }).lean();
-
-    // Find the immediate seniors (1 level up) of the current approver
-    const immediateSeniors = await findSupervisorsFromHierarchy(
-      ownerId,
-      currentUserId
-    );
 
     const targetSupervisor = immediateSeniors.length > 0 ? immediateSeniors[0] : null;
     const hasNextLevel = !!targetSupervisor;

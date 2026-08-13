@@ -364,6 +364,7 @@ exports.getLeaveApprovals = async (req, res) => {
     const populateApprovedBy = { path: "approvedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
     const populateRejectedBy = { path: "rejectedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
     const populateAppliedBy = { path: "appliedBy", select: "name companyEmail email role designation photographUrl photoUrl" };
+    const pendingOnly = req.query.pendingOnly === "true";
 
     const [forApprovalRaw, escalated] = await Promise.all([
       // Pending leaves where it is THIS employee's turn to approve
@@ -387,7 +388,7 @@ exports.getLeaveApprovals = async (req, res) => {
         .lean(),
 
       // Leaves where this employee already acted (passed up, rejected, or finally approved)
-      ApplyLeave.find({
+      pendingOnly ? Promise.resolve([]) : ApplyLeave.find({
         approvalChain: empObjId,
         isTrashed: { $ne: true },
         $or: [
@@ -507,21 +508,21 @@ exports.getLeaveApprovals = async (req, res) => {
         LeaveCarryForwardRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         OvertimeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
         ProfileRevision.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        LoanRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        BonusRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        ReimbursementRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        AdvanceSalaryRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        SalaryChangeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        CommissionRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        TaxAdjustmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        LeaveEncashmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        LeaveCarryForwardRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        OvertimeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        ProfileRevision.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LoanRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : BonusRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : ReimbursementRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : AdvanceSalaryRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : SalaryChangeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : CommissionRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : TaxAdjustmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LeaveEncashmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LeaveCarryForwardRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : OvertimeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : ProfileRevision.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
       ]);
 
       const overtime = await attachOvertimeAttendance(overtimeRaw);
-      const closedOvertime = await attachOvertimeAttendance(closedOvertimeRaw);
+      const closedOvertime = pendingOnly ? [] : await attachOvertimeAttendance(closedOvertimeRaw);
 
       pendingAdminRequests = [
         ...tagRequests(loans, "loan", "payroll"),
@@ -579,15 +580,17 @@ exports.getLeaveApprovals = async (req, res) => {
         canAct: true,
       }));
 
-      closedChallenges = await AttendanceChallenge.find({
-        owner: { $in: ownerIds },
-        employee: { $ne: employeeId },
-        challengeStatus: { $in: ["Approved", "Rejected"] },
-      })
-        .populate("employee", populateEmp)
-        .populate("attendance", "status checkIn checkOut")
-        .sort({ updatedAt: -1 })
-        .lean();
+      closedChallenges = pendingOnly
+        ? []
+        : await AttendanceChallenge.find({
+            owner: { $in: ownerIds },
+            employee: { $ne: employeeId },
+            challengeStatus: { $in: ["Approved", "Rejected"] },
+          })
+            .populate("employee", populateEmp)
+            .populate("attendance", "status checkIn checkOut")
+            .sort({ updatedAt: -1 })
+            .lean();
 
       closedChallenges = closedChallenges.map((c) => ({
         ...c,
@@ -619,14 +622,16 @@ exports.getLeaveApprovals = async (req, res) => {
         canAct: true,
       }));
 
-      const closedDocs = await DocumentRequest.find({
-        owner: { $in: ownerIds },
-        employee: { $ne: employeeId },
-        status: { $in: ["approved", "rejected"] },
-      })
-        .populate("employee", populateEmp)
-        .sort({ updatedAt: -1 })
-        .lean();
+      const closedDocs = pendingOnly
+        ? []
+        : await DocumentRequest.find({
+            owner: { $in: ownerIds },
+            employee: { $ne: employeeId },
+            status: { $in: ["approved", "rejected"] },
+          })
+            .populate("employee", populateEmp)
+            .sort({ updatedAt: -1 })
+            .lean();
 
       closedDocRequests = closedDocs.map((d) => ({
         ...d,
@@ -634,6 +639,19 @@ exports.getLeaveApprovals = async (req, res) => {
         _yourAction: String(d.status || "").toLowerCase() === "rejected" ? "rejected" : "approved",
         canAct: false,
       }));
+    }
+
+    if (pendingOnly) {
+      return res.status(200).json({
+        preApprovals: [],
+        forApproval: uniqueById([
+          ...forApproval,
+          ...pendingAdminRequests,
+          ...pendingChallenges,
+          ...pendingDocRequests,
+        ]),
+        escalated: [],
+      });
     }
 
     const ownerId = req.employee.owner;
@@ -663,19 +681,21 @@ exports.getLeaveApprovals = async (req, res) => {
       preApprovals = tagRequests(preLeaves, "leave", "attendance");
     }
 
-    const forApprovalWithMeta = await attachAdminCommentMeta(uniqueById([
-      ...forApproval,
-      ...pendingAdminRequests,
-      ...pendingChallenges,
-      ...pendingDocRequests,
-    ]));
-    const escalatedWithMeta = await attachAdminCommentMeta([
-      ...annotatedEscalated,
-      ...closedAdminRequests,
-      ...closedChallenges,
-      ...closedDocRequests,
+    const [forApprovalWithMeta, escalatedWithMeta, preApprovalsWithMeta] = await Promise.all([
+      attachAdminCommentMeta(uniqueById([
+        ...forApproval,
+        ...pendingAdminRequests,
+        ...pendingChallenges,
+        ...pendingDocRequests,
+      ])),
+      attachAdminCommentMeta([
+        ...annotatedEscalated,
+        ...closedAdminRequests,
+        ...closedChallenges,
+        ...closedDocRequests,
+      ]),
+      attachAdminCommentMeta(preApprovals),
     ]);
-    const preApprovalsWithMeta = await attachAdminCommentMeta(preApprovals);
 
     escalatedWithMeta.sort(
       (a, b) =>

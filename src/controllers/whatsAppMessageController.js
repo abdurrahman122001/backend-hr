@@ -1786,25 +1786,19 @@ exports.approveMessage = async function approveMessage(req, res) {
     // Find the immediate senior of the CURRENT APPROVER in the hierarchy
     // ─────────────────────────────────────────────────────────────────
 
-    // Fetch the approver's own hierarchy link to record the level
-    const approverLink = await EmployeeHierarchy.findOne({
-      owner: ownerId,
-      junior: currentUserId,
-    })
-      .select("senior hierarchyLevel")
-      .lean();
+    // The approver's own hierarchy link (to record the level) and their
+    // immediate seniors are independent lookups, so pay one round-trip for both
+    // rather than two — approval latency here is almost entirely Atlas RTT.
+    const [approverLink, immediateSeniors] = await Promise.all([
+      EmployeeHierarchy.findOne({
+        owner: ownerId,
+        junior: currentUserId,
+      })
+        .select("senior hierarchyLevel")
+        .lean(),
+      findSupervisorsFromHierarchy(ownerId, currentUserId),
+    ]);
     const currentHierarchyLevel = approverLink?.hierarchyLevel ?? null;
-
-    // Show ALL hierarchy records where this approver is the junior (for debugging)
-    const allLinksAsJunior = await EmployeeHierarchy.find({
-      owner: ownerId,
-      junior: currentUserId,
-    }).lean();
-
-    const immediateSeniors = await findSupervisorsFromHierarchy(
-      ownerId,
-      currentUserId
-    );
 
     // Record this approval step. The message's effective (sent/display) time is
     // bumped to this time at EVERY level — each approval, low or high, updates

@@ -780,12 +780,21 @@ async function applyRealTimeHalfDayDeduction(employeeId, ownerId, userId, attend
     // If approveLeave already consumed the balance for this leave, the 0.5 is
     // reflected in usedPaid — so "has balance" means not in debt (>= 0);
     // otherwise the employee must still have 0.5 available to consume now.
+    // Scoped to THIS DAY, not the whole request. approveLeave settles only dates
+    // that had already passed when it ran and writes one transaction per settled
+    // date, so a request-level check would see a sibling day's transaction and
+    // hand this half day over as Paid without ever consuming the 0.5.
+    const halfDayStr = new Date(attendanceDate).toISOString().split("T")[0];
     const alreadyDeductedAtApproval = hasApprovedLeave
       ? await LeaveTransaction.exists({
           employee: employeeId,
           sourceModel: "ApplyLeave",
           sourceId: approvedLeave._id,
           type: "PAID_LEAVE_USED",
+          date: {
+            $gte: new Date(`${halfDayStr}T00:00:00.000Z`),
+            $lte: new Date(`${halfDayStr}T23:59:59.999Z`),
+          },
         })
       : false;
     const hasLeaves = alreadyDeductedAtApproval ? entitlementLeft >= 0 : entitlementLeft >= 0.5;
