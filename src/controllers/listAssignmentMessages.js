@@ -1078,55 +1078,20 @@ exports.listMessages = async function listMessages(req, res) {
         }
       }
 
-      // The thread view speaks for the client in three cases, and this anchor
-      // has to agree with it or the badge contradicts what is on screen: real
-      // inbound mail (senderType "client"), a message composed in the client's
-      // identity (isFromClient), and any message a CRM/manager sends inside a
-      // client thread — see getClientVoiceSenderIds.
-      const clientVoiceSenderIds = await getClientVoiceSenderIds(
-        q.owner || req.employee?.owner,
-      );
-      // …except when that CRM/manager is on the client's OWN team. Then they
-      // are answering the client, not relaying them.
-      const clientTeamPairs = await getClientTeamPairs(
-        q.owner || req.employee?.owner,
-        clientVoiceSenderIds,
-      );
+      // A message authored under either external identity is client mail for
+      // Activity response tracking, even when a CRM user created it through
+      // the From picker. A normal senior/employee reply has both flags false
+      // and therefore closes Unresponded once it is delivered.
 
       const IS_FROM_CLIENT = {
         $or: [
           { $eq: ["$senderType", "client"] },
           { $eq: ["$isFromClient", true] },
+          { $eq: ["$isFromCompanyEmployee", true] },
           {
-            // Only inside a client thread — the same `!isDirectMessage` guard
-            // the display rule uses. A manager's internal mail stays theirs.
             $and: [
               { $ne: [{ $ifNull: ["$client", null] }, null] },
-              { $in: [{ $toString: "$sender" }, clientVoiceSenderIds] },
-              // An assigned or supervising employee's mail is their REPLY, even
-              // when their role is manager/CRM. Without this their answer was
-              // read as fresh client mail, which both denied it the role of
-              // "the reply" AND re-armed the anchor — so the thread could never
-              // leave Unresponded however many times they answered. Supervisors
-              // sit on essentially every client's supervisedBy list, so this hit
-              // nearly every supervised thread.
-              // Note this narrows ONLY the role-derived clause: someone who
-              // deliberately composes AS the client still sets isFromClient
-              // above and is still counted as the client.
-              {
-                $not: {
-                  $in: [
-                    {
-                      $concat: [
-                        { $toString: "$client" },
-                        "|",
-                        { $toString: "$sender" },
-                      ],
-                    },
-                    clientTeamPairs,
-                  ],
-                },
-              },
+              { $eq: [{ $toString: "$sender" }, { $toString: "$client" }] },
             ],
           },
         ],
@@ -1156,6 +1121,7 @@ exports.listMessages = async function listMessages(req, res) {
             subject: 1,
             senderType: 1,
             isFromClient: 1,
+            isFromCompanyEmployee: 1,
             client: 1,
             sender: 1,
             receiver: 1,
@@ -1317,6 +1283,80 @@ exports.listMessages = async function listMessages(req, res) {
           }
         }
       ];
+
+      // Visibility establishes which threads this user may review, but reply
+      // state belongs to the complete thread. A response from the current
+      // senior, another senior, or any assigned employee can sit outside the
+      // hierarchy-reduced qFinal set. Inspect all messages in each already-
+      // visible thread so any delivered employee response clears Unresponded.
+      if (filter === "review") pipeline.push(
+        {
+          $lookup: {
+            from: "assignmentmessages",
+            let: { reviewThreadId: "$_id", reviewOwnerId: "$threadOwner" },
+            pipeline: [
+              {
+                $match: {
+                  $expr: {
+                    $and: [
+                      { $eq: ["$threadId", "$$reviewThreadId"] },
+                      { $eq: ["$owner", "$$reviewOwnerId"] },
+                    ],
+                  },
+                },
+              },
+              {
+                $group: {
+                  _id: null,
+                  lastClientAt: {
+                    $max: { $cond: [IS_FROM_CLIENT, "$createdAt", null] },
+                  },
+                  lastReplyAt: {
+                    $max: { $cond: [IS_DELIVERED_REPLY, "$createdAt", null] },
+                  },
+                  lastClientMeta: {
+                    $max: {
+                      $cond: [
+                        IS_FROM_CLIENT,
+                        [
+                          "$createdAt",
+                          { $ifNull: ["$readBy.employee", []] },
+                          "$_id",
+                        ],
+                        null,
+                      ],
+                    },
+                  },
+                },
+              },
+            ],
+            as: "wholeThreadReview",
+          },
+        },
+        {
+          $addFields: {
+            lastClientAt: {
+              $ifNull: [
+                { $arrayElemAt: ["$wholeThreadReview.lastClientAt", 0] },
+                "$lastClientAt",
+              ],
+            },
+            lastReplyAt: {
+              $ifNull: [
+                { $arrayElemAt: ["$wholeThreadReview.lastReplyAt", 0] },
+                "$lastReplyAt",
+              ],
+            },
+            lastClientMeta: {
+              $ifNull: [
+                { $arrayElemAt: ["$wholeThreadReview.lastClientMeta", 0] },
+                "$lastClientMeta",
+              ],
+            },
+          },
+        },
+        { $project: { wholeThreadReview: 0 } },
+      );
 
       // Unpack the client anchor: is the client still waiting, who read the
       // mail they are waiting on, and which message it is.
