@@ -1,6 +1,7 @@
 const CommissionRequest = require("../models/CommissionRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 exports.applyCommission = async (req, res) => {
   try {
@@ -48,11 +49,11 @@ exports.getMyRequests = async (req, res) => {
 
 exports.getAllRequests = async (req, res) => {
   try {
-    const ownerId = req.user.owner;
     const { status, month } = req.query;
-    const filter = { owner: ownerId };
-    if (status) filter.status = status;
-    if (month) filter.month = month;
+    const filter = await payrollRequestFilter(req, {
+      ...(status ? { status } : {}),
+      ...(month ? { month } : {}),
+    });
     const requests = await CommissionRequest.find(filter)
       .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });

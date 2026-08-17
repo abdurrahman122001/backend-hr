@@ -127,6 +127,59 @@ async function buildHierarchyMeta(ownerId, seniorId) {
   };
 }
 
+/**
+ * Programmatic helper used by onboarding flows that need to keep the legacy
+ * EmployeeHierarchy collection in sync without going through an HTTP route.
+ * It mirrors the single-manager upsert and metadata rebuild used by the
+ * hierarchy UI.
+ */
+exports.linkJuniorToSenior = async function linkJuniorToSenior(
+  ownerId,
+  seniorId,
+  juniorId,
+  relation = 'Manager'
+) {
+  if (!seniorId || !juniorId) {
+    throw new Error('seniorId and juniorId are required');
+  }
+  if (String(seniorId) === String(juniorId)) {
+    throw new Error('Self-referencing hierarchy is not allowed');
+  }
+
+  const [senior, junior] = await Promise.all([
+    Employee.findOne({ _id: seniorId, owner: ownerId }).select('_id status').lean(),
+    Employee.findOne({ _id: juniorId, owner: ownerId }).select('_id status').lean()
+  ]);
+
+  if (!senior) throw new Error('Senior not found for this company');
+  if (!junior) throw new Error('Junior not found for this company');
+  if (
+    ['offboarded', 'terminated'].includes(senior.status) ||
+    ['offboarded', 'terminated'].includes(junior.status)
+  ) {
+    throw new Error('Cannot add offboarded or terminated employees to hierarchy');
+  }
+
+  if (await checkForCircularReference(ownerId, seniorId, juniorId)) {
+    throw new Error('Circular hierarchy detected');
+  }
+
+  const link = await Hierarchy.findOneAndUpdate(
+    { owner: ownerId, junior: juniorId },
+    {
+      senior: seniorId,
+      relation: relation || 'Manager',
+      hierarchyLevel: 1,
+      path: String(seniorId),
+      rootManager: seniorId
+    },
+    { upsert: true, new: true }
+  );
+
+  await rebuildHierarchy(ownerId);
+  return link;
+};
+
 exports.create = async (req, res) => {
   try {
     const { seniorId, juniorId, relation } = req.body;

@@ -1,5 +1,6 @@
 const RequestNotification = require("../models/RequestNotification");
 const Employee = require("../models/Employees");
+const { getPayrollSubmissionApprovers } = require("./payrollRequestHierarchyService");
 
 const normalizeId = (value) => {
   if (!value) return null;
@@ -81,6 +82,11 @@ async function createRequestNotification({
     const socket = io || req?.app?.get?.("io");
     if (socket) {
       socket.to(`employee_${recipientId}`).emit("request_notification", payload);
+      socket.to(`employee_${recipientId}`).emit("things_to_do_updated", {
+        requestId: normalizeId(requestId),
+        requestType,
+        action,
+      });
     }
 
     // Every Request Center event is also written into the recipient's inbox,
@@ -156,6 +162,17 @@ const requestTypeLabels = {
   whistleblowing: "Whistleblowing report",
 };
 
+const payrollRequestTypes = new Set([
+  "advance-salary",
+  "bonus",
+  "commission",
+  "leave-encashment",
+  "loan",
+  "reimbursement",
+  "salary-change",
+  "tax-adjustment",
+]);
+
 async function notifyRequestSubmitted({
   req,
   request,
@@ -174,18 +191,18 @@ async function notifyRequestSubmitted({
   const ownerId = normalizeId(request.owner || applicant?.owner);
   if (!ownerId) return [];
 
-  const administrators = await Employee.find({
-    owner: ownerId,
-    isAdmin: true,
-    status: "active",
-  })
-    .select("_id")
-    .lean();
+  const recipients = payrollRequestTypes.has(requestType)
+    ? await getPayrollSubmissionApprovers(ownerId, applicantId)
+    : (await Employee.find({
+        owner: ownerId,
+        isAdmin: true,
+        status: "active",
+      }).select("_id").lean()).map((employee) => employee._id);
 
   const label = requestTypeLabels[requestType] || "Request";
   return createManyRequestNotifications({
     req,
-    recipients: administrators.map((employee) => employee._id),
+    recipients,
     exclude: applicantId,
     actor: applicantId,
     requestId: request._id,

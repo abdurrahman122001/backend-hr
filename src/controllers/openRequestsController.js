@@ -13,6 +13,7 @@ const OvertimeRequest = require("../models/OvertimeRequest");
 const ProfileRevision = require("../models/ProfileRevision");
 const ApplyLeave = require("../models/ApplyLeave");
 const AttendanceChallenge = require("../models/AttendanceChallenge");
+const { payrollScope } = require("../services/payrollRequestHierarchyService");
 const Attendance = require("../models/Attendance");
 const Employee = require("../models/Employees");
 const User = require("../models/Users");
@@ -461,18 +462,37 @@ exports.getLeaveApprovals = async (req, res) => {
 
     let pendingAdminRequests = [];
     let closedAdminRequests = [];
-    const ownerIds = req.employee?.isAdmin
-      ? [req.employee.owner, req.employee._id].filter(Boolean)
-      : [];
+    const ownerIds = [req.employee.owner, req.employee._id].filter(Boolean);
+    const payrollAccess = await payrollScope(req);
+    const payrollEmployeeIds = payrollAccess.employeeIds.filter(
+      (id) => String(id) !== String(employeeId)
+    );
 
-    // Admin employees also see pending and closed payroll/profile/document/attendance requests from their org.
-    if (req.employee?.isAdmin) {
+    // Payroll requests are scoped by PayrollHierarchy for every senior. Other
+    // request categories keep their existing isAdmin-only company visibility.
+    if (payrollEmployeeIds.length || req.employee?.isAdmin) {
       const adminBase = { owner: { $in: ownerIds }, employee: { $ne: employeeId }, status: "pending" };
       const closedAdminBase = {
         owner: { $in: ownerIds },
         employee: { $ne: employeeId },
         status: { $in: ["approved", "rejected"] },
       };
+      const payrollBase = {
+        owner: { $in: ownerIds },
+        employee: { $in: payrollEmployeeIds },
+        status: "pending",
+      };
+      const closedPayrollBase = {
+        owner: { $in: ownerIds },
+        employee: { $in: payrollEmployeeIds },
+        status: { $in: ["approved", "rejected"] },
+      };
+      const nonPayrollBase = req.employee?.isAdmin
+        ? adminBase
+        : { ...adminBase, employee: { $in: [] } };
+      const closedNonPayrollBase = req.employee?.isAdmin
+        ? closedAdminBase
+        : { ...closedAdminBase, employee: { $in: [] } };
       const [
         loans,
         bonuses,
@@ -497,28 +517,28 @@ exports.getLeaveApprovals = async (req, res) => {
         closedOvertimeRaw,
         closedProfileRevisions,
       ] = await Promise.all([
-        LoanRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        BonusRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        ReimbursementRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        AdvanceSalaryRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        SalaryChangeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        CommissionRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        TaxAdjustmentRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        LeaveEncashmentRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        LeaveCarryForwardRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        OvertimeRequest.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        ProfileRevision.find(adminBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : LoanRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : BonusRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : ReimbursementRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : AdvanceSalaryRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : SalaryChangeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : CommissionRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : TaxAdjustmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : LeaveEncashmentRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : LeaveCarryForwardRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : OvertimeRequest.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
-        pendingOnly ? Promise.resolve([]) : ProfileRevision.find(closedAdminBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        LoanRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        BonusRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        ReimbursementRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        AdvanceSalaryRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        SalaryChangeRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        CommissionRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        TaxAdjustmentRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        LeaveEncashmentRequest.find(payrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        LeaveCarryForwardRequest.find(nonPayrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        OvertimeRequest.find(nonPayrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        ProfileRevision.find(nonPayrollBase).populate("employee", populateEmp).sort({ createdAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LoanRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : BonusRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : ReimbursementRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : AdvanceSalaryRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : SalaryChangeRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : CommissionRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : TaxAdjustmentRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LeaveEncashmentRequest.find(closedPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : LeaveCarryForwardRequest.find(closedNonPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : OvertimeRequest.find(closedNonPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
+        pendingOnly ? Promise.resolve([]) : ProfileRevision.find(closedNonPayrollBase).populate("employee", populateEmp).sort({ updatedAt: -1 }).lean(),
       ]);
 
       const overtime = await attachOvertimeAttendance(overtimeRaw);

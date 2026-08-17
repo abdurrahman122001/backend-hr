@@ -1,6 +1,7 @@
 const LoanRequest = require("../models/LoanRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 exports.applyLoan = async (req, res) => {
   try {
@@ -55,13 +56,8 @@ exports.getMyLoanRequests = async (req, res) => {
 
 exports.getAllLoanRequests = async (req, res) => {
   try {
-    const ownerId = req.user.owner;
-    // Only allow admins/managers to see all requests
-    if (req.user.role !== "admin" && req.user.role !== "manager" && req.user.role !== "owner") {
-      // For HR users, check if they have specific permissions if needed
-    }
-
-    const requests = await LoanRequest.find({ owner: ownerId })
+    const filter = await payrollRequestFilter(req);
+    const requests = await LoanRequest.find(filter)
       .populate("employee", "name companyEmail department designation employeeId photographUrl")
       .sort({ createdAt: -1 });
     

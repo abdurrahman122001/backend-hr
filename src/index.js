@@ -45,6 +45,7 @@ const docsRouter = require("./routes/docs");
 const employeeSalaryRouter = require("./routes/employeeSalary");
 const hierarchyController = require("./controllers/hierarchyController"); // (not mounted here, imported to ensure build)
 const orgHierarchyRoute = require("./routes/orgHierarchy");
+const payrollHierarchyRoute = require("./routes/payrollHierarchy");
 const salarySettingsRoutes = require("./routes/salarySettings");
 const salarySlipFields = require("./routes/salarySlipFields");
 const loansRoutes = require("./routes/loans");
@@ -354,6 +355,7 @@ app.use("/api/hr-policies", anyPayrollAuth, hrPolicyRoute);
 app.use("/api/bugs", bugRoutes);
 app.use("/api/hierarchy", anyPayrollAuth, hierarchyRoute);
 app.use("/api/org-hierarchy", anyPayrollAuth, orgHierarchyRoute);
+app.use("/api/payroll-hierarchy", anyPayrollAuth, payrollHierarchyRoute);
 app.use("/api/thread-chat", threadChatRoutes);
 app.use("/api/employee-shifts", employeeShiftRoutes);
 app.use("/api/labels", labelRoutes);

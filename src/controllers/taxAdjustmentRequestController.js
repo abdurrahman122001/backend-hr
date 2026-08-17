@@ -1,6 +1,7 @@
 const TaxAdjustmentRequest = require("../models/TaxAdjustmentRequest");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 exports.submitTaxAdjustmentRequest = async (req, res) => {
   try {
@@ -51,8 +52,8 @@ exports.getMyTaxAdjustmentRequests = async (req, res) => {
 
 exports.getAllTaxAdjustmentRequests = async (req, res) => {
   try {
-    const ownerId = req.user.owner;
-    const requests = await TaxAdjustmentRequest.find({ owner: ownerId })
+    const filter = await payrollRequestFilter(req);
+    const requests = await TaxAdjustmentRequest.find(filter)
       .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
 

@@ -2,6 +2,7 @@ const LeaveEncashmentRequest = require("../models/LeaveEncashmentRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -53,10 +54,8 @@ exports.getMyRequests = async (req, res) => {
 
 exports.getAllRequests = async (req, res) => {
   try {
-    const ownerId = getOwnerId(req);
     const { status } = req.query;
-    const filter = { owner: ownerId };
-    if (status) filter.status = status;
+    const filter = await payrollRequestFilter(req, status ? { status } : {});
     const requests = await LeaveEncashmentRequest.find(filter)
       .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });

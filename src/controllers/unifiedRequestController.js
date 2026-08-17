@@ -16,6 +16,7 @@ const ProfileRevision = require("../models/ProfileRevision");
 const Employee = require("../models/Employees");
 const OvertimeRequest = require("../models/OvertimeRequest");
 const { decrypt } = require("../utils/encryption");
+const { payrollScope } = require("../services/payrollRequestHierarchyService");
 
 // Helper to safely parse numbers
 const toNum = (v) => {
@@ -68,6 +69,15 @@ exports.getUnifiedToDoList = async (req, res) => {
       baseMatch.status = status;
     }
 
+    // Payroll request types use their own hierarchy. The company owner and
+    // payroll admin root see the full company; other employees see only the
+    // requests submitted below them in PayrollHierarchy.
+    const payrollAccess = await payrollScope(req);
+    const payrollMatch = { employee: { $in: payrollAccess.employeeIds } };
+    if (status !== "all") {
+      payrollMatch.status = status;
+    }
+
     // Leave Match (strictly filtered by employee)
     const leaveMatch = { employee: { $in: employeeIds } };
     if (status !== "all") {
@@ -87,14 +97,14 @@ exports.getUnifiedToDoList = async (req, res) => {
 // Counts
      const counts = await Promise.all([
          LeaveRequest.countDocuments(leaveMatch),
-         LoanRequest.countDocuments(baseMatch),
-         SalaryChangeRequest.countDocuments(baseMatch),
-         AdvanceSalaryRequest.countDocuments(baseMatch),
-         ReimbursementRequest.countDocuments(baseMatch),
-         CommissionRequest.countDocuments(baseMatch),
-         TaxAdjustmentRequest.countDocuments(baseMatch),
-         BonusRequest.countDocuments(baseMatch),
-         LeaveEncashmentRequest.countDocuments(baseMatch),
+         LoanRequest.countDocuments(payrollMatch),
+         SalaryChangeRequest.countDocuments(payrollMatch),
+         AdvanceSalaryRequest.countDocuments(payrollMatch),
+         ReimbursementRequest.countDocuments(payrollMatch),
+         CommissionRequest.countDocuments(payrollMatch),
+         TaxAdjustmentRequest.countDocuments(payrollMatch),
+         BonusRequest.countDocuments(payrollMatch),
+         LeaveEncashmentRequest.countDocuments(payrollMatch),
          LeaveCarryForwardRequest.countDocuments(baseMatch),
          ProfileRevision.countDocuments(baseMatch),
          Attendance.countDocuments(attendanceMatch),
@@ -116,49 +126,49 @@ exports.getUnifiedToDoList = async (req, res) => {
       .limit(fetchLimit);
 
     // 2. Loan Requests
-    const loanPromise = LoanRequest.find(baseMatch)
+    const loanPromise = LoanRequest.find(payrollMatch)
       .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 3. Salary Change Requests
-    const salaryChangePromise = SalaryChangeRequest.find(baseMatch)
+    const salaryChangePromise = SalaryChangeRequest.find(payrollMatch)
       .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 4. Advance Salary Requests
-    const advanceSalaryPromise = AdvanceSalaryRequest.find(baseMatch)
+    const advanceSalaryPromise = AdvanceSalaryRequest.find(payrollMatch)
       .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
     // 5. Reimbursement Requests
-    const reimbursementPromise = ReimbursementRequest.find(baseMatch)
+    const reimbursementPromise = ReimbursementRequest.find(payrollMatch)
       .populate("employee", "name department designation employeeId photographUrl")
       .sort({ createdAt: -1 })
       .limit(fetchLimit);
 
 // 6. Commission Requests
-     const commissionPromise = CommissionRequest.find(baseMatch)
+     const commissionPromise = CommissionRequest.find(payrollMatch)
        .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 7. Tax Adjustment Requests
-     const taxAdjustmentPromise = TaxAdjustmentRequest.find(baseMatch)
+     const taxAdjustmentPromise = TaxAdjustmentRequest.find(payrollMatch)
        .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 8. Bonus Requests
-     const bonusPromise = BonusRequest.find(baseMatch)
+     const bonusPromise = BonusRequest.find(payrollMatch)
        .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);
 
      // 9. Leave Encashment Requests
-     const leaveEncashmentPromise = LeaveEncashmentRequest.find(baseMatch)
+     const leaveEncashmentPromise = LeaveEncashmentRequest.find(payrollMatch)
        .populate("employee", "name department designation employeeId photographUrl")
        .sort({ createdAt: -1 })
        .limit(fetchLimit);

@@ -10,7 +10,12 @@ const probationPeriods = require("../models/ProbationPeriod");
 const OfferEmailGenerated = require("../models/OfferEmailGenerated");
 const verifyEmail = require("../utils/verifyEmail");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
-const { linkJuniorToSenior } = require("./orgHierarchyController");
+const {
+  linkJuniorToSenior: linkOrgHierarchyJuniorToSenior,
+} = require("./orgHierarchyController");
+const {
+  linkJuniorToSenior: linkEmployeeHierarchyJuniorToSenior,
+} = require("./hierarchyController");
 const {
   createOnboardingAssignmentTask,
 } = require("./onboardingTaskController");
@@ -543,14 +548,39 @@ async function sendOfferLetter(req, res) {
      * --------------------------------------------------------- */
     let hierarchyWarning = null;
     if (seniorId) {
+      const hierarchyWarnings = [];
+      let orgHierarchyLinked = false;
+
       try {
-        await linkJuniorToSenior(
+        await linkOrgHierarchyJuniorToSenior(
           ownerId,
           seniorId,
           employee._id,
           seniorRelation || "Manager"
         );
+        orgHierarchyLinked = true;
+      } catch (linkErr) {
+        console.error("Offer letter org hierarchy link error:", linkErr);
+        hierarchyWarnings.push(
+          `Organization hierarchy: ${linkErr.message || "failed to add employee"}`
+        );
+      }
 
+      try {
+        await linkEmployeeHierarchyJuniorToSenior(
+          ownerId,
+          seniorId,
+          employee._id,
+          seniorRelation || "Manager"
+        );
+      } catch (linkErr) {
+        console.error("Offer letter employee hierarchy link error:", linkErr);
+        hierarchyWarnings.push(
+          `Employee hierarchy: ${linkErr.message || "failed to add employee"}`
+        );
+      }
+
+      if (orgHierarchyLinked) {
         // Notify the manager: raise a Things-to-do item on the senior's
         // dashboard to add the new hire to their clients / projects.
         try {
@@ -564,10 +594,11 @@ async function sendOfferLetter(req, res) {
           // The hierarchy link is what matters; the reminder is best-effort.
           console.error("Onboarding task creation failed:", taskErr.message);
         }
-      } catch (linkErr) {
-        console.error("Offer letter hierarchy link error:", linkErr);
-        hierarchyWarning = linkErr.message || "Failed to add employee to hierarchy";
       }
+
+      hierarchyWarning = hierarchyWarnings.length
+        ? hierarchyWarnings.join("; ")
+        : null;
     }
 
     /* ---------------------------------------------------------

@@ -2,6 +2,7 @@ const ReimbursementRequest = require("../models/ReimbursementRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 exports.applyReimbursement = async (req, res) => {
   try {
@@ -50,8 +51,8 @@ exports.getMyRequests = async (req, res) => {
 
 exports.getAllRequests = async (req, res) => {
   try {
-    const ownerId = req.user.owner;
-  const requests = await ReimbursementRequest.find({ owner: ownerId })
+    const filter = await payrollRequestFilter(req);
+  const requests = await ReimbursementRequest.find(filter)
     .populate("employee", "name designation department employeeId photographUrl")
     .sort({ createdAt: -1 });
     res.status(200).json({ data: requests });

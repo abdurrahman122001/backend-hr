@@ -22,7 +22,6 @@ const EmployeeHierarchySchema = new Schema({
     default: 'Manager'
   },
   hierarchyLevel: {
-
     type: Number,
     required: true
   },

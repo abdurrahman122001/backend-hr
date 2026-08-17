@@ -2,6 +2,7 @@ const BonusRequest = require("../models/BonusRequest");
 const Employee = require("../models/Employees");
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
+const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
 
 const getUserId = (req) => req.user?._id || req.employee?._id;
 const getOwnerId = (req) => req.user?.owner || req.employee?.owner;
@@ -55,11 +56,11 @@ exports.getMyRequests = async (req, res) => {
 
 exports.getAllRequests = async (req, res) => {
   try {
-    const ownerId = getOwnerId(req);
     const { status, month } = req.query;
-    const filter = { owner: ownerId };
-    if (status) filter.status = status;
-    if (month) filter.month = month;
+    const filter = await payrollRequestFilter(req, {
+      ...(status ? { status } : {}),
+      ...(month ? { month } : {}),
+    });
     const requests = await BonusRequest.find(filter)
       .populate("employee", "name designation department employeeId photographUrl")
       .sort({ createdAt: -1 });
