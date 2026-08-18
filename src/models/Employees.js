@@ -107,6 +107,12 @@ const EmployeeSchema = new Schema(
     department: { type: String },
     subDepartment: { type: String },
     designation: { type: String },
+    // Where this ONE person sits on the org ladder, overriding whatever their
+    // designation maps to in Department.designationTiers. Null means "follow
+    // the job title", which is the normal case — this is only set when someone
+    // is deliberately placed off the band their title implies (see
+    // lib/orgTiers and the HRMS Hierarchy page).
+    orgTier: { type: Number, min: 1, max: 5, default: null },
     joiningDate: { type: String },
     leavingDate: { type: String }, // Last working day / employment end date
     experiences: [ExperienceSchema],

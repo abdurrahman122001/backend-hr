@@ -14,6 +14,14 @@ const fs = require("fs");
 
 const CHAT_UPLOAD_DIR = path.join(__dirname, "../uploads/chat-attachments");
 
+// A space and a group are the same document apart from `kind`, but only a
+// GROUP is assembled by hand. A space's roster follows the client it belongs
+// to — assigning or re-assigning employees on the client is what adds people
+// (services/clientSpaceService.syncClientSpaceMembers), and the system groups
+// likewise write their membership directly. Mirrored in the front ends by
+// canAddPeopleTo() in src/lib/chatSpacePolicy.ts.
+const allowsManualAdds = (space) => (space?.kind || "space") === "group";
+
 const storage = multer.diskStorage({
   destination(req, file, cb) {
     if (!fs.existsSync(CHAT_UPLOAD_DIR)) {
@@ -2414,6 +2422,7 @@ exports.getSpaceMembers = async (req, res) => {
       space: {
         _id: space._id,
         name: space.name,
+        kind: space.kind || "space",
         description: space.description,
         avatar: space.avatar,
         createdBy: space.createdBy,
@@ -2421,11 +2430,12 @@ exports.getSpaceMembers = async (req, res) => {
         isPrivate: space.isPrivate,
         settings: space.settings,
         // Server decides who may add people, so the button gate cannot drift
-        // from what addSpaceMembers actually allows.
+        // from what addSpaceMembers actually allows. Never true for a space.
         canInvite:
-          ownerId === req.employee._id.toString() ||
-          adminIds.has(req.employee._id.toString()) ||
-          space.settings?.allowMemberInvites !== false,
+          allowsManualAdds(space) &&
+          (ownerId === req.employee._id.toString() ||
+            adminIds.has(req.employee._id.toString()) ||
+            space.settings?.allowMemberInvites !== false),
       },
       // One list, flagged: the "Added" tab filters out isPending, the
       // "Invited" tab keeps only those.
@@ -2554,6 +2564,14 @@ exports.addSpaceMembers = async (req, res) => {
       });
     }
 
+    if (!allowsManualAdds(space)) {
+      return res.status(403).json({
+        success: false,
+        error:
+          "People are not added to a space by hand — a space's members follow the client's assigned employees",
+      });
+    }
+
     const meId = req.employee._id.toString();
     const isOwner = space.createdBy?.toString() === meId;
     const isSpaceAdmin = space.admins?.some(
@@ -2563,7 +2581,7 @@ exports.addSpaceMembers = async (req, res) => {
       (memberId) => memberId.toString() === meId
     );
 
-    // Any member can invite (Google Chat behaviour), unless the space has
+    // Any member of a GROUP can invite (Google Chat behaviour), unless it has
     // explicitly turned member invites off. Owner/admin can always invite.
     const canInvite =
       isOwner ||
@@ -3640,6 +3658,7 @@ exports.getSpaceDetails = async (req, res) => {
     const spaceDetails = {
       _id: space._id,
       name: space.name,
+      kind: space.kind || "space",
       description: space.description || "",
       avatar: space.avatar,
       emoji: space.emoji || "💡",
@@ -3652,14 +3671,16 @@ exports.getSpaceDetails = async (req, res) => {
       totalMembers: space.members?.length || 0,
       isPrivate: space.isPrivate || false,
       settings: space.settings || {},
-      // Every member may add people unless the space turned that off; owner
-      // and admins always can. Mirrors the check in addSpaceMembers.
+      // Every member of a GROUP may add people unless it turned that off;
+      // owner and admins always can. Mirrors the check in addSpaceMembers, so
+      // this is never true for a space.
       canInvite:
-        space.createdBy?._id?.toString() === req.employee._id.toString() ||
-        space.admins?.some(
-          (a) => a._id.toString() === req.employee._id.toString()
-        ) ||
-        space.settings?.allowMemberInvites !== false,
+        allowsManualAdds(space) &&
+        (space.createdBy?._id?.toString() === req.employee._id.toString() ||
+          space.admins?.some(
+            (a) => a._id.toString() === req.employee._id.toString()
+          ) ||
+          space.settings?.allowMemberInvites !== false),
       createdAt: space.createdAt,
       updatedAt: space.updatedAt,
     };

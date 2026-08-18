@@ -1,4 +1,28 @@
 const Department = require('../models/Departments');
+const { normalizeTier } = require('../lib/orgTiers');
+
+/**
+ * Accept only { name, tier } pairs the ladder recognises, and only for
+ * designations the department actually has. Returns null when the client did
+ * not send the field at all, so an untouched department keeps what it had.
+ */
+function sanitizeDesignationTiers(raw, designations) {
+  if (raw === undefined) return null;
+  if (!Array.isArray(raw)) return [];
+  const allowed = new Set((designations || []).map((d) => String(d).trim()));
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    const name = String(entry?.name || '').trim();
+    const tier = normalizeTier(entry?.tier);
+    if (!name || !tier) continue;
+    if (allowed.size && !allowed.has(name)) continue;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, tier });
+  }
+  return out;
+}
 
 // GET all departments for an owner
 exports.getDepartments = async (req, res) => {
@@ -16,7 +40,7 @@ exports.getDepartments = async (req, res) => {
 exports.createDepartment = async (req, res) => {
   try {
     const owner = req.user?._id || req.body.owner;
-    const { name, designations } = req.body;
+    const { name, designations, designationTiers } = req.body;
     if (!name || !owner) {
       return res.status(400).json({ error: 'Name and owner are required.' });
     }
@@ -24,7 +48,13 @@ exports.createDepartment = async (req, res) => {
     if (designations && (!Array.isArray(designations) || designations.some(d => typeof d !== 'string'))) {
       return res.status(400).json({ error: 'Designations must be an array of strings.' });
     }
-    const department = new Department({ name, owner, designations: designations || [] });
+    const department = new Department({
+      name,
+      owner,
+      designations: designations || [],
+      designationTiers:
+        sanitizeDesignationTiers(designationTiers, designations) || [],
+    });
     await department.save();
     res.status(201).json(department);
   } catch (err) {
@@ -39,7 +69,7 @@ exports.createDepartment = async (req, res) => {
 exports.updateDepartment = async (req, res) => {
   try {
     const { id } = req.params;
-    const { name, designations } = req.body;
+    const { name, designations, designationTiers } = req.body;
     const department = await Department.findById(id);
     if (!department) return res.status(404).json({ error: 'Department not found.' });
     // Update fields if provided
@@ -49,6 +79,19 @@ exports.updateDepartment = async (req, res) => {
         return res.status(400).json({ error: 'Designations must be an array of strings.' });
       }
       department.designations = designations;
+    }
+    const tiers = sanitizeDesignationTiers(
+      designationTiers,
+      designations || department.designations
+    );
+    if (tiers) department.designationTiers = tiers;
+    else if (designations) {
+      // The list changed but no tiers came with it — drop mappings for
+      // designations that no longer exist rather than leave them orphaned.
+      const kept = new Set(designations.map((d) => String(d).trim()));
+      department.designationTiers = (department.designationTiers || []).filter(
+        (t) => kept.has(String(t.name).trim())
+      );
     }
     try {
       await department.save();

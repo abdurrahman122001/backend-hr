@@ -2,6 +2,13 @@ const mongoose = require('mongoose');
 const Hierarchy = require('../models/OrgHierarchy');
 const Employee = require('../models/Employees');
 const Department = require('../models/Departments');
+const {
+  ORG_TIERS,
+  normalizeTier,
+  tierLabel,
+  guessTierFromDesignation,
+  isValidReportingPair
+} = require('../lib/orgTiers');
 
 /**
  * Helper: look for any path from `seniorId` down to `juniorId`.
@@ -36,6 +43,50 @@ function normalizeDept(value) {
 function deptKey(value) {
   const name = normalizeDept(value);
   return name ? name.toLowerCase() : NO_DEPARTMENT;
+}
+
+/**
+ * Build a designation -> tier lookup for the whole company, keyed by
+ * department. A tier is never stored on the employee: it is whatever their job
+ * title maps to in their own department (lib/orgTiers), so a promotion moves
+ * them up the chart by changing the title alone.
+ *
+ * Returns a function so callers do not have to care about the shape.
+ */
+async function buildTierResolver(ownerId) {
+  const departments = await Department.find({ owner: ownerId })
+    .select('name designationTiers')
+    .lean();
+
+  // deptKey -> Map(lowercased designation -> tier)
+  const byDept = new Map();
+  for (const dept of departments) {
+    const map = new Map();
+    for (const entry of dept.designationTiers || []) {
+      const tier = normalizeTier(entry?.tier);
+      const name = String(entry?.name || '').trim().toLowerCase();
+      if (tier && name) map.set(name, tier);
+    }
+    byDept.set(deptKey(dept.name), map);
+  }
+
+  return function tierOf(employee) {
+    // A rung set on the person themself always wins — that is how one employee
+    // moves band without dragging everyone who shares their job title.
+    const override = normalizeTier(employee?.orgTier);
+    if (override) return override;
+
+    const designation = String(employee?.designation || '').trim();
+    if (!designation) return null;
+    const configured = byDept
+      .get(deptKey(employee?.department))
+      ?.get(designation.toLowerCase());
+    if (configured) return configured;
+
+    // A title the admin has not mapped yet, or someone with no department:
+    // fall back to reading the title rather than showing them as unassigned.
+    return guessTierFromDesignation(designation);
+  };
 }
 
 /**
@@ -290,6 +341,21 @@ exports.create = async (req, res) => {
       });
     }
 
+    // A reporting line may only run DOWN the ladder. Unknown tiers never block
+    // anything, so a half-mapped company stays usable (lib/orgTiers).
+    const tierOf = await buildTierResolver(ownerId);
+    const seniorTier = tierOf(senior);
+    const juniorTier = tierOf(junior);
+    if (!isValidReportingPair(seniorTier, juniorTier)) {
+      return res.status(400).json({
+        status: 'error',
+        code: 'TIER_ORDER',
+        message:
+          `${senior.name} (${tierLabel(seniorTier)}) cannot be senior to ` +
+          `${junior.name} (${tierLabel(juniorTier)}) — a reporting line has to go down the ladder`
+      });
+    }
+
     if (await Hierarchy.exists({ owner: ownerId, senior: seniorId, junior: juniorId })) {
       return res.status(400).json({
         status: 'error',
@@ -349,6 +415,7 @@ exports.bulkCreate = async (req, res) => {
 
     // Validate + prepare docs (NO meta calc here; we rebuild after insert)
     let upsertCount = 0;
+    const tierOf = await buildTierResolver(ownerId);
 
     for (const { seniorId, juniorId, relation } of links) {
       if (!seniorId || !juniorId || String(seniorId) === String(juniorId)) {
@@ -358,8 +425,8 @@ exports.bulkCreate = async (req, res) => {
 
       // employees exist?
       const [senior, junior] = await Promise.all([
-        Employee.findById(seniorId).select('_id status name department').lean(),
-        Employee.findById(juniorId).select('_id status name department').lean()
+        Employee.findById(seniorId).select('_id status name department designation orgTier').lean(),
+        Employee.findById(juniorId).select('_id status name department designation orgTier').lean()
       ]);
       if (!senior || !junior) {
         invalid.push({ seniorId, juniorId, reason: 'Employee not found' });
@@ -368,6 +435,21 @@ exports.bulkCreate = async (req, res) => {
 
       if (['offboarded', 'terminated'].includes(senior.status) || ['offboarded', 'terminated'].includes(junior.status)) {
         invalid.push({ seniorId, juniorId, reason: 'Employee is offboarded/terminated' });
+        continue;
+      }
+
+      const seniorTier = tierOf(senior);
+      const juniorTier = tierOf(junior);
+      if (!isValidReportingPair(seniorTier, juniorTier)) {
+        invalid.push({
+          seniorId,
+          juniorId,
+          reason: 'TIER_ORDER',
+          seniorName: senior.name,
+          juniorName: junior.name,
+          seniorTier,
+          juniorTier
+        });
         continue;
       }
 
@@ -458,7 +540,7 @@ exports.bulkCreate = async (req, res) => {
  *
  * Your router should call THIS one (tree), since your UI expects nodes with children[].
  */
-const EMP_NODE_FIELDS = 'name status department subDepartment designation photographUrl employeeId';
+const EMP_NODE_FIELDS = 'name status department subDepartment designation orgTier photographUrl employeeId';
 
 exports.getHierarchy = async function (req, res) {
   try {
@@ -477,9 +559,14 @@ exports.getHierarchy = async function (req, res) {
       return seniorActive && juniorActive;
     });
 
+    const tierOf = await buildTierResolver(ownerId);
+
     const toNode = (emp) => ({
       id: String(emp._id),
       name: emp.name,
+      tier: tierOf(emp),
+      tierLabel: tierLabel(tierOf(emp)),
+      tierOverridden: !!normalizeTier(emp.orgTier),
       department: normalizeDept(emp.department),
       subDepartment: emp.subDepartment || '',
       designation: emp.designation || '',
@@ -556,6 +643,7 @@ exports.getHierarchy = async function (req, res) {
           hasDepartment: !!normalizeDept(deptName),
           tier: meta ? meta.order : Number.MAX_SAFE_INTEGER,
           members: [],
+          roster: [],
           unplaced: [],
           rootIds: []
         });
@@ -566,14 +654,35 @@ exports.getHierarchy = async function (req, res) {
     // Seed every configured department so empty ones are still orderable.
     for (const doc of departmentDocs) bucketFor(doc.name);
 
+    // Who reports to whom, so a band row can show its senior inline.
+    const seniorNameOf = new Map(
+      filteredLinks.map(l => [String(l.junior._id), l.senior.name])
+    );
+
     for (const emp of allEmployees) {
       const bucket = bucketFor(emp.department);
       bucket.members.push(String(emp._id));
+      bucket.roster.push({
+        id: String(emp._id),
+        name: emp.name,
+        designation: emp.designation || '',
+        tier: tierOf(emp),
+        tierLabel: tierLabel(tierOf(emp)),
+        tierOverridden: !!normalizeTier(emp.orgTier),
+        department: normalizeDept(emp.department),
+        photographUrl: emp.photographUrl || '',
+        placed: placedIds.has(String(emp._id)),
+        seniorId: seniorOf.get(String(emp._id)) || null,
+        seniorName: seniorNameOf.get(String(emp._id)) || ''
+      });
       if (!placedIds.has(String(emp._id))) {
         bucket.unplaced.push({
           id: String(emp._id),
           name: emp.name,
           designation: emp.designation || '',
+          tier: tierOf(emp),
+          tierLabel: tierLabel(tierOf(emp)),
+          tierOverridden: !!normalizeTier(emp.orgTier),
           department: normalizeDept(emp.department),
           photographUrl: emp.photographUrl || ''
         });
@@ -621,12 +730,28 @@ exports.getHierarchy = async function (req, res) {
         const depthOf = (nodes) =>
           nodes.reduce((max, n) => Math.max(max, 1 + depthOf(n.children)), 0);
 
+        // One row per department-scoped rung. T1 is company-wide so it is
+        // reported once at the top level, not inside every department.
+        const tierBands = ORG_TIERS.filter(t => t.scope === 'department').map(t => ({
+          tier: t.tier,
+          key: t.key,
+          label: t.label,
+          hint: t.hint,
+          members: bucket.roster
+            .filter(m => m.tier === t.tier)
+            .sort((a, b) => a.name.localeCompare(b.name))
+        }));
+
         return {
           key: bucket.key,
           departmentId: bucket.departmentId,
           department: bucket.department,
           hasDepartment: bucket.hasDepartment,
           tier: bucket.tier,
+          tierBands,
+          untiered: bucket.roster
+            .filter(m => !m.tier)
+            .sort((a, b) => a.name.localeCompare(b.name)),
           head,
           roots,
           unplaced: bucket.unplaced,
@@ -646,9 +771,27 @@ exports.getHierarchy = async function (req, res) {
         return a.department.localeCompare(b.department);
       });
 
+    // The single company-wide rung. More than one person mapped to T1 is a
+    // configuration mistake worth surfacing rather than hiding.
+    const ceoLevel = allEmployees
+      .filter(emp => tierOf(emp) === 1)
+      .map(emp => ({
+        id: String(emp._id),
+        name: emp.name,
+        designation: emp.designation || '',
+        department: normalizeDept(emp.department),
+        photographUrl: emp.photographUrl || '',
+        placed: placedIds.has(String(emp._id)),
+        tier: 1,
+        tierOverridden: !!normalizeTier(emp.orgTier)
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+
     res.json({
       status: 'success',
       data: tree,
+      tiers: ORG_TIERS,
+      ceoLevel,
       byDepartment,
       stats: {
         departments: byDepartment.filter(d => d.hasDepartment).length,
@@ -657,7 +800,9 @@ exports.getHierarchy = async function (req, res) {
         unplaced: allEmployees.length - placedIds.size,
         crossDepartmentLinks: filteredLinks.filter(
           l => deptKey(l.senior.department) !== deptKey(l.junior.department)
-        ).length
+        ).length,
+        // Designations nobody has mapped to a rung yet.
+        untiered: allEmployees.filter(emp => !tierOf(emp)).length
       }
     });
   } catch (err) {
@@ -823,6 +968,84 @@ exports.getManagementChain = async (req, res) => {
       status: 'error',
       message: 'Failed to fetch management chain'
     });
+  }
+};
+
+/**
+ * PATCH /org-hierarchy/:employeeId/tier   { tier: 1..5 | null }
+ *
+ * Move ONE person to another rung, leaving everyone who shares their job title
+ * where they are. Sending null clears the override so they follow their
+ * designation again.
+ *
+ * Existing reporting lines are NOT rewritten: a move that would leave someone
+ * reporting up the wrong way is refused, so the ladder cannot be broken from
+ * here either.
+ */
+exports.setEmployeeTier = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const { employeeId } = req.params;
+    const raw = req.body?.tier;
+    const tier = raw === null || raw === '' || raw === undefined
+      ? null
+      : normalizeTier(raw);
+
+    if (raw !== null && raw !== '' && raw !== undefined && !tier) {
+      return res.status(400).json({ status: 'error', message: 'Invalid tier' });
+    }
+
+    const employee = await Employee.findOne({ _id: employeeId, owner: ownerId });
+    if (!employee) {
+      return res.status(404).json({ status: 'error', message: 'Employee not found' });
+    }
+
+    // What the ladder would look like after the move.
+    const tierOf = await buildTierResolver(ownerId);
+    const nextTier = tier || tierOf({ ...employee.toObject(), orgTier: null });
+
+    const [seniorLink, juniorLinks] = await Promise.all([
+      Hierarchy.findOne({ owner: ownerId, junior: employeeId })
+        .populate('senior', 'name department designation orgTier')
+        .lean(),
+      Hierarchy.find({ owner: ownerId, senior: employeeId })
+        .populate('junior', 'name department designation orgTier')
+        .lean()
+    ]);
+
+    if (seniorLink?.senior && !isValidReportingPair(tierOf(seniorLink.senior), nextTier)) {
+      return res.status(400).json({
+        status: 'error',
+        code: 'TIER_ORDER',
+        message:
+          `${employee.name} reports to ${seniorLink.senior.name} ` +
+          `(${tierLabel(tierOf(seniorLink.senior))}) — remove that line before moving them to ${tierLabel(nextTier)}`
+      });
+    }
+
+    const blocked = juniorLinks.find(
+      (l) => l.junior && !isValidReportingPair(nextTier, tierOf(l.junior))
+    );
+    if (blocked) {
+      return res.status(400).json({
+        status: 'error',
+        code: 'TIER_ORDER',
+        message:
+          `${blocked.junior.name} (${tierLabel(tierOf(blocked.junior))}) reports to ${employee.name} — ` +
+          `remove that line before moving them to ${tierLabel(nextTier)}`
+      });
+    }
+
+    employee.orgTier = tier;
+    await employee.save();
+
+    res.json({
+      status: 'success',
+      data: { id: String(employee._id), tier: nextTier, overridden: !!tier }
+    });
+  } catch (err) {
+    console.error('Error setting employee tier:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to set tier' });
   }
 };
 

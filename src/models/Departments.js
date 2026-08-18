@@ -15,6 +15,21 @@ const DepartmentSchema = new Schema({
     type: [String],
     default: [],
   },
+  /* Which rung of the ladder each designation sits on — see lib/orgTiers.
+   * Kept alongside `designations` rather than inside it so every existing
+   * consumer of that plain string list keeps working. Names not present in
+   * `designations` are ignored; designations absent from here fall back to
+   * guessTierFromDesignation(). */
+  designationTiers: {
+    type: [
+      {
+        _id: false,
+        name: { type: String, required: true, trim: true },
+        tier: { type: Number, min: 1, max: 5, required: true },
+      },
+    ],
+    default: [],
+  },
   order: {
     type: Number,
     required: true,

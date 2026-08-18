@@ -747,7 +747,7 @@ const TYPE_MODEL_MAP = {
 };
 
 const TYPE_EDITABLE_FIELDS = {
-  loan:                ["amount", "period", "reason", "loanCategory", "loanAllowanceField"],
+  loan:                ["amount", "period", "reason", "loanCategory", "loanAllowanceField", "loanDeductionType", "loanDeductionValue"],
   bonus:               ["amount", "reason"],
   reimbursement:       ["amount", "reason"],
   advance:             ["amount", "reason"],

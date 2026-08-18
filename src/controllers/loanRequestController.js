@@ -1,15 +1,57 @@
 const LoanRequest = require("../models/LoanRequest");
+const { LOAN_CATEGORIES, CATEGORIES_WITH_PERIOD } = LoanRequest;
 const { approvedFields } = require("../utils/requestAutoApproval");
 const { notifyRequestDecision, notifyRequestSubmitted } = require("../services/requestNotificationService");
-const { payrollRequestFilter } = require("../services/payrollRequestHierarchyService");
+const { payrollRequestFilter, payrollScope } = require("../services/payrollRequestHierarchyService");
 
 exports.applyLoan = async (req, res) => {
   try {
-    const { amount, period, reason, loanAllowanceField } = req.body;
-    
-    // Validate required fields
-    if (!amount || !period || !reason) {
-      return res.status(400).json({ message: "Amount, period, and reason are required" });
+    const {
+      amount,
+      period,
+      reason,
+      loanCategory,
+      loanAllowanceField,
+      loanDeductionType,
+      loanDeductionValue,
+    } = req.body;
+
+    // Which of the four kinds is being asked for decides what else is
+    // required — see the comments on the LoanRequest schema.
+    const category = LOAN_CATEGORIES.includes(loanCategory)
+      ? loanCategory
+      // Older clients never sent a category — carrying an allowance field was
+      // what marked the request as the allowance kind.
+      : loanAllowanceField
+        ? "Loan Allowance"
+        : "Personal Loan";
+    const isAllowanceLoan = category === "Loan Allowance";
+    const wantsPeriod = CATEGORIES_WITH_PERIOD.includes(category);
+
+    if (!amount || !reason) {
+      return res.status(400).json({ message: "Amount and reason are required" });
+    }
+    if (wantsPeriod && !period) {
+      return res
+        .status(400)
+        .json({ message: "Repayment period is required for a " + category });
+    }
+    if (isAllowanceLoan && !loanAllowanceField) {
+      return res
+        .status(400)
+        .json({ message: "Please select the allowance to deduct from" });
+    }
+    const deductionType = isAllowanceLoan
+      ? loanDeductionType || "complete"
+      : null;
+    if (
+      isAllowanceLoan &&
+      deductionType !== "complete" &&
+      !(Number(loanDeductionValue) > 0)
+    ) {
+      return res
+        .status(400)
+        .json({ message: "Please enter a deduction value" });
     }
 
     const employeeId = req.user.employeeId || req.user._id; // UnifiedAuth attaches employeeId for employees
@@ -19,9 +61,15 @@ exports.applyLoan = async (req, res) => {
       employee: employeeId,
       owner: ownerId,
       amount,
-      period,
+      period: wantsPeriod ? period : undefined,
       reason,
-      loanAllowanceField: loanAllowanceField || null,
+      loanCategory: category,
+      loanAllowanceField: isAllowanceLoan ? loanAllowanceField : null,
+      loanDeductionType: deductionType,
+      loanDeductionValue:
+        isAllowanceLoan && deductionType !== "complete"
+          ? Number(loanDeductionValue)
+          : null,
       ...approvedFields(req),
     });
 
@@ -31,6 +79,9 @@ exports.applyLoan = async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Loan request submitted successfully",
+      // An admin's own request is auto-approved here, which is already the
+      // last word — same signal the review route sends.
+      isFinalApproval: newRequest.status === "approved",
       data: newRequest
     });
   } catch (error) {
@@ -108,9 +159,18 @@ exports.updateLoanRequestStatus = async (req, res) => {
       status, actor: reviewerId, reason: rejectionReason,
     });
 
+    // An admin sitting at the root of the Payroll Hierarchy (and the company
+    // owner login) is the last word on a payroll request — nothing escalates
+    // past them. The admin dashboard uses this to hand the approved loan
+    // straight to the Loan Calculator so it only has to be saved.
+    const scope = await payrollScope(req);
+    const isFinalApproval =
+      status === "approved" && !!(scope.isAdminRoot || scope.isOwnerLogin);
+
     res.json({
       success: true,
       message: `Loan request ${status} successfully`,
+      isFinalApproval,
       data: request
     });
   } catch (error) {
