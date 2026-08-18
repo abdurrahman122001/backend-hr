@@ -3035,6 +3035,10 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
             owner: oid(String(owner)),
             status: "sent",
             approvalStatus: { $ne: "pending" },
+            // These records are excluded from the CRM inbox list. Letting one
+            // become the grouped latest message creates an unread badge for a
+            // thread the user cannot see or open from the inbox.
+            isForwardedCopy: { $ne: true },
             // Their own tab, their own badge — see systemAnnouncements below.
             // BOTH flavours live in that tab (the System Announcements list
             // matches `isSystemAnnouncement OR isSystemMessage`), so excluding
@@ -3166,6 +3170,7 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
         // Not in the list (see the list queries), so not in the count either.
         isForwardedCopy: { $ne: true },
         isSystemAnnouncement: { $ne: true },
+        isSystemMessage: { $ne: true },
       }),
 
       // Unread: Primary-inbox threads whose LATEST message is unread & addressed
