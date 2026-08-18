@@ -1,20 +1,3 @@
-// One-off backfill: give every company its system groups.
-//
-//   company group    — one per org, holding every ACTIVE employee.
-//   department group — one per department that has at least one active
-//                      employee, holding that department's active employees.
-//
-// Owner/admins of each group = the org's active `isAdmin` employees. From here
-// on the groups keep themselves up to date: the Employee model syncs an
-// employee into them whenever they become active or change department
-// (src/services/systemGroupService.js), so this script is only needed for
-// companies that were already running before the feature existed.
-//
-// Additive only — an existing group just gains the members it is missing, so
-// the script is safe to re-run.
-//
-// Run from backend/:  node backfill-system-groups.js
-//        preview it:  node backfill-system-groups.js --dry
 const mongoose = require("mongoose");
 require("dotenv").config();
 

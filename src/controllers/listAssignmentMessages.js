@@ -783,7 +783,13 @@ exports.listMessages = async function listMessages(req, res) {
       excludeHrPolicy = "false",
       threadId,
       reviewState,
+      unreadOnly: unreadOnlyRaw,
     } = req.query;
+
+    // "Unread" view: show only the threads the Inbox badge is counting. Without
+    // it a genuinely unread thread can sit on page 3 of a date-sorted list with
+    // nothing on page 1 to explain the badge — which reads as a stuck count.
+    const unreadOnly = unreadOnlyRaw === "true" || unreadOnlyRaw === true;
 
     const q = {};
 
@@ -1137,6 +1143,14 @@ exports.listMessages = async function listMessages(req, res) {
             threadOwner: { $first: "$owner" },
             latestId: { $first: "$_id" },
             latestMessageAt: { $max: "$createdAt" },
+            // Docs are newest-first, so these describe the thread's newest
+            // VISIBLE message — the one this row is bolded from. `unreadOnly`
+            // below filters on them so the view shows precisely the bold rows.
+            latestSender: { $first: "$sender" },
+            latestReceiver: { $first: "$receiver" },
+            latestReadByEmployees: {
+              $first: { $ifNull: ["$readBy.employee", []] },
+            },
             // Docs arrive newest-first, so $last is the mail that STARTED the
             // thread. A conversation is named after that mail — not after
             // whatever landed on top of it. Anyone editing one reply's subject
@@ -1385,6 +1399,30 @@ exports.listMessages = async function listMessages(req, res) {
       // is incoming-only, so it DOES require the thread to have received something.
       if (filter !== "all" && filter !== "allMail") {
         pipeline.push({ $match: { receivedSomething: true } });
+      }
+
+      // Unread view: keep exactly the rows this list already BOLDS — its
+      // representative message (the newest one this query can see) is addressed
+      // to me and unread by me.
+      //
+      // Note this is the list's definition, not the Inbox badge's. The badge
+      // groups over every message in the org and asks about the thread's
+      // ABSOLUTE latest; this pipeline has already been narrowed to what I am
+      // allowed to see, so a thread whose newest messages are ones I am not a
+      // receiver of resolves to a different "latest" here. Anchoring on the
+      // badge's rule instead would filter to rows this list cannot show, which
+      // is the failure this view exists to prevent — a count pointing at
+      // nothing. Where they differ the badge is the stricter of the two.
+      if (unreadOnly) {
+        pipeline.push({
+          $match: {
+            $and: [
+              { latestReceiver: me },
+              { latestSender: { $ne: me } },
+              { latestReadByEmployees: { $ne: me } },
+            ],
+          },
+        });
       }
 
       // All activity hides threads awaiting approval: pending at ME → they
@@ -2998,7 +3036,20 @@ exports.getMessageCounts = async function getMessageCounts(req, res) {
             status: "sent",
             approvalStatus: { $ne: "pending" },
             // Their own tab, their own badge — see systemAnnouncements below.
+            // BOTH flavours live in that tab (the System Announcements list
+            // matches `isSystemAnnouncement OR isSystemMessage`), so excluding
+            // only the first left an unread HR-policy style delivery counted on
+            // the Primary badge while the message itself sat in another tab.
             isSystemAnnouncement: { $ne: true },
+            isSystemMessage: { $ne: true },
+            // Forwarded copies are filtered out of EVERY list (see the list
+            // queries and getUnreadCount), so they must be filtered out before
+            // the grouping too — for two reasons. A forwarded copy addressed to
+            // me is otherwise counted as an unread thread the list can never
+            // show, which is a badge nothing can clear; and because it is
+            // dropped before the $sort, "latest" here now means the latest
+            // message the list actually renders, which is what the list bolds.
+            isForwardedCopy: { $ne: true },
           },
         },
         { $sort: { createdAt: -1 } },
