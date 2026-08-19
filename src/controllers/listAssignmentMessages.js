@@ -1132,6 +1132,16 @@ exports.listMessages = async function listMessages(req, res) {
             sender: 1,
             receiver: 1,
             approvalStatus: 1,
+            // REQUIRED by hasApproval / hasPendingForMe in the $group below.
+            // Leaving it out does not just lose a field, it INVERTS both flags
+            // for the senior who already approved: hasApproval reads
+            // $size($approvalChain) → 0 → false, and hasPendingForMe's "I am
+            // already in the chain, so it is no longer pending FOR me" guard
+            // becomes vacuously true. The All-activity $match then hides the
+            // thread from exactly the person who approved it, for as long as it
+            // is pending at the next senior up. Only `.approver` is needed —
+            // $size still works on the trimmed subdocuments.
+            "approvalChain.approver": 1,
             status: 1,
             "readBy.employee": 1,
           },

@@ -62,6 +62,11 @@ const CallLogSchema = new Schema(
     // Drives the "you have missed calls" badge; cleared when the callee opens
     // their history.
     seenByCallee: { type: Boolean, default: false },
+
+    // Clearing call history is personal. Keep the shared call record for the
+    // other participant and for auditing, but omit it for employees listed
+    // here.
+    hiddenFor: [{ type: Schema.Types.ObjectId, index: true }],
   },
   { timestamps: true },
 );
