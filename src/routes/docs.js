@@ -319,19 +319,15 @@ function getDocTypeName(docType) {
 async function generateReferenceNumber(docType = "experience_letter", ownerId) {
   try {
     const timezone = await getUserTimezone(ownerId);
-    const SHARED_DOC_TYPES = [
-      "experience_letter",
-      "salary_certificate",
-      "nda",
-      "contract",
-      "employee_cover_page",
-    ];
+    // One counter per document type. These five used to share a single
+    // "employment_document" counter, so downloading an NDA twice and then a
+    // contract numbered them MA01-NDA, MA02-NDA, MA03-EC — the contract
+    // inherited the NDA's sequence. Each type now counts on its own.
+    // Normalised first so "salary-certificate" and "salary_certificate" are
+    // the same counter (and resolve to the same docCode instead of "DOC").
+    const counterDocType = normType(docType);
 
-    const counterDocType = SHARED_DOC_TYPES.includes(docType)
-      ? "employment_document"
-      : docType;
-
-    const docCode = getDocTypeCode(docType);
+    const docCode = getDocTypeCode(counterDocType);
     const yearMonth = getCurrentYearMonth(timezone);
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
@@ -418,19 +414,15 @@ async function getCurrentReferenceNumber(
 ) {
   try {
     const timezone = await getUserTimezone(ownerId);
-    const SHARED_DOC_TYPES = [
-      "experience_letter",
-      "salary_certificate",
-      "nda",
-      "contract",
-      "employee_cover_page",
-    ];
+    // One counter per document type. These five used to share a single
+    // "employment_document" counter, so downloading an NDA twice and then a
+    // contract numbered them MA01-NDA, MA02-NDA, MA03-EC — the contract
+    // inherited the NDA's sequence. Each type now counts on its own.
+    // Normalised first so "salary-certificate" and "salary_certificate" are
+    // the same counter (and resolve to the same docCode instead of "DOC").
+    const counterDocType = normType(docType);
 
-    const counterDocType = SHARED_DOC_TYPES.includes(docType)
-      ? "employment_document"
-      : docType;
-
-    const docCode = getDocTypeCode(docType);
+    const docCode = getDocTypeCode(counterDocType);
     const yearMonth = getCurrentYearMonth(timezone);
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
@@ -889,7 +881,14 @@ async function tokenMap(
     if (certs.masters?.name) submitted.push("masters");
 
     tokens["employee.cert.list"] = submitted.join(", ");
-    tokens["employee.cert.listArray"] = JSON.stringify(submitted);
+    // Numbered one-per-line, not JSON: this token lands straight in a document
+    // cell, where ["matric","inter","graduate"] printed as raw data. The <br>
+    // is safe because token output is injected as raw HTML, and a template
+    // rows height is a MINIMUM in HTML tables — the row grows to fit the list
+    // instead of clipping it.
+    tokens["employee.cert.listArray"] = submitted
+      .map((name, i) => `${i + 1}. ${name}`)
+      .join("<br>");
   } catch (err) {
     console.error("Error populating certificate tokens:", err);
   }
@@ -1493,17 +1492,8 @@ router.post("/bulk/:docType", async (req, res) => {
     const currentDateDDMMYYYY = formatDateDDMMYYYY(new Date(), timezone);
     const currentDate = getCurrentDateString(timezone);
 
-    const SHARED_DOC_TYPES = [
-      "experience_letter",
-      "salary_certificate",
-      "nda",
-      "contract",
-      "employee_cover_page",
-    ];
-
-    const counterDocType = SHARED_DOC_TYPES.includes(normalizedDocType)
-      ? "employment_document"
-      : normalizedDocType;
+    // Per-type counter, same rule as generateReferenceNumber above.
+    const counterDocType = normalizedDocType;
 
     // Get or create counter for bulk generation
     let counter = await ReferenceCounter.findOne({

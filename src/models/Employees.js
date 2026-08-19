@@ -112,7 +112,7 @@ const EmployeeSchema = new Schema(
     // the job title", which is the normal case — this is only set when someone
     // is deliberately placed off the band their title implies (see
     // lib/orgTiers and the HRMS Hierarchy page).
-    orgTier: { type: Number, min: 1, max: 5, default: null },
+    orgTier: { type: Number, min: 1, max: 20, default: null }, // ceiling = MAX_TIERS
     joiningDate: { type: String },
     leavingDate: { type: String }, // Last working day / employment end date
     experiences: [ExperienceSchema],

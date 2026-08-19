@@ -19,13 +19,14 @@ const DepartmentSchema = new Schema({
    * Kept alongside `designations` rather than inside it so every existing
    * consumer of that plain string list keeps working. Names not present in
    * `designations` are ignored; designations absent from here fall back to
-   * guessTierFromDesignation(). */
+   * the ladder's own guess from the title (makeLadder().guess). The rungs
+   * themselves live in models/OrgTier — a company builds its own. */
   designationTiers: {
     type: [
       {
         _id: false,
         name: { type: String, required: true, trim: true },
-        tier: { type: Number, min: 1, max: 5, required: true },
+        tier: { type: Number, min: 1, max: 20, required: true }, // ceiling = MAX_TIERS
       },
     ],
     default: [],
