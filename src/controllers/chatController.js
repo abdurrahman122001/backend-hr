@@ -7844,6 +7844,20 @@ exports.getMentionedMessages = async (req, res) => {
         }
       }
 
+      // Direct messages use the legacy `read` flag, while spaces and groups
+      // track each reader in `readBy`. Applying the group rule to DMs leaves
+      // already-read DM mentions highlighted indefinitely.
+      const isDirectMessage = Boolean(
+        conv && !space && !conv.isGroup && !conv.space
+      );
+      const wasRead = isDirectMessage
+        ? message.read === true
+        : (message.readBy || []).some(
+          (read) =>
+            (read.employee?._id || read.employee)?.toString() ===
+            req.employee._id.toString()
+        );
+
       return {
         _id: message._id,
         content: message.content,
@@ -7877,11 +7891,7 @@ exports.getMentionedMessages = async (req, res) => {
         hasMentions: message.hasMentions,
         isUnread:
           message.sender?._id?.toString() !== req.employee._id.toString() &&
-          !(message.readBy || []).some(
-            (read) =>
-              (read.employee?._id || read.employee)?.toString() ===
-              req.employee._id.toString()
-          ),
+          !wasRead,
       };
     });
 
