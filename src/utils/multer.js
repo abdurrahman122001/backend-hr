@@ -55,6 +55,11 @@ const ACCEPTED = new Set([
   "application/vnd.ms-word.document.macroEnabled.12", // .docm
   "application/vnd.openxmlformats-officedocument.wordprocessingml.template", // .dotx
   "application/vnd.ms-word.template.macroEnabled.12", // .dotm
+  "application/vnd.ms-powerpoint", // .ppt
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+  "application/vnd.openxmlformats-officedocument.presentationml.slideshow", // .ppsx
+  "application/vnd.openxmlformats-officedocument.presentationml.template", // .potx
+  "application/vnd.ms-powerpoint.presentation.macroEnabled.12", // .pptm
   "application/rtf", // .rtf
   "text/rtf",
   // Image files

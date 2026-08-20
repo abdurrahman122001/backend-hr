@@ -17,7 +17,10 @@ exports.getCallHistory = async (req, res) => {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
 
     // Only ever my own calls — never another pair's.
-    const query = { $or: [{ caller: meId }, { callee: meId }] };
+    const query = {
+      $or: [{ caller: meId }, { callee: meId }],
+      hiddenFor: { $ne: meId },
+    };
 
     const withEmployeeId = req.query.withEmployeeId;
     if (withEmployeeId) {
@@ -67,6 +70,7 @@ exports.getMissedCount = async (req, res) => {
       callee: meId,
       status: { $in: ["missed", "cancelled"] },
       seenByCallee: { $ne: true },
+      hiddenFor: { $ne: meId },
     });
     res.json({ count });
   } catch (err) {
@@ -89,5 +93,32 @@ exports.markMissedSeen = async (req, res) => {
   } catch (err) {
     console.error("markMissedSeen error:", err);
     res.status(500).json({ error: "Failed to update call history" });
+  }
+};
+
+/**
+ * Hide all existing calls from the signed-in employee's history only.
+ * The shared call rows remain in the database and stay visible to the other
+ * participant. Calls placed after this request are visible as normal.
+ */
+exports.clearCallHistory = async (req, res) => {
+  try {
+    const meId = req.employee?._id;
+    if (!meId) return res.status(401).json({ error: "Not authenticated" });
+
+    const result = await CallLog.updateMany(
+      {
+        $or: [{ caller: meId }, { callee: meId }],
+        hiddenFor: { $ne: meId },
+      },
+      {
+        $addToSet: { hiddenFor: meId },
+      },
+    );
+
+    res.json({ ok: true, cleared: result.modifiedCount || 0 });
+  } catch (err) {
+    console.error("clearCallHistory error:", err);
+    res.status(500).json({ error: "Failed to clear call history" });
   }
 };

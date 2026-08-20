@@ -2,11 +2,13 @@ const mongoose = require('mongoose');
 const Hierarchy = require('../models/OrgHierarchy');
 const Employee = require('../models/Employees');
 const Department = require('../models/Departments');
+const OrgTier = require('../models/OrgTier');
 const {
-  ORG_TIERS,
-  normalizeTier,
-  tierLabel,
-  guessTierFromDesignation,
+  DEFAULT_ORG_TIERS,
+  MAX_TIERS,
+  TIER_SCOPES,
+  uniqueTierKey,
+  makeLadder,
   isValidReportingPair
 } = require('../lib/orgTiers');
 
@@ -45,6 +47,143 @@ function deptKey(value) {
   return name ? name.toLowerCase() : NO_DEPARTMENT;
 }
 
+/* ── the ladder itself ────────────────────────────────────────────────────
+ * Tiers are per-company data (models/OrgTier), not a constant. A company that
+ * has never touched them is seeded with the defaults on first read, so an
+ * existing install keeps the ladder it already had.
+ * ---------------------------------------------------------------------- */
+
+async function loadTierDocs(ownerId) {
+  let docs = await OrgTier.find({ owner: ownerId }).sort({ tier: 1 }).lean();
+  if (docs.length) return docs;
+
+  try {
+    await OrgTier.insertMany(
+      DEFAULT_ORG_TIERS.map(t => ({ ...t, owner: ownerId })),
+      { ordered: false }
+    );
+  } catch (err) {
+    // Two requests can seed at once; the unique (owner, key) index makes the
+    // loser a duplicate-key error, and re-reading gets the winner's rows.
+    if (err?.code !== 11000) throw err;
+  }
+  return OrgTier.find({ owner: ownerId }).sort({ tier: 1 }).lean();
+}
+
+async function loadLadder(ownerId) {
+  return makeLadder(await loadTierDocs(ownerId));
+}
+
+/**
+ * Renumber a company's rungs to 1..n in the given order, and carry everyone
+ * standing on them along.
+ *
+ * A tier number is a POSITION, so adding, removing or moving a rung shifts the
+ * ones below it. Employee.orgTier and Department.designationTiers store those
+ * numbers, which is why they are rewritten in the same operation — otherwise
+ * inserting a rung at the top would quietly demote the whole company by one.
+ *
+ * @param ordered  docs in their new top-to-bottom order; a null entry reserves
+ *                 the slot a brand-new rung is about to take
+ * @param dropped  tier numbers that no longer exist — anyone on one is cleared
+ */
+async function renumberTiers(ownerId, ordered, dropped = []) {
+  const remap = new Map(dropped.map(t => [Number(t), null]));
+  const ops = [];
+
+  ordered.forEach((doc, index) => {
+    if (!doc) return; // a gap being opened for a new rung
+    const next = index + 1;
+    if (Number(doc.tier) !== next) remap.set(Number(doc.tier), next);
+    ops.push({
+      updateOne: { filter: { _id: doc._id }, update: { $set: { tier: next } } }
+    });
+  });
+
+  if (ops.length) await OrgTier.bulkWrite(ops);
+  if (!remap.size) return;
+
+  const employees = await Employee.find({ owner: ownerId, orgTier: { $ne: null } })
+    .select('_id orgTier')
+    .lean();
+
+  const empOps = employees
+    .filter(e => remap.has(Number(e.orgTier)))
+    .map(e => ({
+      updateOne: {
+        filter: { _id: e._id },
+        update: { $set: { orgTier: remap.get(Number(e.orgTier)) } }
+      }
+    }));
+  if (empOps.length) await Employee.bulkWrite(empOps);
+
+  const departments = await Department.find({ owner: ownerId })
+    .select('_id designationTiers')
+    .lean();
+
+  const deptOps = [];
+  for (const dept of departments) {
+    const current = dept.designationTiers || [];
+    if (!current.length) continue;
+    const next = current
+      .map(entry => ({
+        name: entry.name,
+        tier: remap.has(Number(entry.tier))
+          ? remap.get(Number(entry.tier))
+          : Number(entry.tier)
+      }))
+      // A removed rung takes its designation mappings with it: those titles go
+      // back to "not on the ladder" rather than landing on a neighbour's rung.
+      .filter(entry => entry.tier != null);
+
+    const changed =
+      next.length !== current.length ||
+      next.some((entry, i) => entry.tier !== Number(current[i].tier));
+    if (changed) {
+      deptOps.push({
+        updateOne: {
+          filter: { _id: dept._id },
+          update: { $set: { designationTiers: next } }
+        }
+      });
+    }
+  }
+  if (deptOps.length) await Department.bulkWrite(deptOps);
+}
+
+/**
+ * How many people and job titles are standing on each rung — what the UI needs
+ * to say "removing this leaves 4 people off the ladder" before it happens.
+ */
+async function tierUsage(ownerId, ladder) {
+  const [employees, departments] = await Promise.all([
+    Employee.find({
+      owner: ownerId,
+      status: { $nin: ['offboarded', 'terminated'] }
+    })
+      .select('department designation orgTier')
+      .lean(),
+    Department.find({ owner: ownerId }).select('designationTiers').lean()
+  ]);
+
+  const tierOf = await buildTierResolver(ownerId, ladder);
+  const usage = new Map(
+    ladder.list.map(t => [t.tier, { people: 0, designations: 0 }])
+  );
+
+  for (const emp of employees) {
+    const entry = usage.get(tierOf(emp));
+    if (entry) entry.people += 1;
+  }
+  for (const dept of departments) {
+    for (const mapping of dept.designationTiers || []) {
+      const entry = usage.get(Number(mapping.tier));
+      if (entry) entry.designations += 1;
+    }
+  }
+  return usage;
+}
+
 /**
  * Build a designation -> tier lookup for the whole company, keyed by
  * department. A tier is never stored on the employee: it is whatever their job
@@ -53,7 +192,8 @@ function deptKey(value) {
  *
  * Returns a function so callers do not have to care about the shape.
  */
-async function buildTierResolver(ownerId) {
+async function buildTierResolver(ownerId, ladder) {
+  const rungs = ladder || (await loadLadder(ownerId));
   const departments = await Department.find({ owner: ownerId })
     .select('name designationTiers')
     .lean();
@@ -63,7 +203,7 @@ async function buildTierResolver(ownerId) {
   for (const dept of departments) {
     const map = new Map();
     for (const entry of dept.designationTiers || []) {
-      const tier = normalizeTier(entry?.tier);
+      const tier = rungs.normalize(entry?.tier);
       const name = String(entry?.name || '').trim().toLowerCase();
       if (tier && name) map.set(name, tier);
     }
@@ -73,7 +213,7 @@ async function buildTierResolver(ownerId) {
   return function tierOf(employee) {
     // A rung set on the person themself always wins — that is how one employee
     // moves band without dragging everyone who shares their job title.
-    const override = normalizeTier(employee?.orgTier);
+    const override = rungs.normalize(employee?.orgTier);
     if (override) return override;
 
     const designation = String(employee?.designation || '').trim();
@@ -85,7 +225,7 @@ async function buildTierResolver(ownerId) {
 
     // A title the admin has not mapped yet, or someone with no department:
     // fall back to reading the title rather than showing them as unassigned.
-    return guessTierFromDesignation(designation);
+    return rungs.guess(designation);
   };
 }
 
@@ -343,7 +483,8 @@ exports.create = async (req, res) => {
 
     // A reporting line may only run DOWN the ladder. Unknown tiers never block
     // anything, so a half-mapped company stays usable (lib/orgTiers).
-    const tierOf = await buildTierResolver(ownerId);
+    const ladder = await loadLadder(ownerId);
+    const tierOf = await buildTierResolver(ownerId, ladder);
     const seniorTier = tierOf(senior);
     const juniorTier = tierOf(junior);
     if (!isValidReportingPair(seniorTier, juniorTier)) {
@@ -351,8 +492,8 @@ exports.create = async (req, res) => {
         status: 'error',
         code: 'TIER_ORDER',
         message:
-          `${senior.name} (${tierLabel(seniorTier)}) cannot be senior to ` +
-          `${junior.name} (${tierLabel(juniorTier)}) — a reporting line has to go down the ladder`
+          `${senior.name} (${ladder.label(seniorTier)}) cannot be senior to ` +
+          `${junior.name} (${ladder.label(juniorTier)}) — a reporting line has to go down the ladder`
       });
     }
 
@@ -415,7 +556,8 @@ exports.bulkCreate = async (req, res) => {
 
     // Validate + prepare docs (NO meta calc here; we rebuild after insert)
     let upsertCount = 0;
-    const tierOf = await buildTierResolver(ownerId);
+    const ladder = await loadLadder(ownerId);
+    const tierOf = await buildTierResolver(ownerId, ladder);
 
     for (const { seniorId, juniorId, relation } of links) {
       if (!seniorId || !juniorId || String(seniorId) === String(juniorId)) {
@@ -448,7 +590,11 @@ exports.bulkCreate = async (req, res) => {
           seniorName: senior.name,
           juniorName: junior.name,
           seniorTier,
-          juniorTier
+          juniorTier,
+          // Names, not just numbers: with a company-defined ladder "T3" on its
+          // own no longer tells the admin which rung was refused.
+          seniorTierLabel: ladder.label(seniorTier),
+          juniorTierLabel: ladder.label(juniorTier)
         });
         continue;
       }
@@ -559,14 +705,15 @@ exports.getHierarchy = async function (req, res) {
       return seniorActive && juniorActive;
     });
 
-    const tierOf = await buildTierResolver(ownerId);
+    const ladder = await loadLadder(ownerId);
+    const tierOf = await buildTierResolver(ownerId, ladder);
 
     const toNode = (emp) => ({
       id: String(emp._id),
       name: emp.name,
       tier: tierOf(emp),
-      tierLabel: tierLabel(tierOf(emp)),
-      tierOverridden: !!normalizeTier(emp.orgTier),
+      tierLabel: ladder.label(tierOf(emp)),
+      tierOverridden: !!ladder.normalize(emp.orgTier),
       department: normalizeDept(emp.department),
       subDepartment: emp.subDepartment || '',
       designation: emp.designation || '',
@@ -667,8 +814,8 @@ exports.getHierarchy = async function (req, res) {
         name: emp.name,
         designation: emp.designation || '',
         tier: tierOf(emp),
-        tierLabel: tierLabel(tierOf(emp)),
-        tierOverridden: !!normalizeTier(emp.orgTier),
+        tierLabel: ladder.label(tierOf(emp)),
+        tierOverridden: !!ladder.normalize(emp.orgTier),
         department: normalizeDept(emp.department),
         photographUrl: emp.photographUrl || '',
         placed: placedIds.has(String(emp._id)),
@@ -681,8 +828,8 @@ exports.getHierarchy = async function (req, res) {
           name: emp.name,
           designation: emp.designation || '',
           tier: tierOf(emp),
-          tierLabel: tierLabel(tierOf(emp)),
-          tierOverridden: !!normalizeTier(emp.orgTier),
+          tierLabel: ladder.label(tierOf(emp)),
+          tierOverridden: !!ladder.normalize(emp.orgTier),
           department: normalizeDept(emp.department),
           photographUrl: emp.photographUrl || ''
         });
@@ -732,7 +879,7 @@ exports.getHierarchy = async function (req, res) {
 
         // One row per department-scoped rung. T1 is company-wide so it is
         // reported once at the top level, not inside every department.
-        const tierBands = ORG_TIERS.filter(t => t.scope === 'department').map(t => ({
+        const tierBands = ladder.departmentTiers.map(t => ({
           tier: t.tier,
           key: t.key,
           label: t.label,
@@ -771,26 +918,43 @@ exports.getHierarchy = async function (req, res) {
         return a.department.localeCompare(b.department);
       });
 
-    // The single company-wide rung. More than one person mapped to T1 is a
-    // configuration mistake worth surfacing rather than hiding.
-    const ceoLevel = allEmployees
-      .filter(emp => tierOf(emp) === 1)
-      .map(emp => ({
-        id: String(emp._id),
-        name: emp.name,
-        designation: emp.designation || '',
-        department: normalizeDept(emp.department),
-        photographUrl: emp.photographUrl || '',
-        placed: placedIds.has(String(emp._id)),
-        tier: 1,
-        tierOverridden: !!normalizeTier(emp.orgTier)
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    /* Company-wide rungs — the ones that span every department rather than
+     * repeating inside each one. There can be any number of them now that the
+     * ladder belongs to the company, so they come back as bands instead of the
+     * single hard-coded "CEO level" this used to return. `ceoLevel` stays as
+     * the topmost band so an older client keeps working. */
+    const companyMember = (emp, tier) => ({
+      id: String(emp._id),
+      name: emp.name,
+      designation: emp.designation || '',
+      department: normalizeDept(emp.department),
+      photographUrl: emp.photographUrl || '',
+      placed: placedIds.has(String(emp._id)),
+      tier,
+      tierLabel: ladder.label(tier),
+      tierOverridden: !!ladder.normalize(emp.orgTier),
+      seniorId: seniorOf.get(String(emp._id)) || null,
+      seniorName: seniorNameOf.get(String(emp._id)) || ''
+    });
+
+    const companyBands = ladder.companyTiers.map(t => ({
+      tier: t.tier,
+      key: t.key,
+      label: t.label,
+      hint: t.hint,
+      members: allEmployees
+        .filter(emp => tierOf(emp) === t.tier)
+        .map(emp => companyMember(emp, t.tier))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    }));
+
+    const ceoLevel = companyBands.length ? companyBands[0].members : [];
 
     res.json({
       status: 'success',
       data: tree,
-      tiers: ORG_TIERS,
+      tiers: ladder.list,
+      companyBands,
       ceoLevel,
       byDepartment,
       stats: {
@@ -987,9 +1151,10 @@ exports.setEmployeeTier = async (req, res) => {
     const ownerId = req.user._id;
     const { employeeId } = req.params;
     const raw = req.body?.tier;
+    const ladder = await loadLadder(ownerId);
     const tier = raw === null || raw === '' || raw === undefined
       ? null
-      : normalizeTier(raw);
+      : ladder.normalize(raw);
 
     if (raw !== null && raw !== '' && raw !== undefined && !tier) {
       return res.status(400).json({ status: 'error', message: 'Invalid tier' });
@@ -1001,7 +1166,7 @@ exports.setEmployeeTier = async (req, res) => {
     }
 
     // What the ladder would look like after the move.
-    const tierOf = await buildTierResolver(ownerId);
+    const tierOf = await buildTierResolver(ownerId, ladder);
     const nextTier = tier || tierOf({ ...employee.toObject(), orgTier: null });
 
     const [seniorLink, juniorLinks] = await Promise.all([
@@ -1019,7 +1184,7 @@ exports.setEmployeeTier = async (req, res) => {
         code: 'TIER_ORDER',
         message:
           `${employee.name} reports to ${seniorLink.senior.name} ` +
-          `(${tierLabel(tierOf(seniorLink.senior))}) — remove that line before moving them to ${tierLabel(nextTier)}`
+          `(${ladder.label(tierOf(seniorLink.senior))}) — remove that line before moving them to ${ladder.label(nextTier)}`
       });
     }
 
@@ -1031,8 +1196,8 @@ exports.setEmployeeTier = async (req, res) => {
         status: 'error',
         code: 'TIER_ORDER',
         message:
-          `${blocked.junior.name} (${tierLabel(tierOf(blocked.junior))}) reports to ${employee.name} — ` +
-          `remove that line before moving them to ${tierLabel(nextTier)}`
+          `${blocked.junior.name} (${ladder.label(tierOf(blocked.junior))}) reports to ${employee.name} — ` +
+          `remove that line before moving them to ${ladder.label(nextTier)}`
       });
     }
 
@@ -1046,6 +1211,197 @@ exports.setEmployeeTier = async (req, res) => {
   } catch (err) {
     console.error('Error setting employee tier:', err);
     res.status(500).json({ status: 'error', message: 'Failed to set tier' });
+  }
+};
+
+
+/* ── the ladder's own CRUD ─────────────────────────────────────────────────
+ * Tiers used to be five constants. They are now the company's to build: add a
+ * rung, rename it, move it, take it away. Every write that changes POSITIONS
+ * goes through renumberTiers so the people standing on them move too.
+ * ---------------------------------------------------------------------- */
+
+/** GET /org-hierarchy/tiers */
+exports.listTiers = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const ladder = await loadLadder(ownerId);
+    const usage = await tierUsage(ownerId, ladder);
+    res.json({
+      status: 'success',
+      data: ladder.list.map(t => ({
+        ...t,
+        people: usage.get(t.tier)?.people || 0,
+        designations: usage.get(t.tier)?.designations || 0
+      })),
+      max: MAX_TIERS
+    });
+  } catch (err) {
+    console.error('List tiers error:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to load the ladder' });
+  }
+};
+
+/**
+ * POST /org-hierarchy/tiers   { label, hint?, scope?, position? }
+ *
+ * Add a rung. `position` is where it lands (1 = top); everything from there
+ * down moves one place, and the people standing on those rungs move with them.
+ */
+exports.createTier = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const label = String(req.body?.label || '').trim();
+    if (!label) {
+      return res.status(400).json({ status: 'error', message: 'A tier needs a name' });
+    }
+
+    const docs = await loadTierDocs(ownerId);
+    if (docs.length >= MAX_TIERS) {
+      return res.status(400).json({
+        status: 'error',
+        message: `A ladder can have at most ${MAX_TIERS} tiers`
+      });
+    }
+    if (docs.some(d => String(d.label).toLowerCase() === label.toLowerCase())) {
+      return res.status(400).json({
+        status: 'error',
+        message: `There is already a tier called "${label}"`
+      });
+    }
+
+    const scope = TIER_SCOPES.includes(req.body?.scope) ? req.body.scope : 'department';
+    const raw = Number(req.body?.position);
+    const position = Number.isInteger(raw)
+      ? Math.min(Math.max(raw, 1), docs.length + 1)
+      : docs.length + 1;
+
+    // Open the gap FIRST, with a null placeholder holding the new rung's slot,
+    // so nobody is remapped onto a tier number the new rung is about to take.
+    const slots = [...docs];
+    slots.splice(position - 1, 0, null);
+    await renumberTiers(ownerId, slots);
+
+    await OrgTier.create({
+      owner: ownerId,
+      tier: position,
+      key: uniqueTierKey(label, new Set(docs.map(d => d.key))),
+      label,
+      hint: String(req.body?.hint || '').trim(),
+      scope
+    });
+
+    const ladder = await loadLadder(ownerId);
+    res.status(201).json({ status: 'success', data: ladder.list });
+  } catch (err) {
+    console.error('Create tier error:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to add that tier' });
+  }
+};
+
+/** PATCH /org-hierarchy/tiers/:tierId   { label?, hint?, scope? } */
+exports.updateTier = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const doc = await OrgTier.findOne({ _id: req.params.tierId, owner: ownerId });
+    if (!doc) {
+      return res.status(404).json({ status: 'error', message: 'Tier not found' });
+    }
+
+    if (req.body?.label !== undefined) {
+      const label = String(req.body.label).trim();
+      if (!label) {
+        return res.status(400).json({ status: 'error', message: 'A tier needs a name' });
+      }
+      const others = await OrgTier.find({ owner: ownerId, _id: { $ne: doc._id } })
+        .select('label')
+        .lean();
+      if (others.some(o => String(o.label).toLowerCase() === label.toLowerCase())) {
+        return res.status(400).json({
+          status: 'error',
+          message: `There is already a tier called "${label}"`
+        });
+      }
+      // The key is deliberately NOT regenerated: it is this rung's identity,
+      // and the designation guesser matches on it.
+      doc.label = label;
+    }
+    if (req.body?.hint !== undefined) doc.hint = String(req.body.hint).trim();
+    if (TIER_SCOPES.includes(req.body?.scope)) doc.scope = req.body.scope;
+
+    await doc.save();
+    const ladder = await loadLadder(ownerId);
+    res.json({ status: 'success', data: ladder.list });
+  } catch (err) {
+    console.error('Update tier error:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to save that tier' });
+  }
+};
+
+/**
+ * DELETE /org-hierarchy/tiers/:tierId
+ *
+ * The rung goes and the ones below it move up. Anyone standing on it comes OFF
+ * the ladder rather than being pushed onto a neighbouring rung — a silent
+ * promotion or demotion is worse than an empty spot. Reporting lines are left
+ * alone; those people show under "Not on the ladder" until they are placed.
+ */
+exports.deleteTier = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const docs = await loadTierDocs(ownerId);
+    const doc = docs.find(d => String(d._id) === String(req.params.tierId));
+    if (!doc) {
+      return res.status(404).json({ status: 'error', message: 'Tier not found' });
+    }
+    if (docs.length <= 1) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'A ladder needs at least one tier'
+      });
+    }
+
+    await OrgTier.deleteOne({ _id: doc._id, owner: ownerId });
+    await renumberTiers(
+      ownerId,
+      docs.filter(d => String(d._id) !== String(doc._id)),
+      [Number(doc.tier)]
+    );
+
+    const ladder = await loadLadder(ownerId);
+    res.json({ status: 'success', data: ladder.list });
+  } catch (err) {
+    console.error('Delete tier error:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to remove that tier' });
+  }
+};
+
+/**
+ * PATCH /org-hierarchy/tiers/reorder   { order: [tierId, …] }
+ *
+ * The whole ladder, top first. Everyone standing on a rung moves with it.
+ */
+exports.reorderTiers = async (req, res) => {
+  try {
+    const ownerId = req.user._id;
+    const order = Array.isArray(req.body?.order) ? req.body.order.map(String) : [];
+    const docs = await loadTierDocs(ownerId);
+
+    const byId = new Map(docs.map(d => [String(d._id), d]));
+    const ordered = order.map(id => byId.get(id)).filter(Boolean);
+    if (ordered.length !== docs.length) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Send every tier id, in the new order'
+      });
+    }
+
+    await renumberTiers(ownerId, ordered);
+    const ladder = await loadLadder(ownerId);
+    res.json({ status: 'success', data: ladder.list });
+  } catch (err) {
+    console.error('Reorder tiers error:', err);
+    res.status(500).json({ status: 'error', message: 'Failed to reorder the ladder' });
   }
 };
 

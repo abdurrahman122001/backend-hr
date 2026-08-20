@@ -1,20 +1,30 @@
 const Department = require('../models/Departments');
-const { normalizeTier } = require('../lib/orgTiers');
+const OrgTier = require('../models/OrgTier');
+const { makeLadder } = require('../lib/orgTiers');
 
 /**
- * Accept only { name, tier } pairs the ladder recognises, and only for
- * designations the department actually has. Returns null when the client did
- * not send the field at all, so an untouched department keeps what it had.
+ * Accept only { name, tier } pairs THIS COMPANY'S ladder recognises, and only
+ * for designations the department actually has. Returns null when the client
+ * did not send the field at all, so an untouched department keeps what it had.
+ *
+ * Validated against the company's own rungs rather than a fixed 1..5 range:
+ * the ladder is data now (models/OrgTier), so a tier number that is merely
+ * plausible is not necessarily a rung that exists — and a mapping to a rung
+ * that does not exist would silently read back as "no tier".
  */
-function sanitizeDesignationTiers(raw, designations) {
+async function sanitizeDesignationTiers(raw, designations, ownerId) {
   if (raw === undefined) return null;
   if (!Array.isArray(raw)) return [];
+
+  const ladder = makeLadder(
+    ownerId ? await OrgTier.find({ owner: ownerId }).sort({ tier: 1 }).lean() : []
+  );
   const allowed = new Set((designations || []).map((d) => String(d).trim()));
   const seen = new Set();
   const out = [];
   for (const entry of raw) {
     const name = String(entry?.name || '').trim();
-    const tier = normalizeTier(entry?.tier);
+    const tier = ladder.normalize(entry?.tier);
     if (!name || !tier) continue;
     if (allowed.size && !allowed.has(name)) continue;
     if (seen.has(name)) continue;
@@ -53,7 +63,8 @@ exports.createDepartment = async (req, res) => {
       owner,
       designations: designations || [],
       designationTiers:
-        sanitizeDesignationTiers(designationTiers, designations) || [],
+        (await sanitizeDesignationTiers(designationTiers, designations, owner)) ||
+        [],
     });
     await department.save();
     res.status(201).json(department);
@@ -80,9 +91,10 @@ exports.updateDepartment = async (req, res) => {
       }
       department.designations = designations;
     }
-    const tiers = sanitizeDesignationTiers(
+    const tiers = await sanitizeDesignationTiers(
       designationTiers,
-      designations || department.designations
+      designations || department.designations,
+      department.owner
     );
     if (tiers) department.designationTiers = tiers;
     else if (designations) {
