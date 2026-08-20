@@ -553,16 +553,26 @@ exports.sendGroupMessage = async function (req, res) {
     const message = new WhatsAppMessage(msgDoc);
     await message.save();
 
-    await WhatsAppGroup.findByIdAndUpdate(groupId, {
-      lastMessage: noteContent ? noteContent.substring(0, 100) : "📎 Attachment",
-      lastMessageAt: new Date(),
-      lastMessageBy: senderId,
-      lastMessageDeleted: false,
-      lastMessageIsReaction: false,
-      lastMessageReactionEmoji: null,
-      lastMessageReactorId: null,
-      lastMessageReactorName: null,
-    });
+    // The group lastMessage* fields are the SHARED sidebar preview: every
+    // member reads them, CRM included. A message still working its way up the
+    // hierarchy must NOT land there. approveMessage writes this same block once
+    // the chain finalizes, and until then getChatList shows the message through
+    // pendingLatestMap, which is scoped to the only people entitled to see it
+    // (its sender and its approvers). Writing it here unconditionally leaked the
+    // under-review text into everyone else’s sidebar on their next refresh.
+    // The client-chat path in createMessage has always carried this same guard.
+    if (approvalStatus !== "pending") {
+      await WhatsAppGroup.findByIdAndUpdate(groupId, {
+        lastMessage: noteContent ? noteContent.substring(0, 100) : "📎 Attachment",
+        lastMessageAt: new Date(),
+        lastMessageBy: senderId,
+        lastMessageDeleted: false,
+        lastMessageIsReaction: false,
+        lastMessageReactionEmoji: null,
+        lastMessageReactorId: null,
+        lastMessageReactorName: null,
+      });
+    }
 
     const populated = await WhatsAppMessage.findById(message._id)
       // `designation` + `assignedTo` are needed by the browser-notification

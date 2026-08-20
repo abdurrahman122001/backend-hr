@@ -21,10 +21,18 @@ const mongoose = require("mongoose");
 const { hasCrmAccess, getCrmUserIds } = require("../utils/crmAccess");
 
 /** ---------- utils ---------- **/
+// Attachment URLs are stored RELATIVE, on purpose. Stamping an absolute
+// origin here bakes in whichever host happened to receive the upload: a file
+// written to a local disk while PUBLIC_BASE_URL pointed at production came
+// back as https://<prod>/uploads/<file>, which 404s everywhere except that
+// one host — the image simply never appeared, as if it had never been sent.
+// A relative path is resolved by each client against its own API origin, so
+// the same row is correct in every environment. Rows written before this
+// still hold an absolute URL and are passed through untouched by the
+// clients. Nothing on the server needs the absolute form: the outbound
+// WhatsApp path reads attachments off disk by `filename`.
 function buildPublicUrl(req, filename) {
-  const base =
-    process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
-  return `${base}/uploads/${filename}`;
+  return `/uploads/${filename}`;
 }
 
 const isObjId = (v) => mongoose.isValidObjectId(v);
@@ -1945,6 +1953,9 @@ exports.approveMessage = async function approveMessage(req, res) {
       { path: "attachments.uploadedBy", select: "_id name companyEmail" },
       { path: "replyContent.originalSender", select: "_id name companyEmail" },
       { path: "repliedTo", select: "_id note message sender attachments" },
+      // Without this the approval payload carries editedBy as a bare
+      // ObjectId, so the "Edited by <name>" line has no name to show.
+      { path: "editedBy", select: "_id name companyEmail" },
     ]);
 
     const updatedMessage = {
@@ -2257,6 +2268,7 @@ exports.disapproveMessage = async function disapproveMessage(req, res) {
         path: "approvalChain",
         populate: { path: "approver", select: "_id name role designation", model: "Employee" },
       },
+      { path: "editedBy", select: "_id name companyEmail" },
     ]);
 
     // Add client supervision info
@@ -2427,9 +2439,33 @@ exports.editMessage = async function editMessage(req, res) {
     const isOriginalSenderEmployee = originalSenderRole === "employee";
 
     // Check if the current user is the current receiver
-    const isReceiver =
+    let isReceiver =
       Array.isArray(msg.receiver) &&
       msg.receiver.some((r) => String(r._id || r) === currentUserId);
+
+    // Pre-approval: a senior ABOVE the message's current approver may act on
+    // their behalf while it is still pending. This is the same override
+    // approveMessage already applies, mirrored here so the pre-approvals queue
+    // can offer "Edit & Approve" and not only take-it-or-bounce-it. Without it
+    // the edit 403s for exactly the skip-level senior the queue exists for -
+    // a manager or a client supervisor got through on their own authority,
+    // nobody else did.
+    if (
+      !isReceiver &&
+      msg.approvalStatus === "pending" &&
+      Array.isArray(msg.receiver)
+    ) {
+      for (const r of msg.receiver) {
+        const chainUp = await getManagementChainFromHierarchy(
+          msg.owner,
+          String(r._id || r),
+        );
+        if (chainUp.includes(currentUserId)) {
+          isReceiver = true;
+          break;
+        }
+      }
+    }
 
     // --- Check 1: Was this user in the approval chain? (lean, no populate) ---
     const rawChainDoc = await WhatsAppMessage.findById(id)
@@ -3088,8 +3124,18 @@ exports.deleteMessage = async function deleteMessage(req, res) {
     // chain has finished with it — approved by all seniors, or disapproved by
     // any one of them — the outcome is part of the record and neither delete
     // type applies any more, not even for the sender.
+    //
+    // "Approved" covers two different things, though. A message stamped
+    // approved AT CREATION because its sender is the top of the hierarchy (a
+    // manager / CRM on a supervised client) never had a chain — nobody
+    // reviewed it, so there is no decision to preserve and its author keeps
+    // the rights they would have on an unsupervised client. An empty
+    // approvalChain is what tells the two apart. Mirrors the UI gate in
+    // ChatMessage.tsx.
+    const wasReviewed =
+      Array.isArray(msg.approvalChain) && msg.approvalChain.length > 0;
     if (
-      msg.approvalStatus === "approved" ||
+      (msg.approvalStatus === "approved" && wasReviewed) ||
       msg.approvalStatus === "disapproved"
     ) {
       return res.status(403).json({
@@ -3253,27 +3299,34 @@ exports.deleteMessage = async function deleteMessage(req, res) {
 
       return res.json({ ok: true, deletedForEveryone: true, message: populated });
     } else {
-      // Delete for me only — a personal hide, so it is open to any viewer of the
-      // message (sender, past approvers, CRM); it never changes what other
-      // participants see. The one exception is the senior the message is
-      // currently waiting on: hiding it would strand the approval chain with no
-      // one able to approve or disapprove. Mirrors `canApprove` in ChatMessage.
-      if (msg.approvalStatus === "pending" && String(msg.sender) !== currentUserId) {
-        const receivers = Array.isArray(msg.receiver) ? msg.receiver : [msg.receiver];
-        const isCurrentApprover = receivers.some(
-          (r) => r && String(r._id || r) === currentUserId
-        );
-        const alreadyActed = (msg.approvalChain || []).some((step) => {
-          const approverId = step && (step.approver?._id || step.approver);
-          return approverId && String(approverId) === currentUserId;
+      // Delete for me only — a personal hide. It never changes what other
+      // participants see, but it is NOT open to everyone who can see the
+      // message. Two people are excluded:
+      //
+      //   1. The senior the message is currently waiting on. Hiding it would
+      //      strand the chain with no one able to approve or disapprove.
+      //      Mirrors `canApprove` in ChatMessage.
+      //   2. Anyone the message reached THROUGH the chain rather than by
+      //      writing it. On the CRM's screen an approved message arrives as the
+      //      delivered outcome of that chain — hiding it would quietly drop it
+      //      out of a record they are meant to be holding. Mirrors
+      //      `isDeliveredApproval` in ChatMessage.
+      //
+      // The author is exempt from both: their own message never came through a
+      // chain, whatever status it ended up carrying.
+      const isAuthor = String(msg.sender) === currentUserId;
+      const routedByChain =
+        (Array.isArray(msg.approvalChain) && msg.approvalChain.length > 0) ||
+        (Array.isArray(msg.plannedApprovalChain) &&
+          msg.plannedApprovalChain.length > 0) ||
+        msg.approvalStatus === "pending" ||
+        msg.approvalStatus === "disapproved";
+      if (!isAuthor && routedByChain) {
+        return res.status(403).json({
+          error:
+            "A message delivered through the approval chain cannot be hidden",
         });
-        if (isCurrentApprover && !alreadyActed) {
-          return res.status(403).json({
-            error: "Approve or disapprove this message before hiding it",
-          });
-        }
       }
-
       if (!Array.isArray(msg.deletedForUsers)) msg.deletedForUsers = [];
       const alreadyDeleted = msg.deletedForUsers.some(
         (uid) => String(uid) === currentUserId

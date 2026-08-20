@@ -159,6 +159,12 @@ const fileFilter = (req, file, cb) => {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.ms-excel",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    // PowerPoint — .ppt / .pptx / .ppsx / .potx / .pptm
+    "application/vnd.ms-powerpoint",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.presentationml.slideshow",
+    "application/vnd.openxmlformats-officedocument.presentationml.template",
+    "application/vnd.ms-powerpoint.presentation.macroEnabled.12",
     "text/csv",
     "text/plain",
     "video/mp4",
@@ -183,7 +189,7 @@ const fileFilter = (req, file, cb) => {
   } else {
     cb(
       new Error(
-        `Invalid file type: ${file.mimetype}. Allowed types: images, PDF, Word, Excel, CSV, text files.`
+        `Invalid file type: ${file.mimetype}. Allowed types: images, PDF, Word, Excel, PowerPoint, CSV, text files.`
       ),
       false
     );
@@ -1300,11 +1306,21 @@ exports.sendMessage = async (req, res) => {
       // Also deliver to each participant's personal room — a receiver who has
       // never opened this conversation isn't in its room yet (brand-new chat),
       // so the room broadcast alone never reaches them. Clients dedupe by _id.
+      //
+      // The SENDER is included too. Normally they are looking at the
+      // conversation and add their message from the POST response, so this is
+      // redundant — but a message sent from OUTSIDE the chat UI (the birthday
+      // popup wishes someone happy birthday straight from the dashboard) leaves
+      // them with no open conversation to add it to, and their own sidebar and
+      // chat list would not learn the conversation had moved until a refresh.
+      // Safe on every surface: the conversation view drops its own messages,
+      // the list and sidebar dedupe by _id, and the unread counters already
+      // skip anything you sent yourself.
       (conversation.participants || []).forEach((p) => {
-        const pid = String(p._id || p);
-        if (pid !== String(req.employee._id)) {
-          io.to(`user_${pid}`).emit("receive_message", populatedMessage);
-        }
+        io.to(`user_${String(p._id || p)}`).emit(
+          "receive_message",
+          populatedMessage,
+        );
       });
     }
 
