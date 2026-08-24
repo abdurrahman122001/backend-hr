@@ -239,6 +239,9 @@ exports.getGroupMessages = async function (req, res) {
         },
         { path: "approvedBy", select: "_id name companyEmail role designation" },
         { path: "disapprovedBy", select: "_id name companyEmail role designation" },
+        // editedBy — without it the message-info dialog gets a bare ObjectId
+        // where it expects a person, and shows "Unknown" as the editor.
+        { path: "editedBy", select: "_id name companyEmail role designation" },
       ])
       .lean();
 

@@ -10,7 +10,9 @@ async function getPFRateAndYears(employeeId) {
     pfRate = employee.providentFund.pfRate;
     years = employee.providentFund.years;
   } else {
-    const latestPF = await PFSetting.findOne().sort({ updatedAt: -1 });
+    // No request context here, so the company comes from the employee record.
+    const latestPF = await PFSetting.findOne({ owner: employee?.owner })
+      .sort({ updatedAt: -1 });
     pfRate = latestPF?.pfRate || 0;
     years = latestPF?.years || 1;
   }

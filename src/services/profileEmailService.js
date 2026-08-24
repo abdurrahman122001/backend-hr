@@ -5,6 +5,7 @@ const Signature = require("../models/Signature");
 const CompanyProfile = require("../models/CompanyProfile");
 const { sendEmail } = require("./mailService");
 const { removeSignatureParagraphMargins } = require("../utils/removeSignatureParagraphMargins");
+const { signProfileToken } = require("../utils/profileAccessToken");
 
 const COMPANY_NAME = process.env.COMPANY_NAME || "Mavens Advisors";
 const SERVER_URL = process.env.SERVER_URL || "";
@@ -126,7 +127,10 @@ async function sendCompleteProfileLink({
   if (!id || !to) throw new Error("Missing 'id' or 'to' for complete profile email");
 
   // Add the resend marker so the submit handler can send a set-password email.
-  const link = `${FRONTEND_BASE_URL}/complete-profile/${id}?from=resend`;
+  // The profileToken is what actually authorises the document endpoints — the
+  // employee id alone is not a credential, and these links reach people who do
+  // not have a login yet. It expires, so a forwarded or leaked link goes stale.
+  const link = `${FRONTEND_BASE_URL}/complete-profile/${id}?from=resend&profileToken=${signProfileToken(id)}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const signatureBlock = await getSignatureBlock(ownerId);
   const resolvedCompanyName = await getCompanyName(ownerId, companyName);
@@ -198,7 +202,7 @@ async function sendMissingDocumentsRequest({
     .filter(Boolean);
   if (!labels.length) throw new Error("No valid documents requested");
 
-  const link = `${FRONTEND_BASE_URL}/complete-profile/${id}`;
+  const link = `${FRONTEND_BASE_URL}/complete-profile/${id}?profileToken=${signProfileToken(id)}`;
   const subject = "📄 Action Required: Missing Documents for Your Employee Profile";
   const signatureBlock = await getSignatureBlock(ownerId);
   const resolvedCompanyName = await getCompanyName(ownerId, companyName);

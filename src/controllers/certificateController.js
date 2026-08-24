@@ -26,7 +26,12 @@ exports.uploadCertificate = async (req, res) => {
       await existing.deleteOne();
     }
 
-    const fileName = `${Date.now()}_${file.originalname.replace(/\s+/g, '_')}`;
+    // path.basename strips any directory portion the client put in the filename
+    // — without it, an originalname of "../../evil" escapes the upload folder.
+    const safeName = path
+      .basename(file.originalname || 'certificate')
+      .replace(/[^A-Za-z0-9._-]/g, '_');
+    const fileName = `${Date.now()}_${safeName}`;
     const uploadPath = path.join(folderPath, fileName);
 
     fs.writeFileSync(uploadPath, file.buffer);

@@ -5,8 +5,14 @@ const multer = require("multer");
 
 const Employee = require("../models/Employees");
 const EmployeeDocument = require("../models/EmployeeDocument");
+const employeeDocAccess = require("../middleware/employeeDocAccess");
 
 const router = express.Router();
+
+// Every route below is scoped to one employee. Gate them all at the mount so a
+// route added later cannot be left open by accident: access is the employee
+// themselves, their company, or a valid complete-profile link token.
+router.use("/:employeeId", employeeDocAccess);
 
 /* ---------- ensure upload dirs ---------- */
 const ensureDir = (dir) => {

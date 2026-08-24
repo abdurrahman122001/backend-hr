@@ -11,12 +11,14 @@ const SalarySlip = require('../models/SalarySlip');
 // =====================
 router.get('/employees', async (req, res) => {
   try {
-    // Fetch global PF setting
-    const globalPF = await PFSetting.findOne().sort({ updatedAt: -1 }).lean();
+    const owner = req.user.owner;
 
-    // Fetch employees
+    // Company-wide PF default (the fallback for employees without an override)
+    const globalPF = await PFSetting.findOne({ owner }).sort({ updatedAt: -1 }).lean();
+
+    // Fetch this company's employees
     const employees = await Employee.find(
-      {},
+      { owner },
       {
         name: 1,
         providentFund: 1,
@@ -24,8 +26,9 @@ router.get('/employees', async (req, res) => {
       }
     ).lean();
 
-    // Get latest salary slips for all employees
+    // Latest salary slip per employee, restricted to this company
     const slips = await SalarySlip.aggregate([
+      { $match: { owner } },
       { $sort: { createdAt: -1 } },
       {
         $group: {
@@ -73,7 +76,10 @@ router.post('/gross-salary/:empId', async (req, res) => {
 
   try {
     const empId = req.params.empId;
-    const slip = await SalarySlip.findOne({ employee: empId }).sort({ createdAt: -1 });
+    const slip = await SalarySlip.findOne({
+      employee: empId,
+      owner: req.user.owner,
+    }).sort({ createdAt: -1 });
     if (!slip || !slip.grossSalary)
       return res.status(404).json({ error: "No salary slip found for this employee." });
 
@@ -100,11 +106,11 @@ router.post('/gross-salary/:empId', async (req, res) => {
 });
 
 // =====================
-// GET: Latest global PF setting
+// GET: Latest PF setting for this company
 // =====================
 router.get('/', async (req, res) => {
   try {
-    const latest = await PFSetting.findOne().sort({ updatedAt: -1 });
+    const latest = await PFSetting.findOne({ owner: req.user.owner }).sort({ updatedAt: -1 });
     if (!latest) {
       return res.json(null);
     }
@@ -116,7 +122,7 @@ router.get('/', async (req, res) => {
 });
 
 // =====================
-// POST: Set new global PF setting
+// POST: Set new PF setting for this company
 // =====================
 router.post('/', async (req, res) => {
   try {
@@ -124,7 +130,12 @@ router.post('/', async (req, res) => {
     if (pfRate === undefined || years === undefined) {
       return res.status(400).json({ error: "PF rate and years are required." });
     }
-    const pf = await PFSetting.create({ pfRate, years, updatedBy: req.user?._id });
+    const pf = await PFSetting.create({
+      owner: req.user.owner,
+      pfRate,
+      years,
+      updatedBy: req.user?.employeeId || req.user?._id,
+    });
     res.json(pf);
   } catch (err) {
     console.error(err);
@@ -133,11 +144,12 @@ router.post('/', async (req, res) => {
 });
 
 // =====================
-// DELETE: Delete global PF setting
+// DELETE: Delete this company's PF settings
 // =====================
 router.delete('/', async (req, res) => {
   try {
-    await PFSetting.deleteMany({});
+    // Previously deleteMany({}) — which wiped every company's PF settings.
+    await PFSetting.deleteMany({ owner: req.user.owner });
     res.json({ message: 'Global PF settings deleted successfully.' });
   } catch (err) {
     console.error(err);
@@ -150,12 +162,15 @@ router.delete('/', async (req, res) => {
 // =====================
 router.post('/apply-to-all', async (req, res) => {
   try {
-    const latest = await PFSetting.findOne().sort({ updatedAt: -1 });
+    const owner = req.user.owner;
+    const latest = await PFSetting.findOne({ owner }).sort({ updatedAt: -1 });
     if (!latest) {
       return res.status(400).json({ message: 'No global PF setting found. Please create a global PF setting first.' });
     }
+    // Scoped to this company — previously this updated every employee in every
+    // company that did not have a PF override set.
     const result = await Employee.updateMany(
-      { "providentFund.override": { $ne: true } },
+      { owner, "providentFund.override": { $ne: true } },
       {
         $set: {
           "providentFund.pfRate": latest.pfRate,
@@ -180,7 +195,10 @@ router.patch('/employee/:id', async (req, res) => {
     if (pfRate === undefined || years === undefined) {
       return res.status(400).json({ error: "PF rate and years are required." });
     }
-    const emp = await Employee.findByIdAndUpdate(req.params.id, {
+    const emp = await Employee.findOneAndUpdate({
+      _id: req.params.id,
+      owner: req.user.owner,
+    }, {
       "providentFund.pfRate": pfRate,
       "providentFund.years": years,
       "providentFund.override": true
@@ -200,7 +218,10 @@ router.patch('/employee/:id', async (req, res) => {
 // =====================
 router.patch('/employee/:id/remove-override', async (req, res) => {
   try {
-    const emp = await Employee.findByIdAndUpdate(req.params.id, {
+    const emp = await Employee.findOneAndUpdate({
+      _id: req.params.id,
+      owner: req.user.owner,
+    }, {
       $unset: { "providentFund.pfRate": "", "providentFund.years": "" },
       "providentFund.override": false
     }, { new: true });
@@ -219,9 +240,12 @@ router.patch('/employee/:id/remove-override', async (req, res) => {
 // =====================
 router.delete('/employee/:id', async (req, res) => {
   try {
-    const emp = await Employee.findByIdAndUpdate(req.params.id, {
-      $unset: { 
-        "providentFund.pfRate": "", 
+    const emp = await Employee.findOneAndUpdate({
+      _id: req.params.id,
+      owner: req.user.owner,
+    }, {
+      $unset: {
+        "providentFund.pfRate": "",
         "providentFund.years": "",
         "providentFund.override": ""
       }
