@@ -1,0 +1,32 @@
+[
+  {
+    "collection": "departments",
+    "_id": "68665b26df1d5570fa1e08c3",
+    "owner": "6855af8f93c766d5b1005246"
+  },
+  {
+    "collection": "doctemplates",
+    "_id": "69415f5770b0b305cb4b8ff2",
+    "owner": "69401006b18b7e423e48875b"
+  },
+  {
+    "collection": "gratuitysettings",
+    "_id": "68700c8df0e9a9112ff74db7",
+    "owner": "686fae7d0b9d6018ff1951b1"
+  },
+  {
+    "collection": "offeremailgenerateds",
+    "_id": "6a4401fe0d1ba11de77063e3",
+    "owner": "699ee47b4c5a454fca2e9ab0"
+  },
+  {
+    "collection": "salaries",
+    "_id": "6a4401fe0d1ba11de77063f6",
+    "owner": "699ee47b4c5a454fca2e9ab0"
+  },
+  {
+    "collection": "salarystructures",
+    "_id": "6a57d0e720633c4b337c9791",
+    "owner": "699ee47b4c5a454fca2e9ab0"
+  }
+]
