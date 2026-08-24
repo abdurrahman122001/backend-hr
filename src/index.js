@@ -194,6 +194,14 @@ require("./schedulers/sessionTimeoutCron"); // ✅ Session timeout cron for auto
 // Uploaded files get unique names, so the browser can cache them for a week —
 // without maxAge, every avatar re-downloads on every page/thread open.
 const STATIC_CACHE_OPTS = { maxAge: "7d", immutable: true };
+
+// Employee identity and HR documents (CNIC, CV, education certificates, and the
+// generated nda_/contract_/salary_certificate_/experience_ PDFs) are gated here.
+// This MUST stay above the express.static mounts below — Express matches in
+// order, and static would otherwise serve them to anyone with the URL.
+// Everything it does not recognise falls through to the static handlers.
+app.use("/uploads", require("./routes/protectedUploads"));
+
 app.use(
   "/uploads",
   express.static(path.join(__dirname, "./uploads"), {
@@ -208,6 +216,8 @@ app.use(
     },
   }),
 );
+// Same guard on the singular alias, otherwise /upload/... is a way around it.
+app.use("/upload", require("./routes/protectedUploads"));
 app.use(
   "/upload",
   express.static(path.join(__dirname, "../uploads"), STATIC_CACHE_OPTS),

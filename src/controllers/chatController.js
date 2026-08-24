@@ -184,7 +184,12 @@ const fileFilter = (req, file, cb) => {
     "audio/flac",
   ];
 
-  if (allowedMimes.includes(file.mimetype)) {
+  // Windows without Office reports no usable MIME for .pptx/.docx/.xlsx, so
+  // trust the extension for those formats rather than dropping the upload.
+  const ext = String(file.originalname || "").split(".").pop()?.toLowerCase();
+  const officeExtensions = ["ppt", "pptx", "ppsx", "potx", "pptm", "doc", "docx", "xls", "xlsx"];
+
+  if (allowedMimes.includes(file.mimetype) || officeExtensions.includes(ext)) {
     cb(null, true);
   } else {
     cb(
@@ -1243,6 +1248,13 @@ exports.sendMessage = async (req, res) => {
     await message.save();
 
     // Update conversation
+    // Hiding a conversation is a per-user "clear it off my list", not a
+    // block — so new activity has to bring it back, exactly as
+    // sendSpaceMessage does for spaces. Without this, deleting a chat
+    // would silently swallow every later message from that person.
+    if ((conversation.hiddenBy || []).length > 0) {
+      conversation.hiddenBy = [];
+    }
     conversation.lastMessage = message._id;
     conversation.updatedAt = new Date();
     if (mentions.length > 0) {
@@ -1495,6 +1507,13 @@ exports.forwardMessage = async (req, res) => {
         await message.save();
 
         // Update conversation metadata + unread count
+        // Hiding a conversation is a per-user "clear it off my list", not a
+        // block — so new activity has to bring it back, exactly as
+        // sendSpaceMessage does for spaces. Without this, deleting a chat
+        // would silently swallow every later message from that person.
+        if ((conversation.hiddenBy || []).length > 0) {
+          conversation.hiddenBy = [];
+        }
         conversation.lastMessage = message._id;
         conversation.updatedAt = new Date();
         const currentCount =
@@ -1686,6 +1705,13 @@ exports.sendDirectMessage = async (req, res) => {
     await message.save();
 
     // Update conversation
+    // Hiding a conversation is a per-user "clear it off my list", not a
+    // block — so new activity has to bring it back, exactly as
+    // sendSpaceMessage does for spaces. Without this, deleting a chat
+    // would silently swallow every later message from that person.
+    if ((conversation.hiddenBy || []).length > 0) {
+      conversation.hiddenBy = [];
+    }
     conversation.lastMessage = message._id;
     conversation.updatedAt = new Date();
 
@@ -4905,8 +4931,15 @@ exports.deleteConversation = async (req, res) => {
       });
     }
 
-    // ✅ Option 1: Permanent delete (for everyone)
-    if (permanent === "true" || conversation.isGroup === false) {
+    // ✅ Option 1: Permanent delete (for everyone) — ONLY on an explicit
+    // ?permanent=true. This test used to also read
+    // `|| conversation.isGroup === false`, which sent every 1:1 chat down
+    // this branch: one person picking "Delete this conversation" dropped
+    // the whole message history for the other person too, unrecoverably,
+    // while the dialog promised to delete only *your* copy. A direct
+    // message is precisely the case that must stay per-user, so it now
+    // falls through to the hide below.
+    if (permanent === "true") {
       // Delete all messages
       await Message.deleteMany({ conversation: conversationId });
 

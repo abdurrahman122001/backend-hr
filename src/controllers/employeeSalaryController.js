@@ -352,9 +352,11 @@ async function calculateTaxForSalarySlip(salarySlip, taxCfg) {
 
 async function autoCalculateAndSaveTax(salarySlip) {
   try {
-    let taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    // No request context here — the company comes from the slip being processed.
+    const owner = salarySlip.owner;
+    let taxCfg = await TaxConfig.findOne({ owner, fiscalYear: "2025-26" }).lean();
     if (!taxCfg)
-      taxCfg = await TaxConfig.findOne().sort({ createdAt: -1 }).lean();
+      taxCfg = await TaxConfig.findOne({ owner }).sort({ createdAt: -1 }).lean();
     if (!taxCfg) return null;
 
     const taxCalculation = await calculateTaxForSalarySlip(salarySlip, taxCfg);
@@ -962,7 +964,7 @@ exports.calculateTaxForEmployee = async (req, res) => {
         .json({ error: "Salary slip not found for this employee" });
     }
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    const taxCfg = await TaxConfig.findOne({ owner: getRequestOwnerId(req), fiscalYear }).lean();
     if (!taxCfg) {
       return res
         .status(404)
@@ -1008,7 +1010,7 @@ exports.getTaxConfiguration = async (req, res) => {
   try {
     const { fiscalYear = "2025-26" } = req.query;
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    const taxCfg = await TaxConfig.findOne({ owner: getRequestOwnerId(req), fiscalYear }).lean();
     if (!taxCfg) {
       return res
         .status(404)
@@ -1082,7 +1084,7 @@ exports.calculatePreviewTax = async (req, res) => {
   try {
     const { salaryBreakup, grossMonthly } = req.body;
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" });
+    const taxCfg = await TaxConfig.findOne({ owner: getRequestOwnerId(req), fiscalYear: "2025-26" });
     if (!taxCfg) return res.status(404).json({ error: "Tax config missing" });
 
     const fakeSlip = {
@@ -1115,7 +1117,10 @@ exports.resendCompleteProfileLink = async (req, res) => {
     if (!emp.email)
       return res.status(400).json({ message: "Employee email is missing" });
 
-    const ownerId = emp.owner || DEFAULT_OWNER_ID;
+    // Was `emp.owner || DEFAULT_OWNER_ID`, but DEFAULT_OWNER_ID is not declared
+    // or imported in this file — that threw a ReferenceError whenever an
+    // employee had no owner. The caller's company is the correct fallback.
+    const ownerId = emp.owner || getRequestOwnerId(req);
     await sendCompleteProfileLink({
       id: emp._id.toString(),
       to: emp.email,
@@ -1375,7 +1380,7 @@ exports.calculatePayrollPreviewTax = async (req, res) => {
       return res.status(404).json({ error: "Employee not found" });
     }
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    const taxCfg = await TaxConfig.findOne({ owner: getRequestOwnerId(req), fiscalYear: "2025-26" }).lean();
     if (!taxCfg) {
       return res.status(404).json({ error: "Tax configuration not found for 2025-26" });
     }

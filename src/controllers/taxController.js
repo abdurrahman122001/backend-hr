@@ -267,8 +267,10 @@ exports.enableAutoTax = async (req, res) => {
       });
     }
 
-    // Load existing TaxConfig WITHOUT overwriting slabs
-    let taxCfg = await TaxConfig.findOne({ fiscalYear });
+    const owner = req.user.owner;
+
+    // Load this company's TaxConfig WITHOUT overwriting slabs
+    let taxCfg = await TaxConfig.findOne({ owner, fiscalYear });
 
     if (!taxCfg) {
       return res.status(400).json({
@@ -284,30 +286,30 @@ exports.enableAutoTax = async (req, res) => {
 
     // Update auto-tax-only fields (safe)
     await TaxConfig.updateOne(
-      { fiscalYear },
+      { owner, fiscalYear },
       {
         autoApplyEnabled: true,
         autoApplyFromMonth: { month: fromMonth, year: fromYear },
         autoApplyEnabledAt: new Date(),
-        $addToSet: { autoEnabledOwners: req.user._id },
+        $addToSet: { autoEnabledOwners: owner },
       }
     );
 
     // Reload updated config
-    taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    taxCfg = await TaxConfig.findOne({ owner, fiscalYear }).lean();
 
     // Create full fiscal year month cycle
     const fiscalMonths = generateFiscalMonths(fromMonth, fromYear);
 
     // Store fiscal months to DB
     await TaxConfig.updateOne(
-      { fiscalYear },
+      { owner, fiscalYear },
       { $addToSet: { processedAutoTaxMonths: { $each: fiscalMonths } } }
     );
 
     // Apply tax to all slips inside fiscal-year cycle
     const appliedSlips = await applyAutoTaxToFutureSlips(
-      req.user._id,
+      owner,
       fiscalMonths,
       taxCfg
     );
@@ -337,10 +339,10 @@ exports.disableAutoTax = async (req, res) => {
     const { fiscalYear = "2025-26" } = req.body;
 
     const taxCfg = await TaxConfig.findOneAndUpdate(
-      { fiscalYear },
+      { owner: req.user.owner, fiscalYear },
       {
         autoApplyEnabled: false,
-        $pull: { autoEnabledOwners: req.user._id },
+        $pull: { autoEnabledOwners: req.user.owner },
       },
       { new: true }
     );
@@ -363,7 +365,10 @@ exports.disableAutoTax = async (req, res) => {
 exports.getAutoTaxStatus = async (req, res) => {
   try {
     const { fiscalYear = "2025-26" } = req.query; // CHANGED from req.params to req.query
-    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    const taxCfg = await TaxConfig.findOne({
+      owner: req.user.owner,
+      fiscalYear,
+    }).lean();
 
     if (!taxCfg) {
       return res.json({
@@ -371,8 +376,10 @@ exports.getAutoTaxStatus = async (req, res) => {
         config: null
       });
     }
-    const isAutoEnabled = taxCfg?.autoApplyEnabled &&
-      taxCfg.autoEnabledOwners?.includes(req.user._id.toString());
+    // The config is now per-company, so its own flag is the answer. The previous
+    // check compared ObjectIds in `autoEnabledOwners` against a string, which is
+    // never equal — so this endpoint always reported "disabled".
+    const isAutoEnabled = !!taxCfg.autoApplyEnabled;
 
     return res.json({
       autoTaxEnabled: !!isAutoEnabled,
@@ -448,11 +455,18 @@ exports.autoApplyTaxIfEnabled = async function (slip) {
     // Check if tax is already applied
     const currentTax = slip.taxDeduction ? (Number(await decrypt(slip.taxDeduction)) || 0) : 0;
 
+    // No request context here — the company comes from the slip being processed.
     const taxCfg = await TaxConfig.findOne({
+      owner: slip.owner,
       fiscalYear: "2025-26",
       autoApplyEnabled: true,
-      autoEnabledOwners: slip.owner
     }).lean();
+
+    // Nothing to apply if this company has no auto-tax config for the year.
+    // (Previously this fell through and threw on taxCfg.autoApplyFromMonth.)
+    if (!taxCfg) {
+      return { success: false, error: "No auto-tax config for this company" };
+    }
 
     // Check if this slip is from the auto-apply month or later
     const monthOrder = [
@@ -509,7 +523,8 @@ exports.manualApplyTax = async (req, res) => {
       return res.status(400).json({ error: "slipIds array is required" });
     }
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    const owner = req.user.owner;
+    const taxCfg = await TaxConfig.findOne({ owner, fiscalYear }).lean();
     if (!taxCfg) {
       return res
         .status(404)
@@ -519,7 +534,9 @@ exports.manualApplyTax = async (req, res) => {
     const results = [];
 
     for (const slipId of slipIds) {
-      const slip = await SalarySlip.findById(slipId).populate("employee");
+      // Owner-scoped so a caller cannot apply tax to another company's slip.
+      const slip = await SalarySlip.findOne({ _id: slipId, owner })
+        .populate("employee");
       if (!slip) continue;
 
       const calc = await calculateSlipWithTaxAsync(slip, taxCfg);
@@ -556,10 +573,10 @@ exports.manualApplyTax = async (req, res) => {
 /** ✅ UPDATED enableTaxForOwner */
 exports.enableTaxForOwner = async (req, res) => {
   try {
-    const ownerId = req.user._id;
+    const ownerId = req.user.owner;
     const { fiscalYear = "2025-26" } = req.body || {};
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear }).lean();
+    const taxCfg = await TaxConfig.findOne({ owner: ownerId, fiscalYear }).lean();
     if (!taxCfg) {
       return res
         .status(404)
@@ -595,7 +612,7 @@ exports.enableTaxForOwner = async (req, res) => {
 
     /** ✅ Added — remember that this owner has tax auto-enabled */
     await TaxConfig.updateOne(
-      { fiscalYear },
+      { owner: ownerId, fiscalYear },
       { $addToSet: { autoEnabledOwners: ownerId } }, // add owner to auto-enabled list
       { upsert: true }
     );
@@ -614,7 +631,7 @@ exports.enableTaxForOwner = async (req, res) => {
 /** NEW: flexible update */
 exports.updateTaxForOwner = async (req, res) => {
   try {
-    const ownerId = req.user._id;
+    const ownerId = req.user.owner;
 
     const {
       fiscalYear = "2025-26",
@@ -636,7 +653,9 @@ exports.updateTaxForOwner = async (req, res) => {
     }
 
     const taxCfg =
-      mode === "enable" ? await TaxConfig.findOne({ fiscalYear }).lean() : null;
+      mode === "enable"
+        ? await TaxConfig.findOne({ owner: ownerId, fiscalYear }).lean()
+        : null;
 
     if (mode === "enable" && !taxCfg) {
       return res
@@ -748,12 +767,13 @@ exports.getTaxCalculationDetails = async (req, res) => {
   try {
     const { slipId } = req.params;
 
-    const slip = await SalarySlip.findById(slipId);
+    const owner = req.user.owner;
+    const slip = await SalarySlip.findOne({ _id: slipId, owner });
     if (!slip) {
       return res.status(404).json({ error: "Salary slip not found" });
     }
 
-    const taxCfg = await TaxConfig.findOne({ fiscalYear: "2025-26" }).lean();
+    const taxCfg = await TaxConfig.findOne({ owner, fiscalYear: "2025-26" }).lean();
     const calculation = await calculateSlipWithTaxAsync(slip, taxCfg || {});
 
     return res.json({
@@ -792,16 +812,17 @@ exports.getTaxCalculationDetails = async (req, res) => {
 exports.getTaxConfig = async (req, res) => {
   try {
     const { fiscalYear } = req.query;
+    const owner = req.user.owner;
 
     if (fiscalYear) {
-      const cfg = await TaxConfig.findOne({ fiscalYear })
+      const cfg = await TaxConfig.findOne({ owner, fiscalYear })
         .populate("employeeIds", "_id name companyEmail")
         .lean();
       return res.json({ success: true, config: cfg || null });
     }
 
-    // Return all fiscal years as a list (for the dropdown)
-    const all = await TaxConfig.find({})
+    // Return this company's fiscal years as a list (for the dropdown)
+    const all = await TaxConfig.find({ owner })
       .select("fiscalYear fiscalYearStart fiscalYearEnd slabs enableMedicalExemption applyTo autoApplyEnabled")
       .lean();
     return res.json({ success: true, configs: all });
@@ -839,7 +860,10 @@ exports.saveTaxConfig = async (req, res) => {
       }
     }
 
+    const owner = req.user.owner;
+
     const update = {
+      owner,
       fiscalYear,
       slabs,
       enableMedicalExemption,
@@ -851,7 +875,7 @@ exports.saveTaxConfig = async (req, res) => {
     if (fiscalYearEnd) update.fiscalYearEnd = fiscalYearEnd;
 
     const cfg = await TaxConfig.findOneAndUpdate(
-      { fiscalYear },
+      { owner, fiscalYear },
       { $set: update },
       { upsert: true, new: true }
     );
@@ -874,7 +898,7 @@ exports.saveTaxConfig = async (req, res) => {
 exports.deleteTaxConfig = async (req, res) => {
   try {
     const { fiscalYear } = req.params;
-    await TaxConfig.deleteOne({ fiscalYear });
+    await TaxConfig.deleteOne({ owner: req.user.owner, fiscalYear });
     return res.json({ success: true, message: `Tax config for ${fiscalYear} deleted` });
   } catch (err) {
     console.error("deleteTaxConfig error:", err);

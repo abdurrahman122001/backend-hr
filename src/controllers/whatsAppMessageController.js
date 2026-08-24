@@ -2149,6 +2149,9 @@ exports.getPreApprovalMessages = async (req, res) => {
         },
         { path: "client", select: "_id clientName" },
         { path: "groupId", select: "_id name avatar" },
+        // editedBy — without it the message-info dialog gets a bare ObjectId
+        // where it expects a person, and shows "Unknown" as the editor.
+        { path: "editedBy", select: "_id name companyEmail role designation" },
       ])
       .lean();
 

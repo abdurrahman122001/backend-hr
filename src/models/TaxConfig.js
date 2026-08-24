@@ -9,10 +9,17 @@ const taxSlabSchema = new mongoose.Schema({
 });
 
 const taxConfigSchema = new mongoose.Schema({
+  // Tenant key. A tax config belongs to exactly one company — fiscal years
+  // repeat across companies, so every read and write must be scoped by owner.
+  owner: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true,
+    index: true,
+  },
   fiscalYear: {
     type: String,
     required: true,
-    unique: true,
   },
   // Fiscal year boundaries (used for display & calculation)
   fiscalYearStart: {
@@ -36,8 +43,19 @@ const taxConfigSchema = new mongoose.Schema({
   autoApplyEnabled:       { type: Boolean, default: false },
   autoApplyFromMonth:     { month: String, year: String },
   autoApplyEnabledAt:     { type: Date },
+  // Superseded by `owner`: with one config per company, `autoApplyEnabled` on
+  // that company's own document is the per-company flag. Retained so existing
+  // data and the auto-tax status check keep working; safe to retire once the
+  // backfill has settled.
   autoEnabledOwners:      [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   processedAutoTaxMonths: [{ month: String, year: String }],
 }, { timestamps: true });
+
+// A fiscal year is unique per company, not globally. NOTE: dropping `unique`
+// from the field above does NOT remove the existing `fiscalYear_1` index from
+// MongoDB — it must be dropped explicitly, which
+// migrations/backfill-owner-scoping.js does. Until it is dropped, a second
+// company still cannot create the same fiscal year.
+taxConfigSchema.index({ owner: 1, fiscalYear: 1 }, { unique: true });
 
 module.exports = mongoose.model('TaxConfig', taxConfigSchema);
