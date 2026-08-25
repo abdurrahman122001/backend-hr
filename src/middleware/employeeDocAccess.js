@@ -11,7 +11,7 @@
  *   1. The employee themselves (their own JWT).
  *   2. Someone in the employee's company — an admin/HR user, or an employee of
  *      the same owner. Cross-company access is refused.
- *   3. A candidate holding a valid, unexpired complete-profile link token that
+ *   3. A candidate holding a valid complete-profile link token that
  *      is scoped to this specific employee (see utils/profileAccessToken.js).
  *      This keeps onboarding working for people who have no login yet.
  *
