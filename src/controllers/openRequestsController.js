@@ -409,6 +409,20 @@ exports.getLeaveApprovals = async (req, res) => {
           },
           { rejectedBy: empObjId },
           { approvedBy: empObjId },
+          // Anyone in the chain who ever acted on this leave, whoever ended up
+          // resolving it. Without this branch an intermediate approver LOSES the
+          // request the moment someone above them finishes it: the first clause
+          // needs status "pending", and approvedBy/rejectedBy only ever hold the
+          // one person who closed it — so a senior who approved and passed it up
+          // matched none of the three and it vanished from their Closed tab.
+          //
+          // performedBy is enough on its own here: the outer filter already
+          // restricts to approvalChain members, so this reads as "I am an
+          // approver and I did something to it". Deliberately not filtered by
+          // action — leaveController records an intermediate approval as
+          // "updated" and only the final one as "approved", so matching on
+          // approved/rejected would miss exactly the people this is for.
+          { "workflowHistory.performedBy": empObjId },
         ],
       })
         .populate("employee", populateEmp)
