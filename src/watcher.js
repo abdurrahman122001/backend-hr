@@ -21,6 +21,7 @@ const {
   notifySeniorOfOnboarding,
 } = require("./controllers/onboardingTaskController");
 const { getIo } = require("./socket/ioRegistry");
+const { signProfileToken } = require("./utils/profileAccessToken");
 const { recordOnboardingEvent } = require("./services/onboardingLog");
 const Signature = require("./models/Signature");
 const User = require("./models/Users");
@@ -332,7 +333,10 @@ async function sendSafeEmail({ to, subject, html, ownerId, type = 'general' }) {
 
 // Send profile link
 async function sendCompleteProfileLink(id, to, employeeName, companyName, ownerId) {
-  const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}`;
+  // The form's certificate and document endpoints are gated. Without this
+  // scoped token the candidate has no credential at all, so every upload
+  // comes back 401 — the resend and missing-docs emails already carry it.
+  const link = `${process.env.FRONTEND_BASE_URL}/complete-profile/${id}?profileToken=${signProfileToken(id)}`;
   const subject = "🙌 Thank You! Help Me Finalize Your Profile 🚀";
   const signatureBlock = await getSignatureBlock(ownerId);
 

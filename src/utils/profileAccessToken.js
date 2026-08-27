@@ -7,22 +7,30 @@
  * person's CNIC scan and CV — an id is not a secret, never expires, and the
  * unauthenticated GET handed the file URLs straight back.
  *
- * This mints a short-lived token scoped to one employee, the same shape the
- * set-password email already uses. It grants access to that employee's own
- * documents and nothing else.
+ * This mints a token scoped to one employee, the same shape the set-password
+ * email already uses. It grants access to that employee's own documents and
+ * nothing else.
  */
 const jwt = require("jsonwebtoken");
 
 const SCOPE = "complete-profile";
-const DEFAULT_TTL = "14d";
 
-/** Sign a link token for one employee's document endpoints. */
-function signProfileToken(employeeId, ttl = DEFAULT_TTL) {
+/**
+ * Sign a link token for one employee's document endpoints.
+ *
+ * The token does not expire by default. Onboarding runs on the candidate's
+ * schedule, and a lapsed link surfaced as an opaque 401 with no way forward
+ * except asking HR to resend. Pass `ttl` (any jsonwebtoken `expiresIn` value)
+ * to opt a caller back into an expiry.
+ */
+function signProfileToken(employeeId, ttl) {
   const secret = process.env.JWT_SECRET;
   if (!secret) throw new Error("JWT_SECRET is not configured");
-  return jwt.sign({ sub: String(employeeId), scope: SCOPE }, secret, {
-    expiresIn: ttl,
-  });
+  return jwt.sign(
+    { sub: String(employeeId), scope: SCOPE },
+    secret,
+    ttl ? { expiresIn: ttl } : {}
+  );
 }
 
 /**
