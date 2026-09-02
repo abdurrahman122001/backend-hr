@@ -133,7 +133,10 @@ module.exports = async function anyPayrollAuth(req, res, next) {
             ]);
 
             const hasPayrollEdit = payrollGrant?.accessType === "edit";
-            const hasAttendanceEdit = attendanceGrant?.accessType === "edit";
+            const attendanceAccessTypes = Array.isArray(attendanceGrant?.accessTypes) && attendanceGrant.accessTypes.length > 0
+                ? attendanceGrant.accessTypes
+                : (attendanceGrant?.accessType ? [attendanceGrant.accessType] : []);
+            const hasAttendanceEdit = attendanceAccessTypes.includes("edit");
             
             // If it's an attendance-related route, AttendanceAccess is sufficient
             const isAttendanceRoute = req.originalUrl.includes("attendance") || req.originalUrl.includes("non-working-days");

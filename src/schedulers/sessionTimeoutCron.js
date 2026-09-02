@@ -36,6 +36,24 @@ cron.schedule("* * * * *", async () => {
     // Process each stale session
     for (const session of staleSessions) {
       try {
+        // Populate returns null when the referenced employee was deleted. Update
+        // the orphan directly because saving the populated document can fail
+        // validation on its now-null required employeeId field.
+        if (!session.employeeId) {
+          console.warn(`⚠️ [SESSION-TIMEOUT-CRON] Session ${session._id} references a deleted employee — marking inactive`);
+          await EmployeeSession.updateOne(
+            { _id: session._id },
+            {
+              $set: {
+                active: false,
+                isAutoLogout: true,
+                logoutTime: now.toDate(),
+              },
+            },
+          );
+          continue;
+        }
+
         const employeeId = session.employeeId._id;
         const employeeName = session.employeeId.name || "Unknown";
         const ownerId = session.employeeId.owner;
